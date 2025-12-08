@@ -3,6 +3,10 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
 from fastapi.middleware.cors import CORSMiddleware
+import os
+
+# Check if we're in production
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,7 +24,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Show Me Fire Weather API",
     description="API for fetching synoptic weather data",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
 
 origins = [
