@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
+from fastapi.middleware.cors import CORSMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,6 +21,21 @@ app = FastAPI(
     title="Show Me Fire Weather API",
     description="API for fetching synoptic weather data",
     lifespan=lifespan
+)
+
+origins = [
+    "http://localhost:3000",        # For local development of a React/Vue frontend
+    # "http://192.168.1.100:8080",    # Example of a local IP for testing
+    "https://*.showmefire.org", # Your production frontend domain
+    # You can also add specific port numbers if your frontend is served from one
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get('/')
