@@ -33,7 +33,8 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
     # "http://192.168.1.100:8080",    # Example of a local IP for testing
-    "https://*.showmefire.org", # Your production frontend domain
+    "https://showmefire.org",
+    "https://preview.showmefire.org",# Your production frontend domain
     # You can also add specific port numbers if your frontend is served from one
 ]
 
