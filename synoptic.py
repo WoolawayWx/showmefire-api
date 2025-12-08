@@ -102,7 +102,8 @@ async def fetch_synoptic_data():
             "state": "MO",
             "units": "english",
             "within": "60",
-            "status": "active"
+            "status": "active",
+            "network": "1,2,156,65"
         }
         
         metadata_url = "https://api.synopticdata.com/v2/stations/metadata"
@@ -111,7 +112,8 @@ async def fetch_synoptic_data():
             "state": "MO",
             "status": "active",
             "complete": "1",
-            "sensorvars": "1"
+            "sensorvars": "1",
+            "network": "1,2,156,65"
         }
         
         weather_response = requests.get(weather_url, params=weather_params, timeout=30)
