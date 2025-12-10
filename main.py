@@ -2,10 +2,10 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
+from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
-# Check if we're in production
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
 @asynccontextmanager
@@ -13,9 +13,11 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     scheduler = AsyncIOScheduler()
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5)
+    scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5)
     scheduler.start()
     
     await fetch_synoptic_data()
+    await fetchtimeseriesdata()
     
     yield
     
@@ -61,6 +63,34 @@ async def refresh_stations():
     await fetch_synoptic_data()
     data = get_station_data()
     return {"message": "Station data refreshed", "last_updated": data["last_updated"]}
+
+@app.get('/stations/timeseries')
+async def timeseries():
+    return get_timeseries_data()
+
+@app.get('/stations/timeseries/{stid}')
+async def timeseries_by_stid(stid: str):
+    """Get timeseries data for a specific station by STID"""
+    data = get_timeseries_data()
+    
+    if data.get("error"):
+        return {"error": data["error"]}
+    
+    stations = data.get("stations", [])
+    for station in stations:
+        if station.get("stid") == stid.upper():
+            return {
+                "stid": stid.upper(),
+                "observations": station.get("observations", {}),
+                "last_updated": data.get("last_updated")
+            }
+    
+    return {"error": f"Station {stid} not found"}
+
+@app.get('/stations/timeseries/refresh')
+async def timeseries_refresh():
+    await fetchtimeseriesdata()
+    return get_timeseries_data()
 
 if __name__ == '__main__':
     import uvicorn
