@@ -68,6 +68,26 @@ async def refresh_stations():
 async def timeseries():
     return get_timeseries_data()
 
+@app.get('/stations/timeseries/refresh')
+async def timeseries_refresh():
+    """Manually trigger a timeseries data refresh"""
+    try:
+        await fetchtimeseriesdata()
+        data = get_timeseries_data()
+        
+        if data.get("error"):
+            return {"error": data["error"], "status": "failed"}
+        
+        station_count = len(data.get("stations", []))
+        return {
+            "message": "Timeseries data refreshed",
+            "status": "success",
+            "last_updated": data.get("last_updated"),
+            "station_count": station_count
+        }
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
 @app.get('/stations/timeseries/{stid}')
 async def timeseries_by_stid(stid: str):
     """Get timeseries data for a specific station by STID"""
@@ -86,11 +106,6 @@ async def timeseries_by_stid(stid: str):
             }
     
     return {"error": f"Station {stid} not found"}
-
-@app.get('/stations/timeseries/refresh')
-async def timeseries_refresh():
-    await fetchtimeseriesdata()
-    return get_timeseries_data()
 
 if __name__ == '__main__':
     import uvicorn
