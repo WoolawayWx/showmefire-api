@@ -1,5 +1,5 @@
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 
@@ -140,7 +140,7 @@ async def fetch_synoptic_data():
         
         station_data["stations"] = combined_stations
         station_data["count"] = len(combined_stations)
-        station_data["last_updated"] = datetime.now().isoformat()
+        station_data["last_updated"] = datetime.now(timezone.utc).isoformat()
         station_data["error"] = None
         
         print(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
