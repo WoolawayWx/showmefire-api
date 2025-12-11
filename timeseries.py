@@ -1,4 +1,4 @@
-import requests
+import aiohttp
 from datetime import datetime
 import os
 from dotenv import load_dotenv
@@ -58,9 +58,10 @@ async def fetchtimeseriesdata():
             "units": "english",
         }
         
-        url_response = requests.get(url, params=url_params, timeout=30)
-        url_response.raise_for_status()
-        response_json = url_response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=url_params, timeout=30) as response:
+                response.raise_for_status()
+                response_json = await response.json()
         
         # Flatten the data to reduce size
         flattened = flatten_timeseries_data(response_json)
