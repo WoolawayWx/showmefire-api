@@ -1,7 +1,11 @@
 import aiohttp
+import logging
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 timeseriesdata = {
     "stations": None,
@@ -46,7 +50,12 @@ def flatten_timeseries_data(response_json):
 async def fetchtimeseriesdata():
     global timeseriesdata
     
+    logger.info("Starting timeseries data fetch...")
+    
     try:
+        if not SYNOPTIC_API_TOKEN:
+            raise ValueError("SYNOPTIC_API_TOKEN not set in environment")
+        
         url = "https://api.synopticdata.com/v2/stations/timeseries"
         url_params = {
             "token": SYNOPTIC_API_TOKEN,
@@ -60,6 +69,7 @@ async def fetchtimeseriesdata():
         
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=url_params, timeout=30) as response:
+                logger.info(f"API Response Status: {response.status}")
                 response.raise_for_status()
                 response_json = await response.json()
         
@@ -69,11 +79,11 @@ async def fetchtimeseriesdata():
         timeseriesdata["last_updated"] = datetime.now().isoformat()
         timeseriesdata["error"] = None
         
-        print(f"[{timeseriesdata['last_updated']}] Timeseries data updated successfully")
+        logger.info(f"[{timeseriesdata['last_updated']}] Timeseries data updated successfully. Stations: {len(flattened)}")
         
     except Exception as e:
         timeseriesdata["error"] = str(e)
-        print(f"Error fetching timeseries data: {e}")
+        logger.error(f"Error fetching timeseries data: {e}", exc_info=True)
     
     
 def get_timeseries_data():
