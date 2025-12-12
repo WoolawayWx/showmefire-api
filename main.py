@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
-from broadcast import add_client, remove_client, broadcast_update
+from broadcast import add_client, remove_client, broadcast_update, connected_clients
 import os
 import logging
 import json
@@ -79,12 +79,24 @@ async def websocket_endpoint(websocket: WebSocket):
             "timeseries": get_timeseries_data()
         })
         
+        # Broadcast connection event to all clients
+        await broadcast_update("connection", {
+            "message": "New client connected",
+            "total_clients": len(connected_clients)
+        })
+        
         # Keep connection open
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         remove_client(websocket)
         logger.info("Client disconnected")
+        
+        # Broadcast disconnection event to all remaining clients
+        await broadcast_update("disconnection", {
+            "message": "Client disconnected",
+            "total_clients": len(connected_clients)
+        })
 
 @app.get('/')
 def hello():
