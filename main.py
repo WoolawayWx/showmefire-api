@@ -1,16 +1,17 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
+from broadcast import add_client, remove_client, broadcast_update
 import os
 import logging
+import json
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
-# Add logging configuration at the top
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -63,6 +64,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time data updates"""
+    await websocket.accept()
+    add_client(websocket)
+    logger.info("Client connected")
+    
+    try:
+        # Send initial data
+        await websocket.send_json({
+            "type": "initial",
+            "synoptic": get_station_data(),
+            "timeseries": get_timeseries_data()
+        })
+        
+        # Keep connection open
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        remove_client(websocket)
+        logger.info("Client disconnected")
+
 @app.get('/')
 def hello():
     return {'message': 'Show Me Fire Weather API', 'status': 'running'}
@@ -77,6 +100,7 @@ async def refresh_stations():
     """Manually trigger a data refresh"""
     await fetch_synoptic_data()
     data = get_station_data()
+    await broadcast_update("synoptic", data)
     return {"message": "Station data refreshed", "last_updated": data["last_updated"]}
 
 @app.get('/stations/timeseries')
@@ -144,7 +168,7 @@ def status():
 
 @app.get('/dashboard', response_class=HTMLResponse)
 def dashboard():
-    """Simple HTML dashboard showing API status"""
+    """Simple HTML dashboard showing API status with WebSocket updates"""
     return """
     <!DOCTYPE html>
     <html>
@@ -169,6 +193,8 @@ def dashboard():
             .healthy { color: #28a745; font-weight: bold; }
             .error { color: #dc3545; font-weight: bold; }
             .info { color: #666; font-size: 14px; }
+            .connected { color: #28a745; }
+            .disconnected { color: #dc3545; }
             .refresh { 
                 display: inline-block; 
                 margin-top: 10px; 
@@ -182,44 +208,73 @@ def dashboard():
             .refresh:hover { background: #0056b3; }
         </style>
         <script>
-            async function refreshStatus() {
-                try {
-                    const response = await fetch('/status');
-                    const data = await response.json();
-                    document.getElementById('status-content').innerHTML = formatStatus(data);
-                } catch (error) {
-                    document.getElementById('status-content').innerHTML = '<p class="error">Error fetching status</p>';
+            let ws;
+            
+            function connectWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
+                
+                ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    document.getElementById('ws-status').textContent = 'Connected';
+                    document.getElementById('ws-status').className = 'connected';
+                };
+                
+                ws.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    console.log('Update received:', message);
+                    updateStatus(message);
+                };
+                
+                ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    document.getElementById('ws-status').textContent = 'Disconnected';
+                    document.getElementById('ws-status').className = 'disconnected';
+                    // Reconnect after 3 seconds
+                    setTimeout(connectWebSocket, 3000);
+                };
+            }
+            
+            function updateStatus(message) {
+                if (message.type === 'initial' || message.type === 'synoptic') {
+                    const data = message.synoptic || message.data;
+                    document.getElementById('synoptic-status').innerHTML = formatSynopticStatus(data);
+                }
+                if (message.type === 'initial' || message.type === 'timeseries') {
+                    const data = message.timeseries || message.data;
+                    document.getElementById('timeseries-status').innerHTML = formatTimeseriesStatus(data);
                 }
             }
             
-            function formatStatus(data) {
-                const synoptic = data.synoptic;
-                const timeseries = data.timeseries;
-                
+            function formatSynopticStatus(data) {
                 return `
-                    <h2>Synoptic Weather Data</h2>
-                    <p>Status: <span class="${synoptic.error ? 'error' : 'healthy'}">${synoptic.error ? 'ERROR: ' + synoptic.error : '✓ Healthy'}</span></p>
-                    <p>Stations: <span class="info">${synoptic.station_count}</span></p>
-                    <p>Last Updated: <span class="info">${new Date(synoptic.last_updated).toLocaleString()}</span></p>
-                    
-                    <h2>Timeseries Data</h2>
-                    <p>Status: <span class="${timeseries.error ? 'error' : 'healthy'}">${timeseries.error ? 'ERROR: ' + timeseries.error : '✓ Healthy'}</span></p>
-                    <p>Stations: <span class="info">${timeseries.station_count}</span></p>
-                    <p>Last Updated: <span class="info">${new Date(timeseries.last_updated).toLocaleString()}</span></p>
-                    
-                    <button class="refresh" onclick="refreshStatus()">Refresh</button>
+                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
+                    <p>Stations: <span class="info">${data.station_count}</span></p>
+                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
                 `;
             }
             
-            // Auto-refresh every 30 seconds
-            setInterval(refreshStatus, 30000);
-            refreshStatus();
+            function formatTimeseriesStatus(data) {
+                return `
+                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
+                    <p>Stations: <span class="info">${data.station_count}</span></p>
+                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
+                `;
+            }
+            
+            connectWebSocket();
         </script>
     </head>
     <body>
-        <h1>Show Me Fire - API Status</h1>
+        <h1>🔥 Show Me Fire - API Status</h1>
+        <p>WebSocket: <span id="ws-status" class="disconnected">Connecting...</span></p>
         <div class="status-box">
-            <div id="status-content">Loading...</div>
+            <h2>Synoptic Weather Data</h2>
+            <div id="synoptic-status">Loading...</div>
+        </div>
+        <div class="status-box">
+            <h2>Timeseries Data</h2>
+            <div id="timeseries-status">Loading...</div>
         </div>
     </body>
     </html>
