@@ -1,7 +1,11 @@
-import requests
+import aiohttp
 from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
+import logging
+from broadcast import broadcast_update
+
+logger = logging.getLogger(__name__)
 
 station_data = {
     "stations": None,
@@ -116,13 +120,14 @@ async def fetch_synoptic_data():
             "network": "1,2,156,65"
         }
         
-        weather_response = requests.get(weather_url, params=weather_params, timeout=30)
-        weather_response.raise_for_status()
-        weather_json = weather_response.json()
-        
-        metadata_response = requests.get(metadata_url, params=metadata_params, timeout=30)
-        metadata_response.raise_for_status()
-        metadata_json = metadata_response.json()
+        async with aiohttp.ClientSession() as session:
+            weather_response = await session.get(weather_url, params=weather_params, timeout=30)
+            weather_response.raise_for_status()
+            weather_json = await weather_response.json()
+            
+            metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
+            metadata_response.raise_for_status()
+            metadata_json = await metadata_response.json()
         
         metadata_lookup = {}
         if metadata_json.get("STATION"):
@@ -143,11 +148,15 @@ async def fetch_synoptic_data():
         station_data["last_updated"] = datetime.now(timezone.utc).isoformat()
         station_data["error"] = None
         
-        print(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
+        logger.info(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
+        
+        # Broadcast update to WebSocket clients
+        await broadcast_update("synoptic", station_data)
         
     except Exception as e:
         station_data["error"] = str(e)
-        print(f"Error fetching station data: {e}")
+        logger.error(f"Error fetching station data: {e}")
+        await broadcast_update("synoptic", station_data)
 
 def get_station_data():
     """Return the combined station data"""
