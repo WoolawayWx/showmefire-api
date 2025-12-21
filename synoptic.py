@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 import logging
-from broadcast import broadcast_update
+# from broadcast import broadcast_update
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ async def fetch_synoptic_data():
             "token": SYNOPTIC_API_TOKEN,
             "state": "MO",
             "units": "english",
-            "within": "60",
+            "within": "70",
             "status": "active",
             "network": "1,2,156,65"
         }
@@ -151,12 +151,12 @@ async def fetch_synoptic_data():
         logger.info(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
         
         # Broadcast update to WebSocket clients
-        await broadcast_update("synoptic", station_data)
+        # await broadcast_update("synoptic", station_data)
         
     except Exception as e:
         station_data["error"] = str(e)
         logger.error(f"Error fetching station data: {e}")
-        await broadcast_update("synoptic", station_data)
+        # await broadcast_update("synoptic", station_data)
 
 def get_station_data():
     """Return the combined station data"""

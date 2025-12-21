@@ -3,7 +3,6 @@ import logging
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-from broadcast import broadcast_update
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -82,13 +81,9 @@ async def fetchtimeseriesdata():
         
         logger.info(f"[{timeseriesdata['last_updated']}] Timeseries data updated successfully. Stations: {len(flattened)}")
         
-        # Broadcast update to WebSocket clients
-        await broadcast_update("timeseries", timeseriesdata)
-        
     except Exception as e:
         timeseriesdata["error"] = str(e)
         logger.error(f"Error fetching timeseries data: {e}", exc_info=True)
-        await broadcast_update("timeseries", timeseriesdata)
 
 def get_timeseries_data():
     return timeseriesdata

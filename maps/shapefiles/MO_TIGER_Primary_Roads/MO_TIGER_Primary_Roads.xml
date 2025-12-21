@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?><metadata>
+    <idinfo>
+        <citation>
+            <citeinfo>
+                <origin/>
+                <title>MO_TIGER_Primary_Roads</title>
+            </citeinfo>
+        </citation>
+        <descript>
+            <abstract>The TIGER/Line shapefiles and related database files (.dbf) are an extract of selected geographic and cartographic information from the U.S. Census Bureau's Master Address File / Topologically Integrated Geographic Encoding and Referencing (MAF/TIGER) Database (MTDB). The MTDB represents a seamless national filewith no overlaps or gaps between parts, however, each TIGER/Line shapefile is designed to stand alone as an independentdata set, or they can be combined to cover the entire nation.Primary roads are generally divided, limited-access highways within the interstate highway system or under State management, and are distinguished by the presence of interchanges. These highways are accessible by ramps and may include sometoll highways. The MAF/TIGER Feature Classification Code (MTFCC) is S1100 for primary roads.
+
+For complete metadata, please download the original file at https://msdis-archive.missouri.edu/archive/Missouri_Vector_Data/TIGER_Data/</abstract>
+            <purpose>The Census Bureau releases extracts of the MAF/TIGER database in the form of TIGER/Line Shapefiles for others to use in geographic information systems (GIS) or for other geographic applications.</purpose>
+        </descript>
+        <accconst>Other Constraints</accconst>
+        <useconst>Use Constraints: The TIGER/Line Shapefile products are not copyrighted however TIGER/Line and Census TIGER are registered trademarks of the U.S. Census Bureau. These products are free to use in a product or publication, however acknowledgement must be given to the U.S. Census Bureau as the source. The boundary information in the TIGER/Line Shapefiles are for statistical data collection and tabulation purposes only; their depiction and designation for statistical purposes does not constitute a determination of jurisdictional authority or rights of ownership or entitlement and they are not legal land descriptions. Coordinates in the TIGER/Line shapefiles have six implied decimal places, but the positional accuracy of these coordinates is not as great as the six decimal places suggest.</useconst>
+    </idinfo>
+    <metainfo>
+        <metd>20230301</metd>
+        <metc>
+            <cntinfo>
+                <!--no contact person or organization name available-->
+            </cntinfo>
+        </metc>
+        <metstdn>FGDC Content Standard for Digital Geospatial Metadata</metstdn>
+        <metstdv>FGDC-STD-001-1998</metstdv>
+        <mettc>local time</mettc>
+    </metainfo>
+</metadata>

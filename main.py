@@ -1,14 +1,15 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI  # , WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
-from broadcast import add_client, remove_client, broadcast_update
+# from broadcast import add_client, remove_client, broadcast_update, connected_clients
 import os
 import logging
 import json
+from fastapi.staticfiles import StaticFiles
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -48,6 +49,8 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
 
+app.mount("/images", StaticFiles(directory="images"), name="images")
+
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
     # "http://192.168.1.100:8080",    # Example of a local IP for testing
@@ -64,27 +67,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time data updates"""
-    await websocket.accept()
-    add_client(websocket)
-    logger.info("Client connected")
-    
-    try:
-        # Send initial data
-        await websocket.send_json({
-            "type": "initial",
-            "synoptic": get_station_data(),
-            "timeseries": get_timeseries_data()
-        })
-        
-        # Keep connection open
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        remove_client(websocket)
-        logger.info("Client disconnected")
+# @app.websocket("/ws")
+# async def websocket_endpoint(websocket: WebSocket):
+#     """WebSocket endpoint for real-time data updates"""
+#     await websocket.accept()
+#     add_client(websocket)
+#     logger.info("Client connected")
+#     
+#     try:
+#         # Send initial data
+#         await websocket.send_json({
+#             "type": "initial",
+#             "synoptic": get_station_data(),
+#             "timeseries": get_timeseries_data()
+#         })
+#         
+#         # Broadcast connection event to all clients
+#         await broadcast_update("connection", {
+#             "message": "New client connected",
+#             "total_clients": len(connected_clients)
+#         })
+#         
+#         # Keep connection open
+#         while True:
+#             await websocket.receive_text()
+#     except WebSocketDisconnect:
+#         remove_client(websocket)
+#         logger.info("Client disconnected")
+#         
+#         # Broadcast disconnection event to all remaining clients
+#         await broadcast_update("disconnection", {
+#             "message": "Client disconnected",
+#             "total_clients": len(connected_clients)
+#         })
 
 @app.get('/')
 def hello():
@@ -279,6 +294,16 @@ def dashboard():
     </body>
     </html>
     """
+
+@app.get("/list-images")
+def list_images():
+    files = []
+    images_dir = "images"
+    for fname in os.listdir(images_dir):
+        fpath = os.path.join(images_dir, fname)
+        if os.path.isfile(fpath):
+            files.append(fname)
+    return JSONResponse(content={"files": files})
 
 if __name__ == '__main__':
     import uvicorn
