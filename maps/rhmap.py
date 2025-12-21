@@ -21,6 +21,8 @@ import cairosvg
 from io import BytesIO
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
+from dotenv import load_dotenv
+import os
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -102,8 +104,9 @@ def generate_basemap():
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 
-# Fetch stations from the API
-response = requests.get('http://localhost:8000/stations')
+load_dotenv()
+port = os.getenv('PORT', '8000')
+response = requests.get(f'http://localhost:{port}/stations')
 data = response.json()
 stations = data['stations']
 
