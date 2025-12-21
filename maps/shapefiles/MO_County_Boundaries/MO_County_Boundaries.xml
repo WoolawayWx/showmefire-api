@@ -1,0 +1,423 @@
+<?xml version="1.0" encoding="UTF-8"?><metadata>
+    <idinfo>
+        <citation>
+            <citeinfo>
+                <origin/>
+                <pubdate>20090812</pubdate>
+                <title>county_boundary</title>
+                <geoform>vector digital data</geoform>
+            </citeinfo>
+        </citation>
+        <descript>
+            <abstract>This document was created to be a basic boundary file for maps requiring counties or city limits  The service created is part of a series of basic map services created for the Missouri Office of Geospatial Information.</abstract>
+            <purpose>Missouri county and city limits.</purpose>
+        </descript>
+        <status>
+            <progress>In work</progress>
+            <update>Irregular</update>
+        </status>
+        <spdom>
+            <bounding>
+                <westbc>-95.774885</westbc>
+                <eastbc>-88.898018</eastbc>
+                <northbc>40.620618</northbc>
+                <southbc>35.962393</southbc>
+            </bounding>
+        </spdom>
+        <keywords>
+            <theme>
+                <themekt>None</themekt>
+                <themekey>boundary</themekey>
+                <themekey>county</themekey>
+            </theme>
+            <theme>
+                <themekt>ISO 19115 Topic Categories</themekt>
+                <themekey>boundaries</themekey>
+            </theme>
+            <place>
+                <placekt>None</placekt>
+                <placekey>Missouri</placekey>
+            </place>
+        </keywords>
+        <accconst>None.</accconst>
+        <useconst>Although all data in this data set have been compiled by the Missouri Department of Agriculture, no warranty, expressed or implied, is made by the department as to the accuracy of the data and related materials. The act of distribution shall not constitute any such warranty, and no responsibility is assumed by the department in the use of these data or related materials.</useconst>
+        <ptcontac>
+            <cntinfo>
+                <cntorgp>
+                    <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                    <cntper>Land Survey Program</cntper>
+                </cntorgp>
+                <cntaddr>
+                    <addrtype>mailing</addrtype>
+                    <address>P.O. Box 937</address>
+                    <address>1251 A Gale Drive</address>
+                    <city>Rolla</city>
+                    <state>Missouri</state>
+                    <postal>65402.0937</postal>
+                </cntaddr>
+                <cntvoice>537-368-2300</cntvoice>
+                <cntemail>landsurv@mda.mo.gov</cntemail>
+                <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+            </cntinfo>
+        </ptcontac>
+        <datacred>Missouri Department of Natural Resources, US Bureau of the Census; David Nykodym - OGI, ITSD</datacred>
+        <native>Esri ArcGIS Pro 3.1.3</native>
+    </idinfo>
+    <dataqual>
+        <posacc>
+            <horizpa>
+                <horizpar>Based on 1:24,000 scale source data.</horizpar>
+                <qhorizpa>
+                    <horizpav>+/- 12.2 meters</horizpav>
+                </qhorizpa>
+            </horizpa>
+        </posacc>
+        <lineage>
+            <srcinfo>
+                <typesrc>None</typesrc>
+            </srcinfo>
+            <procstep>
+                <procdesc>The county boundaries were generated from the updated 1:24,000 scale Public Land Survey System (PLSS) grid by merging the PLSS polygons, which made up each county, into a single polygon.
+
+The Platte - Buchannan county line was adjusted to a series of surveyed points that were based on a survey performed under contract with the Missouri Land Survey Program, August 18, 2003. Missouri Land Survey microfilm location - 165/1047 - 165/1048.
+
+The Montgomery - Gasconade county line was adjusted based on the tax mapping from both counties and the use of aerial photography. There is a slight difference between the two counties with the discrepancy appearing to be where Quick Creek enters the Missouri river.</procdesc>
+                <procdate>20090722</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.
+
+The State Boundary was corrected in Township 23 North, Range 17 East. Based on GLO plat book 18 at page 17, July 12, 1843. Survey of sections 1, 2, 11 in Mississippi County Record Book 10 at pages 126 and 127, dated November 29, 1929. Sections 10, 11, 14, 15, in Mississippi County Surveyor Record Book 5 at pages 124 and 125, dated April 10, 1956. Section 26 in Mississippi County Surveyor Record Book 2 at pages 58 and 59, dated July 6, 1882.
+
+Adjusted a portion of the county boundary between Butler and Dunklin County and Butler and Stoddard County. As defined in Missouri statute 46.061, 'thence east along the southern boundary of the state to the middle of the main channel of the St. Francis river; thence up the middle of the main channel thereof to the place of beginning.' Adjustment was made based on NAIP 2012 Arial photography.
+
+Adjusted a portion of the county boundary between Butler and Stoddard county in Township 23 North, Range 8 East, based on GLO plat and county tax mapping.
+
+Corrected a portion of the county boundary between New Madrid and Stoddard county, Township 23 North, Range 13 East, section 7 and Township 23 North, Range 12 East, section 12. Based on GLO and possession lines.
+</procdesc>
+                <procdate>20141231</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.
+
+Adjusted a portion of the county boundary between Mississippi and New Madrid counties, Township 24 North Range 16 East sections 30 and 31. Adjustment is based on GLO plats and possession lines.
+
+Adjusted a portion of the Webster, Douglas, Christian county boundary based on GLO plats and notes.
+
+Adjusted a portion of the Jefferson, Ste. Genevieve county boundary based on survey by the Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection, Land Survey Program. Project number 1386, Document number 750-27498. 
+
+</procdesc>
+                <procdate>20180302</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20200210</procdate>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20231231</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+        </lineage>
+    </dataqual>
+    <spdoinfo>
+        <direct>Vector</direct>
+        <ptvctinf>
+            <sdtsterm>
+                <sdtstype>GT-polygon composed of chains</sdtstype>
+                <ptvctcnt>115</ptvctcnt>
+            </sdtsterm>
+        </ptvctinf>
+    </spdoinfo>
+    <eainfo>
+        <detailed>
+            <enttyp>
+                <enttypl>County</enttypl>
+            </enttyp>
+            <attr>
+                <attrlabl>OBJECTID</attrlabl>
+                <attrdef>Internal feature number.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        					
+                    
+                    <udom>Sequential unique whole numbers that are automatically generated.</udom>
+                                        				
+                
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>Shape</attrlabl>
+                <attrdef>Feature geometry.</attrdef>
+                <attrdefs>ESRI</attrdefs>
+                <attrdomv>
+                                        					
+                    
+                    <udom>Coordinates defining the features.</udom>
+                                        				
+                
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>COUNTYNAME</attrlabl>
+                <attrdef>The name of the U.S. county or county equivalent in mixed case letters.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>COUNTYFIPS</attrlabl>
+                <attrdef>The last three digits of the five-digit Federal Information Processing Standards (FIPS) code that represents the county or county equivalent and the state or state equivalent of the United States.</attrdef>
+                <attrdefs>http://www.itl.nist.gov/fipspubs/fip6-4.htm</attrdefs>
+            </attr>
+            <attr>
+                <attrlabl>COUNTYGNIS</attrlabl>
+                <attrdef>The official code for the county using the Geographic Name Information System (GNIS) database.</attrdef>
+                <attrdefs>http://geonames.usgs.gov/fips55/fips55down.htm</attrdefs>
+            </attr>
+            <attr>
+                <attrlabl>NAME_UCASE</attrlabl>
+                <attrdef>The name of the county or county equivalent in upper case letters.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>ACRES</attrlabl>
+                <attrdef>Area of county in acres.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>SQ_MILES</attrlabl>
+                <attrdef>Area of county in square miles.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>CNTY_SEAT</attrlabl>
+                <attrdef>A town or city that is the administrative center of its county.  Blank if not applicable.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>CO_CLASS</attrlabl>
+                <attrdef>County classification.</attrdef>
+                <attrdefs>Missouri Association of Counties - see http://www.mocounties.com</attrdefs>
+                <attrdomv>
+                                        					
+                    
+                    <edom>
+                                                						
+                        
+                        <edomv>0</edomv>
+                                                						
+                        
+                        <edomvd>Not Applicable</edomvd>
+                                                					
+                    
+                    </edom>
+                                        				
+                
+                </attrdomv>
+                <attrdomv>
+                                        					
+                    
+                    <edom>
+                                                						
+                        
+                        <edomv>1</edomv>
+                                                						
+                        
+                        <edomvd>Counties with charter form of government or assessed valuation of $900 million and over after the county has maintained such valuation for five years.</edomvd>
+                                                						
+                        
+                        <edomvds>Missouri Association of Counties - see http://www.mocounties.com</edomvds>
+                                                					
+                    
+                    </edom>
+                                        				
+                
+                </attrdomv>
+                <attrdomv>
+                                        					
+                    
+                    <edom>
+                                                						
+                        
+                        <edomv>2</edomv>
+                                                						
+                        
+                        <edomvd>Assessed valuation of $600 million and over (but less than $900 million) after the county has maintained such valuation for five years.</edomvd>
+                                                						
+                        
+                        <edomvds>Missouri Association of Counties - see http://www.mocounties.com</edomvds>
+                                                					
+                    
+                    </edom>
+                                        				
+                
+                </attrdomv>
+                <attrdomv>
+                                        					
+                    
+                    <edom>
+                                                						
+                        
+                        <edomv>3</edomv>
+                                                						
+                        
+                        <edomvd>Assessed valuation of less than $600 million.</edomvd>
+                                                						
+                        
+                        <edomvds>Missouri Association of Counties - see http://www.mocounties.com</edomvds>
+                                                					
+                    
+                    </edom>
+                                        				
+                
+                </attrdomv>
+                <attrdomv>
+                                        					
+                    
+                    <edom>
+                                                						
+                        
+                        <edomv>4</edomv>
+                                                						
+                        
+                        <edomvd>Classification 2 counties which would otherwise return to Classification 3 because of changes in assessed valutaion, but which attained Classification 2 prior to August 13, 1988 and operate under the laws of Classification 2.</edomvd>
+                                                						
+                        
+                        <edomvds>Missouri Association of Counties - see http://www.mocounties.com</edomvds>
+                                                					
+                    
+                    </edom>
+                                        				
+                
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>GlobalID</attrlabl>
+            </attr>
+            <attr>
+                <attrlabl>SHAPE_Length</attrlabl>
+                <attrdef>Length of feature in internal units.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        
+                    <udom>Positive real numbers that are automatically generated.</udom>
+                                    
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>SHAPE_Area</attrlabl>
+                <attrdef>Area of feature in internal units squared.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        
+                    <udom>Positive real numbers that are automatically generated.</udom>
+                                    
+                </attrdomv>
+            </attr>
+        </detailed>
+    </eainfo>
+    <distinfo>
+        <distliab>See access and use constraints information.</distliab>
+        <availabl>
+            <timeinfo>
+                <sngdate>
+                    <caldate>20090722</caldate>
+                </sngdate>
+            </timeinfo>
+        </availabl>
+    </distinfo>
+    <metainfo>
+        <metd>20240325</metd>
+        <metc>
+            <cntinfo>
+                <cntorgp>
+                    <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                    <cntper>Land Survey Program</cntper>
+                </cntorgp>
+                <cntaddr>
+                    <addrtype>mailing</addrtype>
+                    <address>P.O. Box 937</address>
+                    <address>1251 A Gale Drive</address>
+                    <city>Rolla</city>
+                    <state>Missouri</state>
+                    <postal>65402.0937</postal>
+                </cntaddr>
+                <cntvoice>537-368-2300</cntvoice>
+                <cntemail>landsurv@mda.mo.gov</cntemail>
+                <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+            </cntinfo>
+        </metc>
+        <metstdn>FGDC Content Standard for Digital Geospatial Metadata</metstdn>
+        <metstdv>FGDC-STD-001-1998</metstdv>
+        <mettc>local time</mettc>
+    </metainfo>
+</metadata>

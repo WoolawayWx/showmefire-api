@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?><metadata>
+    <idinfo>
+        <citation>
+            <citeinfo>
+                <origin/>
+                <pubdate>20090812</pubdate>
+                <title>State</title>
+                <geoform>vector digital data</geoform>
+            </citeinfo>
+        </citation>
+        <descript>
+            <abstract>Outline of the state boundary of Missouri. </abstract>
+            <purpose>State of Missouri boundary polygon.</purpose>
+        </descript>
+        <timeperd>
+            <timeinfo>
+                <sngdate>
+                    <caldate>20090722</caldate>
+                </sngdate>
+            </timeinfo>
+            <current>publication date</current>
+        </timeperd>
+        <status>
+            <progress>In work</progress>
+            <update>Irregular</update>
+        </status>
+        <spdom>
+            <bounding>
+                <westbc>-95.774885</westbc>
+                <eastbc>-88.898018</eastbc>
+                <northbc>40.620618</northbc>
+                <southbc>35.962393</southbc>
+            </bounding>
+        </spdom>
+        <keywords>
+            <theme>
+                <themekt>None</themekt>
+                <themekey>boundary, state</themekey>
+            </theme>
+            <theme>
+                <themekt>ISO 19115 Topic Categories</themekt>
+                <themekey>boundaries</themekey>
+            </theme>
+            <place>
+                <placekt>None</placekt>
+                <placekey>Missouri</placekey>
+            </place>
+        </keywords>
+        <accconst>None.</accconst>
+        <useconst>Although all data in this data set have been compiled by the Missouri Department of Agriculture, no warranty, expressed or implied, is made by the department as to the accuracy of the data and related materials. The act of distribution shall not constitute any such warranty, and no responsibility is assumed by the department in the use of these data or related materials.</useconst>
+        <ptcontac>
+            <cntinfo>
+                <cntorgp>
+                    <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                    <cntper>Land Survey Program</cntper>
+                </cntorgp>
+                <cntaddr>
+                    <addrtype>mailing</addrtype>
+                    <address>P.O. Box 937</address>
+                    <address>1251 A Gale Drive</address>
+                    <city>Rolla</city>
+                    <state>Missouri</state>
+                    <postal>65402.0937</postal>
+                </cntaddr>
+                <cntvoice>537-368-2300</cntvoice>
+                <cntemail>landsurv@mda.mo.gov</cntemail>
+                <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+            </cntinfo>
+        </ptcontac>
+        <datacred>David Nykodym - OGI, ITSD</datacred>
+        <native>Esri ArcGIS 13.1.3.41833</native>
+    </idinfo>
+    <dataqual>
+        <posacc>
+            <horizpa>
+                <horizpar>Based on 1:24,000 scale source data.</horizpar>
+                <qhorizpa>
+                    <horizpav>+/- 12.2 meters</horizpav>
+                </qhorizpa>
+            </horizpa>
+        </posacc>
+        <lineage>
+            <procstep>
+                <procdesc>The state boundary was generated from the updated 1:24,000 scale county boundaries by merging the county polygons to create a single state polygon.</procdesc>
+                <procdate>20090722</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneosly to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20141231</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20180302</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20200210</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+            <procstep>
+                <procdesc>Corrections were made to the Missouri Public Land Survey System (PLSS) grid and simultaneously to the Township grid, county boundary and state boundary data sets.</procdesc>
+                <procdate>20240325</procdate>
+                <proccont>
+                    <cntinfo>
+                        <cntorgp>
+                            <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                            <cntper>Land Survey Program</cntper>
+                        </cntorgp>
+                        <cntaddr>
+                            <addrtype>mailing</addrtype>
+                            <address>P.O. Box 937</address>
+                            <address>1251 A Gale Drive</address>
+                            <city>Rolla</city>
+                            <state>Missouri</state>
+                            <postal>65402.0937</postal>
+                        </cntaddr>
+                        <cntvoice>537-368-2300</cntvoice>
+                        <cntemail>landsurv@mda.mo.gov</cntemail>
+                        <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+                    </cntinfo>
+                </proccont>
+            </procstep>
+        </lineage>
+    </dataqual>
+    <spdoinfo>
+        <direct>Vector</direct>
+        <ptvctinf>
+            <sdtsterm>
+                <sdtstype>GT-polygon composed of chains</sdtstype>
+                <ptvctcnt>1</ptvctcnt>
+            </sdtsterm>
+        </ptvctinf>
+    </spdoinfo>
+    <eainfo>
+        <detailed>
+            <enttyp>
+                <enttypl>State_Boundary</enttypl>
+                <enttypd>Boundary of State of Missouri</enttypd>
+                <enttypds>Missouri Department of Agriculture, Land Survey Program</enttypds>
+            </enttyp>
+            <attr>
+                <attrlabl>OBJECTID</attrlabl>
+                <attrdef>Internal feature number.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        					
+                    
+                    <udom>Sequential unique whole numbers that are automatically generated.</udom>
+                                        				
+                
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>Shape</attrlabl>
+                <attrdef>Feature geometry.</attrdef>
+                <attrdefs>ESRI</attrdefs>
+                <attrdomv>
+                                        					
+                    
+                    <udom>Coordinates defining the features.</udom>
+                                        				
+                
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>PSTATENAME</attrlabl>
+                <attrdef>The name of a principal administrative subdivision of the United States.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>PSTATEABBR</attrlabl>
+                <attrdef>Two-letter abbreviation for the name of a principal administrative subdivision of the United States.</attrdef>
+            </attr>
+            <attr>
+                <attrlabl>PSTATEFIPS</attrlabl>
+                <attrdef>The official code for the state using the Federal Information Processing Standards (FIPS) database.</attrdef>
+                <attrdefs>http:/www.itl.nist.gov/fipspubs/fip6-4.htm</attrdefs>
+            </attr>
+            <attr>
+                <attrlabl>PSTATEGNIS</attrlabl>
+                <attrdef>The official code for the state using the Geographic Names Information System (GNIS) database.</attrdef>
+                <attrdefs>http:/geonames.usgs.gov/fips55/fips55down.html</attrdefs>
+            </attr>
+            <attr>
+                <attrlabl>GlobalID</attrlabl>
+            </attr>
+            <attr>
+                <attrlabl>SHAPE_Length</attrlabl>
+                <attrdef>Length of feature in internal units.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        
+                    <udom>Positive real numbers that are automatically generated.</udom>
+                                    
+                </attrdomv>
+            </attr>
+            <attr>
+                <attrlabl>SHAPE_Area</attrlabl>
+                <attrdef>Area of feature in internal units squared.</attrdef>
+                <attrdefs>Esri</attrdefs>
+                <attrdomv>
+                                        
+                    <udom>Positive real numbers that are automatically generated.</udom>
+                                    
+                </attrdomv>
+            </attr>
+        </detailed>
+    </eainfo>
+    <metainfo>
+        <metd>20240408</metd>
+        <metc>
+            <cntinfo>
+                <cntorgp>
+                    <cntorg>Missouri Department of Agriculture, Division of Weights, Measures and Consumer Protection</cntorg>
+                    <cntper>Land Survey Program</cntper>
+                </cntorgp>
+                <cntaddr>
+                    <addrtype>mailing</addrtype>
+                    <address>P.O. Box 937</address>
+                    <address>1251 A Gale Drive</address>
+                    <city>Rolla</city>
+                    <state>Missouri</state>
+                    <postal>65402.0937</postal>
+                </cntaddr>
+                <cntvoice>537-368-2300</cntvoice>
+                <cntemail>landsurv@mda.mo.gov</cntemail>
+                <hours>Monday through Friday, 8 a.m. to 5 p.m. Central time</hours>
+            </cntinfo>
+        </metc>
+        <metstdn>FGDC Content Standard for Digital Geospatial Metadata</metstdn>
+        <metstdv>FGDC-STD-001-1998</metstdv>
+        <mettc>local time</mettc>
+    </metainfo>
+</metadata>
