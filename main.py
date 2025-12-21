@@ -10,6 +10,7 @@ import os
 import logging
 import json
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -49,7 +50,17 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
 
-app.mount("/images", StaticFiles(directory="images"), name="images")
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response: Response = await super().get_response(path, scope)
+        # Set cache-control to 1 minute (or 0 for no cache)
+        response.headers["Cache-Control"] = "public, max-age=60"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+# Use this instead of the default StaticFiles
+app.mount("/images", NoCacheStaticFiles(directory="images"), name="images")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
