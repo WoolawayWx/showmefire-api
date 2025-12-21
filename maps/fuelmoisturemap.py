@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 import os
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
+import geojson
+from shapely.geometry import LineString, mapping
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -284,7 +286,37 @@ if image is not None:
 # Save the figure as an image
 fig.savefig('images/fuelmoisturemap.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
-# Close the figure to free memory
-plt.close(fig)
+
 
 print(f"Fuel Moisture updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+
+# Define contour levels: every 1% from 0-20, then every 5% from 25-30
+contour_levels = list(range(0, 21, 1)) + list(range(25, 31, 5))
+
+#Generate contours
+contour_set = ax.contour(
+    grid_lon_mesh, grid_lat_mesh, grid_values,
+    levels=contour_levels,
+    colors='none',  # Don't draw, just extract
+    linewidths=0.1,
+    transform=data_crs
+)
+
+features = []
+# Use allsegs - it's a list of lists of arrays (one list per contour level)
+for i, level_segs in enumerate(contour_set.allsegs):
+    for seg in level_segs:
+        if len(seg) > 1:  # Need at least 2 points for a line
+            line = LineString(seg)
+            features.append(geojson.Feature(
+                geometry=mapping(line),
+                properties={"fuel_moisture": contour_levels[i]}
+            ))
+
+# Save as GeoJSON
+geojson_obj = geojson.FeatureCollection(features)
+with open("gis/fuelmoisture_contours.geojson", "w") as f:
+    geojson.dump(geojson_obj, f)
+    
+# Close the figure to free memory
+plt.close(fig)

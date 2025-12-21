@@ -60,6 +60,7 @@ class NoCacheStaticFiles(StaticFiles):
 
 # Use this instead of the default StaticFiles
 app.mount("/images", NoCacheStaticFiles(directory="images"), name="images")
+app.mount("/gis", NoCacheStaticFiles(directory="gis"), name="gis")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -311,6 +312,16 @@ def list_images():
     images_dir = "images"
     for fname in os.listdir(images_dir):
         fpath = os.path.join(images_dir, fname)
+        if os.path.isfile(fpath):
+            files.append(fname)
+    return JSONResponse(content={"files": files})
+
+@app.get("/list-gis")
+def list_gis():
+    files = []
+    gis_dir = "gis"
+    for fname in os.listdir(gis_dir):
+        fpath = os.path.join(gis_dir, fname)
         if os.path.isfile(fpath):
             files.append(fname)
     return JSONResponse(content={"files": files})

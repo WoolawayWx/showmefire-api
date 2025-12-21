@@ -4,7 +4,7 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
 from shapely.ops import unary_union
 from shapely.affinity import translate
-from shapely.geometry import box, Point
+from shapely.geometry import box, Point, LineString, mapping
 import json
 import matplotlib.patheffects as path_effects
 import rasterio
@@ -23,6 +23,7 @@ import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 from dotenv import load_dotenv
 import os
+import geojson
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -264,6 +265,40 @@ if image is not None:
 
 fig.savefig('images/rh-filtered.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
-plt.close(fig)
+
 
 print(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+
+# filepath: /Users/cade/Development/Show Me Fire/api-server/showmefire-api/maps/rhmap-fil.py
+
+contour_levels = list(range(0, 101, 1))
+
+# Only run if grid_values exists and is not None
+if 'grid_values' in locals() and grid_values is not None:
+    contour_set = ax.contour(
+        grid_lon_mesh, grid_lat_mesh, grid_values,
+        levels=contour_levels,
+        colors='none',  # Don't draw, just extract
+        linewidths=0.1,
+        transform=data_crs
+    )
+
+    features = []
+    # Use allsegs - it's a list of lists of arrays (one list per contour level)
+    for i, level_segs in enumerate(contour_set.allsegs):
+        for seg in level_segs:
+            if len(seg) > 1:  # Need at least 2 points for a line
+                line = LineString(seg)
+                features.append(geojson.Feature(
+                    geometry=mapping(line),
+                    properties={"relative_humidity": contour_levels[i]}
+                ))
+
+    # Save as GeoJSON
+    geojson_obj = geojson.FeatureCollection(features)
+    with open("gis/rh_contours.geojson", "w") as f:
+        geojson.dump(geojson_obj, f)
+        
+        
+        
+plt.close(fig)
