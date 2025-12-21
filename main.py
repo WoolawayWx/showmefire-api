@@ -1,5 +1,5 @@
 from fastapi import FastAPI  # , WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 import json
+from fastapi.staticfiles import StaticFiles
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -47,6 +48,8 @@ app = FastAPI(
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
+
+app.mount("/images", StaticFiles(directory="images"), name="images")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -291,6 +294,16 @@ def dashboard():
     </body>
     </html>
     """
+
+@app.get("/list-images")
+def list_images():
+    files = []
+    images_dir = "images"
+    for fname in os.listdir(images_dir):
+        fpath = os.path.join(images_dir, fname)
+        if os.path.isfile(fpath):
+            files.append(fname)
+    return JSONResponse(content={"files": files})
 
 if __name__ == '__main__':
     import uvicorn

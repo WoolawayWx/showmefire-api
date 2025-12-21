@@ -105,7 +105,7 @@ async def fetch_synoptic_data():
             "token": SYNOPTIC_API_TOKEN,
             "state": "MO",
             "units": "english",
-            "within": "60",
+            "within": "70",
             "status": "active",
             "network": "1,2,156,65"
         }
