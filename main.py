@@ -53,10 +53,9 @@ app = FastAPI(
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
-        # Set cache-control to 1 minute (or 0 for no cache)
-        response.headers["Cache-Control"] = "public, max-age=60"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+        response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
+        # This forces browser to check with server each time
+        # but only downloads if file changed
         return response
 
 # Use this instead of the default StaticFiles
