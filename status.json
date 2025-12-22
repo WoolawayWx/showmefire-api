@@ -1,0 +1,26 @@
+{
+    "RealtimeFireDanger": {
+        "last_update": "2025-12-22 14:38 CT",
+        "status": "updated"
+    },
+    "HumidityFiltered": {
+        "last_update": "2025-12-22 14:38 CT",
+        "status": "updated"
+    },
+    "Humidity": {
+        "last_update": "2025-12-22 14:38 CT",
+        "status": "updated"
+    },
+    "WindFiltered": {
+        "last_update": "2025-12-22 14:38 CT",
+        "status": "updated"
+    },
+    "Wind": {
+        "last_update": "2025-12-22 14:38 CT",
+        "status": "updated"
+    },
+    "RealTimeFuelMoisture": {
+        "last_update": "2025-12-22 14:37 CT",
+        "status": "updated"
+    }
+}

@@ -334,3 +334,25 @@ if 'grid_values' in locals() and grid_values is not None:
         geojson.dump(geojson_obj, f)
         
 plt.close(fig)
+
+status_file = Path(__file__).parent.parent / 'status.json'
+# Load existing status or create empty dict
+if status_file.exists():
+    try:
+        with open(status_file, 'r') as f:
+            status = json.load(f)
+    except json.JSONDecodeError:
+        # File exists but is empty or invalid JSON; start with empty dict
+        status = {}
+else:
+    status = {}
+
+# Update the status for this map (change 'rh_map' to the appropriate key)
+status['Humidity'] = {
+    'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+    'status': 'updated'
+}
+
+# Save back to status.json
+with open(status_file, 'w') as f:
+    json.dump(status, f, indent=4)

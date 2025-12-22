@@ -25,6 +25,7 @@ import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import geojson
 from shapely.geometry import LineString, mapping
+from pathlib import Path
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -320,3 +321,25 @@ with open("gis/fuelmoisture_contours.geojson", "w") as f:
     
 # Close the figure to free memory
 plt.close(fig)
+
+status_file = Path(__file__).parent.parent / 'status.json'
+# Load existing status or create empty dict
+if status_file.exists():
+    try:
+        with open(status_file, 'r') as f:
+            status = json.load(f)
+    except json.JSONDecodeError:
+        # File exists but is empty or invalid JSON; start with empty dict
+        status = {}
+else:
+    status = {}
+
+# Update the status for this map (change 'rh_map' to the appropriate key)
+status['RealTimeFuelMoisture'] = {
+    'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+    'status': 'updated'
+}
+
+# Save back to status.json
+with open(status_file, 'w') as f:
+    json.dump(status, f, indent=4)
