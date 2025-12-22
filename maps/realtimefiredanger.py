@@ -93,6 +93,7 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
         return 1  # Moderate - heads up that fuels are drying
     
     # Fuel moisture < 10% - now check RH and wind for increasing danger levels
+    # Following the NWCG table exactly
     
     # EXTREME conditions (Level 4): Very dry fuels + high winds + very low RH
     # FM < 6%, Wind >= 25kts, RH < 15%
@@ -103,29 +104,39 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
     if fuel_moisture < 7 and wind_speed_knots >= 30 and relative_humidity < 20:
         return 4  # Extreme
     
-    # CRITICAL conditions (Level 3): Red Flag Warning criteria
-    # Wind >= 20kts AND RH < 25%, with FM < 10%
-    if wind_speed_knots >= 20 and relative_humidity < 25:
+    # CRITICAL conditions (Level 3): Red Flag Warning criteria per NWCG table
+    # 15-19kts with RH < 20% = Generally Critical (Red Flag)
+    if wind_speed_knots >= 15 and wind_speed_knots < 20 and relative_humidity < 20:
         return 3  # Critical/Red Flag
-    # Or: Wind >= 15kts AND RH < 20%, with FM < 10%
-    elif wind_speed_knots >= 15 and relative_humidity < 20:
+    # 20-24kts with RH < 25% = Red Flag Warning
+    elif wind_speed_knots >= 20 and wind_speed_knots < 25 and relative_humidity < 25:
         return 3  # Critical/Red Flag
-    # Also critical if FM is very low even with moderate conditions
+    # >= 25kts with RH < 25% = Red Flag Warning (detailed below in table)
+    elif wind_speed_knots >= 25 and relative_humidity < 25:
+        return 3  # Critical/Red Flag
+    # Also critical if FM is very low even with slightly higher RH
     elif fuel_moisture < 7 and wind_speed_knots >= 15 and relative_humidity < 30:
         return 3  # Critical
     
-    # ELEVATED conditions (Level 2): Concerning but not critical
-    # Wind 10-19kts with RH < 35%, or wind 15-24kts with RH 25-35%
-    if wind_speed_knots >= 15 and relative_humidity < 35:
+    # ELEVATED conditions (Level 2): Following NWCG table exactly
+    # 5-9kts with RH < 20% = Elevated
+    if wind_speed_knots >= 5 and wind_speed_knots < 10 and relative_humidity < 20:
         return 2  # Elevated
-    elif wind_speed_knots >= 10 and relative_humidity < 30:
+    # 10-14kts with RH < 35% = Elevated
+    elif wind_speed_knots >= 10 and wind_speed_knots < 15 and relative_humidity < 35:
         return 2  # Elevated
-    elif wind_speed_knots >= 25 and relative_humidity < 45:
+    # 15-19kts: RH 20-34% = Elevated
+    elif wind_speed_knots >= 15 and wind_speed_knots < 20 and relative_humidity >= 20 and relative_humidity < 35:
+        return 2  # Elevated
+    # 20-24kts: RH 25-44% = Elevated  
+    elif wind_speed_knots >= 20 and wind_speed_knots < 25 and relative_humidity >= 25 and relative_humidity < 45:
+        return 2  # Elevated
+    # >= 25kts: RH 25-44% = Elevated
+    elif wind_speed_knots >= 25 and relative_humidity >= 25 and relative_humidity < 45:
         return 2  # Elevated
     
-    # MODERATE conditions (Level 1): FM < 10% but wind/RH not concerning yet
-    # This catches the dry fuels with lighter winds or higher humidity
-    if fuel_moisture < 10 and (wind_speed_knots >= 5 or relative_humidity < 45):
+    # If FM < 10% but doesn't meet elevated criteria, still moderate
+    if fuel_moisture < 10:
         return 1  # Moderate
     
     return 0  # Low
@@ -363,7 +374,7 @@ plt.rcParams['font.family'] = 'Montserrat'
 
 fig.text(
     0.99, 0.97,
-    "Missouri Real Time Fire Danger Assessment",
+    "Missouri Fire Danger Assessment",
     fontsize=26,
     fontweight='bold',
     ha='right',
@@ -372,23 +383,23 @@ fig.text(
 )
 fig.text(
     0.99, 0.6,
-    "Data Source: All Available Stations from Synoptic Weather\n\n"
+    "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n\n"
     "Based on NWCG fire danger criteria with 5-level scale:\n"
     "• Low: FM≥15% (fuels adequately moist)\n"
     "• Moderate: FM 10-15% (heads up - fuels drying)\n"
-    "• Elevated: FM<10%, Wind≥10kts per NWCG table\n"
-    "• Critical: FM<10%, Wind≥15kts, RH<25% (Red Flag)\n"
-    "• Extreme: FM<7%, Wind≥25kts, RH<20%\n\n"
-    "RAWS stations provide direct fuel moisture measurements.\n"
-    "Other stations use RH-based estimation weighted by distance to RAWS.",
-    fontsize=9,
+    "• Elevated: FM<10%, following NWCG RH/Wind matrix\n"
+    "• Critical: FM<10%, Red Flag criteria\n"
+    "• Extreme: FM<7%, severe conditions\n\n"
+    "RAWS stations: direct fuel moisture | Others: RH-based estimation \n\n"
+    "For More Info, Vist ShowMeFire.org",
+    fontsize=8.5,
     ha='right',
     va='top',
     fontname='Montserrat'
 )
 fig.text(
     0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
+    "Observations Analysis | Valid Time: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
     fontsize=16,
     ha='right',
     va='top',
@@ -419,23 +430,20 @@ print(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M 
 plt.close(fig)
 
 status_file = Path(__file__).parent.parent / 'status.json'
-# Load existing status or create empty dict
+
 if status_file.exists():
     try:
         with open(status_file, 'r') as f:
             status = json.load(f)
     except json.JSONDecodeError:
-        # File exists but is empty or invalid JSON; start with empty dict
         status = {}
 else:
     status = {}
 
-# Update the status for this map (change 'rh_map' to the appropriate key)
 status['RealtimeFireDanger'] = {
     'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
     'status': 'updated'
 }
 
-# Save back to status.json
 with open(status_file, 'w') as f:
     json.dump(status, f, indent=4)
