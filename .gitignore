@@ -8,3 +8,5 @@ venv/
 beta/
 images/*
 gis/*
+
+password.py

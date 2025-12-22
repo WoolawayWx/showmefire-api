@@ -1,16 +1,31 @@
-from fastapi import FastAPI  # , WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 # from broadcast import add_client, remove_client, broadcast_update, connected_clients
 import os
 import logging
 import json
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from typing import Optional
+
+# Security Configuration
+SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_HOURS = 24
+
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -50,6 +65,31 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
 
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create a JWT token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(token: str) -> Optional[str]:
+    """Verify a JWT token and return the email"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        return email
+    except JWTError:
+        return None
+
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
@@ -77,6 +117,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class LoginRequest(BaseModel):
+    email:str
+    password:str
+
 
 # @app.websocket("/ws")
 # async def websocket_endpoint(websocket: WebSocket):
@@ -325,6 +370,78 @@ def list_gis():
         if os.path.isfile(fpath):
             files.append(fname)
     return JSONResponse(content={"files": files})
+
+@app.post("/api/admin/login")
+async def login(data: LoginRequest):
+    logger.info(f"Login attempt from: {data.email}")
+    
+    # Verify email and password
+    if data.email != ADMIN_EMAIL:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    if not verify_password(data.password, ADMIN_PASSWORD_HASH):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create JWT token
+    access_token = create_access_token(
+        data={"sub": data.email},
+        expires_delta=timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    )
+    
+    return {
+        "success": True,
+        "token": access_token,
+        "message": "Login successful"
+    }
+
+class TokenVerify(BaseModel):
+    token: str
+
+@app.post("/api/admin/verify")
+async def verify_admin_token(data: TokenVerify):
+    """Verify if a token is still valid"""
+    email = verify_token(data.token)
+    if email:
+        return {"valid": True, "email": email}
+    else:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    
+class BannerData(BaseModel):
+    enabled: bool = False
+    type: str = "info"  # info, warning, danger, success
+    message: str = ""
+    link: Optional[str] = None
+
+# In-memory storage (we'll add database later)
+banner_storage = BannerData()
+
+@app.get("/api/banner")
+async def get_banner_public():
+    """Get current banner (public endpoint)"""
+    return banner_storage
+
+@app.get("/api/admin/banner")
+async def get_banner_admin(token: str):
+    """Get banner data (admin only)"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return banner_storage
+
+@app.post("/api/admin/banner")
+async def update_banner(banner: BannerData, token: str):
+    """Update banner (admin only)"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    global banner_storage
+    banner_storage = banner
+    logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
+    
+    return {"success": True, "message": "Banner updated successfully"}
+
 
 if __name__ == '__main__':
     import uvicorn
