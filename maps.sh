@@ -9,5 +9,7 @@ for script in ./maps/*.py; do
     python "$script"
 done
 
+python cdnupload.py
+
 # Deactivate the virtual environment
 deactivate

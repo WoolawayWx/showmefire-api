@@ -1,20 +1,20 @@
 {
     "RealtimeFireDanger": {
-        "last_update": "2025-12-25 23:16 CT",
+        "last_update": "2025-12-25 23:38 CT",
         "status": "updated",
-        "runtime_sec": 11.68,
+        "runtime_sec": 12.95,
         "log": [
-            "Fire Danger Map updated at 2025-12-25 23:16 CT",
-            "Script runtime: 11.68 seconds"
+            "Fire Danger Map updated at 2025-12-25 23:38 CT",
+            "Script runtime: 12.95 seconds"
         ]
     },
     "HumidityFiltered": {
-        "last_update": "2025-12-25 23:03 CT",
+        "last_update": "2025-12-25 23:38 CT",
         "status": "updated",
-        "runtime_sec": 14.0,
+        "runtime_sec": 14.42,
         "log": [
-            "RH% Filtered Map updated at 2025-12-25 23:03 CT",
-            "Script runtime: 14.00 seconds"
+            "RH% Filtered Map updated at 2025-12-25 23:38 CT",
+            "Script runtime: 14.42 seconds"
         ]
     },
     "Humidity": {
@@ -22,12 +22,12 @@
         "status": "updated"
     },
     "WindFiltered": {
-        "last_update": "2025-12-25 23:08 CT",
+        "last_update": "2025-12-25 23:38 CT",
         "status": "updated",
-        "runtime_sec": 15.03,
+        "runtime_sec": 14.82,
         "log": [
-            "Wind Map updated at 2025-12-25 23:08 CT",
-            "Script runtime: 15.03 seconds"
+            "Wind Map updated at 2025-12-25 23:38 CT",
+            "Script runtime: 14.82 seconds"
         ]
     },
     "Wind": {
@@ -35,12 +35,12 @@
         "status": "updated"
     },
     "RealTimeFuelMoisture": {
-        "last_update": "2025-12-25 22:47 CT",
+        "last_update": "2025-12-25 23:37 CT",
         "status": "updated",
-        "runtime_sec": 11.64,
+        "runtime_sec": 11.88,
         "log": [
-            "Fuel Moisture updated at 2025-12-25 22:47 CT",
-            "Script runtime: 11.64 seconds"
+            "Fuel Moisture updated at 2025-12-25 23:37 CT",
+            "Script runtime: 11.88 seconds"
         ]
     }
 }
