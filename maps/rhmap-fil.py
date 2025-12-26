@@ -14,7 +14,7 @@ import geopandas as gpd
 import numpy as np
 from pathlib import Path
 import requests
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, Rbf  # Add this import at the top if not present
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 import cairosvg
@@ -24,6 +24,11 @@ import matplotlib.image as mpimg
 from dotenv import load_dotenv
 import os
 import geojson
+import rasterio.features
+import time
+import logging
+
+start_time = time.time()
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -119,50 +124,47 @@ for s in filtered_stations:
     if 'observations' in s and 'relative_humidity' in s['observations']:
         rh = s['observations']['relative_humidity']
         if rh.get('value') is not None:
-            points.append((s['longitude'], s['latitude'], rh['value']))
+            capped_rh = min(rh['value'], 100)  # Cap at 100%
+            points.append((s['longitude'], s['latitude'], capped_rh))
 
 fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
 
 lon_min, lon_max, lat_min, lat_max = -95.8, -89.1, 35.8, 40.8
-grid_lon = np.linspace(lon_min, lon_max, 200)
-grid_lat = np.linspace(lat_min, lat_max, 200)
+grid_lon = np.linspace(lon_min, lon_max, 400)
+grid_lat = np.linspace(lat_min, lat_max, 400)
 grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
 
 if points:
-    filtered_points = [p for p in points if 5 <= p[2] <= 100]
-    if not filtered_points:
-        print("No valid relative humidity data points found.")
-    else:
-        points_lon = [p[0] for p in filtered_points]
-        points_lat = [p[1] for p in filtered_points]
-        values = [p[2] for p in filtered_points]
-        
-        grid_values = griddata((points_lon, points_lat), values, (grid_lon_mesh, grid_lat_mesh), method='linear')
-        
-        nan_mask = np.isnan(grid_values)
-        if np.any(nan_mask):
-            nearest_values = griddata((points_lon, points_lat), values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
-            grid_values[nan_mask] = nearest_values[nan_mask]
-        
-        missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-        if missouriborder.crs != data_crs.proj4_init:
-            missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-        ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor='none', 
-                        facecolor='none', linewidth=2, zorder=6)
-        if not missouriborder.empty:
-            missouri_geom = missouriborder.geometry.iloc[0]
-            grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-            within_mask = gpd.GeoSeries(grid_points).within(missouri_geom)
-            within_mask = within_mask.values.reshape(grid_lon_mesh.shape)
-            grid_values[~within_mask] = np.nan
-        
-        cs = ax.contourf(
-            grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
-            levels=np.linspace(0, 100, 101), cmap='RdYlGn', alpha=0.7, zorder=7, antialiased=True
-        )
-        
-        cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-        cbar = plt.colorbar(cs, cax=cax, label='Relative Humidity (%)', ticks=np.arange(0, 102, 5))
+    points_lon = [p[0] for p in points]
+    points_lat = [p[1] for p in points]
+    values = [p[2] for p in points]
+
+    # Interpolation and smoothing (same as fuel moisture)
+    rbf = Rbf(points_lon, points_lat, values, function='multiquadric', smooth=0.005)
+    grid_values = rbf(grid_lon_mesh, grid_lat_mesh)
+    grid_values = np.minimum(grid_values, 100)  # Cap all values at 100
+    grid_values = gaussian_filter(grid_values, sigma=0)
+
+    # Masking (same as fuel moisture)
+    missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+    if missouriborder.crs != data_crs.proj4_init:
+        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+
+    if not missouriborder.empty:
+        missouri_geom = missouriborder.geometry.iloc[0]
+        grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
+        within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
+        grid_values[~within_mask] = np.nan
+
+    # Plotting (same as fuel moisture)
+    cs = ax.contourf(
+        grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
+        levels=np.linspace(0, 101, 256),
+        cmap='RdYlGn', alpha=0.75, zorder=7, antialiased=True
+    )
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Relative Humidity (%)', ticks=np.arange(0, 102, 5))
 
 if filtered_stations:
     lats = []
@@ -263,64 +265,39 @@ if image is not None:
     )
     ax.add_artist(ab)
 
-fig.savefig('images/rh-filtered.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+fig.savefig('images/mo-rh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
+runtime_sec = time.time() - start_time
 
 
 print(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+print(f"Script runtime: {runtime_sec:.2f} seconds")
 
-# filepath: /Users/cade/Development/Show Me Fire/api-server/showmefire-api/maps/rhmap-fil.py
+logging.basicConfig(filename='logs/rhmap-fil.log', level=logging.INFO)
+logging.info(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
-contour_levels = list(range(0, 101, 1))
-
-# Only run if grid_values exists and is not None
-if 'grid_values' in locals() and grid_values is not None:
-    contour_set = ax.contour(
-        grid_lon_mesh, grid_lat_mesh, grid_values,
-        levels=contour_levels,
-        colors='none',  # Don't draw, just extract
-        linewidths=0.1,
-        transform=data_crs
-    )
-
-    features = []
-    # Use allsegs - it's a list of lists of arrays (one list per contour level)
-    for i, level_segs in enumerate(contour_set.allsegs):
-        for seg in level_segs:
-            if len(seg) > 1:  # Need at least 2 points for a line
-                line = LineString(seg)
-                features.append(geojson.Feature(
-                    geometry=mapping(line),
-                    properties={"relative_humidity": contour_levels[i]}
-                ))
-
-    # Save as GeoJSON
-    geojson_obj = geojson.FeatureCollection(features)
-    with open("gis/rh_contours.geojson", "w") as f:
-        geojson.dump(geojson_obj, f)
-        
-        
-        
 plt.close(fig)
 
 status_file = Path(__file__).parent.parent / 'status.json'
-# Load existing status or create empty dict
 if status_file.exists():
     try:
         with open(status_file, 'r') as f:
             status = json.load(f)
     except json.JSONDecodeError:
-        # File exists but is empty or invalid JSON; start with empty dict
         status = {}
 else:
     status = {}
 
-# Update the status for this map (change 'rh_map' to the appropriate key)
 status['HumidityFiltered'] = {
     'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
-    'status': 'updated'
+    'status': 'updated',
+    'runtime_sec': round(runtime_sec, 2),
+    'log': [
+        f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
+        f"Script runtime: {runtime_sec:.2f} seconds"
+    ]
 }
 
-# Save back to status.json
 with open(status_file, 'w') as f:
     json.dump(status, f, indent=4)

@@ -161,3 +161,60 @@ async def fetch_synoptic_data():
 def get_station_data():
     """Return the combined station data"""
     return station_data
+
+async def fetch_raws_stations_multi_state(states=None):
+    """
+    Fetch all RAWS stations in the specified states.
+    Default states: MO, OK, AR, TN, KY, IL, IA, NE, KS.
+    Returns a list of flattened station dicts.
+    """
+    if states is None:
+        states = ["MO", "OK", "AR", "TN", "KY", "IL", "IA", "NE", "KS"]
+
+    weather_url = "https://api.synopticdata.com/v2/stations/latest"
+    weather_params = {
+        "token": SYNOPTIC_API_TOKEN,
+        "state": ",".join(states),
+        "units": "english",
+        "within": "70",
+        "status": "active",
+        "network": "2"  # Includes RAWS (network 1)
+    }
+
+    metadata_url = "https://api.synopticdata.com/v2/stations/metadata"
+    metadata_params = {
+        "token": SYNOPTIC_API_TOKEN,
+        "state": ",".join(states),
+        "status": "active",
+        "complete": "1",
+        "sensorvars": "1",
+        "network": "2"
+    }
+
+    async with aiohttp.ClientSession() as session:
+        weather_response = await session.get(weather_url, params=weather_params, timeout=30)
+        weather_response.raise_for_status()
+        weather_json = await weather_response.json()
+
+        metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
+        metadata_response.raise_for_status()
+        metadata_json = await metadata_response.json()
+
+    metadata_lookup = {}
+    if metadata_json.get("STATION"):
+        for station in metadata_json["STATION"]:
+            stid = station.get("STID")
+            if stid:
+                metadata_lookup[stid] = station
+
+    raws_stations = []
+    if weather_json.get("STATION"):
+        for station in weather_json["STATION"]:
+            stid = station.get("STID")
+            meta = metadata_lookup.get(stid, {})
+            # Only include RAWS stations (network SHORTNAME == 'RAWS')
+            if meta.get("SHORTNAME") == "RAWS":
+                flattened = flatten_station_data(station, meta)
+                raws_stations.append(flattened)
+
+    return raws_stations

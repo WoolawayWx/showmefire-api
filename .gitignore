@@ -10,3 +10,4 @@ images/*
 gis/*
 
 password.py
+*.log

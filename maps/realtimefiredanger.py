@@ -14,7 +14,7 @@ import geopandas as gpd
 import numpy as np
 from pathlib import Path
 import requests
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, Rbf
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 import cairosvg
@@ -23,6 +23,8 @@ import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 from dotenv import load_dotenv
 import os
+import time
+import logging
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -195,14 +197,19 @@ PROJECT_DIR = SCRIPT_DIR.parent
 
 load_dotenv()
 port = os.getenv('PORT', '8000')
-response = requests.get(f'http://localhost:{port}/stations')
-data = response.json()
-stations = data['stations']
+
+# --- Use RAWS endpoint for fuel moisture ---
+response = requests.get(f'http://localhost:{port}/stations/raws')
+raws_stations = response.json()['stations']
+
+# Use all stations for RH and wind, but only RAWS for fuel moisture
+response_all = requests.get(f'http://localhost:{port}/stations')
+all_stations = response_all.json()['stations']
 
 # Define grid
 lon_min, lon_max, lat_min, lat_max = -95.8, -89.1, 35.8, 40.8
-grid_lon = np.linspace(lon_min, lon_max, 200)
-grid_lat = np.linspace(lat_min, lat_max, 200)
+grid_lon = np.linspace(lon_min, lon_max, 400)
+grid_lat = np.linspace(lat_min, lat_max, 400)
 grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
 
 fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
@@ -211,102 +218,71 @@ fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
 rh_points = []
 wind_points = []
 fuel_points_measured = []  # RAWS stations with actual fuel moisture
-fuel_points_estimated = []  # Estimated from RH
-temp_points = []
 
-for s in stations:
+for s in all_stations:
     obs = s.get('observations', {})
     rh = obs.get('relative_humidity', {}).get('value')
     if rh is not None and 0 <= rh <= 100:
         rh_points.append((s['longitude'], s['latitude'], rh))
-    
-    # Wind speed is already in knots from METAR/ASOS stations
     ws = obs.get('wind_speed', {}).get('value')
     if ws is not None and ws >= 0:
         wind_points.append((s['longitude'], s['latitude'], ws))
-    
-    # Temperature for fuel moisture estimation
-    temp = obs.get('air_temp', {}).get('value')
-    if temp is not None:
-        temp_points.append((s['longitude'], s['latitude'], temp))
-    
-    # Fuel moisture - direct from RAWS stations (prioritize these)
-    fm = obs.get('fuel_moisture', {}).get('value')
+
+# Only use RAWS for fuel moisture
+for s in raws_stations:
+    fm = s.get('observations', {}).get('fuel_moisture', {}).get('value')
     if fm is not None and fm > 0:
         fuel_points_measured.append((s['longitude'], s['latitude'], fm))
-    elif rh is not None:
-        # Estimate fuel moisture for non-RAWS stations
-        fm_estimated = estimate_fuel_moisture(rh, temp)
-        if fm_estimated is not None:
-            fuel_points_estimated.append((s['longitude'], s['latitude'], fm_estimated))
 
-# Combine measured and estimated fuel moisture, prioritizing measured
-fuel_points = fuel_points_measured + fuel_points_estimated
+fuel_points = fuel_points_measured
 
 print(f"Data summary: {len(rh_points)} RH, {len(wind_points)} wind, "
-      f"{len(fuel_points_measured)} measured FM, {len(fuel_points_estimated)} estimated FM")
+      f"{len(fuel_points_measured)} measured FM (RAWS only)")
+
+start_time = time.time()
 
 if rh_points and wind_points and fuel_points:
     # Interpolate RH
     rh_lon = [p[0] for p in rh_points]
     rh_lat = [p[1] for p in rh_points]
     rh_values = [p[2] for p in rh_points]
-    rh_grid = griddata((rh_lon, rh_lat), rh_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
-    nan_mask = np.isnan(rh_grid)
-    if np.any(nan_mask):
-        nearest = griddata((rh_lon, rh_lat), rh_values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
-        rh_grid[nan_mask] = nearest[nan_mask]
-    
+    rh_rbf = Rbf(rh_lon, rh_lat, rh_values, function='multiquadric', smooth=0.01)
+    rh_grid = rh_rbf(grid_lon_mesh, grid_lat_mesh)
+    rh_grid = gaussian_filter(rh_grid, sigma=0.7)
+
     # Interpolate wind
     wind_lon = [p[0] for p in wind_points]
     wind_lat = [p[1] for p in wind_points]
     wind_values = [p[2] for p in wind_points]
-    wind_grid = griddata((wind_lon, wind_lat), wind_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
-    nan_mask = np.isnan(wind_grid)
-    if np.any(nan_mask):
-        nearest = griddata((wind_lon, wind_lat), wind_values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
-        wind_grid[nan_mask] = nearest[nan_mask]
-    
+    wind_rbf = Rbf(wind_lon, wind_lat, wind_values, function='multiquadric', smooth=0.01)
+    wind_grid = wind_rbf(grid_lon_mesh, grid_lat_mesh)
+    wind_grid = gaussian_filter(wind_grid, sigma=0.7)
+
     # Interpolate fuel moisture with priority given to measured values
-    # First, create a base grid from all fuel moisture points
     fuel_lon = [p[0] for p in fuel_points]
     fuel_lat = [p[1] for p in fuel_points]
     fuel_values = [p[2] for p in fuel_points]
-    fuel_grid = griddata((fuel_lon, fuel_lat), fuel_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
-    nan_mask = np.isnan(fuel_grid)
-    if np.any(nan_mask):
-        nearest = griddata((fuel_lon, fuel_lat), fuel_values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
-        fuel_grid[nan_mask] = nearest[nan_mask]
-    
-    # If we have measured fuel moisture, create a "measured influence" grid
-    # This will be used to weight the final fuel moisture calculation
+    fuel_rbf = Rbf(fuel_lon, fuel_lat, fuel_values, function='multiquadric', smooth=0.01)
+    fuel_grid = fuel_rbf(grid_lon_mesh, grid_lat_mesh)
+    fuel_grid = gaussian_filter(fuel_grid, sigma=0.7)
+
+    # If we have measured fuel moisture, blend with estimated as before
     if fuel_points_measured:
         measured_lon = [p[0] for p in fuel_points_measured]
         measured_lat = [p[1] for p in fuel_points_measured]
         measured_values = [p[2] for p in fuel_points_measured]
-        
-        # Create a grid showing the nearest measured fuel moisture value
-        measured_nearest_grid = griddata(
-            (measured_lon, measured_lat), measured_values, 
-            (grid_lon_mesh, grid_lat_mesh), method='nearest'
-        )
-        
-        # Calculate distance-based influence of measured stations
-        # Points closer to measured stations will use measured values more
+        measured_rbf = Rbf(measured_lon, measured_lat, measured_values, function='multiquadric', smooth=0.005)
+        measured_grid = measured_rbf(grid_lon_mesh, grid_lat_mesh)
+        measured_grid = gaussian_filter(measured_grid, sigma=0)
+
+        # Distance-based influence
         influence_grid = np.zeros_like(grid_lon_mesh)
-        for i, (mlon, mlat) in enumerate(zip(measured_lon, measured_lat)):
+        for mlon, mlat in zip(measured_lon, measured_lat):
             dist = np.sqrt((grid_lon_mesh - mlon)**2 + (grid_lat_mesh - mlat)**2)
-            # Influence decreases with distance (inverse distance weighting)
-            # Strong influence within ~0.5 degrees, fades by ~2 degrees
             influence = np.exp(-dist / 0.5)
             influence_grid = np.maximum(influence_grid, influence)
-        
-        # Blend measured and estimated based on influence
-        # Near RAWS stations: use measured values
-        # Far from RAWS: use estimated values
-        fuel_grid = (influence_grid * measured_nearest_grid + 
-                    (1 - influence_grid) * fuel_grid)
-    
+        fuel_grid = (influence_grid * measured_grid + (1 - influence_grid) * fuel_grid)
+
     # Calculate fire danger using NWCG standards
     grid_values = np.zeros_like(rh_grid)
     for i in range(grid_values.shape[0]):
@@ -316,31 +292,29 @@ if rh_points and wind_points and fuel_points:
                 rh_grid[i, j],
                 wind_grid[i, j]
             )
-    
+
     # Define fire danger categories (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
     bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
     labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
-    colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF0000', '#8B0000']  # light green, yellow, orange, red, dark red
+    colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
     cmap = ListedColormap(colors)
     norm = BoundaryNorm(bins, len(colors))
-    
+
     # Mask to Missouri
     missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
     if missouriborder.crs != data_crs.proj4_init:
         missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-    
     if not missouriborder.empty:
         missouri_geom = missouriborder.geometry.iloc[0]
         grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-        within_mask = gpd.GeoSeries(grid_points).within(missouri_geom)
-        within_mask = within_mask.values.reshape(grid_lon_mesh.shape)
+        within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
         grid_values[~within_mask] = np.nan
-    
+
     cs = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
         levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True
     )
-    
+
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
     cbar = plt.colorbar(cs, cax=cax, label='Fire Danger Level')
     cbar.set_ticks([0, 1, 2, 3, 4])
@@ -392,7 +366,7 @@ fig.text(
     "• Extreme: FM<7%, severe conditions\n\n"
     "RAWS stations: direct fuel moisture | Others: RH-based estimation \n\n"
     "For More Info, Vist ShowMeFire.org",
-    fontsize=8.5,
+    fontsize=10,
     ha='right',
     va='top',
     fontname='Montserrat'
@@ -423,14 +397,20 @@ if image is not None:
     )
     ax.add_artist(ab)
 
-fig.savefig('images/mo_realtimefiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+fig.savefig('images/mo-realtimefiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+
+runtime_sec = time.time() - start_time
 
 print(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+print(f"Script runtime: {runtime_sec:.2f} seconds")
+
+logging.basicConfig(filename='logs/realtimefiredanger.log', level=logging.INFO)
+logging.info(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
 plt.close(fig)
 
 status_file = Path(__file__).parent.parent / 'status.json'
-
 if status_file.exists():
     try:
         with open(status_file, 'r') as f:
@@ -442,7 +422,12 @@ else:
 
 status['RealtimeFireDanger'] = {
     'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
-    'status': 'updated'
+    'status': 'updated',
+    'runtime_sec': round(runtime_sec, 2),
+    'log': [
+        f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
+        f"Script runtime: {runtime_sec:.2f} seconds"
+    ]
 }
 
 with open(status_file, 'w') as f:

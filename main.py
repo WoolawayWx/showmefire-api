@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from synoptic import fetch_synoptic_data, get_station_data
+from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -36,6 +36,25 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Add a global storage for RAWS stations
+raws_station_data = {
+    "stations": None,
+    "last_updated": None,
+    "error": None
+}
+
+async def fetch_and_store_raws_stations():
+    """Fetch RAWS stations and store in global variable"""
+    try:
+        raws_stations = await fetch_raws_stations_multi_state()
+        raws_station_data["stations"] = raws_stations
+        raws_station_data["last_updated"] = datetime.now().isoformat()
+        raws_station_data["error"] = None
+    except Exception as e:
+        raws_station_data["error"] = str(e)
+        raws_station_data["stations"] = []
+        raws_station_data["last_updated"] = datetime.now().isoformat()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
@@ -45,11 +64,14 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     # Run timeseries at :02, :07, :12, etc. (2 minutes offset)
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
+    # Run RAWS fetch at :00, :05, :10, etc.
+    scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
     scheduler.start()
     logger.info("Scheduler started")
     
     await fetch_synoptic_data()
     await fetchtimeseriesdata()
+    await fetch_and_store_raws_stations()
     
     yield
     
@@ -441,6 +463,13 @@ async def update_banner(banner: BannerData, token: str):
     logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
     
     return {"success": True, "message": "Banner updated successfully"}
+
+@app.get('/stations/raws')
+def get_raws_stations():
+    """
+    Get all RAWS stations in MO, OK, AR, TN, KY, IL, IA, NE, KS.
+    """
+    return raws_station_data
 
 
 if __name__ == '__main__':
