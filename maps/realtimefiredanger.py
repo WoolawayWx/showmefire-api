@@ -90,9 +90,14 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
     if fuel_moisture >= 15:
         return 0  # Low
     
-    # Fuel moisture 10-15% - MODERATE (heads up, starting to get dry)
+    # Fuel moisture 10-15% - MODERATE
+    # MODIFICATION: Now requires weather to contribute to the risk.
+    # If it is very humid (>60%) AND calm (<6 kts), downgrades to Low despite dry-ish fuels.
     if fuel_moisture >= 10:
-        return 1  # Moderate - heads up that fuels are drying
+        if relative_humidity < 60 or wind_speed_knots >= 6:
+            return 1  # Moderate
+        else:
+            return 0  # Low (Fuels are drying, but weather is benign)
     
     # Fuel moisture < 10% - now check RH and wind for increasing danger levels
     # Following the NWCG table exactly
@@ -138,6 +143,7 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
         return 2  # Elevated
     
     # If FM < 10% but doesn't meet elevated criteria, still moderate
+    # We leave this as Moderate because FM < 10 implies 1-hour fuels are very receptive
     if fuel_moisture < 10:
         return 1  # Moderate
     
@@ -356,19 +362,22 @@ fig.text(
     fontname='Plus Jakarta Sans'
 )
 fig.text(
-    0.99, 0.6,
-    "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n\n"
-    "Based on NWCG fire danger criteria with 5-level scale:\n"
-    "• Low: FM≥15% (fuels adequately moist)\n"
-    "• Moderate: FM 10-15% (heads up - fuels drying)\n"
-    "• Elevated: FM<10%, following NWCG RH/Wind matrix\n"
-    "• Critical: FM<10%, Red Flag criteria\n"
-    "• Extreme: FM<7%, severe conditions\n\n"
-    "RAWS stations: direct fuel moisture | Others: RH-based estimation \n\n"
-    "For More Info, Vist ShowMeFire.org",
+    0.99, 0.62,
+    
+    "Fire Danger Criteria (aligns with MO AOP guidence)\n"
+    "\n"
+    "Low: FM ≥ 15% (Fuels adequately moist)\n"
+    "Moderate: FM 10-14% with RH < 60% or Wind ≥ 6 kts\n"
+    "Elevated: FM < 10% with RH < 45% or Wind ≥ 10 kts\n"
+    "Critical: FM < 10% with RH < 25% & Wind ≥ 15 kts\n"
+    "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
+    "Criteria represent potential for fire ignition and spread.\n\n"
+    "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
+    "For More Info, Visit ShowMeFire.org",
     fontsize=10,
     ha='right',
     va='top',
+    linespacing=1.6,
     fontname='Montserrat'
 )
 fig.text(

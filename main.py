@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state
@@ -16,6 +16,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Optional
+from rss_feed import generate_rss_feed
 
 # Security Configuration
 SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
@@ -123,6 +124,7 @@ class NoCacheStaticFiles(StaticFiles):
 # Use this instead of the default StaticFiles
 app.mount("/images", NoCacheStaticFiles(directory="images"), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory="gis"), name="gis")
+app.mount("/public", StaticFiles(directory="public"), name="public")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -193,7 +195,6 @@ async def refresh_stations():
     """Manually trigger a data refresh"""
     await fetch_synoptic_data()
     data = get_station_data()
-    await broadcast_update("synoptic", data)
     return {"message": "Station data refreshed", "last_updated": data["last_updated"]}
 
 @app.get('/stations/timeseries')
