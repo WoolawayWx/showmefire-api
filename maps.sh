@@ -11,7 +11,7 @@ done
 
 python cdnupload.py
 
-python rss_feed.py
+python rss_feed.py --add-summary
 
 
 # Deactivate the virtual environment
