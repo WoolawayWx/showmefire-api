@@ -302,7 +302,7 @@ if rh_points and wind_points and fuel_points:
     # Define fire danger categories (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
     bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
     labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
-    colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
+    colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
     cmap = ListedColormap(colors)
     norm = BoundaryNorm(bins, len(colors))
 
