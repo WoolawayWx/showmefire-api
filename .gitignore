@@ -12,3 +12,4 @@ gis/*
 password.py
 *.log
 cache
+status.json
