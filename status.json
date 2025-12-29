@@ -1,11 +1,11 @@
 {
     "RealtimeFireDanger": {
-        "last_update": "2025-12-28 10:32 CT",
+        "last_update": "2025-12-28 14:40 CT",
         "status": "updated",
-        "runtime_sec": 12.29,
+        "runtime_sec": 11.79,
         "log": [
-            "Fire Danger Map updated at 2025-12-28 10:32 CT",
-            "Script runtime: 12.29 seconds"
+            "Fire Danger Map updated at 2025-12-28 14:40 CT",
+            "Script runtime: 11.79 seconds"
         ]
     },
     "HumidityFiltered": {
@@ -41,6 +41,23 @@
         "log": [
             "Fuel Moisture updated at 2025-12-28 10:32 CT",
             "Script runtime: 12.24 seconds"
+        ]
+    },
+    "ForecastFireDanger": {
+        "last_update": "2025-12-29 09:01 CT",
+        "model_run": "2025-12-29 12Z",
+        "status": "updated",
+        "runtime_sec": 24.02,
+        "maps_generated": [
+            "mo-forecastfiredanger.png",
+            "mo-forecastfuelmoistire.png",
+            "mo-forecastminrh.png",
+            "mo-forecastmaxwind.png",
+            "mo-forecastmaxtemp.png"
+        ],
+        "log": [
+            "All forecast maps updated at 2025-12-29 09:01 CT",
+            "Script runtime: 24.02 seconds"
         ]
     }
 }

@@ -11,3 +11,4 @@ gis/*
 
 password.py
 *.log
+cache

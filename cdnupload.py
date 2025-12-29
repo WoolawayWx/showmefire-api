@@ -1,3 +1,4 @@
+
 import os
 import boto3
 from pathlib import Path
@@ -18,6 +19,45 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 FOLDERS_TO_UPLOAD = [
     SCRIPT_DIR / "images"
 ]
+
+def upload_to_cdn(files, dest_keys, content_types=None, cache_controls=None):
+    """
+    Uploads files to the CDN with custom destination keys.
+    Args:
+        files (list of Path or str): List of file paths to upload.
+        dest_keys (list of str): List of destination keys (paths in the bucket) for each file.
+        content_types (list of str, optional): List of content types for each file. Defaults to 'application/octet-stream'.
+        cache_controls (list of str, optional): List of cache control headers for each file. Defaults to 'max-age=3600'.
+    """
+    if not all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
+        print("Error: Missing R2 credentials in .env file.")
+        return
+
+    if len(files) != len(dest_keys):
+        raise ValueError("files and dest_keys must have the same length.")
+
+    if content_types is None:
+        content_types = ['application/octet-stream'] * len(files)
+    if cache_controls is None:
+        cache_controls = ['max-age=3600'] * len(files)
+
+    if not (len(content_types) == len(files) == len(cache_controls)):
+        raise ValueError("files, dest_keys, content_types, and cache_controls must have the same length.")
+
+    s3 = get_r2_client()
+    for file_path, key, ctype, cache in zip(files, dest_keys, content_types, cache_controls):
+        file_path = Path(file_path)
+        if not file_path.exists():
+            print(f" [SKIP] {file_path} does not exist.")
+            continue
+        try:
+            s3.upload_file(
+                str(file_path), BUCKET_NAME, key,
+                ExtraArgs={'ContentType': ctype, 'CacheControl': cache}
+            )
+            print(f" [OK] {file_path.name} -> {key}")
+        except Exception as e:
+            print(f" [FAILED] {file_path.name} to {key}: {e}")
 
 def get_rounded_timestamp():
     """Returns a string like '20251225_2330' rounded to the nearest 15 mins."""
