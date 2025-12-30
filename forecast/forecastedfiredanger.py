@@ -23,6 +23,7 @@ import xarray as xr
 import requests
 from scipy.interpolate import Rbf
 import pickle
+import json
 
 # Suppress Herbie regex warnings
 warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
@@ -434,29 +435,92 @@ def generate_complete_forecast():
 
     # --- Save initialization observation data for ML/verification ---
     # Try to get the current fuel moisture field (RAWS obs)
-    try:
-        from synoptic import get_current_fuel_moisture_field
-        obs_data = get_current_fuel_moisture_field(port=port)
-    except Exception as e:
-        print(f"[WARN] Could not fetch or save initialization obs: {e}")
-        obs_data = None
-
-    if obs_data:
-        archive_dir = PROJECT_DIR / 'archive' / 'forecast_inputs'
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        obs_file = archive_dir / f"obs_{RUN_DATE.strftime('%Y%m%d_%H')}.json"
-        import json
-        try:
-            with open(obs_file, 'w') as f:
-                json.dump(obs_data, f, indent=2)
-            print(f"[OK] Saved initialization obs to {obs_file}")
-        except Exception as e:
-            print(f"[WARN] Could not save obs file: {e}")
 
     # Continue with forecast using ML model
     hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks = process_forecast_with_ml_model(
         ds_full, lon, lat, port=port, ml_model_path="models/fuel_moisture_model_latest.pkl"
     )
+    
+    # Calculate peak/min values FIRST
+    combined_risk = np.stack(hourly_risks, axis=0)
+    peak_risk = np.nanmax(combined_risk, axis=0)
+    
+    combined_fm = np.stack(hourly_fm, axis=0)
+    min_fuel_moisture = np.nanmin(combined_fm, axis=0)
+    
+    combined_rh = np.stack(hourly_rh, axis=0)
+    min_rh = np.nanmin(combined_rh, axis=0)
+    
+    combined_ws = np.stack(hourly_ws, axis=0)
+    max_wind = np.nanmax(combined_ws, axis=0)
+    
+    combined_temp = np.stack(hourly_temp, axis=0)
+    max_temp = np.nanmax(combined_temp, axis=0)
+    
+    # NOW save forecast data for verification
+    print("\nSaving forecast data for verification...")
+    
+    # Get initial fuel moisture field for saving
+    fuel_points = get_current_fuel_moisture_field(port)
+    if fuel_points and len(fuel_points) >= 3:
+        if lon.ndim == 1 and lat.ndim == 1:
+            grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+        else:
+            grid_lon_mesh, grid_lat_mesh = lon, lat
+        initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
+    else:
+        initial_fm = np.full_like(lon, 12.0)  # Default value if no observations
+    
+    forecast_archive_dir = PROJECT_DIR / 'archive' / 'forecasts'
+    forecast_archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Convert time steps to valid times
+    forecast_valid_times = []
+    for ts in ds_full.step:
+        time_step_value = ts.values
+        if isinstance(time_step_value, np.timedelta64):
+            hours_ahead = int(time_step_value / np.timedelta64(1, 'h'))
+        else:
+            hours_ahead = int(time_step_value / 3600000000000)
+        valid_time = RUN_DATE + pd.Timedelta(hours=hours_ahead)
+        forecast_valid_times.append(valid_time.isoformat())
+    
+    forecast_data = {
+        'model_run': RUN_DATE.strftime('%Y%m%d_%H'),
+        'forecast_valid_times': forecast_valid_times,
+        'initial_fuel_moisture': {
+            'min': float(np.nanmin(initial_fm)),
+            'max': float(np.nanmax(initial_fm)),
+            'mean': float(np.nanmean(initial_fm))
+        },
+        'hourly_forecasts': [
+            {
+                'hour': i,
+                'fuel_moisture_min': float(np.nanmin(hourly_fm[i])),
+                'fuel_moisture_max': float(np.nanmax(hourly_fm[i])),
+                'fuel_moisture_mean': float(np.nanmean(hourly_fm[i])),
+                'rh_min': float(np.nanmin(hourly_rh[i])),
+                'temp_max': float(np.nanmax(hourly_temp[i])),
+                'wind_max': float(np.nanmax(hourly_ws[i]))
+            }
+            for i in range(len(hourly_fm))
+        ],
+        'peak_values': {
+            'min_fuel_moisture': float(np.nanmin(min_fuel_moisture)),
+            'min_rh': float(np.nanmin(min_rh)),
+            'max_wind': float(np.nanmax(max_wind)),
+            'max_temp': float(np.nanmax(max_temp)),
+            'peak_danger_level': int(np.nanmax(peak_risk))
+        }
+    }
+    
+    forecast_file = forecast_archive_dir / f"forecast_{RUN_DATE.strftime('%Y%m%d_%H')}.json"
+    with open(forecast_file, 'w') as f:
+        json.dump(forecast_data, f, indent=2)
+    print(f"✓ Saved forecast data to {forecast_file}")
+    
+    # Apply smoothing (continue with rest of the code)
+    peak_risk_smooth = gaussian_filter(peak_risk.astype(float), sigma=1.5)
     
     # Calculate peak/min values
     combined_risk = np.stack(hourly_risks, axis=0)
@@ -1006,10 +1070,14 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
     previous_rh = None
     previous_temp = None
     
+    print(f"\nProcessing {len(ds_full.step)} forecast hours...")
+    
     for i, time_step in enumerate(ds_full.step):
+        print(f"\n=== Hour {i+1}/{len(ds_full.step)} ===")
         ds_hour = ds_full.sel(step=time_step)
         
         # Extract forecast variables
+        print("  Extracting forecast variables...")
         rh = ds_hour['r2'].values
         temp = ds_hour['t2m'].values - 273.15  # Convert K to C
         u = ds_hour['u10'].values
@@ -1018,7 +1086,14 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         ws_kts = np.sqrt(u**2 + v**2) * 1.94384
         
         # Get time features for this forecast hour
-        forecast_time = now + pd.Timedelta(hours=int(time_step))
+        # Convert time_step to hours - handle both timedelta64 and int64 cases
+        time_step_value = time_step.values
+        if isinstance(time_step_value, np.timedelta64):
+            hours_ahead = int(time_step_value / np.timedelta64(1, 'h'))
+        else:
+            # If it's an int64, it's likely nanoseconds
+            hours_ahead = int(time_step_value / 3600000000000)  # nanoseconds to hours
+        forecast_time = now + pd.Timedelta(hours=hours_ahead)
         hour = forecast_time.hour
         day_of_year = forecast_time.dayofyear
         month = forecast_time.month
@@ -1027,32 +1102,76 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         fm = np.zeros_like(rh)
         
         if use_ml:
-            # Use ML model for each grid point
-            for ii in range(rh.shape[0]):
-                for jj in range(rh.shape[1]):
-                    # Prepare features for this grid point
-                    features = prepare_ml_features(
-                        rh=rh[ii, jj],
-                        temp_c=temp[ii, jj],
-                        wind_kts=ws_kts[ii, jj],
-                        solar=None,  # Not available in HRRR
-                        precip=None,  # Not available in HRRR
-                        prev_fm=previous_fm[ii, jj],
-                        prev_rh=previous_rh[ii, jj] if previous_rh is not None else rh[ii, jj],
-                        prev_temp=previous_temp[ii, jj] if previous_temp is not None else temp[ii, jj],
-                        hour=hour,
-                        day_of_year=day_of_year,
-                        month=month,
-                        latitude=grid_lat_mesh[ii, jj],
-                        longitude=grid_lon_mesh[ii, jj],
-                        elevation=0  # Would need DEM data
-                    )
-                    
-                    # Predict with ML model
-                    fm[ii, jj] = predict_with_ml_model(model_dict, features)
+            # Vectorized ML prediction - much faster than loop
+            print(f"  Processing {rh.size} grid points with ML model...")
+            
+            # Flatten arrays for batch processing
+            n_points = rh.size
+            rh_flat = rh.ravel()
+            temp_flat = temp.ravel()
+            ws_flat = ws_kts.ravel()
+            prev_fm_flat = previous_fm.ravel()
+            prev_rh_flat = (previous_rh.ravel() if previous_rh is not None else rh_flat)
+            prev_temp_flat = (previous_temp.ravel() if previous_temp is not None else temp_flat)
+            grid_lat_flat = grid_lat_mesh.ravel()
+            grid_lon_flat = grid_lon_mesh.ravel()
+            
+            # Calculate derived features (vectorized)
+            print("  Calculating features...")
+            temp_f = temp_flat * 9/5 + 32
+            emc_simple = 3 + 0.25 * rh_flat
+            emc_nelson = np.array([calculate_nelson_emc(rh_flat[k], temp_flat[k]) for k in range(n_points)])
+            vpd = calculate_vpd(temp_flat, rh_flat)
+            wind_temp_interaction = ws_flat * temp_flat
+            
+            # Build feature DataFrame for all points at once
+            print("  Building feature matrix...")
+            features_df = pd.DataFrame({
+                'rh': rh_flat,
+                'temp': temp_f,
+                'temp_c': temp_flat,
+                'wind': ws_flat,
+                'solar': 0,
+                'precip': 0,
+                'prev_rh': prev_rh_flat,
+                'prev_temp': prev_temp_flat,
+                'prev_fm': prev_fm_flat,
+                'rh_3h_avg': prev_rh_flat,
+                'temp_3h_avg': prev_temp_flat,
+                'emc_simple': emc_simple,
+                'emc_nelson': emc_nelson,
+                'vpd': vpd,
+                'wind_temp_interaction': wind_temp_interaction,
+                'hour': hour,
+                'day_of_year': day_of_year,
+                'month': month,
+                'latitude': grid_lat_flat,
+                'longitude': grid_lon_flat,
+                'elevation': 0
+            })
+            
+            # Ensure correct feature order
+            feature_names = model_dict['feature_names']
+            features_df = features_df[feature_names]
+            
+            # Scale and predict all at once
+            print("  Running ML predictions...")
+            scaler = model_dict['scaler']
+            features_scaled = scaler.transform(features_df)
+            
+            model = model_dict['model']
+            predictions = model.predict(features_scaled)
+            predictions = np.clip(predictions, 1, 40)
+            
+            # Reshape back to grid
+            fm = predictions.reshape(rh.shape)
+            
         else:
             # Fallback to physics-based lag model
+            print(f"  Processing with physics-based model...")
             for ii in range(rh.shape[0]):
+                if ii % 10 == 0:
+                    print(f"    Row {ii}/{rh.shape[0]}")
                 for jj in range(rh.shape[1]):
                     fm[ii, jj] = estimate_fuel_moisture_with_lag(
                         rh[ii, jj], 
@@ -1073,18 +1192,17 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         hourly_fm.append(fm)
         
         # Calculate fire danger
+        print(f"  Calculating fire danger levels...")
         risk = np.zeros_like(rh, dtype=int)
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
         hourly_risks.append(risk)
         
-        # Progress indicator
-        if i == 0:
-            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}% (initial)")
-        elif i % 3 == 0:
-            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+        # Progress summary
+        print(f"  ✓ Hour {i+1} complete: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
     
+    print("\n✓ All forecast hours processed successfully!\n")
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
 
 
