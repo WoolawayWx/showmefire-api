@@ -20,6 +20,9 @@ import logging
 import warnings
 from herbie import FastHerbie
 import xarray as xr
+import requests
+from scipy.interpolate import Rbf
+import pickle
 
 # Suppress Herbie regex warnings
 warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
@@ -150,6 +153,181 @@ def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_D
     except (ImportError, FileNotFoundError):
         pass
 
+def get_current_fuel_moisture_field(port='8000'):
+    """
+    Get current observed fuel moisture from RAWS stations and create initial field.
+    This provides the starting point for the forecast.
+    """
+    try:
+        response = requests.get(f'http://localhost:{port}/stations/raws', timeout=5)
+        raws_stations = response.json()['stations']
+        
+        fuel_points = []
+        for s in raws_stations:
+            fm = s.get('observations', {}).get('fuel_moisture', {}).get('value')
+            if fm is not None and fm > 0:
+                fuel_points.append((s['longitude'], s['latitude'], fm))
+        
+        if len(fuel_points) >= 3:
+            print(f"Found {len(fuel_points)} RAWS stations with fuel moisture data")
+            return fuel_points
+        else:
+            print(f"Warning: Only {len(fuel_points)} RAWS stations available, using default")
+            return None
+            
+    except Exception as e:
+        print(f"Error fetching RAWS data: {e}")
+        return None
+
+
+def interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh):
+    """
+    Interpolate current RAWS observations to forecast grid.
+    """
+    if not fuel_points:
+        return None
+        
+    fuel_lon = [p[0] for p in fuel_points]
+    fuel_lat = [p[1] for p in fuel_points]
+    fuel_values = [p[2] for p in fuel_points]
+    
+    # Use RBF interpolation
+    fuel_rbf = Rbf(fuel_lon, fuel_lat, fuel_values, function='multiquadric', smooth=0.01)
+    fuel_grid = fuel_rbf(grid_lon_mesh, grid_lat_mesh)
+    fuel_grid = gaussian_filter(fuel_grid, sigma=0.7)
+    
+    return fuel_grid
+
+
+def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
+    """
+    Estimate fuel moisture accounting for time lag (10-hour fuels).
+    
+    This models the physical process of fuel moisture change rather than
+    just using equilibrium moisture content.
+    
+    Parameters:
+    - rh: Relative humidity (%)
+    - temp_c: Air temperature (°C)
+    - previous_fm: Fuel moisture from previous timestep (%)
+    - hours_elapsed: Hours since last timestep (usually 1)
+    
+    Returns: New fuel moisture (%)
+    """
+    # Calculate equilibrium moisture content (EMC) based on RH and temperature
+    # This is what the fuel "wants" to be at given current conditions
+    if rh <= 10:
+        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    elif rh <= 50:
+        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+    else:
+        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
+    
+    emc = np.clip(emc, 1, 40)
+    
+    # Calculate response time (tau) for 10-hour fuels
+    # Drying is faster than wetting
+    if previous_fm > emc:  # Drying
+        tau = 10.0 * np.exp(-0.05 * temp_c)
+    else:  # Wetting
+        tau = 10.0 * np.exp(-0.05 * temp_c) * 1.5
+    
+    # Exponential approach to equilibrium
+    # alpha represents fraction of way to equilibrium after time elapsed
+    alpha = 1 - np.exp(-hours_elapsed / tau)
+    
+    # Calculate new fuel moisture
+    fm_new = previous_fm + alpha * (emc - previous_fm)
+    
+    return np.clip(fm_new, 1, 40)
+
+
+def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
+    """
+    Process HRRR forecast with actual fuel moisture observations as starting point.
+    
+    This replaces the simple RH-based estimation with a physics-based model
+    that accounts for:
+    1. Current actual fuel moisture (from RAWS)
+    2. Time lag in fuel response
+    3. Temperature effects on drying/wetting rates
+    
+    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+    """
+    # Get current fuel moisture observations
+    fuel_points = get_current_fuel_moisture_field(port)
+    
+    # Create grid meshes for interpolation
+    if lon.ndim == 1 and lat.ndim == 1:
+        grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+    else:
+        grid_lon_mesh, grid_lat_mesh = lon, lat
+    
+    # Initialize fuel moisture field from observations
+    if fuel_points and len(fuel_points) >= 3:
+        initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
+        print(f"Initialized from RAWS observations: FM range {np.nanmin(initial_fm):.1f}-{np.nanmax(initial_fm):.1f}%")
+    else:
+        # Fallback: Use conservative default based on recent weather
+        # You could make this more sophisticated by looking at recent RH trends
+        initial_fm = np.full_like(grid_lon_mesh, 12.0)
+        print("Warning: Using default FM=12% (no RAWS data available)")
+    
+    # Process each forecast hour
+    hourly_fm = []
+    hourly_rh = []
+    hourly_ws = []
+    hourly_temp = []
+    hourly_risks = []
+    
+    previous_fm = initial_fm.copy()
+    
+    for i, time_step in enumerate(ds_full.step):
+        ds_hour = ds_full.sel(step=time_step)
+        
+        # Extract forecast variables
+        rh = ds_hour['r2'].values
+        temp = ds_hour['t2m'].values - 273.15  # Convert K to C
+        u = ds_hour['u10'].values
+        v = ds_hour['v10'].values
+        
+        ws_kts = np.sqrt(u**2 + v**2) * 1.94384
+        
+        # Calculate fuel moisture with lag model
+        fm = np.zeros_like(rh)
+        for ii in range(rh.shape[0]):
+            for jj in range(rh.shape[1]):
+                fm[ii, jj] = estimate_fuel_moisture_with_lag(
+                    rh[ii, jj], 
+                    temp[ii, jj], 
+                    previous_fm[ii, jj],
+                    hours_elapsed=1
+                )
+        
+        # Store for next iteration
+        previous_fm = fm.copy()
+        
+        # Save hourly values
+        hourly_rh.append(rh)
+        hourly_temp.append(temp)
+        hourly_ws.append(ws_kts)
+        hourly_fm.append(fm)
+        
+        # Calculate fire danger # Import your existing function
+        risk = np.zeros_like(rh, dtype=int)
+        for ii in range(rh.shape[0]):
+            for jj in range(rh.shape[1]):
+                risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+        hourly_risks.append(risk)
+        
+        # Progress indicator
+        if i == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}% (initial)")
+        elif i % 3 == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+    
+    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+
 
 def generate_complete_forecast():
     """
@@ -238,35 +416,47 @@ def generate_complete_forecast():
             print(f"Warning: Could not save cache file: {e}")
             print("Continuing without caching...")
     
-    # Process data
-    print("Processing forecast data...")
-    hourly_risks = []
-    hourly_fm = []
-    hourly_rh = []
-    hourly_ws = []
-    hourly_temp = []
-    
-    for time_step in ds_full.step:
-        ds_hour = ds_full.sel(step=time_step)
-        
-        rh = ds_hour['r2'].values
-        temp = ds_hour['t2m'].values - 273.15  # Convert K to C
-        u = ds_hour['u10'].values
-        v = ds_hour['v10'].values
-        
-        ws_kts = np.sqrt(u**2 + v**2) * 1.94384
-        fm = estimate_fuel_moisture(rh)
-        
-        hourly_rh.append(rh)
-        hourly_temp.append(temp)
-        hourly_ws.append(ws_kts)
-        hourly_fm.append(fm)
-        
-        risk = np.zeros_like(rh, dtype=int)
-        for i in range(rh.shape[0]):
-            for j in range(rh.shape[1]):
-                risk[i, j] = calculate_fire_danger(fm[i, j], rh[i, j], ws_kts[i, j])
-        hourly_risks.append(risk)
+    # Extract coordinates first
+    lon = ds_full['longitude'].values
+    lat = ds_full['latitude'].values
+
+    if lon.ndim == 1 and lat.ndim == 1:
+        lon, lat = np.meshgrid(lon, lat)
+
+    if lon.max() > 180:
+        lon = np.where(lon > 180, lon - 360, lon)
+
+    # Get port from environment
+    port = os.getenv('PORT', '8000')
+
+    # Process data with observations-based fuel moisture
+    print("Processing forecast data with RAWS observations...")
+
+    # --- Save initialization observation data for ML/verification ---
+    # Try to get the current fuel moisture field (RAWS obs)
+    try:
+        from synoptic import get_current_fuel_moisture_field
+        obs_data = get_current_fuel_moisture_field(port=port)
+    except Exception as e:
+        print(f"[WARN] Could not fetch or save initialization obs: {e}")
+        obs_data = None
+
+    if obs_data:
+        archive_dir = PROJECT_DIR / 'archive' / 'forecast_inputs'
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        obs_file = archive_dir / f"obs_{RUN_DATE.strftime('%Y%m%d_%H')}.json"
+        import json
+        try:
+            with open(obs_file, 'w') as f:
+                json.dump(obs_data, f, indent=2)
+            print(f"[OK] Saved initialization obs to {obs_file}")
+        except Exception as e:
+            print(f"[WARN] Could not save obs file: {e}")
+
+    # Continue with forecast using ML model
+    hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks = process_forecast_with_ml_model(
+        ds_full, lon, lat, port=port, ml_model_path="models/fuel_moisture_model_latest.pkl"
+    )
     
     # Calculate peak/min values
     combined_risk = np.stack(hourly_risks, axis=0)
@@ -641,6 +831,261 @@ def generate_complete_forecast():
         json.dump(status, f, indent=4)
 
     return peak_risk_smooth
+
+import pickle
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+def load_ml_model(model_path="models/fuel_moisture_model_latest.pkl"):
+    """
+    Load the trained ML model.
+    
+    Returns: model_dict or None if model doesn't exist
+    """
+    model_file = Path(model_path)
+    
+    if not model_file.exists():
+        print(f"ML model not found at {model_path}")
+        print("Falling back to physics-based estimation")
+        return None
+    
+    try:
+        with open(model_file, 'rb') as f:
+            model_dict = pickle.load(f)
+        print(f"✓ Loaded ML model from {model_path}")
+        print(f"  Test MAE: {model_dict['test_metrics']['mae']:.3f}%")
+        return model_dict
+    except Exception as e:
+        print(f"Error loading ML model: {e}")
+        print("Falling back to physics-based estimation")
+        return None
+
+
+def calculate_vpd(temp_c, rh):
+    """Calculate Vapor Pressure Deficit (VPD) in kPa."""
+    # Saturation vapor pressure (kPa)
+    svp = 0.6108 * np.exp(17.27 * temp_c / (temp_c + 237.3))
+    # Actual vapor pressure
+    avp = svp * (rh / 100)
+    # VPD
+    vpd = svp - avp
+    return vpd
+
+
+def calculate_nelson_emc(rh, temp_c):
+    """Calculate equilibrium moisture content using Nelson's equations."""
+    if rh <= 10:
+        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    elif rh <= 50:
+        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+    else:
+        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
+    
+    return np.clip(emc, 1, 40)
+
+
+def prepare_ml_features(rh, temp_c, wind_kts, solar, precip, prev_fm, prev_rh, prev_temp,
+                       hour, day_of_year, month, latitude, longitude, elevation):
+    """
+    Prepare features for ML model prediction.
+    Must match the exact features used during training.
+    
+    Returns: DataFrame with features in correct order
+    """
+    # Calculate derived features
+    temp_f = temp_c * 9/5 + 32
+    emc_simple = 3 + 0.25 * rh
+    emc_nelson = calculate_nelson_emc(rh, temp_c)
+    vpd = calculate_vpd(temp_c, rh)
+    wind_temp_interaction = wind_kts * temp_c
+    
+    # Create feature dictionary
+    features = {
+        'rh': rh,
+        'temp': temp_f,
+        'temp_c': temp_c,
+        'wind': wind_kts,
+        'solar': solar if solar is not None else 0,
+        'precip': precip if precip is not None else 0,
+        'prev_rh': prev_rh,
+        'prev_temp': prev_temp,
+        'prev_fm': prev_fm,
+        'rh_3h_avg': prev_rh,  # Simplified - would need 3 hours of history
+        'temp_3h_avg': prev_temp,  # Simplified
+        'emc_simple': emc_simple,
+        'emc_nelson': emc_nelson,
+        'vpd': vpd,
+        'wind_temp_interaction': wind_temp_interaction,
+        'hour': hour,
+        'day_of_year': day_of_year,
+        'month': month,
+        'latitude': latitude,
+        'longitude': longitude,
+        'elevation': elevation
+    }
+    
+    return features
+
+
+def predict_with_ml_model(model_dict, features_dict):
+    """
+    Use ML model to predict fuel moisture.
+    
+    Args:
+        model_dict: Loaded model dictionary
+        features_dict: Dictionary of features
+    
+    Returns: Predicted fuel moisture (%)
+    """
+    # Create DataFrame with single row
+    df = pd.DataFrame([features_dict])
+    
+    # Ensure features are in correct order (same as training)
+    feature_names = model_dict['feature_names']
+    df = df[feature_names]
+    
+    # Scale features
+    scaler = model_dict['scaler']
+    features_scaled = scaler.transform(df)
+    
+    # Predict
+    model = model_dict['model']
+    prediction = model.predict(features_scaled)[0]
+    
+    return np.clip(prediction, 1, 40)
+
+
+def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path="models/fuel_moisture_model_latest.pkl"):
+    """
+    Process HRRR forecast using ML model for fuel moisture prediction.
+    Falls back to physics-based model if ML model unavailable.
+    
+    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+    """
+    from scipy.interpolate import Rbf
+    from scipy.ndimage import gaussian_filter
+    
+    # Try to load ML model
+    model_dict = load_ml_model(ml_model_path)
+    use_ml = model_dict is not None
+    
+    if use_ml:
+        print("Using ML model for fuel moisture prediction")
+    else:
+        print("Using physics-based model for fuel moisture prediction")
+    
+    # Get current fuel moisture observations
+    fuel_points = get_current_fuel_moisture_field(port)
+    
+    # Create grid meshes for interpolation
+    if lon.ndim == 1 and lat.ndim == 1:
+        grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+    else:
+        grid_lon_mesh, grid_lat_mesh = lon, lat
+    
+    # Initialize fuel moisture field from observations
+    if fuel_points and len(fuel_points) >= 3:
+        initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
+        print(f"Initialized from RAWS observations: FM range {np.nanmin(initial_fm):.1f}-{np.nanmax(initial_fm):.1f}%")
+    else:
+        initial_fm = np.full_like(grid_lon_mesh, 12.0)
+        print("Warning: Using default FM=12% (no RAWS data available)")
+    
+    # Get current time info for features
+    now = pd.Timestamp.utcnow()
+    
+    # Process each forecast hour
+    hourly_fm = []
+    hourly_rh = []
+    hourly_ws = []
+    hourly_temp = []
+    hourly_risks = []
+    
+    previous_fm = initial_fm.copy()
+    previous_rh = None
+    previous_temp = None
+    
+    for i, time_step in enumerate(ds_full.step):
+        ds_hour = ds_full.sel(step=time_step)
+        
+        # Extract forecast variables
+        rh = ds_hour['r2'].values
+        temp = ds_hour['t2m'].values - 273.15  # Convert K to C
+        u = ds_hour['u10'].values
+        v = ds_hour['v10'].values
+        
+        ws_kts = np.sqrt(u**2 + v**2) * 1.94384
+        
+        # Get time features for this forecast hour
+        forecast_time = now + pd.Timedelta(hours=int(time_step))
+        hour = forecast_time.hour
+        day_of_year = forecast_time.dayofyear
+        month = forecast_time.month
+        
+        # Calculate fuel moisture
+        fm = np.zeros_like(rh)
+        
+        if use_ml:
+            # Use ML model for each grid point
+            for ii in range(rh.shape[0]):
+                for jj in range(rh.shape[1]):
+                    # Prepare features for this grid point
+                    features = prepare_ml_features(
+                        rh=rh[ii, jj],
+                        temp_c=temp[ii, jj],
+                        wind_kts=ws_kts[ii, jj],
+                        solar=None,  # Not available in HRRR
+                        precip=None,  # Not available in HRRR
+                        prev_fm=previous_fm[ii, jj],
+                        prev_rh=previous_rh[ii, jj] if previous_rh is not None else rh[ii, jj],
+                        prev_temp=previous_temp[ii, jj] if previous_temp is not None else temp[ii, jj],
+                        hour=hour,
+                        day_of_year=day_of_year,
+                        month=month,
+                        latitude=grid_lat_mesh[ii, jj],
+                        longitude=grid_lon_mesh[ii, jj],
+                        elevation=0  # Would need DEM data
+                    )
+                    
+                    # Predict with ML model
+                    fm[ii, jj] = predict_with_ml_model(model_dict, features)
+        else:
+            # Fallback to physics-based lag model
+            for ii in range(rh.shape[0]):
+                for jj in range(rh.shape[1]):
+                    fm[ii, jj] = estimate_fuel_moisture_with_lag(
+                        rh[ii, jj], 
+                        temp[ii, jj], 
+                        previous_fm[ii, jj],
+                        hours_elapsed=1
+                    )
+        
+        # Store for next iteration
+        previous_fm = fm.copy()
+        previous_rh = rh.copy()
+        previous_temp = temp.copy()
+        
+        # Save hourly values
+        hourly_rh.append(rh)
+        hourly_temp.append(temp)
+        hourly_ws.append(ws_kts)
+        hourly_fm.append(fm)
+        
+        # Calculate fire danger
+        risk = np.zeros_like(rh, dtype=int)
+        for ii in range(rh.shape[0]):
+            for jj in range(rh.shape[1]):
+                risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+        hourly_risks.append(risk)
+        
+        # Progress indicator
+        if i == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}% (initial)")
+        elif i % 3 == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+    
+    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
 
 
 if __name__ == "__main__":

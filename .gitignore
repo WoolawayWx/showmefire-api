@@ -8,6 +8,9 @@ venv/
 beta/
 images/*
 gis/*
+models/*
+reports/*
+archive/*
 
 password.py
 *.log

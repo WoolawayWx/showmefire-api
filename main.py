@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state
+from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state, fetch_historical_station_data, save_raw_data_to_archive, get_raw_data_stats
 from timeseries import fetchtimeseriesdata, get_timeseries_data
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Optional
 from rss_feed import generate_rss_feed
+from pathlib import Path
 
 # Security Configuration
 SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
@@ -472,6 +473,164 @@ def get_raws_stations():
     """
     return raws_station_data
 
+@app.get("/api/historical/fetch")
+async def fetch_historical_data(
+    days_back: int = 1,
+    states: str = "MO,OK,AR,TN,KY,IL,IA,NE,KS",
+    networks: str = "1,2,156",
+    save_to_archive: bool = False
+):
+    '''
+    Fetch historical weather station data.
+    
+    Query params:
+    - days_back: Number of days to fetch (default: 1)
+    - states: Comma-separated state codes (default: MO and surrounding)
+    - networks: Comma-separated network IDs (default: 1,2,156)
+    - save_to_archive: Whether to save raw data to archive (default: False)
+    
+    Returns: Raw Synoptic API response with metadata
+    '''
+    states_list = states.split(",")
+    networks_list = [int(n) for n in networks.split(",")]
+    
+    try:
+        data = await fetch_historical_station_data(
+            states=states_list,
+            days_back=days_back,
+            networks=networks_list
+        )
+        
+        if save_to_archive:
+            filepath = await save_raw_data_to_archive(
+                days_back=days_back,
+                archive_dir="archive/raw_data"
+            )
+            data['_saved_to'] = str(filepath) if filepath else None
+        
+        return {
+            "success": True,
+            "data": data,
+            "stats": get_raw_data_stats(data)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching historical data: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+        
+@app.get("/api/historical/stats")
+async def get_historical_stats(days_back: int = 7):
+    '''
+    Get statistics about available historical data.
+    
+    Query params:
+    - days_back: Number of days to analyze (default: 7)
+    
+    Returns: Summary statistics
+    '''
+    try:
+        data = await fetch_historical_station_data(days_back=days_back)
+        stats = get_raw_data_stats(data)
+        return {"success": True, "stats": stats}
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/historical/archive/save")
+async def save_historical_to_archive(days_back: int = 1):
+    '''
+    Save historical data to archive folder.
+    
+    Body params:
+    - days_back: Number of days to fetch and save (default: 1)
+    
+    Returns: Path to saved file
+    '''
+    try:
+        filepath = await save_raw_data_to_archive(days_back=days_back)
+        if filepath:
+            return {
+                "success": True,
+                "filepath": str(filepath),
+                "message": f"Saved {days_back} days of data"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "No data to save"
+            }
+    except Exception as e:
+        logger.error(f"Error saving to archive: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/historical/archive/list")
+async def list_archived_files(archive_dir: str = "archive/raw_data"):
+    '''
+    List all archived data files.
+    
+    Query params:
+    - archive_dir: Directory to list (default: archive/raw_data)
+    
+    Returns: List of available archive files with metadata
+    '''
+    archive_path = Path(archive_dir)
+    
+    if not archive_path.exists():
+        return {"success": True, "files": []}
+    
+    files = []
+    for filepath in archive_path.glob("raw_data_*.json"):
+        stat = filepath.stat()
+        files.append({
+            "filename": filepath.name,
+            "size_mb": round(stat.st_size / 1024 / 1024, 2),
+            "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+        })
+    
+    files.sort(key=lambda x: x['modified'], reverse=True)
+    
+    return {
+        "success": True,
+        "files": files,
+        "count": len(files)
+    }
+
+
+@app.get("/api/historical/archive/load/{filename}")
+async def load_archived_file(filename: str, archive_dir: str = "archive/raw_data"):
+    '''
+    Load a specific archived data file.
+    
+    Path params:
+    - filename: Name of the file to load
+    
+    Query params:
+    - archive_dir: Directory to load from (default: archive/raw_data)
+    
+    Returns: Archived data with statistics
+    '''
+    archive_path = Path(archive_dir) / filename
+    
+    if not archive_path.exists():
+        return {"success": False, "error": "File not found"}
+    
+    try:
+        with open(archive_path, 'r') as f:
+            data = json.load(f)
+        
+        return {
+            "success": True,
+            "data": data,
+            "stats": get_raw_data_stats(data)
+        }
+    except Exception as e:
+        logger.error(f"Error loading archive: {e}")
+        return {"success": False, "error": str(e)}
 
 if __name__ == '__main__':
     import uvicorn

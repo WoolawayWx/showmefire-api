@@ -77,7 +77,13 @@ def get_r2_client():
         region_name='auto'
     )
 
-def run_upload():
+def run_upload(files_to_upload=None):
+    """
+    Uploads only the specified files if files_to_upload is provided,
+    otherwise uploads all files in FOLDERS_TO_UPLOAD.
+    Args:
+        files_to_upload (list of Path or str, optional): List of file paths to upload.
+    """
     if not all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
         print("Error: Missing R2 credentials in .env file.")
         return
@@ -87,40 +93,50 @@ def run_upload():
     
     print(f"--- Starting Sync for interval: {timestamp_folder} ---")
 
-    for folder in FOLDERS_TO_UPLOAD:
-        if not folder.exists():
-            print(f"Skipping {folder.name}: Folder does not exist.")
-            continue
+    if files_to_upload:
+        files = [Path(f) for f in files_to_upload]
+    else:
+        files = []
+        for folder in FOLDERS_TO_UPLOAD:
+            if not folder.exists():
+                print(f"Skipping {folder.name}: Folder does not exist.")
+                continue
+            files.extend([f for f in folder.glob('*') if f.is_file()])
 
-        for file_path in folder.glob('*'):
-            if file_path.is_dir(): continue # Skip subfolders
-            
-            filename = file_path.name
-            # Set content type based on extension
-            content_type = 'application/json' if file_path.suffix == '.geojson' else 'image/png'
-            
-            # 1. Path for the archive (e.g., 20251225_2330/mo-fuelmoisture.png)
-            archive_key = f"{timestamp_folder}/{filename}"
-            
-            # 2. Path for the website (e.g., latest/mo-fuelmoisture.png)
-            latest_key = f"latest/{filename}"
+    for file_path in files:
+        filename = file_path.name
+        # Set content type based on extension
+        content_type = 'application/json' if file_path.suffix == '.geojson' else 'image/png'
+        
+        # 1. Path for the archive (e.g., 20251225_2330/mo-fuelmoisture.png)
+        archive_key = f"{timestamp_folder}/{filename}"
+        
+        # 2. Path for the website (e.g., latest/mo-fuelmoisture.png)
+        latest_key = f"latest/{filename}"
 
-            try:
-                # Upload to Archive
-                s3.upload_file(
-                    str(file_path), BUCKET_NAME, archive_key,
-                    ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=3600'}
-                )
-                
-                # Upload to Latest
-                s3.upload_file(
-                    str(file_path), BUCKET_NAME, latest_key,
-                    ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
-                )
-                
-                print(f" [OK] {filename} -> R2")
-            except Exception as e:
-                print(f" [FAILED] {filename}: {e}")
+        try:
+            # Upload to Archive
+            s3.upload_file(
+                str(file_path), BUCKET_NAME, archive_key,
+                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=3600'}
+            )
+            
+            # Upload to Latest
+            s3.upload_file(
+                str(file_path), BUCKET_NAME, latest_key,
+                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
+            )
+            
+            print(f" [OK] {filename} -> R2")
+        except Exception as e:
+            print(f" [FAILED] {filename}: {e}")
 
 if __name__ == "__main__":
-    run_upload()
+    # Example: specify files to upload by their paths
+    files_to_upload = [
+        SCRIPT_DIR / "images" / "mo-windfilmap.png",
+        SCRIPT_DIR / "images" / "mo-rh.png",
+        SCRIPT_DIR / "images" / "mo-realtimefiredanger.png",
+        SCRIPT_DIR / "images" / "mo-fuelmoisture.png",
+    ]
+    run_upload(files_to_upload=files_to_upload)
