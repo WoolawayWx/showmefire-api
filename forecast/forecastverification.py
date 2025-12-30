@@ -532,56 +532,7 @@ def generate_verification_report(results: pd.DataFrame, output_dir: str = "repor
 
 # ==================== MAIN WORKFLOW ====================
 
-def run_daily_training(archive_dir: str = "archive/raw_data", 
-                      model_dir: str = "models"):
-    """
-    Daily workflow: Load all archived data, train model, save results.
-    Run this once per day to update the ML model.
-    """
-    logger.info("="*60)
-    logger.info("DAILY MODEL TRAINING")
-    logger.info("="*60)
-    
-    # 1. Load all archived data
-    df = load_all_archived_data(archive_dir)
-    
-    if df.empty:
-        logger.error("No data available for training!")
-        return None
-    
-    # 2. Prepare training data
-    X, y = prepare_training_data(df)
-    
-    if X.empty:
-        logger.error("No training data prepared!")
-        return None
-    
-    # 3. Train model
-    model_dict = train_fuel_moisture_model(X, y, model_type="random_forest")
-    
-    # 4. Save model
-    model_path = Path(model_dir) / f"fuel_moisture_model_{datetime.now().strftime('%Y%m%d')}.pkl"
-    save_model(model_dict, model_path)
-    
-    # Also save as "latest"
-    latest_path = Path(model_dir) / "fuel_moisture_model_latest.pkl"
-    save_model(model_dict, latest_path)
-    
-    # 5. Generate verification report
-    results = compare_simple_model_to_ml(df, model_dict)
-    generate_verification_report(results)
-    
-    # 6. Print feature importance
-    logger.info("\nTop 10 Most Important Features:")
-    logger.info("-"*60)
-    for idx, row in model_dict['feature_importance'].head(10).iterrows():
-        logger.info(f"  {row['feature']:20s}: {row['importance']:.4f}")
-    
-    logger.info("\n" + "="*60)
-    logger.info("TRAINING COMPLETE")
-    logger.info("="*60 + "\n")
-    
-    return model_dict
+
 
 
 def quick_model_test():
@@ -609,22 +560,366 @@ def quick_model_test():
 
 # ==================== COMMAND LINE INTERFACE ====================
 
+
+        
+        
+# Add to forecastverification.py
+
+def load_forecast_data(model_run: str, forecast_dir: str = "archive/forecasts") -> Dict:
+    """Load saved forecast data."""
+    forecast_file = Path(forecast_dir) / f"forecast_{model_run}.json"
+    
+    if not forecast_file.exists():
+        logger.error(f"Forecast file not found: {forecast_file}")
+        return None
+    
+    with open(forecast_file, 'r') as f:
+        forecast_data = json.load(f)
+    
+    logger.info(f"Loaded forecast: {model_run}")
+    return forecast_data
+
+
+def verify_forecast(forecast_data: Dict, archive_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Verify forecast accuracy by comparing to actual observations.
+    
+    Args:
+        forecast_data: Loaded forecast from archive/forecasts/
+        archive_df: DataFrame with actual observations
+    
+    Returns: DataFrame with forecast errors by station and time
+    """
+    results = []
+    
+    # Get forecast valid times and make them timezone-aware (UTC)
+    valid_times = [pd.to_datetime(t).tz_localize('UTC') if pd.to_datetime(t).tz is None 
+                   else pd.to_datetime(t) for t in forecast_data['forecast_valid_times']]
+    
+    # For each forecast hour
+    for i, forecast_hour in enumerate(forecast_data['hourly_forecasts']):
+        valid_time = valid_times[i]
+        
+        # Get forecast values (these are grid-averaged)
+        forecast_fm_mean = forecast_hour['fuel_moisture_mean']
+        forecast_fm_min = forecast_hour['fuel_moisture_min']
+        
+        # Find actual observations within ±30 min of valid time
+        time_window_start = valid_time - timedelta(minutes=30)
+        time_window_end = valid_time + timedelta(minutes=30)
+        
+        obs_mask = (
+            (archive_df['timestamp'] >= time_window_start) & 
+            (archive_df['timestamp'] <= time_window_end) &
+            (archive_df['fuel_moisture'].notna())
+        )
+        
+        observations = archive_df[obs_mask]
+        
+        if len(observations) == 0:
+            continue
+        
+        # Compare forecast to each observation
+        for _, obs in observations.iterrows():
+            actual_fm = obs['fuel_moisture']
+            
+            results.append({
+                'model_run': forecast_data['model_run'],
+                'valid_time': valid_time,
+                'forecast_hour': forecast_hour['hour'],
+                'stid': obs['stid'],
+                'forecast_fm_mean': forecast_fm_mean,
+                'forecast_fm_min': forecast_fm_min,
+                'actual_fm': actual_fm,
+                'error_mean': forecast_fm_mean - actual_fm,
+                'error_min': forecast_fm_min - actual_fm,
+                'abs_error_mean': abs(forecast_fm_mean - actual_fm),
+                'abs_error_min': abs(forecast_fm_min - actual_fm)
+            })
+    
+    results_df = pd.DataFrame(results)
+    
+    if len(results_df) > 0:
+        logger.info(f"\nFORECAST VERIFICATION: {forecast_data['model_run']}")
+        logger.info(f"Verified against {results_df['stid'].nunique()} stations")
+        logger.info(f"Mean forecast MAE: {results_df['abs_error_mean'].mean():.2f}%")
+        logger.info(f"Min forecast MAE: {results_df['abs_error_min'].mean():.2f}%")
+        logger.info(f"Forecast bias: {results_df['error_mean'].mean():.2f}%")
+    
+    return results_df
+
+
+def run_forecast_verification(model_run: str = None, 
+                              forecast_dir: str = "archive/forecasts",
+                              archive_dir: str = "archive/raw_data"):
+    """
+    Verify a specific forecast run against actual observations.
+    
+    Args:
+        model_run: Model run timestamp (YYYYMMDD_HH), or None for most recent
+    """
+    logger.info("="*60)
+    logger.info("FORECAST VERIFICATION")
+    logger.info("="*60)
+    
+    # Find most recent forecast if not specified
+    if model_run is None:
+        forecast_path = Path(forecast_dir)
+        forecast_files = sorted(forecast_path.glob("forecast_*.json"))
+        if not forecast_files:
+            logger.error("No forecast files found!")
+            return None
+        model_run = forecast_files[-1].stem.replace("forecast_", "")
+        logger.info(f"Using most recent forecast: {model_run}")
+    
+    # Load forecast
+    forecast_data = load_forecast_data(model_run, forecast_dir)
+    if not forecast_data:
+        return None
+    
+    # Load archived observations
+    archive_df = load_all_archived_data(archive_dir)
+    if archive_df.empty:
+        logger.error("No archived observations available!")
+        return None
+    
+    # Verify forecast
+    results = verify_forecast(forecast_data, archive_df)
+    
+    if results.empty:
+        logger.warning("No matching observations found for verification!")
+        return None
+    
+    # Generate report
+    generate_forecast_verification_report(results)
+    
+    return results
+
+
+def generate_forecast_verification_report(results: pd.DataFrame, output_dir: str = "reports"):
+    """Generate visualizations for forecast verification."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    model_run = results['model_run'].iloc[0]
+    
+    # 1. Error by forecast hour
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # MAE by hour
+    hourly_stats = results.groupby('forecast_hour').agg({
+        'abs_error_mean': 'mean',
+        'abs_error_min': 'mean'
+    })
+    
+    axes[0, 0].plot(hourly_stats.index, hourly_stats['abs_error_mean'], 
+                    marker='o', label='Mean Forecast')
+    axes[0, 0].plot(hourly_stats.index, hourly_stats['abs_error_min'], 
+                    marker='s', label='Min Forecast')
+    axes[0, 0].set_xlabel('Forecast Hour')
+    axes[0, 0].set_ylabel('MAE (%)')
+    axes[0, 0].set_title('Forecast Error by Hour')
+    axes[0, 0].legend()
+    axes[0, 0].grid(alpha=0.3)
+    
+    # Error distribution
+    axes[0, 1].hist(results['error_mean'], bins=30, alpha=0.7, edgecolor='black')
+    axes[0, 1].axvline(0, color='red', linestyle='--', linewidth=2)
+    axes[0, 1].set_xlabel('Forecast Error (%)')
+    axes[0, 1].set_ylabel('Frequency')
+    axes[0, 1].set_title('Error Distribution')
+    axes[0, 1].grid(alpha=0.3)
+    
+    # Actual vs Predicted
+    axes[1, 0].scatter(results['actual_fm'], results['forecast_fm_mean'], 
+                      alpha=0.5, s=20)
+    axes[1, 0].plot([0, 30], [0, 30], 'r--', linewidth=2)
+    axes[1, 0].set_xlabel('Actual FM (%)')
+    axes[1, 0].set_ylabel('Forecast FM (%)')
+    axes[1, 0].set_title('Actual vs Forecast')
+    axes[1, 0].grid(alpha=0.3)
+    
+    # Error by station
+    station_stats = results.groupby('stid')['abs_error_mean'].mean().sort_values()
+    if len(station_stats) <= 20:
+        axes[1, 1].barh(range(len(station_stats)), station_stats.values)
+        axes[1, 1].set_yticks(range(len(station_stats)))
+        axes[1, 1].set_yticklabels(station_stats.index)
+        axes[1, 1].set_xlabel('MAE (%)')
+        axes[1, 1].set_title('Error by Station')
+        axes[1, 1].grid(alpha=0.3, axis='x')
+    else:
+        axes[1, 1].text(0.5, 0.5, f'Too many stations\n({len(station_stats)} total)', 
+                       ha='center', va='center', transform=axes[1, 1].transAxes)
+        axes[1, 1].axis('off')
+    
+    plt.suptitle(f'Forecast Verification: {model_run}', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    output_file = output_path / f'forecast_verification_{model_run}.png'
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    logger.info(f"Saved forecast verification plot: {output_file}")
+    plt.close()
+    
+    
+def run_daily_training(archive_dir: str = "archive/raw_data", 
+                      model_dir: str = "models",
+                      forecast_dir: str = "archive/forecasts",
+                      verify_forecasts: bool = True):
+    """
+    Daily workflow: Load all archived data, train model, save results, verify forecasts.
+    Run this once per day to update the ML model and check forecast performance.
+    """
+    logger.info("="*60)
+    logger.info("DAILY MODEL TRAINING AND VERIFICATION")
+    logger.info("="*60)
+    
+    # 1. Load all archived data
+    df = load_all_archived_data(archive_dir)
+    
+    if df.empty:
+        logger.error("No data available for training!")
+        return None
+    
+    # 2. Prepare training data
+    X, y = prepare_training_data(df)
+    
+    if X.empty:
+        logger.error("No training data prepared!")
+        return None
+    
+    # 3. Train model
+    model_dict = train_fuel_moisture_model(X, y, model_type="random_forest")
+    
+    # 4. Save model
+    model_path = Path(model_dir) / f"fuel_moisture_model_{datetime.now().strftime('%Y%m%d')}.pkl"
+    save_model(model_dict, model_path)
+    
+    # Also save as "latest"
+    latest_path = Path(model_dir) / "fuel_moisture_model_latest.pkl"
+    save_model(model_dict, latest_path)
+    
+    # 5. Generate model verification report (ML vs Simple)
+    results = compare_simple_model_to_ml(df, model_dict)
+    generate_verification_report(results)
+    
+    # 6. Print feature importance
+    logger.info("\nTop 10 Most Important Features:")
+    logger.info("-"*60)
+    for idx, row in model_dict['feature_importance'].head(10).iterrows():
+        logger.info(f"  {row['feature']:20s}: {row['importance']:.4f}")
+    
+    # 7. VERIFY RECENT FORECASTS (if enabled)
+    if verify_forecasts:
+        logger.info("\n" + "="*60)
+        logger.info("VERIFYING RECENT FORECASTS")
+        logger.info("="*60)
+        
+        forecast_path = Path(forecast_dir)
+        if forecast_path.exists():
+            # Get all forecast files from last 7 days
+            cutoff_date = datetime.now() - timedelta(days=7)
+            recent_forecasts = []
+            
+            for forecast_file in sorted(forecast_path.glob("forecast_*.json")):
+                # Extract date from filename: forecast_YYYYMMDD_HH.json
+                try:
+                    model_run = forecast_file.stem.replace("forecast_", "")
+                    run_date = datetime.strptime(model_run, "%Y%m%d_%H")
+                    
+                    if run_date >= cutoff_date:
+                        recent_forecasts.append(model_run)
+                except:
+                    continue
+            
+            if recent_forecasts:
+                logger.info(f"Found {len(recent_forecasts)} recent forecasts to verify")
+                
+                all_forecast_results = []
+                
+                for model_run in recent_forecasts:
+                    logger.info(f"\nVerifying forecast: {model_run}")
+                    forecast_data = load_forecast_data(model_run, forecast_dir)
+                    
+                    if forecast_data:
+                        results = verify_forecast(forecast_data, df)
+                        if not results.empty:
+                            all_forecast_results.append(results)
+                            generate_forecast_verification_report(results)
+                
+                # Generate summary report across all forecasts
+                if all_forecast_results:
+                    combined_results = pd.concat(all_forecast_results, ignore_index=True)
+                    
+                    logger.info("\n" + "="*60)
+                    logger.info("FORECAST VERIFICATION SUMMARY (Last 7 Days)")
+                    logger.info("="*60)
+                    logger.info(f"Total forecasts verified: {combined_results['model_run'].nunique()}")
+                    logger.info(f"Total verifications: {len(combined_results)}")
+                    logger.info(f"Mean Absolute Error: {combined_results['abs_error_mean'].mean():.2f}%")
+                    logger.info(f"RMSE: {np.sqrt((combined_results['error_mean']**2).mean()):.2f}%")
+                    logger.info(f"Bias: {combined_results['error_mean'].mean():.2f}%")
+                    
+                    # Save summary
+                    summary_file = Path("reports") / f"forecast_summary_{datetime.now().strftime('%Y%m%d')}.txt"
+                    with open(summary_file, 'w') as f:
+                        f.write("FORECAST VERIFICATION SUMMARY\n")
+                        f.write("="*60 + "\n")
+                        f.write(f"Period: Last 7 days\n")
+                        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                        f.write(f"Forecasts verified: {combined_results['model_run'].nunique()}\n")
+                        f.write(f"Total verifications: {len(combined_results)}\n")
+                        f.write(f"Stations: {combined_results['stid'].nunique()}\n\n")
+                        f.write(f"Mean Absolute Error: {combined_results['abs_error_mean'].mean():.2f}%\n")
+                        f.write(f"RMSE: {np.sqrt((combined_results['error_mean']**2).mean()):.2f}%\n")
+                        f.write(f"Mean Bias: {combined_results['error_mean'].mean():.2f}%\n")
+                    
+                    logger.info(f"Saved summary report: {summary_file}")
+            else:
+                logger.info("No recent forecasts found to verify")
+        else:
+            logger.info(f"Forecast directory does not exist: {forecast_dir}")
+    
+    logger.info("\n" + "="*60)
+    logger.info("DAILY TRAINING AND VERIFICATION COMPLETE")
+    logger.info("="*60 + "\n")
+    
+    return model_dict
+
+
+
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Fuel Moisture ML Training and Verification')
-    parser.add_argument('--train', action='store_true', help='Run daily training workflow')
+    parser.add_argument('--train', action='store_true', help='Run daily training workflow (includes forecast verification)')
     parser.add_argument('--test', action='store_true', help='Run quick model test')
+    parser.add_argument('--verify-forecast', type=str, metavar='MODEL_RUN', 
+                       help='Verify specific forecast (e.g., 20251230_12)')
+    parser.add_argument('--no-forecast-verification', action='store_true',
+                       help='Skip forecast verification during training')
     parser.add_argument('--archive-dir', default='archive/raw_data', help='Archive directory')
     parser.add_argument('--model-dir', default='models', help='Model save directory')
+    parser.add_argument('--forecast-dir', default='archive/forecasts', help='Forecast archive directory')
     
     args = parser.parse_args()
     
     if args.train:
-        run_daily_training(args.archive_dir, args.model_dir)
+        run_daily_training(
+            args.archive_dir, 
+            args.model_dir,
+            args.forecast_dir,
+            verify_forecasts=not args.no_forecast_verification
+        )
     elif args.test:
         quick_model_test()
+    elif args.verify_forecast:
+        run_forecast_verification(args.verify_forecast, args.forecast_dir, args.archive_dir)
     else:
-        # Default: run training
         logger.info("No command specified, running daily training...")
-        run_daily_training(args.archive_dir, args.model_dir)
+        run_daily_training(
+            args.archive_dir, 
+            args.model_dir,
+            args.forecast_dir,
+            verify_forecasts=True
+        )
