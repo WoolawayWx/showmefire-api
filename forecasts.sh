@@ -4,7 +4,7 @@
 source ./venv/bin/activate
 
 # Run all Python scripts in the maps folder
-python forecast/forecastfiredanger.py
+python forecast/forecastedfiredanger.py
 
 
 # Deactivate the virtual environment
