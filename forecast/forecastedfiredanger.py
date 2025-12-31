@@ -645,10 +645,20 @@ def generate_complete_forecast():
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     print("Generating minimum fuel moisture map...")
-    fm_colors = ['#8B4513', '#CD853F', '#DAA520', '#F0E68C', '#90EE90', '#228B22']
-    fm_levels = [0, 5, 8, 10, 12, 15, 30]
-    fm_cmap = ListedColormap(fm_colors)
-    fm_norm = BoundaryNorm(fm_levels, len(fm_colors))
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # Create a smooth gradient colormap for 0-30% fuel moisture
+    fm_colors = [
+        '#8B4513',  # 0% - very dry (saddlebrown)
+        '#CD853F',  # 5% - peru
+        '#DAA520',  # 8% - goldenrod
+        '#F0E68C',  # 12% - khaki
+        '#90EE90',  # 18% - lightgreen
+        '#228B22'   # 30% - forestgreen
+    ]
+    fm_levels = [0, 5, 8, 12, 18, 30]
+    fm_cmap = LinearSegmentedColormap.from_list('fm_gradient', fm_colors, N=256)
+    fm_norm = BoundaryNorm(fm_levels, fm_cmap.N)
     
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
     

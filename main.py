@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state, fetch_historical_station_data, save_raw_data_to_archive, get_raw_data_stats
@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from rss_feed import generate_rss_feed
 from pathlib import Path
+from tools.nfgs_firedetect import main as firedetect
 
 # Security Configuration
 SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
@@ -68,6 +69,13 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     # Run RAWS fetch at :00, :05, :10, etc.
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    scheduler.add_job(
+        firedetect, 
+        'cron', 
+        minute='0,5,10,15,20,25,30,35,40,45,50,55',
+        hour='10-22',  # 10 AM through 10 PM
+        id='fetch_fire_detections'
+    )
     scheduler.start()
     logger.info("Scheduler started")
     
@@ -437,13 +445,31 @@ class BannerData(BaseModel):
     message: str = ""
     link: Optional[str] = None
 
-# In-memory storage (we'll add database later)
-banner_storage = BannerData()
+# Persistent banner config file
+BANNER_CONFIG_PATH = Path("banner_config.json")
+
+def load_banner_config() -> BannerData:
+    if BANNER_CONFIG_PATH.exists():
+        try:
+            with open(BANNER_CONFIG_PATH, "r") as f:
+                data = json.load(f)
+            return BannerData(**data)
+        except Exception as e:
+            logger.error(f"Failed to load banner config: {e}")
+    return BannerData()
+
+def save_banner_config(banner: BannerData):
+    try:
+        with open(BANNER_CONFIG_PATH, "w") as f:
+            json.dump(banner.dict(), f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save banner config: {e}")
 
 @app.get("/api/banner")
 async def get_banner_public():
     """Get current banner (public endpoint)"""
-    return banner_storage
+    # Always load from file for latest value
+    return load_banner_config()
 
 @app.get("/api/admin/banner")
 async def get_banner_admin(token: str):
@@ -451,7 +477,7 @@ async def get_banner_admin(token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return banner_storage
+    return load_banner_config()
 
 @app.post("/api/admin/banner")
 async def update_banner(banner: BannerData, token: str):
@@ -459,11 +485,8 @@ async def update_banner(banner: BannerData, token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    global banner_storage
-    banner_storage = banner
+    save_banner_config(banner)
     logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
-    
     return {"success": True, "message": "Banner updated successfully"}
 
 @app.get('/stations/raws')
@@ -631,6 +654,24 @@ async def load_archived_file(filename: str, archive_dir: str = "archive/raw_data
     except Exception as e:
         logger.error(f"Error loading archive: {e}")
         return {"success": False, "error": str(e)}
+    
+@app.get("/api/fires/missouri")
+async def get_missouri_fires():
+    """Get current Missouri fire detections as JSON"""
+    json_file = 'data/missouri_fires_coords.json'
+    if os.path.exists(json_file):
+        return FileResponse(json_file, media_type='application/json')
+    else:
+        raise HTTPException(status_code=404, detail="Fire data not yet available")
+
+@app.get("/api/fires/missouri/geojson")
+async def get_missouri_fires_geojson():
+    """Get current Missouri fire detections as GeoJSON"""
+    geojson_file = 'data/missouri_fires.geojson'
+    if os.path.exists(geojson_file):
+        return FileResponse(geojson_file, media_type='application/geo+json')
+    else:
+        raise HTTPException(status_code=404, detail="Fire GeoJSON not yet available")
 
 if __name__ == '__main__':
     import uvicorn

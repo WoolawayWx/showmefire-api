@@ -16,3 +16,5 @@ password.py
 *.log
 cache
 status.json
+banner_config.json
+data/*
