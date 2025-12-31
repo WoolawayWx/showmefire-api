@@ -19,6 +19,8 @@ from typing import Optional
 from rss_feed import generate_rss_feed
 from pathlib import Path
 from tools.nfgs_firedetect import main as firedetect
+from pytz import timezone
+
 
 # Security Configuration
 SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
@@ -46,6 +48,9 @@ raws_station_data = {
     "error": None
 }
 
+central_tz = timezone('America/Chicago')
+scheduler = AsyncIOScheduler(timezone=central_tz)
+
 async def fetch_and_store_raws_stations():
     """Fetch RAWS stations and store in global variable"""
     try:
@@ -69,6 +74,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     # Run RAWS fetch at :00, :05, :10, etc.
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    
     scheduler.add_job(
         firedetect, 
         'cron', 
