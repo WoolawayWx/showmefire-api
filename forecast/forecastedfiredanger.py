@@ -677,7 +677,7 @@ def generate_complete_forecast():
         "Elevated: FM < 10% with RH < 45% or Wind ≥ 10 kts\n"
         "Critical: FM < 10% with RH < 25% & Wind ≥ 15 kts\n"
         "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
-        "Data Source: HRRR Model Forecast\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -691,30 +691,41 @@ def generate_complete_forecast():
 
     # Create a smooth gradient colormap for 0-30% fuel moisture
     fm_colors = [
-        '#8B4513',  # 0% - very dry (saddlebrown)
-        '#CD853F',  # 5% - peru
-        '#DAA520',  # 8% - goldenrod
-        '#F0E68C',  # 12% - khaki
-        '#90EE90',  # 18% - lightgreen
-        '#228B22'   # 30% - forestgreen
+        '#8B0000',  # 0% - critical (dark red)
+        '#CD5C5C',  # 8% - indian red
+        '#D2691E',  # 12% - chocolate (transition start)
+        '#DAA520',  # 13% - goldenrod
+        '#F0E68C',  # 15% - khaki (transition end)
+        '#9ACD32',  # 17% - yellowgreen
+        '#90EE90',  # 20% - lightgreen
+        '#32CD32',  # 30% - limegreen
+        '#228B22'   # 40% - forestgreen
     ]
-    fm_levels = [0, 5, 8, 12, 18, 30]
+
+    # More levels concentrated around the critical zone
+    fm_levels = np.concatenate([
+        np.linspace(0, 12, 13),        # 0-12%: every 1%
+        np.linspace(12.25, 15, 12),    # 12.25-15%: finer intervals for transition
+        np.linspace(15.5, 40, 50)      # 15.5-40%: smoother to end
+    ])
+
     fm_cmap = LinearSegmentedColormap.from_list('fm_gradient', fm_colors, N=256)
-    fm_norm = BoundaryNorm(fm_levels, fm_cmap.N)
-    
+
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-    
+
     cs = ax.contourf(lon, lat, min_fuel_moisture_smooth, transform=data_crs,
-                     levels=fm_levels, cmap=fm_cmap, norm=fm_norm, alpha=0.7, zorder=7, antialiased=True)
+                    levels=fm_levels, cmap=fm_cmap, alpha=0.7, zorder=7, antialiased=True)
+
+    # Highlight the critical transition with contour lines
+    contour_levels = [8, 12, 15, 20, 25, 30]
     ax.contour(lon, lat, min_fuel_moisture_smooth, transform=data_crs,
-               levels=fm_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
-    
+            levels=contour_levels, colors='black', linewidths=0.4, alpha=0.3, zorder=8)
+
     add_boundaries(ax, data_crs, PROJECT_DIR)
-    
+
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
     cbar = plt.colorbar(cs, cax=cax, label='Fuel Moisture (%)')
-    cbar.set_ticks([2.5, 6.5, 9, 11, 13.5, 22.5])
-    cbar.set_ticklabels(['<5%', '5-8%', '8-10%', '10-12%', '12-15%', '>15%'])
+    cbar.set_ticks([0, 8, 12, 15, 20, 30, 40])
     
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
@@ -729,7 +740,7 @@ def generate_complete_forecast():
         "8-10%: Dry - Elevated fire behavior expected\n"
         "10-15%: Moderate - Fire activity possible\n"
         "> 15%: Moist - Fuels less receptive to fire\n\n"
-        "Data Source: HRRR Model Forecast\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -771,7 +782,7 @@ def generate_complete_forecast():
         "25-35%: Dry - Elevated fire danger possible\n"
         "35-50%: Moderate - Normal fire activity\n"
         "> 50%: Moist - Fire spread limited\n\n"
-        "Data Source: HRRR Model Forecast\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -813,7 +824,7 @@ def generate_complete_forecast():
         "15-20 kts: Strong - Red Flag criteria with low RH\n"
         "20-25 kts: Very Strong - Critical fire weather\n"
         "> 25 kts: Extreme - Dangerous fire conditions\n\n"
-        "Data Source: HRRR Model Forecast\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -823,22 +834,30 @@ def generate_complete_forecast():
     
     # ========== MAP 5: MAXIMUM TEMPERATURE ==========
     logger.info("Generating maximum temperature map...")
-    temp_colors = ['#4169E1', '#87CEEB', '#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#8B0000']
-    temp_levels = [-10, 0, 10, 20, 27, 32, 38, 45]
-    temp_cmap = ListedColormap(temp_colors)
-    temp_norm = BoundaryNorm(temp_levels, len(temp_colors))
-    
+    # Define temperature levels and colors in Fahrenheit
+    temp_cmap = plt.cm.turbo  # Or try: plt.cm.RdYlBu_r, plt.cm.jet, plt.cm.plasma
+
+    # Smooth gradient from 0°F to 90°F
+    temp_levels_f = np.linspace(0, 90, 50)
+
+    # Convert max_temp_smooth from C to F for plotting
+    max_temp_smooth_f = max_temp_smooth * 9/5 + 32
+
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-    
-    cs = ax.contourf(lon, lat, max_temp_smooth, transform=data_crs,
-                     levels=temp_levels, cmap=temp_cmap, norm=temp_norm, alpha=0.7, zorder=7, antialiased=True)
-    ax.contour(lon, lat, max_temp_smooth, transform=data_crs,
-               levels=temp_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
-    
+
+    cs = ax.contourf(lon, lat, max_temp_smooth_f, transform=data_crs,
+                    levels=temp_levels_f, cmap=temp_cmap, alpha=0.7, zorder=7, antialiased=True)
+
+    # Contour lines every 10°F
+    contour_levels = np.arange(10, 90, 10)
+    ax.contour(lon, lat, max_temp_smooth_f, transform=data_crs,
+            levels=contour_levels, colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+
     add_boundaries(ax, data_crs, PROJECT_DIR)
-    
+
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°C)')
+    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
+    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
     
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
@@ -853,7 +872,7 @@ def generate_complete_forecast():
         "Combined with low humidity and wind,\n"
         "high temperatures create dangerous\n"
         "fire weather conditions.\n\n"
-        "Data Source: HRRR Model Forecast\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -907,7 +926,7 @@ def generate_complete_forecast():
             content_types.extend(['image/png', 'image/png'])
         files = [f for f in forecast_files for _ in (0,1)]
         print("Uploading forecast maps to CDN...")
-        upload_to_cdn(files, dest_keys, content_types=content_types, cache_controls=["max-age=300"]*len(files))
+        upload_to_cdn(files, dest_keys, content_types=content_types, cache_controls=["no-cache, no-store, must-revalidate, max-age=0"]*len(files))
 
     # Log results
     logging.basicConfig(filename='logs/forecastfiredanger.log', level=logging.INFO)
