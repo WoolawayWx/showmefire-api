@@ -2,6 +2,8 @@ import cartopy.crs as ccrs
 import pandas as pd
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
+import logging
+import os
 import json
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
@@ -25,11 +27,34 @@ from scipy.interpolate import Rbf
 import pickle
 import json
 
+
 # Suppress Herbie regex warnings
 warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
 
+# Set up logging to file in logs folder
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+log_file_path = os.path.join(LOGS_DIR, 'forecastedfiredanger.log')
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# File handler
+file_handler = logging.FileHandler(log_file_path, mode='a')
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# Console handler (optional, keeps previous behavior)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(file_formatter)
+logger.addHandler(console_handler)
+
 
 def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
+    logger.debug(f"Calculating fire danger: FM={fuel_moisture}, RH={relative_humidity}, Wind={wind_speed_knots}")
     """
     Calculate fire danger level based on NWCG standards with extended scale.
     
@@ -83,6 +108,7 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
 
 
 def estimate_fuel_moisture(relative_humidity, air_temp=None):
+    logger.debug(f"Estimating fuel moisture from RH={relative_humidity}, Temp={air_temp}")
     """
     Estimate 10-hour fuel moisture from relative humidity.
     """
@@ -96,6 +122,7 @@ def estimate_fuel_moisture(relative_humidity, air_temp=None):
 
 
 def create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi):
+    logger.info(f"Creating base map with extent={extent}, size=({pixelw}x{pixelh}), dpi={mapdpi}")
     """Create base map figure and axes."""
     figsize_width = pixelw / mapdpi
     figsize_height = pixelh / mapdpi
@@ -112,6 +139,7 @@ def create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi):
 
 
 def add_boundaries(ax, data_crs, PROJECT_DIR, county_zorder=5, state_zorder=9):
+    logger.info("Adding county and state boundaries to map.")
     """Add county and state boundaries to map."""
     counties = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
     if counties.crs != data_crs.proj4_init:
@@ -127,6 +155,7 @@ def add_boundaries(ax, data_crs, PROJECT_DIR, county_zorder=5, state_zorder=9):
 
 
 def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_DIR):
+    logger.info(f"Adding title and branding: {title}")
     """Add title, description, and branding to figure."""
     font_paths = [
         str(SCRIPT_DIR.parent / 'assets/Montserrat/static/Montserrat-Regular.ttf'),
@@ -155,6 +184,7 @@ def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_D
         pass
 
 def get_current_fuel_moisture_field(port='8000'):
+    logger.info(f"Getting current fuel moisture field from RAWS (port={port})")
     """
     Get current observed fuel moisture from RAWS stations and create initial field.
     This provides the starting point for the forecast.
@@ -182,6 +212,7 @@ def get_current_fuel_moisture_field(port='8000'):
 
 
 def interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh):
+    logger.info(f"Interpolating {len(fuel_points) if fuel_points else 0} fuel points to grid.")
     """
     Interpolate current RAWS observations to forecast grid.
     """
@@ -201,6 +232,7 @@ def interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh):
 
 
 def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
+    logger.debug(f"Estimating FM with lag: RH={rh}, Temp={temp_c}, PrevFM={previous_fm}, Hours={hours_elapsed}")
     """
     Estimate fuel moisture accounting for time lag (10-hour fuels).
     
@@ -244,6 +276,7 @@ def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
 
 
 def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
+    logger.info("Processing forecast with observations-based fuel moisture.")
     """
     Process HRRR forecast with actual fuel moisture observations as starting point.
     
@@ -331,6 +364,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
 
 
 def generate_complete_forecast():
+    logger.info("Starting complete fire weather forecast generation.")
     """
     Generate complete suite of fire weather forecast maps.
     """
@@ -339,17 +373,21 @@ def generate_complete_forecast():
     
     load_dotenv()
     start_time = time.time()
+    logger.info("Loaded environment variables.")
     
     # Configuration
     now = pd.Timestamp.utcnow()
+    logger.info(f"Current UTC time: {now}")
     
     # Always use the most recent available 12z run
     # HRRR runs are available ~1-2 hours after model time
     # So 12z run is typically available by ~14z (2pm UTC)
     if now.hour < 14:
+        logger.info("Using previous day's 12z HRRR run.")
         # If before 14z, use yesterday's 12z run (most recent available)
         RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
     else:
+        logger.info("Using today's 12z HRRR run.")
         # If after 14z, today's 12z run should be available
         RUN_DATE = now.replace(hour=12, minute=0, second=0, microsecond=0)
 
@@ -369,10 +407,13 @@ def generate_complete_forecast():
     
     cache_dir = PROJECT_DIR / 'cache' / 'hrrr'
     cache_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Cache directory: {cache_dir}")
     
     cache_file = cache_dir / f"hrrr_{RUN_DATE.strftime('%Y%m%d_%H')}z_f04-15.nc"
+    logger.info(f"Cache file: {cache_file}")
     
     if cache_file.exists():
+        logger.info("Loading HRRR data from cache.")
         print(f"Loading cached HRRR data from {cache_file}...")
         try:
             ds_full = xr.open_dataset(cache_file, decode_cf=False)
@@ -384,6 +425,7 @@ def generate_complete_forecast():
             # Fall through to download section
     
     if not cache_file.exists():
+        logger.info("Downloading HRRR data (not found in cache). This may take a while...")
         print(f"Downloading HRRR data for {RUN_DATE} UTC...")
         FH = FastHerbie(DATES=[RUN_DATE], fxx=list(FORECAST_HOURS), model='hrrr', product='sfc')
         
@@ -431,7 +473,7 @@ def generate_complete_forecast():
     port = os.getenv('PORT', '8000')
 
     # Process data with observations-based fuel moisture
-    print("Processing forecast data with RAWS observations...")
+    logger.info("Processing forecast data with RAWS observations...")
 
     # --- Save initialization observation data for ML/verification ---
     # Try to get the current fuel moisture field (RAWS obs)
@@ -458,7 +500,7 @@ def generate_complete_forecast():
     max_temp = np.nanmax(combined_temp, axis=0)
     
     # NOW save forecast data for verification
-    print("\nSaving forecast data for verification...")
+    logger.info("Saving forecast data for verification...")
     
     # Get initial fuel moisture field for saving
     fuel_points = get_current_fuel_moisture_field(port)
@@ -517,7 +559,7 @@ def generate_complete_forecast():
     forecast_file = forecast_archive_dir / f"forecast_{RUN_DATE.strftime('%Y%m%d_%H')}.json"
     with open(forecast_file, 'w') as f:
         json.dump(forecast_data, f, indent=2)
-    print(f"✓ Saved forecast data to {forecast_file}")
+    logger.info(f"Saved forecast data to {forecast_file}")
     
     # Apply smoothing (continue with rest of the code)
     peak_risk_smooth = gaussian_filter(peak_risk.astype(float), sigma=1.5)
@@ -601,7 +643,7 @@ def generate_complete_forecast():
         max_temp_smooth = np.where(mask, max_temp_smooth, np.nan)
     
     # ========== MAP 1: PEAK FIRE DANGER ==========
-    print("Generating peak fire danger map...")
+    logger.info("Generating peak fire danger map...")
     colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
     labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
     bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
@@ -644,7 +686,7 @@ def generate_complete_forecast():
     plt.close(fig)
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
-    print("Generating minimum fuel moisture map...")
+    logger.info("Generating minimum fuel moisture map...")
     from matplotlib.colors import LinearSegmentedColormap
 
     # Create a smooth gradient colormap for 0-30% fuel moisture
@@ -696,7 +738,7 @@ def generate_complete_forecast():
     plt.close(fig)
     
     # ========== MAP 3: MINIMUM RELATIVE HUMIDITY ==========
-    print("Generating minimum relative humidity map...")
+    logger.info("Generating minimum relative humidity map...")
     rh_colors = ['#8B0000', '#FF0000', '#FFA500', '#FFED4E', '#90EE90', '#228B22']
     rh_levels = [0, 15, 25, 35, 50, 65, 100]
     rh_cmap = ListedColormap(rh_colors)
@@ -738,7 +780,7 @@ def generate_complete_forecast():
     plt.close(fig)
     
     # ========== MAP 4: MAXIMUM WIND SPEED ==========
-    print("Generating maximum wind speed map...")
+    logger.info("Generating maximum wind speed map...")
     wind_colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
     wind_levels = [0, 10, 15, 20, 25, 30, 50]
     wind_cmap = ListedColormap(wind_colors)
@@ -780,7 +822,7 @@ def generate_complete_forecast():
     plt.close(fig)
     
     # ========== MAP 5: MAXIMUM TEMPERATURE ==========
-    print("Generating maximum temperature map...")
+    logger.info("Generating maximum temperature map...")
     temp_colors = ['#4169E1', '#87CEEB', '#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#8B0000']
     temp_levels = [-10, 0, 10, 20, 27, 32, 38, 45]
     temp_cmap = ListedColormap(temp_colors)
@@ -1217,4 +1259,5 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
 
 
 if __name__ == "__main__":
+    logger.info("Running as main script.")
     generate_complete_forecast()
