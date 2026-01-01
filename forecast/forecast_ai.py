@@ -1,3 +1,8 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from database import insert_forecast
+from datetime import timezone
 from google import genai
 import PIL.Image
 from dotenv import load_dotenv
@@ -150,3 +155,15 @@ print("\n" + "="*60)
 print(f"{headline} - {date_string}")
 print("="*60)
 print(summary_response.text)
+
+# Store forecast in database
+valid_time = current_date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+try:
+    forecast_id = insert_forecast(
+        valid_time=valid_time,
+        title=headline,
+        discussion=summary_response.text.strip()
+    )
+    print(f"\nForecast saved to database with ID: {forecast_id}")
+except Exception as e:
+    print(f"\nError saving forecast to database: {e}")

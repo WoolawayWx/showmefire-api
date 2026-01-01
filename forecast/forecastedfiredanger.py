@@ -26,6 +26,8 @@ import requests
 from scipy.interpolate import Rbf
 import pickle
 import json
+import gc
+import psutil
 
 
 # Suppress Herbie regex warnings
@@ -51,6 +53,12 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(file_formatter)
 logger.addHandler(console_handler)
+
+
+def log_memory_usage(note=""):
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / 1024 / 1024
+    logger.info(f"[MEM] {note} RSS={mem_mb:.1f} MB")
 
 
 def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
@@ -416,7 +424,7 @@ def generate_complete_forecast():
         logger.info("Loading HRRR data from cache.")
         print(f"Loading cached HRRR data from {cache_file}...")
         try:
-            ds_full = xr.open_dataset(cache_file, decode_cf=False)
+            ds_full = xr.open_dataset(cache_file, decode_cf=False, chunks={'latitude': 50, 'longitude': 50})
             print("Loaded from cache successfully")
         except Exception as e:
             print(f"Error loading cache: {e}")
@@ -429,6 +437,7 @@ def generate_complete_forecast():
         print(f"Downloading HRRR data for {RUN_DATE} UTC...")
         FH = FastHerbie(DATES=[RUN_DATE], fxx=list(FORECAST_HOURS), model='hrrr', product='sfc')
         
+        # Remove chunks argument here
         ds_rh_temp = FH.xarray(":(TMP|RH):2 m")
         if isinstance(ds_rh_temp, list):
             ds_rh_temp = ds_rh_temp[0]
@@ -442,7 +451,6 @@ def generate_complete_forecast():
         # Save to cache for future use
         try:
             print(f"Saving to cache: {cache_file}")
-            # Load data into memory and clean encoding attributes
             ds_full.load()
             
             # Remove problematic encoding attributes
@@ -782,6 +790,8 @@ def generate_complete_forecast():
     
     fig.savefig(PROJECT_DIR / 'images/mo-forecastfiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     logger.info("Generating minimum fuel moisture map...")
@@ -845,6 +855,8 @@ def generate_complete_forecast():
     
     fig.savefig(PROJECT_DIR / 'images/mo-forecastfuelmoisture.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
     
     # ========== MAP 3: MINIMUM RELATIVE HUMIDITY ==========
     logger.info("Generating minimum relative humidity map...")
@@ -887,6 +899,8 @@ def generate_complete_forecast():
     
     fig.savefig(PROJECT_DIR / 'images/mo-forecastminrh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
     
     # ========== MAP 4: MAXIMUM WIND SPEED ==========
     logger.info("Generating maximum wind speed map...")
@@ -929,6 +943,8 @@ def generate_complete_forecast():
     
     fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxwind.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
     
     # ========== MAP 5: MAXIMUM TEMPERATURE ==========
     logger.info("Generating maximum temperature map...")
@@ -977,6 +993,8 @@ def generate_complete_forecast():
     
     fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxtemp.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
     
 
     runtime_sec = time.time() - start_time
@@ -1284,7 +1302,7 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
             prev_rh_flat = (previous_rh.ravel() if previous_rh is not None else rh_flat)
             prev_temp_flat = (previous_temp.ravel() if previous_temp is not None else temp_flat)
             grid_lat_flat = grid_lat_mesh.ravel()
-            grid_lon_flat = grid_lon_mesh.ravel()
+            grid_lon_flat = grid_lon_mesh.ravel();
             
             # Calculate derived features (vectorized)
             print("  Calculating features...")
