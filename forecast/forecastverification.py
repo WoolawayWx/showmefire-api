@@ -561,7 +561,161 @@ def quick_model_test():
 # ==================== COMMAND LINE INTERFACE ====================
 
 
+def save_metrics_history(model_dict: Dict, metrics_file: str = "models/metrics_history.jsonl"):
+    """Save daily training metrics to track improvement over time."""
+    metrics_path = Path(metrics_file)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    metrics_record = {
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'timestamp': datetime.now().isoformat(),
+        'train_mae': model_dict['train_metrics']['mae'],
+        'train_rmse': model_dict['train_metrics']['rmse'],
+        'train_r2': model_dict['train_metrics']['r2'],
+        'test_mae': model_dict['test_metrics']['mae'],
+        'test_rmse': model_dict['test_metrics']['rmse'],
+        'test_r2': model_dict['test_metrics']['r2'],
+        'cv_mae': model_dict['cv_mae'],
+        'n_samples': len(model_dict.get('X_train', [])) if 'X_train' in model_dict else None,
+        'top_feature': model_dict['feature_importance'].iloc[0]['feature'],
+        'top_feature_importance': float(model_dict['feature_importance'].iloc[0]['importance'])
+    }
+    
+    # Append to JSONL file (one JSON object per line)
+    with open(metrics_path, 'a') as f:
+        f.write(json.dumps(metrics_record) + '\n')
+    
+    logger.info(f"Saved metrics history to {metrics_path}")
+    
+    return metrics_record
+
+
+def load_metrics_history(metrics_file: str = "models/metrics_history.jsonl") -> pd.DataFrame:
+    """Load historical metrics for comparison."""
+    metrics_path = Path(metrics_file)
+    
+    if not metrics_path.exists():
+        logger.warning("No metrics history file found")
+        return pd.DataFrame()
+    
+    records = []
+    with open(metrics_path, 'r') as f:
+        for line in f:
+            records.append(json.loads(line))
+    
+    df = pd.DataFrame(records)
+    df['date'] = pd.to_datetime(df['date'])
+    return df
+
+
+def compare_to_previous_runs(current_metrics: Dict, history_df: pd.DataFrame):
+    """Compare current run to previous runs."""
+    if history_df.empty or len(history_df) < 2:
+        logger.info("\nNot enough historical data for comparison")
+        return
+    
+    # Get yesterday's metrics
+    yesterday = history_df.iloc[-1]
+    
+    # Calculate changes
+    mae_change = current_metrics['test_mae'] - yesterday['test_mae']
+    r2_change = current_metrics['test_r2'] - yesterday['test_r2']
+    
+    logger.info("\n" + "="*60)
+    logger.info("DAY-TO-DAY COMPARISON")
+    logger.info("="*60)
+    logger.info(f"Previous run: {yesterday['date']}")
+    logger.info(f"Current run:  {current_metrics['date']}")
+    logger.info("")
+    logger.info(f"Test MAE:  {yesterday['test_mae']:.3f}% → {current_metrics['test_mae']:.3f}% "
+                f"({'↓' if mae_change < 0 else '↑'} {abs(mae_change):.3f}%)")
+    logger.info(f"Test R²:   {yesterday['test_r2']:.3f} → {current_metrics['test_r2']:.3f} "
+                f"({'↑' if r2_change > 0 else '↓'} {abs(r2_change):.3f})")
+    
+    # 7-day trend
+    if len(history_df) >= 7:
+        last_7_days = history_df.tail(7)
+        mae_trend = np.polyfit(range(7), last_7_days['test_mae'], 1)[0]
         
+        logger.info("")
+        logger.info("7-Day Trend:")
+        logger.info(f"  MAE trend: {'Improving ↓' if mae_trend < 0 else 'Degrading ↑'} "
+                    f"({abs(mae_trend):.4f}% per day)")
+        logger.info(f"  Best MAE (7d): {last_7_days['test_mae'].min():.3f}%")
+        logger.info(f"  Worst MAE (7d): {last_7_days['test_mae'].max():.3f}%")
+    
+    logger.info("="*60)
+
+
+def plot_metrics_over_time(history_df: pd.DataFrame, output_dir: str = "reports"):
+    """Generate plots showing model performance over time."""
+    if history_df.empty or len(history_df) < 2:
+        return
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # MAE over time
+    axes[0, 0].plot(history_df['date'], history_df['train_mae'], 
+                    marker='o', label='Train MAE', alpha=0.7)
+    axes[0, 0].plot(history_df['date'], history_df['test_mae'], 
+                    marker='s', label='Test MAE', alpha=0.7)
+    axes[0, 0].plot(history_df['date'], history_df['cv_mae'], 
+                    marker='^', label='CV MAE', alpha=0.7)
+    axes[0, 0].set_xlabel('Date')
+    axes[0, 0].set_ylabel('MAE (%)')
+    axes[0, 0].set_title('Mean Absolute Error Over Time')
+    axes[0, 0].legend()
+    axes[0, 0].grid(alpha=0.3)
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    
+    # R² over time
+    axes[0, 1].plot(history_df['date'], history_df['train_r2'], 
+                    marker='o', label='Train R²', alpha=0.7)
+    axes[0, 1].plot(history_df['date'], history_df['test_r2'], 
+                    marker='s', label='Test R²', alpha=0.7)
+    axes[0, 1].set_xlabel('Date')
+    axes[0, 1].set_ylabel('R²')
+    axes[0, 1].set_title('R² Score Over Time')
+    axes[0, 1].legend()
+    axes[0, 1].grid(alpha=0.3)
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    
+    # Train/Test gap
+    axes[1, 0].plot(history_df['date'], 
+                    history_df['test_mae'] - history_df['train_mae'],
+                    marker='o', color='purple')
+    axes[1, 0].axhline(0, color='black', linestyle='--', linewidth=1)
+    axes[1, 0].set_xlabel('Date')
+    axes[1, 0].set_ylabel('Gap (%)')
+    axes[1, 0].set_title('Train/Test MAE Gap (Test - Train)')
+    axes[1, 0].grid(alpha=0.3)
+    axes[1, 0].tick_params(axis='x', rotation=45)
+    
+    # Rolling 7-day average MAE
+    if len(history_df) >= 7:
+        history_df['test_mae_rolling'] = history_df['test_mae'].rolling(window=7, min_periods=1).mean()
+        axes[1, 1].plot(history_df['date'], history_df['test_mae'], 
+                        marker='o', alpha=0.3, label='Daily')
+        axes[1, 1].plot(history_df['date'], history_df['test_mae_rolling'], 
+                        linewidth=2, label='7-day avg')
+        axes[1, 1].set_xlabel('Date')
+        axes[1, 1].set_ylabel('Test MAE (%)')
+        axes[1, 1].set_title('Test MAE with 7-Day Rolling Average')
+        axes[1, 1].legend()
+        axes[1, 1].grid(alpha=0.3)
+        axes[1, 1].tick_params(axis='x', rotation=45)
+    
+    plt.suptitle('Model Performance History', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    output_file = output_path / 'model_performance_history.png'
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    logger.info(f"Saved performance history plot: {output_file}")
+    plt.close()
+
         
 # Add to forecastverification.py
 
@@ -791,6 +945,9 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     # 3. Train model
     model_dict = train_fuel_moisture_model(X, y, model_type="random_forest")
     
+    # Store training data size for metrics
+    model_dict['n_train_samples'] = len(X)
+    
     # 4. Save model
     model_path = Path(model_dir) / f"fuel_moisture_model_{datetime.now().strftime('%Y%m%d')}.pkl"
     save_model(model_dict, model_path)
@@ -809,7 +966,21 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     for idx, row in model_dict['feature_importance'].head(10).iterrows():
         logger.info(f"  {row['feature']:20s}: {row['importance']:.4f}")
     
-    # 7. VERIFY RECENT FORECASTS (if enabled)
+    # 7. Save current metrics to history
+    current_metrics = save_metrics_history(model_dict)
+    
+    # 8. Load historical metrics and compare
+    history_df = load_metrics_history()
+    
+    if not history_df.empty and len(history_df) >= 2:
+        compare_to_previous_runs(current_metrics, history_df)
+        
+        # Generate performance trend plots
+        plot_metrics_over_time(history_df)
+    else:
+        logger.info("\nFirst run or insufficient history for comparison")
+    
+    # 9. VERIFY RECENT FORECASTS (if enabled)
     if verify_forecasts:
         logger.info("\n" + "="*60)
         logger.info("VERIFYING RECENT FORECASTS")
@@ -862,6 +1033,7 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
                     
                     # Save summary
                     summary_file = Path("reports") / f"forecast_summary_{datetime.now().strftime('%Y%m%d')}.txt"
+                    summary_file.parent.mkdir(parents=True, exist_ok=True)
                     with open(summary_file, 'w') as f:
                         f.write("FORECAST VERIFICATION SUMMARY\n")
                         f.write("="*60 + "\n")
