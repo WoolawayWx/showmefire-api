@@ -745,7 +745,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastfuelmoistire.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(PROJECT_DIR / 'images/mo-forecastfuelmoisture.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     
     # ========== MAP 3: MINIMUM RELATIVE HUMIDITY ==========
@@ -885,7 +885,7 @@ def generate_complete_forecast():
 
     print(f"\nAll forecast maps generated successfully!")
     print(f"Peak Fire Danger: images/mo-forecastfiredanger.png")
-    print(f"Minimum Fuel Moisture: images/mo-forecastfuelmoistire.png")
+    print(f"Minimum Fuel Moisture: images/mo-forecastfuelmoisture.png")
     print(f"Minimum RH: images/mo-forecastminrh.png")
     print(f"Maximum Wind: images/mo-forecastmaxwind.png")
     print(f"Maximum Temperature: images/mo-forecastmaxtemp.png")
@@ -911,7 +911,7 @@ def generate_complete_forecast():
     if upload_success and upload_to_cdn:
         forecast_files = [
             PROJECT_DIR / 'images/mo-forecastfiredanger.png',
-            PROJECT_DIR / 'images/mo-forecastfuelmoistire.png',
+            PROJECT_DIR / 'images/mo-forecastfuelmoisture.png',
             PROJECT_DIR / 'images/mo-forecastminrh.png',
             PROJECT_DIR / 'images/mo-forecastmaxwind.png',
             PROJECT_DIR / 'images/mo-forecastmaxtemp.png'
@@ -951,7 +951,7 @@ def generate_complete_forecast():
         'runtime_sec': round(runtime_sec, 2),
         'maps_generated': [
             'mo-forecastfiredanger.png',
-            'mo-forecastfuelmoistire.png',
+            'mo-forecastfuelmoisture.png',
             'mo-forecastminrh.png',
             'mo-forecastmaxwind.png',
             'mo-forecastmaxtemp.png'
