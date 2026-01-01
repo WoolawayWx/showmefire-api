@@ -483,6 +483,104 @@ def generate_complete_forecast():
         ds_full, lon, lat, port=port, ml_model_path="models/fuel_moisture_model_latest.pkl"
     )
     
+    logger.info("Generating ML-based fire danger map...")
+
+    try:
+        from firedangermodel import load_model, predict_fire_danger, generate_fire_danger_map
+        
+        # Load ML fire danger model
+        fire_danger_model = load_model('models/fire_danger_model_latest.pkl')
+        
+        if fire_danger_model:
+            print("\n✓ Loaded ML fire danger model")
+            
+            # Prepare features for each grid point at peak fire danger time
+            # Use the data from the hour with worst conditions
+            combined_risk = np.stack(hourly_risks, axis=0)
+            peak_hour_idx = np.argmax(np.nanmean(combined_risk, axis=(1,2)))
+            
+            print(f"  Using forecast hour {peak_hour_idx+4} for ML fire danger (peak conditions)")
+            
+            # Get data for that hour
+            peak_rh = hourly_rh[peak_hour_idx]
+            peak_temp = hourly_temp[peak_hour_idx]
+            peak_ws = hourly_ws[peak_hour_idx]
+            peak_fm = hourly_fm[peak_hour_idx]
+            
+            # Flatten grids for DataFrame
+            if lon.ndim == 1 and lat.ndim == 1:
+                grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+            else:
+                grid_lon_mesh, grid_lat_mesh = lon, lat
+            
+            n_points = peak_rh.size
+            forecast_time = RUN_DATE + pd.Timedelta(hours=peak_hour_idx+4)
+            
+            # Build features DataFrame
+            forecast_df = pd.DataFrame({
+                'rh': peak_rh.ravel(),
+                'temp': (peak_temp.ravel() * 9/5 + 32),  # C to F
+                'temp_c': peak_temp.ravel(),
+                'wind': peak_ws.ravel(),
+                'wind_gust': peak_ws.ravel() * 1.3,  # Estimate gusts
+                'solar': 500,  # Daytime average
+                'precip': 0,
+                'prev_rh': peak_rh.ravel(),
+                'prev_temp': (peak_temp.ravel() * 9/5 + 32),
+                'rh_3h_avg': peak_rh.ravel(),
+                'temp_3h_avg': (peak_temp.ravel() * 9/5 + 32),
+                'emc_simple': 3 + 0.25 * peak_rh.ravel(),
+                'hour': forecast_time.hour,
+                'day_of_year': forecast_time.dayofyear,
+                'month': forecast_time.month,
+                'latitude': grid_lat_mesh.ravel(),
+                'longitude': grid_lon_mesh.ravel(),
+                'elevation': 300  # Average MO elevation
+            })
+            
+            # Calculate derived features
+            from firedangermodel import calculate_nelson_emc, calculate_vpd
+            forecast_df['emc_nelson'] = forecast_df.apply(
+                lambda row: calculate_nelson_emc(row['rh'], row['temp']), axis=1
+            )
+            forecast_df['vpd'] = forecast_df.apply(
+                lambda row: calculate_vpd(row['temp'], row['rh']), axis=1
+            )
+            forecast_df['wind_temp_interaction'] = forecast_df['wind'] * forecast_df['temp_c']
+            
+            print(f"  Predicting ML fire danger for {n_points} grid points...")
+            
+            # Predict fire danger scores
+            fire_danger_scores = predict_fire_danger(fire_danger_model, forecast_df)
+            
+            # Reshape to grid
+            fire_danger_grid = fire_danger_scores.reshape(peak_rh.shape)
+            
+            # Smooth
+            fire_danger_grid_smooth = gaussian_filter(fire_danger_grid, sigma=1.5)
+            
+            print(f"  ML Fire Danger range: {np.nanmin(fire_danger_grid_smooth):.1f} - {np.nanmax(fire_danger_grid_smooth):.1f}")
+            
+            # Generate map
+            generate_fire_danger_map(
+                fire_danger_grid=fire_danger_grid_smooth,
+                lon=grid_lon_mesh,
+                lat=grid_lat_mesh,
+                output_path=PROJECT_DIR / 'images/mo-forecastmlfiredanger.png',
+                model_run_date=RUN_DATE,
+                valid_date=forecast_time,
+                project_dir=PROJECT_DIR
+            )
+            
+            print("✓ ML fire danger map generated: images/mo-forecastmlfiredanger.png")
+            
+        else:
+            print("ML fire danger model not available, skipping ML map")
+            
+    except Exception as e:
+        print(f"Error generating ML fire danger map: {e}")
+        logger.error(f"ML fire danger map generation failed: {e}")
+    
     # Calculate peak/min values FIRST
     combined_risk = np.stack(hourly_risks, axis=0)
     peak_risk = np.nanmax(combined_risk, axis=0)
@@ -914,7 +1012,8 @@ def generate_complete_forecast():
             PROJECT_DIR / 'images/mo-forecastfuelmoisture.png',
             PROJECT_DIR / 'images/mo-forecastminrh.png',
             PROJECT_DIR / 'images/mo-forecastmaxwind.png',
-            PROJECT_DIR / 'images/mo-forecastmaxtemp.png'
+            PROJECT_DIR / 'images/mo-forecastmaxtemp.png',
+            PROJECT_DIR / 'images/mo-forecastmlfiredanger.png'  # ADD THIS
         ]
         date_folder = RUN_DATE.strftime('%Y%m%d')
         dest_keys = []
@@ -954,7 +1053,8 @@ def generate_complete_forecast():
             'mo-forecastfuelmoisture.png',
             'mo-forecastminrh.png',
             'mo-forecastmaxwind.png',
-            'mo-forecastmaxtemp.png'
+            'mo-forecastmaxtemp.png',
+            'mo-forecastmlfiredanger.png'  # ADD THIS
         ],
         'log': [
             f"All forecast maps updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
@@ -1098,8 +1198,7 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
     
     Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
     """
-    from scipy.interpolate import Rbf
-    from scipy.ndimage import gaussian_filter
+    
     
     # Try to load ML model
     model_dict = load_ml_model(ml_model_path)
