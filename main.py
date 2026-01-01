@@ -20,6 +20,12 @@ from rss_feed import generate_rss_feed
 from pathlib import Path
 from tools.nfgs_firedetect import main as firedetect
 from pytz import timezone
+from database import (
+    get_latest_forecast,
+    get_forecast_by_time,
+    get_recent_forecasts,
+    get_forecast_count
+)
 
 
 # Security Configuration
@@ -678,6 +684,13 @@ async def get_missouri_fires_geojson():
         return FileResponse(geojson_file, media_type='application/geo+json')
     else:
         raise HTTPException(status_code=404, detail="Fire GeoJSON not yet available")
+    
+@app.get("/forecast/latest")
+def api_latest_forecast():
+    forecast = get_latest_forecast()
+    if not forecast:
+        raise HTTPException(status_code=404, detail="No forecast found")
+    return forecast
 
 if __name__ == '__main__':
     import uvicorn
