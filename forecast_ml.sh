@@ -4,35 +4,44 @@
 
 set -e
 
+# Detect project directory from script location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-LOG_DIR="$PROJECT_DIR/logs"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+PROJECT_DIR="$SCRIPT_DIR"
 
-# Create log directory
-mkdir -p "$LOG_DIR"
+# Change to project directory
+cd "$PROJECT_DIR" || exit 1
 
-# Log file
-LOG_FILE="$LOG_DIR/training_$TIMESTAMP.log"
+# Use Python from venv (no activation needed)
+PYTHON="$PROJECT_DIR/venv/bin/python"
 
-# Log everything
-exec > >(tee -a "$LOG_FILE") 2>&1
+# Verify Python exists
+if [ ! -f "$PYTHON" ]; then
+    echo "ERROR: Python not found at $PYTHON"
+    exit 1
+fi
 
-echo "========================================"
-echo "Training Started: $(date)"
-echo "========================================"
+# Set up PATH
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-cd "$PROJECT_DIR"
+# Create logs directory if it doesn't exist
+mkdir -p "$PROJECT_DIR/logs"
 
-source ./venv/bin/activate
+# Log file with date
+LOG_FILE="$PROJECT_DIR/logs/training_$(date +\%Y\%m\%d).log"
 
-python forecast/forecastverification.py
+# Run the script with full logging
+echo "========================================" >> "$LOG_FILE" 2>&1
+echo "Training Started: $(date)" >> "$LOG_FILE" 2>&1
+echo "========================================" >> "$LOG_FILE" 2>&1
 
-deactivate
+"$PYTHON" "$PROJECT_DIR/forecast/forecastverification.py" >> "$LOG_FILE" 2>&1
+EXIT_CODE=$?
 
-echo "========================================"
-echo "Training Completed: $(date)"
-echo "========================================"
+echo "========================================" >> "$LOG_FILE" 2>&1
+echo "Training Completed: $(date)" >> "$LOG_FILE" 2>&1
+echo "========================================" >> "$LOG_FILE" 2>&1
 
 # Keep only last 30 days of logs
-find "$LOG_DIR" -name "training_*.log" -mtime +30 -delete
+find "$PROJECT_DIR/logs" -name "training_*.log" -mtime +30 -delete
+
+exit $EXIT_CODE
