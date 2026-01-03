@@ -184,30 +184,39 @@ def load_all_archived_data(archive_dir: str = "archive/raw_data") -> pd.DataFram
         logger.warning(f"Archive directory does not exist: {archive_dir}")
         return pd.DataFrame()
     
+    logger.info(f"Loading archived data from: {archive_path}")
     all_dfs = []
     
     for filepath in sorted(archive_path.glob("raw_data_*.json")):
-        logger.info(f"Loading {filepath.name}...")
+        logger.info(f"  Loading {filepath.name}...")
         data = load_archived_data(filepath)
         if data:
             df = process_timeseries_to_dataframe(data)
             if not df.empty:
                 all_dfs.append(df)
+                logger.info(f"    ✓ Loaded {len(df)} observations")
     
     if not all_dfs:
         logger.warning("No data loaded from archives")
         return pd.DataFrame()
     
+    logger.info(f"Combining {len(all_dfs)} data files...")
     combined_df = pd.concat(all_dfs, ignore_index=True)
     
     # Remove duplicates (same station, same timestamp)
+    original_count = len(combined_df)
     combined_df = combined_df.drop_duplicates(subset=['stid', 'timestamp'])
+    duplicates_removed = original_count - len(combined_df)
+    if duplicates_removed > 0:
+        logger.info(f"  Removed {duplicates_removed} duplicate observations")
     
     # Sort by timestamp
     combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
     
-    logger.info(f"Combined dataset: {len(combined_df)} observations from {combined_df['stid'].nunique()} stations")
-    logger.info(f"Date range: {combined_df['timestamp'].min()} to {combined_df['timestamp'].max()}")
+    logger.info(f"✓ Combined dataset complete:")
+    logger.info(f"  - Total observations: {len(combined_df)}")
+    logger.info(f"  - Unique stations: {combined_df['stid'].nunique()}")
+    logger.info(f"  - Date range: {combined_df['timestamp'].min()} to {combined_df['timestamp'].max()}")
     
     return combined_df
 
@@ -219,8 +228,11 @@ def prepare_training_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
     Prepare data for ML training.
     Returns: (features_df, targets_df) with only complete cases
     """
+    logger.info("Preparing training data...")
+    
     # Filter to only rows with fuel moisture observations
     raws_df = df[df['fuel_moisture'].notna()].copy()
+    logger.info(f"  Filtered to {len(raws_df)} rows with fuel moisture observations")
     
     if len(raws_df) == 0:
         logger.error("No fuel moisture observations found!")
@@ -239,12 +251,18 @@ def prepare_training_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
     
     # Keep only columns that exist
     available_cols = [col for col in feature_cols if col in raws_df.columns]
+    logger.info(f"  Available features: {len(available_cols)}/{len(feature_cols)}")
     
     # Drop rows with any missing features
+    initial_count = len(raws_df)
     clean_df = raws_df[available_cols + ['fuel_moisture']].dropna()
+    dropped_count = initial_count - len(clean_df)
+    logger.info(f"  Removed {dropped_count} incomplete observations")
     
-    logger.info(f"Training data: {len(clean_df)} complete observations")
-    logger.info(f"Features: {len(available_cols)} columns")
+    logger.info(f"✓ Training data prepared:")
+    logger.info(f"  - Complete observations: {len(clean_df)}")
+    logger.info(f"  - Feature columns: {len(available_cols)}")
+    logger.info(f"  - Target variable: fuel_moisture")
     
     X = clean_df[available_cols]
     y = clean_df['fuel_moisture']
@@ -263,20 +281,32 @@ def train_fuel_moisture_model(X: pd.DataFrame, y: pd.Series, model_type: str = "
     
     Returns: Dict with model, scaler, metrics, and feature importance
     """
-    logger.info(f"Training {model_type} model...")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TRAINING {model_type.upper()} MODEL")
+    logger.info(f"{'='*60}")
     
     # Split data
+    logger.info(f"Splitting data: 80% train ({len(X)*0.8:.0f}), 20% test ({len(X)*0.2:.0f})")
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
+    logger.info(f"  ✓ Train set: {len(X_train)} samples")
+    logger.info(f"  ✓ Test set: {len(X_test)} samples")
     
     # Scale features
+    logger.info(f"Scaling features with StandardScaler...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
+    logger.info(f"  ✓ Features scaled")
     
     # Train model
+    logger.info(f"Training {model_type} model with hyperparameters:")
     if model_type == "random_forest":
+        logger.info(f"  - n_estimators: 200")
+        logger.info(f"  - max_depth: 15")
+        logger.info(f"  - min_samples_split: 5")
+        logger.info(f"  - min_samples_leaf: 2")
         model = RandomForestRegressor(
             n_estimators=200,
             max_depth=15,
@@ -286,6 +316,9 @@ def train_fuel_moisture_model(X: pd.DataFrame, y: pd.Series, model_type: str = "
             n_jobs=-1
         )
     elif model_type == "gradient_boosting":
+        logger.info(f"  - n_estimators: 200")
+        logger.info(f"  - max_depth: 5")
+        logger.info(f"  - learning_rate: 0.1")
         model = GradientBoostingRegressor(
             n_estimators=200,
             max_depth=5,
@@ -295,13 +328,18 @@ def train_fuel_moisture_model(X: pd.DataFrame, y: pd.Series, model_type: str = "
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
+    logger.info(f"Model training in progress...")
     model.fit(X_train_scaled, y_train)
+    logger.info(f"  ✓ Model trained successfully")
     
     # Predictions
+    logger.info(f"Generating predictions...")
     y_train_pred = model.predict(X_train_scaled)
     y_test_pred = model.predict(X_test_scaled)
+    logger.info(f"  ✓ Predictions complete")
     
     # Calculate metrics
+    logger.info(f"Calculating metrics...")
     train_metrics = {
         'mae': mean_absolute_error(y_train, y_train_pred),
         'rmse': np.sqrt(mean_squared_error(y_train, y_train_pred)),
@@ -315,24 +353,38 @@ def train_fuel_moisture_model(X: pd.DataFrame, y: pd.Series, model_type: str = "
     }
     
     # Cross-validation
+    logger.info(f"Running 5-fold cross-validation...")
     cv_scores = cross_val_score(
         model, X_train_scaled, y_train, 
         cv=5, scoring='neg_mean_absolute_error'
     )
     cv_mae = -cv_scores.mean()
+    logger.info(f"  ✓ CV complete")
     
     # Feature importance
+    logger.info(f"Calculating feature importance...")
     feature_importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
+    logger.info(f"  ✓ Top 3 features: {', '.join(feature_importance.head(3)['feature'].tolist())}")
     
-    logger.info(f"Training complete!")
-    logger.info(f"  Train MAE: {train_metrics['mae']:.3f}%")
-    logger.info(f"  Test MAE:  {test_metrics['mae']:.3f}%")
-    logger.info(f"  Test RMSE: {test_metrics['rmse']:.3f}%")
-    logger.info(f"  Test R²:   {test_metrics['r2']:.3f}")
-    logger.info(f"  CV MAE:    {cv_mae:.3f}%")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TRAINING RESULTS SUMMARY")
+    logger.info(f"{'='*60}")
+    logger.info(f"Training Metrics:")
+    logger.info(f"  - MAE:  {train_metrics['mae']:.3f}%")
+    logger.info(f"  - RMSE: {train_metrics['rmse']:.3f}%")
+    logger.info(f"  - R²:   {train_metrics['r2']:.3f}")
+    
+    logger.info(f"Test Metrics:")
+    logger.info(f"  - MAE:  {test_metrics['mae']:.3f}%")
+    logger.info(f"  - RMSE: {test_metrics['rmse']:.3f}%")
+    logger.info(f"  - R²:   {test_metrics['r2']:.3f}")
+    
+    logger.info(f"Cross-Validation:")
+    logger.info(f"  - CV MAE (5-fold): {cv_mae:.3f}%")
+    logger.info(f"{'='*60}\n")
     
     return {
         'model': model,
@@ -349,10 +401,12 @@ def save_model(model_dict: Dict, filepath: Path):
     """Save trained model and associated data."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
     
+    logger.info(f"Saving model to: {filepath}")
     with open(filepath, 'wb') as f:
         pickle.dump(model_dict, f)
     
-    logger.info(f"Model saved to {filepath}")
+    file_size_mb = filepath.stat().st_size / (1024 * 1024)
+    logger.info(f"  ✓ Model saved ({file_size_mb:.2f} MB)")
 
 
 def load_model(filepath: Path) -> Dict:
@@ -361,10 +415,11 @@ def load_model(filepath: Path) -> Dict:
         logger.error(f"Model file not found: {filepath}")
         return None
     
+    logger.info(f"Loading model from: {filepath}")
     with open(filepath, 'rb') as f:
         model_dict = pickle.load(f)
     
-    logger.info(f"Model loaded from {filepath}")
+    logger.info(f"  ✓ Model loaded successfully")
     return model_dict
 
 
@@ -443,11 +498,15 @@ def compare_simple_model_to_ml(df: pd.DataFrame, model_dict: Dict) -> pd.DataFra
     return results
 
 
-def generate_verification_report(results: pd.DataFrame, output_dir: str = "reports"):
+def generate_verification_report(results: pd.DataFrame, output_dir: str = "reports", daily_path: Path = None):
     """
     Generate visualizations and report for forecast verification.
+    If daily_path is provided, saves to that folder instead.
     """
-    output_path = Path(output_dir)
+    if daily_path is None:
+        output_path = Path(output_dir)
+    else:
+        output_path = daily_path
     output_path.mkdir(parents=True, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -850,9 +909,13 @@ def run_forecast_verification(model_run: str = None,
     return results
 
 
-def generate_forecast_verification_report(results: pd.DataFrame, output_dir: str = "reports"):
-    """Generate visualizations for forecast verification."""
-    output_path = Path(output_dir)
+def generate_forecast_verification_report(results: pd.DataFrame, output_dir: str = "reports", daily_path: Path = None):
+    """Generate visualizations for forecast verification.
+    If daily_path is provided, saves to that folder instead."""
+    if daily_path is None:
+        output_path = Path(output_dir)
+    else:
+        output_path = daily_path
     output_path.mkdir(parents=True, exist_ok=True)
     
     model_run = results['model_run'].iloc[0]
@@ -924,66 +987,104 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     Daily workflow: Load all archived data, train model, save results, verify forecasts.
     Run this once per day to update the ML model and check forecast performance.
     """
-    logger.info("="*60)
-    logger.info("DAILY MODEL TRAINING AND VERIFICATION")
-    logger.info("="*60)
+    logger.info("\n" + "="*60)
+    logger.info("DAILY MODEL TRAINING AND VERIFICATION WORKFLOW")
+    logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("="*60 + "\n")
+    
+    # 0. Setup daily folder for reports
+    daily_path = setup_daily_folder()
+    logger.info(f"STEP 1: Setting up daily folder")
+    logger.info(f"  Path: {daily_path}\n")
     
     # 1. Load all archived data
+    logger.info(f"STEP 2: Loading archived data")
     df = load_all_archived_data(archive_dir)
     
     if df.empty:
-        logger.error("No data available for training!")
+        logger.error("ERROR: No data available for training!")
         return None
     
     # 2. Prepare training data
+    logger.info(f"\nSTEP 3: Preparing training data")
     X, y = prepare_training_data(df)
     
     if X.empty:
-        logger.error("No training data prepared!")
+        logger.error("ERROR: No training data prepared!")
         return None
     
     # 3. Train model
+    logger.info(f"\nSTEP 4: Training model")
     model_dict = train_fuel_moisture_model(X, y, model_type="random_forest")
     
     # Store training data size for metrics
     model_dict['n_train_samples'] = len(X)
     
     # 4. Save model
+    logger.info(f"\nSTEP 5: Saving trained model")
     model_path = Path(model_dir) / f"fuel_moisture_model_{datetime.now().strftime('%Y%m%d')}.pkl"
     save_model(model_dict, model_path)
     
     # Also save as "latest"
     latest_path = Path(model_dir) / "fuel_moisture_model_latest.pkl"
     save_model(model_dict, latest_path)
+    logger.info(f"  Models saved to: {model_dir}\n")
     
     # 5. Generate model verification report (ML vs Simple)
+    logger.info(f"STEP 6: Generating verification report")
     results = compare_simple_model_to_ml(df, model_dict)
-    generate_verification_report(results)
+    generate_verification_report(results, daily_path=daily_path)
+    logger.info(f"  Report saved to: {daily_path}\n")
     
     # 6. Print feature importance
-    logger.info("\nTop 10 Most Important Features:")
+    logger.info(f"STEP 7: Feature importance analysis")
+    logger.info(f"Top 10 Most Important Features:")
     logger.info("-"*60)
     for idx, row in model_dict['feature_importance'].head(10).iterrows():
-        logger.info(f"  {row['feature']:20s}: {row['importance']:.4f}")
+        logger.info(f"  {idx+1:2d}. {row['feature']:20s}: {row['importance']:.4f}")
+    logger.info("")
     
     # 7. Save current metrics to history
+    logger.info(f"STEP 8: Saving metrics to history")
     current_metrics = save_metrics_history(model_dict)
+    logger.info(f"  Current metrics saved\n")
     
     # 8. Load historical metrics and compare
+    logger.info(f"STEP 9: Comparing to historical runs")
     history_df = load_metrics_history()
     
     if not history_df.empty and len(history_df) >= 2:
+        logger.info(f"  Found {len(history_df)} previous training runs")
         compare_to_previous_runs(current_metrics, history_df)
         
         # Generate performance trend plots
-        plot_metrics_over_time(history_df)
+        logger.info(f"  Generating performance trend plots...")
+        plot_metrics_over_time(history_df, output_dir=str(daily_path))
+        logger.info(f"  ✓ Trend plots saved\n")
     else:
-        logger.info("\nFirst run or insufficient history for comparison")
+        logger.info(f"  Insufficient history for comparison (this is normal for first runs)\n")
     
-    # 9. VERIFY RECENT FORECASTS (if enabled)
+    # 9. Save API stats for frontend dashboard
+    logger.info(f"STEP 10: Saving API statistics")
+    ml_metrics = {
+        'mae': float(model_dict['test_metrics']['mae']),
+        'rmse': float(model_dict['test_metrics']['rmse']),
+        'r2': float(model_dict['test_metrics']['r2'])
+    }
+    
+    # Calculate baseline metrics (simple RH model)
+    baseline_metrics = {
+        'mae': float(results['simple_abs_error'].mean()),
+        'rmse': float(np.sqrt((results['simple_error']**2).mean())),
+        'r2': float(r2_score(results['actual_fm'], results['simple_pred']))
+    }
+    
+    save_api_stats(daily_path, ml_metrics, baseline_metrics)
+    logger.info(f"  Stats saved for API dashboard\n")
+    
+    # 10. VERIFY RECENT FORECASTS (if enabled)
     if verify_forecasts:
-        logger.info("\n" + "="*60)
-        logger.info("VERIFYING RECENT FORECASTS")
+        logger.info(f"STEP 11: Verifying recent forecasts")
         logger.info("="*60)
         
         forecast_path = Path(forecast_dir)
@@ -1004,19 +1105,20 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
                     continue
             
             if recent_forecasts:
-                logger.info(f"Found {len(recent_forecasts)} recent forecasts to verify")
+                logger.info(f"Found {len(recent_forecasts)} recent forecasts to verify (last 7 days)")
                 
                 all_forecast_results = []
                 
-                for model_run in recent_forecasts:
-                    logger.info(f"\nVerifying forecast: {model_run}")
+                for idx, model_run in enumerate(recent_forecasts, 1):
+                    logger.info(f"  [{idx}/{len(recent_forecasts)}] Verifying: {model_run}")
                     forecast_data = load_forecast_data(model_run, forecast_dir)
                     
                     if forecast_data:
                         results = verify_forecast(forecast_data, df)
                         if not results.empty:
                             all_forecast_results.append(results)
-                            generate_forecast_verification_report(results)
+                            # Save individual forecast report to daily folder
+                            generate_forecast_verification_report(results, daily_path=daily_path)
                 
                 # Generate summary report across all forecasts
                 if all_forecast_results:
@@ -1031,9 +1133,8 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
                     logger.info(f"RMSE: {np.sqrt((combined_results['error_mean']**2).mean()):.2f}%")
                     logger.info(f"Bias: {combined_results['error_mean'].mean():.2f}%")
                     
-                    # Save summary
-                    summary_file = Path("reports") / f"forecast_summary_{datetime.now().strftime('%Y%m%d')}.txt"
-                    summary_file.parent.mkdir(parents=True, exist_ok=True)
+                    # Save summary to daily folder
+                    summary_file = daily_path / f"forecast_summary_{datetime.now().strftime('%Y%m%d')}.txt"
                     with open(summary_file, 'w') as f:
                         f.write("FORECAST VERIFICATION SUMMARY\n")
                         f.write("="*60 + "\n")
@@ -1046,17 +1147,52 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
                         f.write(f"RMSE: {np.sqrt((combined_results['error_mean']**2).mean()):.2f}%\n")
                         f.write(f"Mean Bias: {combined_results['error_mean'].mean():.2f}%\n")
                     
-                    logger.info(f"Saved summary report: {summary_file}")
+                    logger.info(f"  ✓ Forecast summary saved")
             else:
-                logger.info("No recent forecasts found to verify")
+                logger.info("  No recent forecasts found to verify")
         else:
-            logger.info(f"Forecast directory does not exist: {forecast_dir}")
+            logger.info(f"  Forecast directory does not exist: {forecast_dir}")
+    else:
+        logger.info("  Forecast verification SKIPPED (disabled)")
     
     logger.info("\n" + "="*60)
-    logger.info("DAILY TRAINING AND VERIFICATION COMPLETE")
-    logger.info("="*60 + "\n")
+    logger.info("✓ DAILY TRAINING AND VERIFICATION COMPLETE")
+    logger.info(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("="*60)
+    logger.info(f"Reports saved to: {daily_path}\n")
     
     return model_dict
+
+def setup_daily_folder(base_dir="reports"):
+    """Creates a folder like reports/2026-01-02/"""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    daily_path = Path(base_dir) / date_str
+    daily_path.mkdir(parents=True, exist_ok=True)
+    return daily_path
+
+def save_api_stats(daily_path, ml_metrics, baseline_metrics):
+    """Saves core stats to a JSON file for the API to read"""
+    stats = {
+        "timestamp": datetime.now().isoformat(),
+        "ml_model": ml_metrics,
+        "baseline": baseline_metrics,
+        "improvement_pct": round(((baseline_metrics['mae'] - ml_metrics['mae']) / baseline_metrics['mae']) * 100, 2)
+    }
+    
+    # Save to the daily folder
+    with open(daily_path / "stats.json", "w") as f:
+        json.dump(stats, f, indent=4)
+        
+    # Append to a global 'history.json' for the "improvement over time" chart
+    history_file = Path("reports/training_history.json")
+    history = []
+    if history_file.exists():
+        with open(history_file, "r") as f:
+            history = json.load(f)
+    
+    history.append({"date": datetime.now().strftime("%Y-%m-%d"), "mae": ml_metrics['mae']})
+    with open(history_file, "w") as f:
+        json.dump(history, f, indent=4)
 
 
 

@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 
@@ -16,13 +17,20 @@ LOGS_DIR = BASE_DIR / 'logs'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Setup logging
+# Setup logging with rotation
 LOG_FILE = LOGS_DIR / 'nfgs_firedetect.log'
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s'
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Create rotating file handler: 5MB max file size, keep 5 backup files
+handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=5  # Keep 5 previous logs (nfgs_firedetect.log.1, .log.2, etc.)
 )
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 def extract_coordinates(event):
     """Extract lat/lon from the satellite imagery link"""
@@ -67,7 +75,7 @@ def parse_event_id_datetime(event_id):
 def get_missouri_fires_with_coords():
     """Fetch fire events and extract data specifically for Missouri"""
     url = "https://cimss.ssec.wisc.edu/ngfs/alerts-dashboard/api/"
-    logging.info(f"Fetching fire events from {url}")
+    logger.info(f"Fetching fire events from {url}")
     
     try:
         response = requests.get(url, timeout=15)
@@ -148,7 +156,7 @@ def get_missouri_fires_with_coords():
         }
 
     except Exception as e:
-        logging.error(f"Error in data collection: {e}")
+        logger.error(f"Error in data collection: {e}")
         return {'error': str(e), 'events': [], 'summary': {'missouri_event_count': 0}}
 
 def main():

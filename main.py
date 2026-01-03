@@ -692,6 +692,237 @@ def api_latest_forecast():
         raise HTTPException(status_code=404, detail="No forecast found")
     return forecast
 
+@app.get("/api/admin/reports/list")
+async def list_reports(token: str):
+    """List all reports (files and folders) in the reports directory (Admin/Logged-in only)"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    reports_dir = Path("reports")
+    if not reports_dir.exists():
+        return {"success": True, "items": [], "path": ""}
+    
+    items = []
+    for filepath in sorted(reports_dir.glob("*")):
+        stat = filepath.stat()
+        if filepath.is_dir():
+            # For folders, count the items inside
+            item_count = len(list(filepath.glob("*")))
+            items.append({
+                "name": filepath.name,
+                "type": "folder",
+                "item_count": item_count,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+        else:
+            # For files, show size
+            items.append({
+                "name": filepath.name,
+                "type": "file",
+                "size_kb": round(stat.st_size / 1024, 2),
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+    
+    items.sort(key=lambda x: x['modified'], reverse=True)
+    return {"success": True, "items": items, "path": ""}
+
+@app.get("/api/admin/reports/list/{path:path}")
+async def list_reports_in_path(path: str, token: str):
+    """List contents of a specific folder within reports directory"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    reports_dir = Path("reports")
+    target_path = reports_dir / path
+    
+    # Security check: ensure the user isn't trying to access files outside the folder
+    if not target_path.resolve().is_relative_to(reports_dir.resolve()):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail="Folder not found")
+    
+    if not target_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    
+    items = []
+    for filepath in sorted(target_path.glob("*")):
+        stat = filepath.stat()
+        if filepath.is_dir():
+            item_count = len(list(filepath.glob("*")))
+            items.append({
+                "name": filepath.name,
+                "type": "folder",
+                "item_count": item_count,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+        else:
+            items.append({
+                "name": filepath.name,
+                "type": "file",
+                "size_kb": round(stat.st_size / 1024, 2),
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+    
+    items.sort(key=lambda x: x['modified'], reverse=True)
+    return {"success": True, "items": items, "path": path}
+
+@app.get("/api/admin/reports/view/{filepath:path}")
+async def view_report(filepath: str, token: str):
+    """Serve a specific report file securely from reports directory"""
+    # Verify token
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    # Construct the file path
+    report_path = Path("reports") / filepath
+    
+    # Security check: ensure the user isn't trying to access files outside the folder
+    try:
+        report_path.resolve().relative_to(Path("reports").resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Forbidden: Path traversal not allowed")
+
+    # Check if file exists
+    if not report_path.exists():
+        logger.warning(f"File not found: {report_path} (requested by {email})")
+        raise HTTPException(status_code=404, detail=f"File not found: {filepath}")
+    
+    # Ensure it's a file, not a directory
+    if report_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is a directory, not a file")
+    
+    # Serve the file
+    logger.info(f"Serving report {filepath} to {email}")
+    return FileResponse(report_path)
+
+@app.get("/api/admin/logs/list")
+async def list_logs(token: str):
+    """List all logs (files and folders) in the logs directory (Admin/Logged-in only)"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    logs_dir = Path("logs")
+    if not logs_dir.exists():
+        return {"success": True, "items": [], "path": ""}
+    
+    items = []
+    for filepath in sorted(logs_dir.glob("*")):
+        stat = filepath.stat()
+        if filepath.is_dir():
+            # For folders, count the items inside
+            item_count = len(list(filepath.glob("*")))
+            items.append({
+                "name": filepath.name,
+                "type": "folder",
+                "item_count": item_count,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+        else:
+            # For files, show size
+            items.append({
+                "name": filepath.name,
+                "type": "file",
+                "size_kb": round(stat.st_size / 1024, 2),
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+    
+    items.sort(key=lambda x: x['modified'], reverse=True)
+    return {"success": True, "items": items, "path": ""}
+
+@app.get("/api/admin/logs/list/{path:path}")
+async def list_logs_in_path(path: str, token: str):
+    """List contents of a specific folder within logs directory"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    logs_dir = Path("logs")
+    target_path = logs_dir / path
+    
+    # Security check: ensure the user isn't trying to access files outside the folder
+    if not target_path.resolve().is_relative_to(logs_dir.resolve()):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail="Folder not found")
+    
+    if not target_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+    
+    items = []
+    for filepath in sorted(target_path.glob("*")):
+        stat = filepath.stat()
+        if filepath.is_dir():
+            item_count = len(list(filepath.glob("*")))
+            items.append({
+                "name": filepath.name,
+                "type": "folder",
+                "item_count": item_count,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+        else:
+            items.append({
+                "name": filepath.name,
+                "type": "file",
+                "size_kb": round(stat.st_size / 1024, 2),
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+    
+    items.sort(key=lambda x: x['modified'], reverse=True)
+    return {"success": True, "items": items, "path": path}
+
+@app.get("/api/admin/logs/view/{filepath:path}")
+async def view_log(filepath: str, token: str):
+    """Serve a specific log file securely from logs directory"""
+    # Verify token
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    # Construct the file path
+    log_path = Path("logs") / filepath
+    
+    # Security check: ensure the user isn't trying to access files outside the folder
+    try:
+        log_path.resolve().relative_to(Path("logs").resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Forbidden: Path traversal not allowed")
+
+    # Check if file exists
+    if not log_path.exists():
+        logger.warning(f"Log file not found: {log_path} (requested by {email})")
+        raise HTTPException(status_code=404, detail=f"Log file not found: {filepath}")
+    
+    # Ensure it's a file, not a directory
+    if log_path.is_dir():
+        raise HTTPException(status_code=400, detail="Path is a directory, not a file")
+    
+    # Serve the file
+    logger.info(f"Serving log {filepath} to {email}")
+    return FileResponse(log_path)
+
+@app.get("/api/training/latest-stats")
+async def get_latest_training_stats():
+    """Returns the JSON stats from the most recent training folder"""
+    reports_dir = Path("reports")
+    # Get the most recent date folder
+    date_folders = sorted([d for d in reports_dir.iterdir() if d.is_dir()], reverse=True)
+    
+    if not date_folders:
+        raise HTTPException(status_code=404, detail="No training data found")
+        
+    stats_path = date_folders[0] / "stats.json"
+    if stats_path.exists():
+        with open(stats_path, "r") as f:
+            return json.load(f)
+    
+    raise HTTPException(status_code=404, detail="Stats file missing")
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='127.0.0.1', port=8000)
