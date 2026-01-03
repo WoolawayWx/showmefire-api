@@ -33,6 +33,11 @@ echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
 "$PYTHON" "$PROJECT_DIR/forecast/forecastedfiredanger.py" >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
+echo "Running AI Text Generation"
+
+"$PYTHON" "$PROJECT_DIR/forecast/forecast_ai.py" >> "$LOG_FILE" 2>&1
+EXIT_CODE=$?
+
 if [ $EXIT_CODE -eq 0 ]; then
     echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
 else
