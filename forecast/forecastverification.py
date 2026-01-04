@@ -157,6 +157,30 @@ def process_timeseries_to_dataframe(api_response: Dict) -> pd.DataFrame:
         # Wind chill / heat stress indicators
         df['wind_temp_interaction'] = df['wind'] * df['temp_c']
         
+        # ========== REGIME-AWARENESS FEATURES (FIXES MEAN-REGRESSION) ==========
+        # Group by station for proper delta calculations
+        df = df.sort_values(['stid', 'timestamp'])
+        
+        # Hourly change rates (directional signals)
+        df['rh_delta_1h'] = df.groupby('stid')['rh'].diff()
+        df['temp_delta_1h'] = df.groupby('stid')['temp'].diff()
+        df['solar_delta_1h'] = df.groupby('stid')['solar'].diff()
+        df['fm_delta_1h'] = df.groupby('stid')['fuel_moisture'].diff()
+        
+        # Regime flags (critical for capturing transitions)
+        df['drying_flag'] = (df['rh_delta_1h'] < -3).astype(int)  # RH dropping fast
+        df['wetting_flag'] = (df['rh_delta_1h'] > 3).astype(int)  # RH rising fast
+        df['heating_flag'] = (df['temp_delta_1h'] > 2).astype(int)  # Temp rising
+        
+        # 3-hour change rates (slower trends)
+        df['rh_delta_3h'] = df.groupby('stid')['rh'].diff(3)
+        df['temp_delta_3h'] = df.groupby('stid')['temp'].diff(3)
+        
+        # Directional momentum (is change accelerating?)
+        df['rh_accel'] = df.groupby('stid')['rh_delta_1h'].diff()
+        
+        logger.info(f"  Added regime-awareness features (deltas, flags, acceleration)")
+        
         logger.info(f"Processed {len(df)} observations from {df['stid'].nunique()} stations")
     
     return df
@@ -240,11 +264,20 @@ def prepare_training_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
     
     # Define feature columns
     feature_cols = [
+        # Current conditions
         'rh', 'temp', 'temp_c', 'wind', 'solar', 'precip',
+        # Lagged features
         'prev_rh', 'prev_temp', 'prev_fm',
         'rh_3h_avg', 'temp_3h_avg',
+        # Physical models
         'emc_simple', 'emc_nelson', 'vpd',
         'wind_temp_interaction',
+        # REGIME-AWARENESS (fixes mean-regression)
+        'rh_delta_1h', 'temp_delta_1h', 'solar_delta_1h',
+        'rh_delta_3h', 'temp_delta_3h',
+        'drying_flag', 'wetting_flag', 'heating_flag',
+        'rh_accel',
+        # Temporal/spatial
         'hour', 'day_of_year', 'month',
         'latitude', 'longitude', 'elevation'
     ]
@@ -253,11 +286,30 @@ def prepare_training_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]
     available_cols = [col for col in feature_cols if col in raws_df.columns]
     logger.info(f"  Available features: {len(available_cols)}/{len(feature_cols)}")
     
-    # Drop rows with any missing features
+    # ========== SELECTIVE IMPUTATION (KEEPS TRANSITION ROWS) ==========
+    # Don't drop transition rows — they teach regime changes!
     initial_count = len(raws_df)
-    clean_df = raws_df[available_cols + ['fuel_moisture']].dropna()
+    clean_df = raws_df[available_cols + ['fuel_moisture']].copy()
+    
+    # Forward-fill lagged features (preserves time-series continuity)
+    lag_cols = [col for col in ['prev_rh', 'prev_temp', 'prev_fm', 'rh_3h_avg', 'temp_3h_avg'] 
+                if col in available_cols]
+    if lag_cols:
+        clean_df[lag_cols] = clean_df[lag_cols].fillna(method='ffill')
+        logger.info(f"  Forward-filled {len(lag_cols)} lagged features")
+    
+    # Delta features: fill with 0 (no change) rather than drop
+    delta_cols = [col for col in clean_df.columns if 'delta' in col or 'accel' in col]
+    if delta_cols:
+        clean_df[delta_cols] = clean_df[delta_cols].fillna(0)
+        logger.info(f"  Zero-filled {len(delta_cols)} delta features")
+    
+    # Now drop only rows with missing critical features
+    critical_cols = ['fuel_moisture', 'rh', 'temp']
+    clean_df = clean_df.dropna(subset=critical_cols)
+    
     dropped_count = initial_count - len(clean_df)
-    logger.info(f"  Removed {dropped_count} incomplete observations")
+    logger.info(f"  Removed {dropped_count} rows with missing critical data (kept transitions)")
     
     logger.info(f"✓ Training data prepared:")
     logger.info(f"  - Complete observations: {len(clean_df)}")
@@ -285,33 +337,50 @@ def train_fuel_moisture_model(X: pd.DataFrame, y: pd.Series, model_type: str = "
     logger.info(f"TRAINING {model_type.upper()} MODEL")
     logger.info(f"{'='*60}")
     
-    # Split data
+    # Split data with stratification by FM percentile (fixes clustering)
     logger.info(f"Splitting data: 80% train ({len(X)*0.8:.0f}), 20% test ({len(X)*0.2:.0f})")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    logger.info(f"  ✓ Train set: {len(X_train)} samples")
-    logger.info(f"  ✓ Test set: {len(X_test)} samples")
+    logger.info(f"  Using stratified split by fuel moisture quintile (fixes 17-18% magnet)")
     
-    # Scale features
-    logger.info(f"Scaling features with StandardScaler...")
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    logger.info(f"  ✓ Features scaled")
+    # Bin fuel moisture into quintiles for stratification
+    try:
+        bins = pd.qcut(y, q=5, labels=False, duplicates='drop')
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=bins, random_state=42
+        )
+        logger.info(f"  ✓ Stratified split successful")
+    except:
+        # Fallback if stratification fails
+        logger.warning(f"  ! Stratification failed, using random split")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+    
+    logger.info(f"  ✓ Train set: {len(X_train)} samples (FM range: {y_train.min():.1f}-{y_train.max():.1f}%)")
+    logger.info(f"  ✓ Test set: {len(X_test)} samples (FM range: {y_test.min():.1f}-{y_test.max():.1f}%)")
+    
+    # ========== NO SCALING FOR TREE MODELS ==========
+    # Random Forests don't need scaling and it actually hurts interpretability
+    logger.info(f"Skipping feature scaling (tree models don't need it)")
+    scaler = None
+    X_train_scaled = X_train
+    X_test_scaled = X_test
     
     # Train model
     logger.info(f"Training {model_type} model with hyperparameters:")
     if model_type == "random_forest":
-        logger.info(f"  - n_estimators: 200")
-        logger.info(f"  - max_depth: 15")
-        logger.info(f"  - min_samples_split: 5")
-        logger.info(f"  - min_samples_leaf: 2")
+        logger.info(f"  ========== EXTREME-AWARE HYPERPARAMETERS ==========")
+        logger.info(f"  - n_estimators: 400 (more trees = better extremes)")
+        logger.info(f"  - max_depth: None (unlimited = sharper splits)")
+        logger.info(f"  - min_samples_split: 2 (allows rare events)")
+        logger.info(f"  - min_samples_leaf: 1 (captures outliers)")
+        logger.info(f"  - bootstrap: True (variance for extremes)")
+        logger.info(f"  NOTE: MAE may worsen slightly, scatter will improve massively")
         model = RandomForestRegressor(
-            n_estimators=200,
-            max_depth=15,
-            min_samples_split=5,
-            min_samples_leaf=2,
+            n_estimators=400,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            bootstrap=True,
             random_state=42,
             n_jobs=-1
         )
@@ -434,14 +503,18 @@ def predict_fuel_moisture(model_dict: Dict, features: pd.DataFrame) -> np.ndarra
     Returns: Array of predicted fuel moisture values
     """
     model = model_dict['model']
-    scaler = model_dict['scaler']
+    scaler = model_dict.get('scaler', None)
     
     # Ensure features are in correct order
     feature_names = model_dict['feature_names']
     features = features[feature_names]
     
-    # Scale and predict
-    features_scaled = scaler.transform(features)
+    # Scale if scaler exists (for backwards compatibility)
+    if scaler is not None:
+        features_scaled = scaler.transform(features)
+    else:
+        features_scaled = features
+    
     predictions = model.predict(features_scaled)
     
     return predictions
@@ -496,6 +569,106 @@ def compare_simple_model_to_ml(df: pd.DataFrame, model_dict: Dict) -> pd.DataFra
     logger.info("="*60 + "\n")
     
     return results
+
+
+def generate_diagnostic_plots(results: pd.DataFrame, df: pd.DataFrame, output_path: Path):
+    """
+    Generate diagnostic plots to identify where model fails.
+    These reveal mean-regression, regime-blindness, and extreme errors.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    
+    # Merge results with original data to get delta features
+    results_enhanced = results.copy()
+    
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    
+    # 1. Error vs Actual FM (reveals mean-regression)
+    axes[0, 0].scatter(results['actual_fm'], results['ml_error'], alpha=0.3, s=10, color='blue')
+    axes[0, 0].axhline(0, color='black', linestyle='--', linewidth=1)
+    axes[0, 0].set_xlabel('Actual Fuel Moisture (%)')
+    axes[0, 0].set_ylabel('Error (Predicted - Actual) %')
+    axes[0, 0].set_title('🔴 Error vs Actual FM\n(Reveals over/under-prediction at extremes)')
+    axes[0, 0].grid(alpha=0.3)
+    
+    # Add trendline
+    z = np.polyfit(results['actual_fm'], results['ml_error'], 2)
+    p = np.poly1d(z)
+    x_trend = np.linspace(results['actual_fm'].min(), results['actual_fm'].max(), 100)
+    axes[0, 0].plot(x_trend, p(x_trend), "r-", linewidth=2, alpha=0.7)
+    
+    # 2. Error distribution at different FM ranges
+    low_fm = results[results['actual_fm'] < 10]['ml_error']
+    mid_fm = results[(results['actual_fm'] >= 10) & (results['actual_fm'] < 20)]['ml_error']
+    high_fm = results[results['actual_fm'] >= 20]['ml_error']
+    
+    axes[0, 1].hist([low_fm, mid_fm, high_fm], bins=20, label=['<10%', '10-20%', '>20%'], 
+                    alpha=0.6, color=['red', 'yellow', 'blue'])
+    axes[0, 1].axvline(0, color='black', linestyle='--', linewidth=2)
+    axes[0, 1].set_xlabel('Error (%)')
+    axes[0, 1].set_ylabel('Frequency')
+    axes[0, 1].set_title('🟡 Error by FM Range\n(Shows if model pulls toward mean)')
+    axes[0, 1].legend()
+    axes[0, 1].grid(alpha=0.3)
+    
+    # 3. Residuals by hour (circadian bias)
+    hourly_error = results.groupby(results['timestamp'].dt.hour)['ml_error'].mean()
+    axes[0, 2].plot(hourly_error.index, hourly_error.values, marker='o', linewidth=2)
+    axes[0, 2].axhline(0, color='black', linestyle='--', linewidth=1)
+    axes[0, 2].set_xlabel('Hour of Day')
+    axes[0, 2].set_ylabel('Mean Error (%)')
+    axes[0, 2].set_title('🟢 Hourly Bias Pattern\n(Reveals transition failures)')
+    axes[0, 2].grid(alpha=0.3)
+    axes[0, 2].set_xticks(range(0, 24, 3))
+    
+    # 4. Absolute error by actual FM (the "magnet" diagnostic)
+    fm_bins = pd.cut(results['actual_fm'], bins=10)
+    binned_mae = results.groupby(fm_bins)['ml_abs_error'].mean()
+    bin_centers = [interval.mid for interval in binned_mae.index]
+    
+    axes[1, 0].bar(range(len(binned_mae)), binned_mae.values, color='purple', alpha=0.7)
+    axes[1, 0].set_xticks(range(len(binned_mae)))
+    axes[1, 0].set_xticklabels([f"{c:.1f}" for c in bin_centers], rotation=45)
+    axes[1, 0].set_xlabel('Actual FM (%)')
+    axes[1, 0].set_ylabel('Mean Absolute Error (%)')
+    axes[1, 0].set_title('🔵 MAE by FM Bin\n(Higher at extremes = mean-regression)')
+    axes[1, 0].grid(alpha=0.3, axis='y')
+    
+    # 5. Prediction range (are we making bold predictions?)
+    axes[1, 1].hist(results['actual_fm'], bins=30, alpha=0.5, label='Actual', color='green')
+    axes[1, 1].hist(results['ml_pred'], bins=30, alpha=0.5, label='Predicted', color='orange')
+    axes[1, 1].set_xlabel('Fuel Moisture (%)')
+    axes[1, 1].set_ylabel('Frequency')
+    axes[1, 1].set_title('🟣 Distribution Comparison\n(Predictions should match actual spread)')
+    axes[1, 1].legend()
+    axes[1, 1].grid(alpha=0.3)
+    
+    # 6. Station-specific bias
+    station_bias = results.groupby('stid').agg({
+        'ml_error': 'mean',
+        'ml_abs_error': 'mean'
+    }).sort_values('ml_error')
+    
+    if len(station_bias) <= 15:
+        axes[1, 2].barh(range(len(station_bias)), station_bias['ml_error'], color='teal')
+        axes[1, 2].set_yticks(range(len(station_bias)))
+        axes[1, 2].set_yticklabels(station_bias.index)
+        axes[1, 2].axvline(0, color='black', linestyle='--', linewidth=2)
+        axes[1, 2].set_xlabel('Mean Bias (%)')
+        axes[1, 2].set_title('🟤 Station Bias\n(Climatology leakage?)')
+        axes[1, 2].grid(alpha=0.3, axis='x')
+    else:
+        axes[1, 2].text(0.5, 0.5, f'{len(station_bias)} stations\nToo many to plot', 
+                       ha='center', va='center', transform=axes[1, 2].transAxes, fontsize=12)
+        axes[1, 2].axis('off')
+    
+    plt.suptitle('🔬 DIAGNOSTIC PLOTS: Where Does the Model Fail?', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    
+    diag_file = output_path / f'diagnostics_{timestamp}.png'
+    plt.savefig(diag_file, dpi=150, bbox_inches='tight')
+    logger.info(f"Saved diagnostic plots to {diag_file}")
+    plt.close()
 
 
 def generate_verification_report(results: pd.DataFrame, output_dir: str = "reports", daily_path: Path = None):
@@ -1034,7 +1207,11 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     logger.info(f"STEP 6: Generating verification report")
     results = compare_simple_model_to_ml(df, model_dict)
     generate_verification_report(results, daily_path=daily_path)
-    logger.info(f"  Report saved to: {daily_path}\n")
+    
+    # 5b. Generate diagnostic plots (NEW - reveals mean-regression)
+    logger.info(f"  Generating diagnostic plots (error analysis)...")
+    generate_diagnostic_plots(results, df, daily_path)
+    logger.info(f"  ✓ Reports and diagnostics saved to: {daily_path}\n")
     
     # 6. Print feature importance
     logger.info(f"STEP 7: Feature importance analysis")
