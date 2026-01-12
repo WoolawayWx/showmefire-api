@@ -36,8 +36,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import get_db_path
 
 # Load the production model once
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, 'models', 'fuel_moisture_model.json')
+
 FM_MODEL = xgb.Booster()
-FM_MODEL.load_model('models/fuel_moisture_model.json')
+try:
+    FM_MODEL.load_model(MODEL_PATH)
+except Exception as e:
+    # Fallback for when running from a different context or if path logic fails
+    FM_MODEL.load_model('models/fuel_moisture_model.json')
 
 # The exact features the model expects
 # Extended features list for models trained with precipitation
