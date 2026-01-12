@@ -29,6 +29,8 @@ import xgboost as xgb
 import sys
 import rasterio
 from rasterio.transform import from_bounds
+import sqlite3
+from core.database import get_db_path
 
 # Load the production model once
 FM_MODEL = xgb.Booster()
@@ -373,6 +375,17 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         pass
     
     now = pd.Timestamp.utcnow()
+
+    # Load Station Indices for Verification
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
+        conn.close()
+        station_indices = indices_df.to_dict('records')
+    except Exception as e:
+        logger.error(f"Failed to load station indices: {e}")
+        station_indices = []
     
     for i, time_step in enumerate(ds_full.step):
         ds_hour = ds_full.sel(step=time_step)
@@ -436,6 +449,39 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
         hourly_risks.append(risk)
+
+        # Save verification data
+        if station_indices:
+            forecast_rows = []
+            run_time_str = now.strftime('%Y-%m-%d %H:%M:%S')
+            valid_time_str = forecast_time.strftime('%Y-%m-%d %H:%M:%S')
+            
+            for st in station_indices:
+                sx, sy = st['x'], st['y']
+                if 0 <= sx < fm.shape[1] and 0 <= sy < fm.shape[0]:
+                    forecast_rows.append((
+                        st['station_id'],
+                        valid_time_str,
+                        run_time_str,
+                        float(temp[sy, sx]),
+                        float(rh[sy, sx]),
+                        float(ws_ms[sy, sx]),
+                        float(precip_mm[sy, sx]),
+                        float(fm[sy, sx])
+                    ))
+            
+            if forecast_rows:
+                try:
+                    conn = sqlite3.connect(db_path)
+                    conn.executemany('''
+                        INSERT OR REPLACE INTO station_forecasts 
+                        (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms, precip_mm, fuel_moisture)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', forecast_rows)
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Failed to save station forecasts for {valid_time_str}: {e}")
         
         # Progress indicator
         if i == 0:

@@ -1,8 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
-from services.synoptic import get_station_data, fetch_historical_station_data, save_raw_data_to_archive, get_raw_data_stats
-from services.timeseries import get_timeseries_data
+from services.synoptic import (
+    get_station_data, 
+    fetch_historical_station_data, 
+    save_raw_data_to_archive, 
+    get_raw_data_stats,
+    fetch_synoptic_data
+)
+from services.timeseries import get_timeseries_data, fetchtimeseriesdata
 from services.banner import BannerData, load_banner_config, save_banner_config
 from services.file_manager import list_files, view_file
 from fastapi.middleware.cors import CORSMiddleware

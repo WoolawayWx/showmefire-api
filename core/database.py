@@ -81,7 +81,50 @@ def init_database():
             state TEXT
         )
     ''')
+
+    # 5. Station Forecasts (Stores point forecasts for verification)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS station_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            station_id TEXT,
+            valid_time TIMESTAMP,
+            forecast_run_time TIMESTAMP,
+            temp_c REAL,
+            rel_humidity REAL,
+            wind_speed_ms REAL,
+            precip_mm REAL,
+            fuel_moisture REAL,
+            UNIQUE(station_id, valid_time, forecast_run_time)
+        )
+    ''')
     
+    # 6. Observations (Stores actuals)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            station_id TEXT,
+            observation_date TEXT,
+            fuel_moisture_percentage REAL,
+            temp_c REAL,
+            rel_humidity REAL,
+            wind_speed_ms REAL,
+            precip_accum_1h_mm REAL,
+            latitude REAL,
+            longitude REAL,
+            UNIQUE(station_id, observation_date)
+        )
+    ''') 
+    
+    # Try to add columns if they don't exist (migrations)
+    try: cursor.execute('ALTER TABLE observations ADD COLUMN temp_c REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE observations ADD COLUMN rel_humidity REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE observations ADD COLUMN wind_speed_ms REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE observations ADD COLUMN precip_accum_1h_mm REAL')
+    except: pass
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_wf_snapshot ON weather_features(snapshot_id)')
