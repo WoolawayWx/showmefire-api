@@ -125,6 +125,24 @@ def init_database():
     try: cursor.execute('ALTER TABLE observations ADD COLUMN precip_accum_1h_mm REAL')
     except: pass
 
+    # 7. Banner Configuration (Operational settings)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS banner_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER DEFAULT 0,
+            type TEXT DEFAULT 'info',
+            message TEXT DEFAULT '',
+            link TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Initialize default banner row if it doesn't exist
+    cursor.execute('''
+        INSERT OR IGNORE INTO banner_config (id, enabled, type, message, link)
+        VALUES (1, 0, 'info', 'Welcome to Show Me Fire', NULL)
+    ''')
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_wf_snapshot ON weather_features(snapshot_id)')

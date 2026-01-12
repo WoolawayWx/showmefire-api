@@ -12,6 +12,5 @@ ARCHIVE_RAW_DATA_DIR = ARCHIVE_DIR / "raw_data"
 DATA_DIR = Path("data")
 
 # File Paths
-BANNER_CONFIG_FILE = DATA_DIR / "banner_config.json"
 MISSOURI_FIRES_JSON = DATA_DIR / "missouri_fires_coords.json"
 MISSOURI_FIRES_GEOJSON = DATA_DIR / "missouri_fires.geojson"
