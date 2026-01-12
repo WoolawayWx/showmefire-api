@@ -1,7 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from api.core.database import insert_forecast
+from core.database import insert_forecast
 from datetime import timezone
 from google import genai
 import PIL.Image

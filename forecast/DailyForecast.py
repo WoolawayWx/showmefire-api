@@ -30,6 +30,9 @@ import sys
 import rasterio
 from rasterio.transform import from_bounds
 import sqlite3
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import get_db_path
 
 # Load the production model once

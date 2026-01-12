@@ -298,3 +298,46 @@ def set_hrrr_filename(snapshot_id: int, filename: str):
     )
     conn.commit()
     conn.close()
+
+def insert_forecast(valid_time, title, discussion):
+    """
+    Inserts a new forecast into the database.
+    
+    Args:
+        valid_time (datetime): The valid time of the forecast.
+        title (str): The headline/title of the forecast.
+        discussion (str): The detailed discussion text.
+        
+    Returns:
+        int: The ID of the inserted forecast.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO forecasts (valid_time, title, discussion)
+            VALUES (?, ?, ?)
+        ''', (valid_time, title, discussion))
+        
+        forecast_id = cursor.lastrowid
+        conn.commit()
+        return forecast_id
+        
+    except sqlite3.IntegrityError:
+        # Forecast for this time already exists - update it instead
+        cursor.execute('''
+            UPDATE forecasts 
+            SET title = ?, discussion = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE valid_time = ?
+        ''', (title, discussion, valid_time))
+        conn.commit()
+        
+        # Get the ID of the updated row
+        cursor.execute('SELECT id FROM forecasts WHERE valid_time = ?', (valid_time,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+        
+    finally:
+        conn.close()
