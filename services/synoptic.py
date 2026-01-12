@@ -392,3 +392,132 @@ def get_raw_data_stats(api_response):
             stats["total_observations"] += len(obs["date_time"])
     
     return stats
+
+
+async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=None):
+    """
+    Fetch fuel moisture observations near a specific time using nearesttime endpoint.
+    Defaults to 7 AM Central Time of the current day.
+    
+    Args:
+        target_time: datetime object in UTC (if None, uses 7 AM CT today)
+        states: List of state abbreviations (default: MO and surrounding states)
+        networks: List of network IDs (default: [2] for RAWS)
+    
+    Returns: Dictionary with station fuel moisture data
+    """
+    if states is None:
+        states = ["MO", "OK", "AR", "TN", "KY", "IL", "IA", "NE", "KS"]
+    
+    if networks is None:
+        networks = [2]  # Network 2 for RAWS stations with fuel moisture
+    
+    # If no target time provided, use 7 AM Central Time today
+    if target_time is None:
+        from pytz import timezone as pytz_timezone
+        central = pytz_timezone('America/Chicago')
+        now_central = datetime.now(central)
+        # Set to 7 AM today in Central Time
+        target_central = now_central.replace(hour=7, minute=0, second=0, microsecond=0)
+        # Convert to UTC
+        target_time = target_central.astimezone(pytz_timezone('UTC'))
+    
+    # Format time for Synoptic API (YYYYMMDDhhmm)
+    attime = target_time.strftime("%Y%m%d%H%M")
+    
+    url = "https://api.synopticdata.com/v2/stations/nearesttime"
+    params = {
+        "token": SYNOPTIC_API_TOKEN,
+        "state": ",".join(states),
+        "attime": attime,
+        "within": "60",  # Within 60 minutes of target time
+        "network": ",".join(map(str, networks)),
+        "vars": "fuel_moisture",
+        "obtimezone": "local"
+    }
+    
+    logger.info(f"Fetching fuel moisture data near {attime} local time ({len(states)} states, networks: {networks})")
+    logger.info(f"Full URL: {url} with params: {params}")
+    
+    async with aiohttp.ClientSession() as session:
+        response = await session.get(url, params=params, timeout=60)
+        response.raise_for_status()
+        data = await response.json()
+    
+    # Log the response for debugging
+    logger.info(f"API Response: SUMMARY={data.get('SUMMARY', {})}")
+    if data.get("STATION"):
+        logger.info(f"Received {len(data['STATION'])} stations from API")
+        # Log first station structure for debugging
+        if len(data['STATION']) > 0:
+            first_station = data['STATION'][0]
+            logger.info(f"Sample station STID={first_station.get('STID')}, "
+                       f"OBS keys={list(first_station.get('OBSERVATIONS', {}).keys())}")
+    else:
+        logger.warning(f"No STATION data in response. Keys: {list(data.keys())}")
+    
+    # Process and flatten the response
+    stations_with_fm = []
+    if data.get("STATION"):
+        for station in data["STATION"]:
+            obs = station.get("OBSERVATIONS", {})
+            
+            # Extract fuel moisture values - check for both possible key formats
+            fm_value = None
+            obs_time = None
+            
+            # Try different key formats that Synoptic API might use
+            for key in ["fuel_moisture_value_1", "fuel_moisture_set_1", "fuel_moisture"]:
+                if key in obs:
+                    fm_data = obs[key]
+                    if isinstance(fm_data, dict):
+                        fm_value = fm_data.get("value")
+                    elif isinstance(fm_data, list) and len(fm_data) > 0:
+                        fm_value = fm_data[0]
+                    elif isinstance(fm_data, (int, float)):
+                        fm_value = fm_data
+                    
+                    if fm_value is not None:
+                        break
+            
+            # Get observation time
+            if obs.get("date_time"):
+                date_time = obs["date_time"]
+                if isinstance(date_time, list) and len(date_time) > 0:
+                    obs_time = date_time[0]
+                else:
+                    obs_time = date_time
+            
+            # Only include stations that have fuel moisture data
+            if fm_value is not None and fm_value > 0:
+                station_info = {
+                    "stid": station.get("STID"),
+                    "name": station.get("NAME"),
+                    "state": station.get("STATE"),
+                    "latitude": float(station.get("LATITUDE", 0)),
+                    "longitude": float(station.get("LONGITUDE", 0)),
+                    "elevation": float(station.get("ELEVATION", 0)) if station.get("ELEVATION") else None,
+                    "network": station.get("MNET_SHORTNAME"),
+                    "observation_time": obs_time,
+                    "observations": {
+                        "fuel_moisture": {
+                            "value": fm_value
+                        }
+                    }
+                }
+                stations_with_fm.append(station_info)
+    
+    result = {
+        "target_time": target_time.isoformat(),
+        "target_time_formatted": target_time.strftime("%Y-%m-%d %H:%M UTC"),
+        "station_count": len(stations_with_fm),
+        "stations": stations_with_fm,
+        "fetched_at": datetime.utcnow().isoformat()
+    }
+    
+    logger.info(f"Found {len(stations_with_fm)} stations with fuel moisture data")
+    
+    return result
+
+
+
