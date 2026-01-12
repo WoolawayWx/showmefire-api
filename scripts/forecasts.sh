@@ -30,7 +30,7 @@ echo "=== Starting fire danger forecast at $(date) ===" >> "$LOG_FILE" 2>&1
 echo "Running from: $PROJECT_DIR" >> "$LOG_FILE" 2>&1
 echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
 
-"$PYTHON" "$PROJECT_DIR/forecast/forecastedfiredanger.py" >> "$LOG_FILE" 2>&1
+"$PYTHON" "$PROJECT_DIR/forecast/DailyForecast.py" >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
 echo "Running AI Text Generation"
