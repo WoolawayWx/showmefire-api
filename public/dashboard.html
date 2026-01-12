@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <title>Show Me Fire - API Status</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 1000px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }
+            h1 { color: #333; }
+            .status-box {
+                background: white;
+                padding: 20px;
+                margin: 20px 0;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .healthy { color: #28a745; font-weight: bold; }
+            .error { color: #dc3545; font-weight: bold; }
+            .info { color: #666; font-size: 14px; }
+            .connected { color: #28a745; }
+            .disconnected { color: #dc3545; }
+            .refresh { 
+                display: inline-block; 
+                margin-top: 10px; 
+                padding: 8px 12px; 
+                background: #007bff; 
+                color: white; 
+                border: none; 
+                border-radius: 4px; 
+                cursor: pointer;
+            }
+            .refresh:hover { background: #0056b3; }
+        </style>
+        <script>
+            let ws;
+            
+            function connectWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
+                
+                ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    document.getElementById('ws-status').textContent = 'Connected';
+                    document.getElementById('ws-status').className = 'connected';
+                };
+                
+                ws.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    console.log('Update received:', message);
+                    updateStatus(message);
+                };
+                
+                ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    document.getElementById('ws-status').textContent = 'Disconnected';
+                    document.getElementById('ws-status').className = 'disconnected';
+                    // Reconnect after 3 seconds
+                    setTimeout(connectWebSocket, 3000);
+                };
+            }
+            
+            function updateStatus(message) {
+                if (message.type === 'initial' || message.type === 'synoptic') {
+                    const data = message.synoptic || message.data;
+                    document.getElementById('synoptic-status').innerHTML = formatSynopticStatus(data);
+                }
+                if (message.type === 'initial' || message.type === 'timeseries') {
+                    const data = message.timeseries || message.data;
+                    document.getElementById('timeseries-status').innerHTML = formatTimeseriesStatus(data);
+                }
+            }
+            
+            function formatSynopticStatus(data) {
+                return `
+                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
+                    <p>Stations: <span class="info">${data.station_count}</span></p>
+                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
+                `;
+            }
+            
+            function formatTimeseriesStatus(data) {
+                return `
+                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
+                    <p>Stations: <span class="info">${data.station_count}</span></p>
+                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
+                `;
+            }
+            
+            connectWebSocket();
+        </script>
+    </head>
+    <body>
+        <h1>🔥 Show Me Fire - API Status</h1>
+        <p>WebSocket: <span id="ws-status" class="disconnected">Connecting...</span></p>
+        <div class="status-box">
+            <h2>Synoptic Weather Data</h2>
+            <div id="synoptic-status">Loading...</div>
+        </div>
+        <div class="status-box">
+            <h2>Timeseries Data</h2>
+            <div id="timeseries-status">Loading...</div>
+        </div>
+    </body>
+    </html>

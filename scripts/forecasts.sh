@@ -2,7 +2,7 @@
 
 # Detect project directory from script location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1

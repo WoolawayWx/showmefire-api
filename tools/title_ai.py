@@ -2,13 +2,19 @@ from google import genai
 import PIL.Image
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
 load_dotenv()
+
+# Determine project root
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 
 genai_key = os.getenv('genai_key')
 client = genai.Client(api_key=genai_key)
 
-img = PIL.Image.open("images/mo-realtimefiredanger.png")
+img_path = PROJECT_ROOT / "images" / "mo-realtimefiredanger.png"
+img = PIL.Image.open(img_path)
 
 response = client.models.generate_content(
     model="gemini-2.5-flash",

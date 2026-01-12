@@ -16,8 +16,9 @@ BUCKET_NAME = 'cdn-showmefire'
 
 # Directories to scan
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 FOLDERS_TO_UPLOAD = [
-    SCRIPT_DIR / "images"
+    PROJECT_ROOT / "images"
 ]
 
 def upload_to_cdn(files, dest_keys, content_types=None, cache_controls=None):
@@ -134,9 +135,9 @@ def run_upload(files_to_upload=None):
 if __name__ == "__main__":
     # Example: specify files to upload by their paths
     files_to_upload = [
-        SCRIPT_DIR / "images" / "mo-windfilmap.png",
-        SCRIPT_DIR / "images" / "mo-rh.png",
-        SCRIPT_DIR / "images" / "mo-realtimefiredanger.png",
-        SCRIPT_DIR / "images" / "mo-fuelmoisture.png",
+        PROJECT_ROOT / "images" / "mo-windfilmap.png",
+        PROJECT_ROOT / "images" / "mo-rh.png",
+        PROJECT_ROOT / "images" / "mo-realtimefiredanger.png",
+        PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
     ]
     run_upload(files_to_upload=files_to_upload)

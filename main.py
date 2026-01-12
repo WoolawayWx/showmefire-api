@@ -1,42 +1,53 @@
-from fastapi import FastAPI, HTTPException # , WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from synoptic import fetch_synoptic_data, get_station_data, fetch_raws_stations_multi_state, fetch_historical_station_data, save_raw_data_to_archive, get_raw_data_stats
-from timeseries import fetchtimeseriesdata, get_timeseries_data
+from services.synoptic import get_station_data, fetch_historical_station_data, save_raw_data_to_archive, get_raw_data_stats
+from services.timeseries import get_timeseries_data
+from services.banner import BannerData, load_banner_config, save_banner_config
+from services.file_manager import list_files, view_file
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-# from broadcast import add_client, remove_client, broadcast_update, connected_clients
 import os
 import logging
 import json
+import asyncio
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
-from passlib.context import CryptContext
-from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Optional
-from rss_feed import generate_rss_feed
+from services.rss import generate_rss_feed
 from pathlib import Path
-from tools.nfgs_firedetect import main as firedetect
 from pytz import timezone
-from database import (
+from core.database import (
     get_latest_forecast,
     get_forecast_by_time,
     get_recent_forecasts,
     get_forecast_count
 )
-
-
-# Security Configuration
-SECRET_KEY = os.getenv("JWT_SECRET", "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_HOURS = 24
-
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
-
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
+from core.security import (
+    verify_password,
+    create_access_token,
+    verify_token,
+    ADMIN_EMAIL,
+    ADMIN_PASSWORD_HASH,
+    ACCESS_TOKEN_EXPIRE_HOURS
+)
+from core.scheduler import (
+    create_scheduler,
+    start_scheduler_jobs,
+    run_initial_fetches,
+    raws_station_data
+)
+from core.config import (
+    IMAGES_DIR,
+    GIS_DIR,
+    PUBLIC_DIR,
+    REPORTS_DIR,
+    LOGS_DIR,
+    ARCHIVE_RAW_DATA_DIR,
+    MISSOURI_FIRES_JSON,
+    MISSOURI_FIRES_GEOJSON
+)
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -47,58 +58,27 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Add a global storage for RAWS stations
-raws_station_data = {
-    "stations": None,
-    "last_updated": None,
-    "error": None
-}
-
-central_tz = timezone('America/Chicago')
-scheduler = AsyncIOScheduler(timezone=central_tz)
-
-async def fetch_and_store_raws_stations():
-    """Fetch RAWS stations and store in global variable"""
-    try:
-        raws_stations = await fetch_raws_stations_multi_state()
-        raws_station_data["stations"] = raws_stations
-        raws_station_data["last_updated"] = datetime.now().isoformat()
-        raws_station_data["error"] = None
-    except Exception as e:
-        raws_station_data["error"] = str(e)
-        raws_station_data["stations"] = []
-        raws_station_data["last_updated"] = datetime.now().isoformat()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    logger.info("Starting scheduler...")
-    scheduler = AsyncIOScheduler()
-    # Run synoptic at :00, :05, :10, etc.
-    scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
-    # Run timeseries at :02, :07, :12, etc. (2 minutes offset)
-    scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
-    # Run RAWS fetch at :00, :05, :10, etc.
-    scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    run_scheduler = os.getenv("run_sch", "false").lower() == "true"
+    scheduler_local = None
+
+    if run_scheduler:
+        logger.info("Starting scheduler...")
+        scheduler_local = create_scheduler()
+        start_scheduler_jobs(scheduler_local)
+    else:
+        logger.info("Scheduler disabled via run_sch environment variable")
     
-    scheduler.add_job(
-        firedetect, 
-        'cron', 
-        minute='0,5,10,15,20,25,30,35,40,45,50,55',
-        hour='10-22',  # 10 AM through 10 PM
-        id='fetch_fire_detections'
-    )
-    scheduler.start()
-    logger.info("Scheduler started")
-    
-    await fetch_synoptic_data()
-    await fetchtimeseriesdata()
-    await fetch_and_store_raws_stations()
+    # Start the fetch in the background so the API starts immediately
+    asyncio.create_task(run_initial_fetches())
     
     yield
     
-    logger.info("Shutting down scheduler...")
-    scheduler.shutdown()
+    if scheduler_local:
+        logger.info("Shutting down scheduler...")
+        scheduler_local.shutdown()
 
 app = FastAPI(
     title="Show Me Fire Weather API",
@@ -109,31 +89,6 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return pwd_context.verify(plain_password, hashed_password)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create a JWT token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
-    
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-def verify_token(token: str) -> Optional[str]:
-    """Verify a JWT token and return the email"""
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        return email
-    except JWTError:
-        return None
-
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
@@ -143,9 +98,9 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 # Use this instead of the default StaticFiles
-app.mount("/images", NoCacheStaticFiles(directory="images"), name="images")
-app.mount("/gis", NoCacheStaticFiles(directory="gis"), name="gis")
-app.mount("/public", StaticFiles(directory="public"), name="public")
+app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
+app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
+app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -166,41 +121,6 @@ app.add_middleware(
 class LoginRequest(BaseModel):
     email:str
     password:str
-
-
-# @app.websocket("/ws")
-# async def websocket_endpoint(websocket: WebSocket):
-#     """WebSocket endpoint for real-time data updates"""
-#     await websocket.accept()
-#     add_client(websocket)
-#     logger.info("Client connected")
-#     
-#     try:
-#         # Send initial data
-#         await websocket.send_json({
-#             "type": "initial",
-#             "synoptic": get_station_data(),
-#             "timeseries": get_timeseries_data()
-#         })
-#         
-#         # Broadcast connection event to all clients
-#         await broadcast_update("connection", {
-#             "message": "New client connected",
-#             "total_clients": len(connected_clients)
-#         })
-#         
-#         # Keep connection open
-#         while True:
-#             await websocket.receive_text()
-#     except WebSocketDisconnect:
-#         remove_client(websocket)
-#         logger.info("Client disconnected")
-#         
-#         # Broadcast disconnection event to all remaining clients
-#         await broadcast_update("disconnection", {
-#             "message": "Client disconnected",
-#             "total_clients": len(connected_clients)
-#         })
 
 @app.get('/')
 def hello():
@@ -284,121 +204,12 @@ def status():
 @app.get('/dashboard', response_class=HTMLResponse)
 def dashboard():
     """Simple HTML dashboard showing API status with WebSocket updates"""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Show Me Fire - API Status</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 1000px;
-                margin: 0 auto;
-                padding: 20px;
-                background-color: #f5f5f5;
-            }
-            h1 { color: #333; }
-            .status-box {
-                background: white;
-                padding: 20px;
-                margin: 20px 0;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            .healthy { color: #28a745; font-weight: bold; }
-            .error { color: #dc3545; font-weight: bold; }
-            .info { color: #666; font-size: 14px; }
-            .connected { color: #28a745; }
-            .disconnected { color: #dc3545; }
-            .refresh { 
-                display: inline-block; 
-                margin-top: 10px; 
-                padding: 8px 12px; 
-                background: #007bff; 
-                color: white; 
-                border: none; 
-                border-radius: 4px; 
-                cursor: pointer;
-            }
-            .refresh:hover { background: #0056b3; }
-        </style>
-        <script>
-            let ws;
-            
-            function connectWebSocket() {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
-                
-                ws.onopen = () => {
-                    console.log('WebSocket connected');
-                    document.getElementById('ws-status').textContent = 'Connected';
-                    document.getElementById('ws-status').className = 'connected';
-                };
-                
-                ws.onmessage = (event) => {
-                    const message = JSON.parse(event.data);
-                    console.log('Update received:', message);
-                    updateStatus(message);
-                };
-                
-                ws.onclose = () => {
-                    console.log('WebSocket disconnected');
-                    document.getElementById('ws-status').textContent = 'Disconnected';
-                    document.getElementById('ws-status').className = 'disconnected';
-                    // Reconnect after 3 seconds
-                    setTimeout(connectWebSocket, 3000);
-                };
-            }
-            
-            function updateStatus(message) {
-                if (message.type === 'initial' || message.type === 'synoptic') {
-                    const data = message.synoptic || message.data;
-                    document.getElementById('synoptic-status').innerHTML = formatSynopticStatus(data);
-                }
-                if (message.type === 'initial' || message.type === 'timeseries') {
-                    const data = message.timeseries || message.data;
-                    document.getElementById('timeseries-status').innerHTML = formatTimeseriesStatus(data);
-                }
-            }
-            
-            function formatSynopticStatus(data) {
-                return `
-                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
-                    <p>Stations: <span class="info">${data.station_count}</span></p>
-                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
-                `;
-            }
-            
-            function formatTimeseriesStatus(data) {
-                return `
-                    <p>Status: <span class="${data.error ? 'error' : 'healthy'}">${data.error ? 'ERROR: ' + data.error : '✓ Healthy'}</span></p>
-                    <p>Stations: <span class="info">${data.station_count}</span></p>
-                    <p>Last Updated: <span class="info">${new Date(data.last_updated).toLocaleString()}</span></p>
-                `;
-            }
-            
-            connectWebSocket();
-        </script>
-    </head>
-    <body>
-        <h1>🔥 Show Me Fire - API Status</h1>
-        <p>WebSocket: <span id="ws-status" class="disconnected">Connecting...</span></p>
-        <div class="status-box">
-            <h2>Synoptic Weather Data</h2>
-            <div id="synoptic-status">Loading...</div>
-        </div>
-        <div class="status-box">
-            <h2>Timeseries Data</h2>
-            <div id="timeseries-status">Loading...</div>
-        </div>
-    </body>
-    </html>
-    """
+    return HTMLResponse(content=(PUBLIC_DIR / "dashboard.html").read_text())
 
 @app.get("/list-images")
 def list_images():
     files = []
-    images_dir = "images"
+    images_dir = IMAGES_DIR
     for fname in os.listdir(images_dir):
         fpath = os.path.join(images_dir, fname)
         if os.path.isfile(fpath):
@@ -408,7 +219,7 @@ def list_images():
 @app.get("/list-gis")
 def list_gis():
     files = []
-    gis_dir = "gis"
+    gis_dir = GIS_DIR
     for fname in os.listdir(gis_dir):
         fpath = os.path.join(gis_dir, fname)
         if os.path.isfile(fpath):
@@ -449,33 +260,6 @@ async def verify_admin_token(data: TokenVerify):
         return {"valid": True, "email": email}
     else:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    
-class BannerData(BaseModel):
-    enabled: bool = False
-    type: str = "info"  # info, warning, danger, success
-    message: str = ""
-    link: Optional[str] = None
-
-# Persistent banner config file
-BANNER_CONFIG_PATH = Path("banner_config.json")
-
-def load_banner_config() -> BannerData:
-    if BANNER_CONFIG_PATH.exists():
-        try:
-            with open(BANNER_CONFIG_PATH, "r") as f:
-                data = json.load(f)
-            return BannerData(**data)
-        except Exception as e:
-            logger.error(f"Failed to load banner config: {e}")
-    return BannerData()
-
-def save_banner_config(banner: BannerData):
-    try:
-        with open(BANNER_CONFIG_PATH, "w") as f:
-            json.dump(banner.dict(), f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save banner config: {e}")
 
 @app.get("/api/banner")
 async def get_banner_public():
@@ -539,7 +323,7 @@ async def fetch_historical_data(
         if save_to_archive:
             filepath = await save_raw_data_to_archive(
                 days_back=days_back,
-                archive_dir="archive/raw_data"
+                archive_dir=str(ARCHIVE_RAW_DATA_DIR)
             )
             data['_saved_to'] = str(filepath) if filepath else None
         
@@ -603,7 +387,7 @@ async def save_historical_to_archive(days_back: int = 1):
 
 
 @app.get("/api/historical/archive/list")
-async def list_archived_files(archive_dir: str = "archive/raw_data"):
+async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
     '''
     List all archived data files.
     
@@ -637,7 +421,7 @@ async def list_archived_files(archive_dir: str = "archive/raw_data"):
 
 
 @app.get("/api/historical/archive/load/{filename}")
-async def load_archived_file(filename: str, archive_dir: str = "archive/raw_data"):
+async def load_archived_file(filename: str, archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
     '''
     Load a specific archived data file.
     
@@ -670,7 +454,7 @@ async def load_archived_file(filename: str, archive_dir: str = "archive/raw_data
 @app.get("/api/fires/missouri")
 async def get_missouri_fires():
     """Get current Missouri fire detections as JSON"""
-    json_file = 'data/missouri_fires_coords.json'
+    json_file = MISSOURI_FIRES_JSON
     if os.path.exists(json_file):
         return FileResponse(json_file, media_type='application/json')
     else:
@@ -679,7 +463,7 @@ async def get_missouri_fires():
 @app.get("/api/fires/missouri/geojson")
 async def get_missouri_fires_geojson():
     """Get current Missouri fire detections as GeoJSON"""
-    geojson_file = 'data/missouri_fires.geojson'
+    geojson_file = MISSOURI_FIRES_GEOJSON
     if os.path.exists(geojson_file):
         return FileResponse(geojson_file, media_type='application/geo+json')
     else:
@@ -698,34 +482,7 @@ async def list_reports(token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    reports_dir = Path("reports")
-    if not reports_dir.exists():
-        return {"success": True, "items": [], "path": ""}
-    
-    items = []
-    for filepath in sorted(reports_dir.glob("*")):
-        stat = filepath.stat()
-        if filepath.is_dir():
-            # For folders, count the items inside
-            item_count = len(list(filepath.glob("*")))
-            items.append({
-                "name": filepath.name,
-                "type": "folder",
-                "item_count": item_count,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        else:
-            # For files, show size
-            items.append({
-                "name": filepath.name,
-                "type": "file",
-                "size_kb": round(stat.st_size / 1024, 2),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-    
-    items.sort(key=lambda x: x['modified'], reverse=True)
-    return {"success": True, "items": items, "path": ""}
+    return list_files(str(REPORTS_DIR))
 
 @app.get("/api/admin/reports/list/{path:path}")
 async def list_reports_in_path(path: str, token: str):
@@ -733,71 +490,15 @@ async def list_reports_in_path(path: str, token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    reports_dir = Path("reports")
-    target_path = reports_dir / path
-    
-    # Security check: ensure the user isn't trying to access files outside the folder
-    if not target_path.resolve().is_relative_to(reports_dir.resolve()):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    if not target_path.exists():
-        raise HTTPException(status_code=404, detail="Folder not found")
-    
-    if not target_path.is_dir():
-        raise HTTPException(status_code=400, detail="Path is not a directory")
-    
-    items = []
-    for filepath in sorted(target_path.glob("*")):
-        stat = filepath.stat()
-        if filepath.is_dir():
-            item_count = len(list(filepath.glob("*")))
-            items.append({
-                "name": filepath.name,
-                "type": "folder",
-                "item_count": item_count,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        else:
-            items.append({
-                "name": filepath.name,
-                "type": "file",
-                "size_kb": round(stat.st_size / 1024, 2),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-    
-    items.sort(key=lambda x: x['modified'], reverse=True)
-    return {"success": True, "items": items, "path": path}
+    return list_files(str(REPORTS_DIR), path)
 
 @app.get("/api/admin/reports/view/{filepath:path}")
 async def view_report(filepath: str, token: str):
     """Serve a specific report file securely from reports directory"""
-    # Verify token
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Construct the file path
-    report_path = Path("reports") / filepath
-    
-    # Security check: ensure the user isn't trying to access files outside the folder
-    try:
-        report_path.resolve().relative_to(Path("reports").resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Forbidden: Path traversal not allowed")
-
-    # Check if file exists
-    if not report_path.exists():
-        logger.warning(f"File not found: {report_path} (requested by {email})")
-        raise HTTPException(status_code=404, detail=f"File not found: {filepath}")
-    
-    # Ensure it's a file, not a directory
-    if report_path.is_dir():
-        raise HTTPException(status_code=400, detail="Path is a directory, not a file")
-    
-    # Serve the file
-    logger.info(f"Serving report {filepath} to {email}")
-    return FileResponse(report_path)
+    return view_file(str(REPORTS_DIR), filepath, email)
 
 @app.get("/api/admin/logs/list")
 async def list_logs(token: str):
@@ -805,34 +506,7 @@ async def list_logs(token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    logs_dir = Path("logs")
-    if not logs_dir.exists():
-        return {"success": True, "items": [], "path": ""}
-    
-    items = []
-    for filepath in sorted(logs_dir.glob("*")):
-        stat = filepath.stat()
-        if filepath.is_dir():
-            # For folders, count the items inside
-            item_count = len(list(filepath.glob("*")))
-            items.append({
-                "name": filepath.name,
-                "type": "folder",
-                "item_count": item_count,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        else:
-            # For files, show size
-            items.append({
-                "name": filepath.name,
-                "type": "file",
-                "size_kb": round(stat.st_size / 1024, 2),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-    
-    items.sort(key=lambda x: x['modified'], reverse=True)
-    return {"success": True, "items": items, "path": ""}
+    return list_files(str(LOGS_DIR))
 
 @app.get("/api/admin/logs/list/{path:path}")
 async def list_logs_in_path(path: str, token: str):
@@ -840,76 +514,20 @@ async def list_logs_in_path(path: str, token: str):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    logs_dir = Path("logs")
-    target_path = logs_dir / path
-    
-    # Security check: ensure the user isn't trying to access files outside the folder
-    if not target_path.resolve().is_relative_to(logs_dir.resolve()):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    
-    if not target_path.exists():
-        raise HTTPException(status_code=404, detail="Folder not found")
-    
-    if not target_path.is_dir():
-        raise HTTPException(status_code=400, detail="Path is not a directory")
-    
-    items = []
-    for filepath in sorted(target_path.glob("*")):
-        stat = filepath.stat()
-        if filepath.is_dir():
-            item_count = len(list(filepath.glob("*")))
-            items.append({
-                "name": filepath.name,
-                "type": "folder",
-                "item_count": item_count,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-        else:
-            items.append({
-                "name": filepath.name,
-                "type": "file",
-                "size_kb": round(stat.st_size / 1024, 2),
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-            })
-    
-    items.sort(key=lambda x: x['modified'], reverse=True)
-    return {"success": True, "items": items, "path": path}
+    return list_files(str(LOGS_DIR), path)
 
 @app.get("/api/admin/logs/view/{filepath:path}")
 async def view_log(filepath: str, token: str):
     """Serve a specific log file securely from logs directory"""
-    # Verify token
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    # Construct the file path
-    log_path = Path("logs") / filepath
-    
-    # Security check: ensure the user isn't trying to access files outside the folder
-    try:
-        log_path.resolve().relative_to(Path("logs").resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Forbidden: Path traversal not allowed")
-
-    # Check if file exists
-    if not log_path.exists():
-        logger.warning(f"Log file not found: {log_path} (requested by {email})")
-        raise HTTPException(status_code=404, detail=f"Log file not found: {filepath}")
-    
-    # Ensure it's a file, not a directory
-    if log_path.is_dir():
-        raise HTTPException(status_code=400, detail="Path is a directory, not a file")
-    
-    # Serve the file
-    logger.info(f"Serving log {filepath} to {email}")
-    return FileResponse(log_path)
+    return view_file(str(LOGS_DIR), filepath, email)
 
 @app.get("/api/training/latest-stats")
 async def get_latest_training_stats():
     """Returns the JSON stats from the most recent training folder"""
-    reports_dir = Path("reports")
+    reports_dir = REPORTS_DIR
     # Get the most recent date folder
     date_folders = sorted([d for d in reports_dir.iterdir() if d.is_dir()], reverse=True)
     
@@ -922,6 +540,91 @@ async def get_latest_training_stats():
             return json.load(f)
     
     raise HTTPException(status_code=404, detail="Stats file missing")
+
+@app.get("/api/fuel-moisture/morning")
+async def get_morning_fuel_moisture():
+    """
+    Fetch fuel moisture observations near 7 AM Central Time for today.
+    Uses default states (MO and surrounding) and network 2 (RAWS).
+    
+    Returns: Fuel moisture observations from stations
+    """
+    from services.synoptic import fetch_fuel_moisture_at_time
+    
+    try:
+        # Use defaults: current day 7 AM CT, multi-state, network 2
+        data = await fetch_fuel_moisture_at_time(
+            target_time=None,  # Defaults to 7 AM CT today
+            states=None,       # Defaults to MO and surrounding states
+            networks=None      # Defaults to network 2
+        )
+        
+        return {
+            "success": True,
+            "data": data
+        }
+    except Exception as e:
+        logger.error(f"Error fetching morning fuel moisture: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching fuel moisture data: {str(e)}"
+        )
+
+@app.get("/api/fuel-moisture/morning/debug")
+async def get_morning_fuel_moisture_debug(
+    date: Optional[str] = None,
+    states: Optional[str] = "MO",
+    networks: Optional[str] = "2"
+):
+    """
+    Debug endpoint - returns raw Synoptic API response for fuel moisture.
+    Helps diagnose data extraction issues.
+    """
+    from services.synoptic import SYNOPTIC_API_TOKEN
+    from pytz import timezone as pytz_timezone
+    import aiohttp
+    
+    try:
+        # Parse date if provided
+        if date:
+            from datetime import datetime as dt
+            central = pytz_timezone('America/Chicago')
+            parsed_date = dt.strptime(date, "%Y-%m-%d")
+            target_central = central.localize(parsed_date.replace(hour=7, minute=0, second=0))
+            target_time = target_central.astimezone(pytz_timezone('UTC'))
+        else:
+            from pytz import timezone as pytz_timezone
+            central = pytz_timezone('America/Chicago')
+            now_central = datetime.now(central)
+            target_central = now_central.replace(hour=7, minute=0, second=0, microsecond=0)
+            target_time = target_central.astimezone(pytz_timezone('UTC'))
+        
+        attime = target_time.strftime("%Y%m%d%H%M")
+        
+        url = "https://api.synopticdata.com/v2/stations/nearesttime"
+        params = {
+            "token": SYNOPTIC_API_TOKEN,
+            "state": states,
+            "attime": attime,
+            "within": "60",
+            "network": networks,
+            "vars": "fuel_moisture",
+            "obtimezone": "local"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            response = await session.get(url, params=params, timeout=60)
+            response.raise_for_status()
+            raw_data = await response.json()
+        
+        return {
+            "success": True,
+            "query_params": params,
+            "raw_response": raw_data
+        }
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
     import uvicorn

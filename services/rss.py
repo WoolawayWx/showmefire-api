@@ -1,7 +1,7 @@
 from feedgen.feed import FeedGenerator
 from datetime import datetime, timezone
 import pytz  # Add this import for timezone handling
-from synoptic import get_station_data  # Import your data function
+from services.synoptic import get_station_data  # Import your data function
 import argparse  # Add for command-line flags
 from ai.ai_summary import generate_summary  # Import AI summary function
 
