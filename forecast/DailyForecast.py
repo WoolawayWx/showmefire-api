@@ -331,7 +331,7 @@ def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
     return np.clip(fm_new, 1, 40)
 
 
-def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
+def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=None):
     logger.info("Processing forecast with observations-based fuel moisture.")
     """
     Process HRRR forecast with actual fuel moisture observations as starting point.
@@ -384,18 +384,68 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
     except:
         pass
     
-    now = pd.Timestamp.utcnow()
+    # Prepare base_time for forecast calculations (Model Run Time)
+    # If run_date is provided, use it. Otherwise fallback to now (UTC).
+    # ensure base_time is UTC aware
+    if run_date:
+        if run_date.tzinfo is None:
+            base_time = run_date.tz_localize('UTC')
+        else:
+            base_time = run_date
+    else:
+        base_time = pd.Timestamp.utcnow()
 
     # Load Station Indices for Verification
     db_path = get_db_path()
     try:
         conn = sqlite3.connect(db_path)
         indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
+        
+        # Fallback if empty (e.g. locally or if not initialized)
+        if indices_df.empty:
+            logger.info("station_grid_indices is empty. Calculating indices from observations on the fly.")
+            try:
+                stations_df = pd.read_sql("SELECT DISTINCT station_id, latitude, longitude FROM observations", conn)
+                new_indices = []
+                # Use grid mesh from earlier
+                # Ensure we have valid coordinates
+                valid_stations = stations_df.dropna(subset=['latitude', 'longitude'])
+                
+                for _, row in valid_stations.iterrows():
+                    dist = (grid_lat_mesh - row['latitude'])**2 + (grid_lon_mesh - row['longitude'])**2
+                    y_idx, x_idx = np.unravel_index(np.argmin(dist), dist.shape)
+                    
+                    new_indices.append({
+                        'station_id': row['station_id'],
+                        'x': int(x_idx),
+                        'y': int(y_idx),
+                        'lat': row['latitude'],
+                        'lon': row['longitude']
+                    })
+                station_indices = new_indices
+            except Exception as e:
+                logger.error(f"Failed to calculate station indices on the fly: {e}")
+                station_indices = []
+        else:
+            station_indices = indices_df.to_dict('records')
+
         conn.close()
-        station_indices = indices_df.to_dict('records')
     except Exception as e:
         logger.error(f"Failed to load station indices: {e}")
         station_indices = []
+
+    # Initialize JSON data structure for history
+    # Convert dates to US/Central
+    run_date_ct = None
+    if run_date:
+        run_date_ct = run_date.tz_localize('UTC').tz_convert('US/Central') if run_date.tzinfo is None else run_date.tz_convert('US/Central')
+    else:
+        run_date_ct = pd.Timestamp.now(tz='US/Central')
+
+    json_output_data = {
+       "run_date": run_date_ct.strftime('%Y-%m-%dT%H:00:00'),
+       "stations": {}
+    }
     
     for i, time_step in enumerate(ds_full.step):
         ds_hour = ds_full.sel(step=time_step)
@@ -428,7 +478,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
             hours_ahead = int(time_step_value / np.timedelta64(1, 'h'))
         else:
             hours_ahead = int(time_step_value / 3600000000000)
-        forecast_time = now + pd.Timedelta(hours=hours_ahead)
+        
+        forecast_time = base_time + pd.Timedelta(hours=hours_ahead)
         hour_val = forecast_time.hour
         month_val = forecast_time.month
         
@@ -463,22 +514,57 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         # Save verification data
         if station_indices:
             forecast_rows = []
-            run_time_str = now.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Use base_time (Model Run Time) as the reference for DB records too
+            run_time_str = base_time.strftime('%Y-%m-%d %H:%M:%S')
             valid_time_str = forecast_time.strftime('%Y-%m-%d %H:%M:%S')
             
+            # Format suitable for JSON (ISO 8601) - Use Central Time
+            if forecast_time.tzinfo is None:
+                forecast_time_ct = forecast_time.tz_localize('UTC').tz_convert('US/Central')
+            else:
+                forecast_time_ct = forecast_time.tz_convert('US/Central')
+            
+            json_valid_time = forecast_time_ct.strftime('%Y-%m-%dT%H:00:00')
+
             for st in station_indices:
                 sx, sy = st['x'], st['y']
                 if 0 <= sx < fm.shape[1] and 0 <= sy < fm.shape[0]:
+                    # Extract values
+                    val_t = float(temp[sy, sx])
+                    val_rh = float(rh[sy, sx])
+                    val_ws = float(ws_ms[sy, sx])
+                    val_precip = float(precip_mm[sy, sx])
+                    val_fm = float(fm[sy, sx])
+
                     forecast_rows.append((
                         st['station_id'],
                         valid_time_str,
                         run_time_str,
-                        float(temp[sy, sx]),
-                        float(rh[sy, sx]),
-                        float(ws_ms[sy, sx]),
-                        float(precip_mm[sy, sx]),
-                        float(fm[sy, sx])
+                        val_t,
+                        val_rh,
+                        val_ws,
+                        val_precip,
+                        val_fm
                     ))
+                    
+                    # Add to JSON structure
+                    sid = st['station_id']
+                    if sid not in json_output_data['stations']:
+                        json_output_data['stations'][sid] = {
+                            "lat": st.get('lat'),
+                            "lon": st.get('lon'),
+                            "forecasts": []
+                        }
+                    
+                    json_output_data['stations'][sid]['forecasts'].append({
+                        "time": json_valid_time,
+                        "temp_c": round(val_t, 2),
+                        "rh": round(val_rh, 1),
+                        "wind_speed_ms": round(val_ws, 2),
+                        "precip_mm": round(val_precip, 2),
+                        "fuel_moisture": round(val_fm, 1)
+                    })
             
             if forecast_rows:
                 try:
@@ -492,13 +578,26 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
                     conn.close()
                 except Exception as e:
                     logger.error(f"Failed to save station forecasts for {valid_time_str}: {e}")
+
         
         # Progress indicator
         if i == 0:
             print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
         elif i % 3 == 0:
             print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
-    
+
+    # Save standalone JSON station history
+    if run_date and json_output_data['stations']:
+        filename = f"station_forecasts_{run_date.strftime('%Y%m%d_%H')}.json"
+        save_path = Path("archive/forecasts") / filename
+        try:
+             save_path.parent.mkdir(parents=True, exist_ok=True)
+             with open(save_path, 'w') as f:
+                 json.dump(json_output_data, f, indent=2)
+             logger.info(f"Saved station forecast history to {save_path}")
+        except Exception as e:
+             logger.error(f"Failed to save station forecast history JSON: {e}")
+
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
 
 def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None):
@@ -729,7 +828,7 @@ def generate_complete_forecast():
 
     # Continue with forecast using ML model
     hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks = process_forecast_with_observations(
-        ds_full, lon, lat, port=port
+        ds_full, lon, lat, port=port, run_date=RUN_DATE
     )
     
     # --- Extract and process precipitation data ---

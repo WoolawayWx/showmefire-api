@@ -106,6 +106,7 @@ class NoCacheStaticFiles(StaticFiles):
 # Use this instead of the default StaticFiles
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
+app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
 app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 
 origins = [
