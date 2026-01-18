@@ -19,6 +19,9 @@ CSV_FILE="$REPORTS_DIR/forecast_comparison_latest.csv"
 DATE_STAMP=$(date +%Y-%m-%d)
 ARCHIVE_DIR="$REPORTS_DIR/$DATE_STAMP"
 
+# Activate the virtual environment
+source ./venv/bin/activate
+
 echo "=================================================="
 echo "   Show Me Fire - Model Validation Pipeline"
 echo "=================================================="
