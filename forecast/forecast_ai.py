@@ -19,9 +19,8 @@ images_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'imag
 archive_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'archive', 'forecasts'))
 
 # Get the most recent forecast JSON
-forecast_date = datetime.now().strftime('%Y%m%d')
-forecast_hour = '12'
-forecast_json_path = os.path.join(archive_dir, f"forecast_{forecast_date}_{forecast_hour}.json")
+forecast_date = datetime.now().strftime('%Y-%m-%d')
+forecast_json_path = os.path.join(archive_dir, f"station_forecasts_{forecast_date}.json")
 
 # Load forecast metadata if it exists
 forecast_metadata = {}

@@ -7,12 +7,18 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1
 
-# Use Python from venv (no activation needed)
-PYTHON="$PROJECT_DIR/venv/bin/python"
+# Detect correct Python executable
+if [ -f "/opt/venv/bin/python" ]; then
+    PYTHON="/opt/venv/bin/python" # Docker production
+elif [ -f "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON="$PROJECT_DIR/venv/bin/python" # Local development
+else
+    PYTHON="python" # System fallback
+fi
 
-# Verify Python exists
-if [ ! -f "$PYTHON" ]; then
-    echo "ERROR: Python not found at $PYTHON"
+# Verify Python works
+if ! "$PYTHON" --version > /dev/null 2>&1; then
+    echo "ERROR: Python not found or not working at $PYTHON"
     exit 1
 fi
 
