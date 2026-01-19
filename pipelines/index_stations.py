@@ -1,6 +1,12 @@
 import xarray as xr
 import pandas as pd
 import sqlite3
+import sys
+import os
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from core.database import get_db_path
 
 def index_stations(sample_nc_path):
@@ -29,6 +35,18 @@ def index_stations(sample_nc_path):
     
     # 3. Save to the cache table
     cursor = conn.cursor()
+    
+    # Ensure table exists
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS station_grid_indices (
+            station_id TEXT PRIMARY KEY,
+            grid_x INTEGER,
+            grid_y INTEGER,
+            original_lat REAL,
+            original_lon REAL
+        )
+    ''')
+
     cursor.executemany(
         "INSERT OR REPLACE INTO station_grid_indices VALUES (?, ?, ?, ?, ?)", 
         indices

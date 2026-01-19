@@ -18,3 +18,4 @@ cache
 status.json
 banner_config.json
 data/*
+public/rss.xml

@@ -427,6 +427,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 logger.error(f"Failed to calculate station indices on the fly: {e}")
                 station_indices = []
         else:
+            # Ensure columns map to what the rest of the code expects (x, y)
+            if 'grid_x' in indices_df.columns:
+                indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
             station_indices = indices_df.to_dict('records')
 
         conn.close()
