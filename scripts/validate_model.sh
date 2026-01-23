@@ -18,16 +18,26 @@ CSV_FILE="$REPORTS_DIR/forecast_comparison_latest.csv"
 # Define Date for Archive
 DATE_STAMP=$(date +%Y-%m-%d)
 ARCHIVE_DIR="$REPORTS_DIR/$DATE_STAMP"
+LOG_DIR="$BASE_DIR/logs"
+LOG_FILE="$LOG_DIR/validation_$DATE_STAMP.log"
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+
+# Redirect stdout and stderr to both console and log file
+exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Activate the virtual environment
-source ./venv/bin/activate
+source "$BASE_DIR/venv/bin/activate"
 
 echo "=================================================="
 echo "   Show Me Fire - Model Validation Pipeline"
 echo "=================================================="
+echo "Date: $(date)"
 echo "Base Directory: $BASE_DIR"
 echo "Reports Output: $REPORTS_DIR"
 echo "Archive Output: $ARCHIVE_DIR"
+echo "Log File: $LOG_FILE"
 echo "--------------------------------------------------"
 
 # 1. Compare Forecasts vs Observations

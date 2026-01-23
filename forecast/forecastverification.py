@@ -1155,7 +1155,8 @@ def generate_forecast_verification_report(results: pd.DataFrame, output_dir: str
 def run_daily_training(archive_dir: str = "archive/raw_data", 
                       model_dir: str = "models",
                       forecast_dir: str = "archive/forecasts",
-                      verify_forecasts: bool = True):
+                      verify_forecasts: bool = True,
+                      target_date: str = None):
     """
     Daily workflow: Load all archived data, train model, save results, verify forecasts.
     Run this once per day to update the ML model and check forecast performance.
@@ -1163,16 +1164,36 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     logger.info("\n" + "="*60)
     logger.info("DAILY MODEL TRAINING AND VERIFICATION WORKFLOW")
     logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if target_date:
+        logger.info(f"Target Date (Back-Analysis): {target_date}")
     logger.info("="*60 + "\n")
     
     # 0. Setup daily folder for reports
-    daily_path = setup_daily_folder()
+    daily_path = setup_daily_folder(target_date=target_date)
     logger.info(f"STEP 1: Setting up daily folder")
     logger.info(f"  Path: {daily_path}\n")
     
     # 1. Load all archived data
     logger.info(f"STEP 2: Loading archived data")
     df = load_all_archived_data(archive_dir)
+
+    # Filter data if target_date is provided (simulate past run)
+    if target_date and not df.empty:
+        try:
+            target_dt = datetime.strptime(target_date, "%Y%m%d")
+            # Include data up to end of that day
+            cutoff = target_dt + timedelta(days=1)
+            logger.info(f"  Filtering data up to {cutoff} (Back-analysis mode)")
+            
+            # Ensure timestamp is datetime
+            if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                
+            original_len = len(df)
+            df = df[df['timestamp'] < cutoff]
+            logger.info(f"  Filtered {original_len} -> {len(df)} observations")
+        except Exception as e:
+            logger.error(f"  Error filtering by date: {e}")
     
     if df.empty:
         logger.error("ERROR: No data available for training!")
@@ -1266,23 +1287,39 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
         
         forecast_path = Path(forecast_dir)
         if forecast_path.exists():
-            # Get all forecast files from last 7 days
-            cutoff_date = datetime.now() - timedelta(days=7)
+            # Get all forecast files from last 7 days (relative to target date)
+            if target_date:
+                try:
+                    ref_date = datetime.strptime(target_date, "%Y%m%d")
+                except:
+                    ref_date = datetime.now()
+            else:
+                ref_date = datetime.now()
+                
+            cutoff_date = ref_date - timedelta(days=7)
             recent_forecasts = []
             
             for forecast_file in sorted(forecast_path.glob("forecast_*.json")):
                 # Extract date from filename: forecast_YYYYMMDD_HH.json
                 try:
                     model_run = forecast_file.stem.replace("forecast_", "")
-                    run_date = datetime.strptime(model_run, "%Y%m%d_%H")
+                    # Handle varying filename formats if necessary, but assuming YYYYMMDD_HH
+                    # If just YYYYMMDD, this might fail, but let's assume standard format
                     
-                    if run_date >= cutoff_date:
-                        recent_forecasts.append(model_run)
+                    # Robust parsing
+                    parts = model_run.split('_')
+                    if len(parts) >= 1:
+                        date_part = parts[0]
+                        run_date = datetime.strptime(date_part, "%Y%m%d")
+                        
+                        # Verify forecasts within the window, but NOT future ones (if back-testing)
+                        if run_date >= cutoff_date and run_date <= ref_date:
+                            recent_forecasts.append(model_run)
                 except:
                     continue
             
             if recent_forecasts:
-                logger.info(f"Found {len(recent_forecasts)} recent forecasts to verify (last 7 days)")
+                logger.info(f"Found {len(recent_forecasts)} recent forecasts to verify (Window: {cutoff_date.date()} to {ref_date.date()})")
                 
                 all_forecast_results = []
                 
@@ -1340,9 +1377,19 @@ def run_daily_training(archive_dir: str = "archive/raw_data",
     
     return model_dict
 
-def setup_daily_folder(base_dir="reports"):
+def setup_daily_folder(base_dir="reports", target_date: str = None):
     """Creates a folder like reports/2026-01-02/"""
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    if target_date:
+        # Assuming input is YYYYMMDD, convert to YYYY-MM-DD
+        try:
+            dt = datetime.strptime(target_date, "%Y%m%d")
+            date_str = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            # Fallback if format is different
+            date_str = target_date
+    else:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        
     daily_path = Path(base_dir) / date_str
     daily_path.mkdir(parents=True, exist_ok=True)
     return daily_path
@@ -1383,6 +1430,8 @@ if __name__ == "__main__":
                        help='Verify specific forecast (e.g., 20251230_12)')
     parser.add_argument('--no-forecast-verification', action='store_true',
                        help='Skip forecast verification during training')
+    parser.add_argument('--date', type=str, metavar='YYYYMMDD',
+                       help='Run back-analysis for specific date (simulates past run)')
     parser.add_argument('--archive-dir', default='archive/raw_data', help='Archive directory')
     parser.add_argument('--model-dir', default='models', help='Model save directory')
     parser.add_argument('--forecast-dir', default='archive/forecasts', help='Forecast archive directory')
@@ -1394,7 +1443,8 @@ if __name__ == "__main__":
             args.archive_dir, 
             args.model_dir,
             args.forecast_dir,
-            verify_forecasts=not args.no_forecast_verification
+            verify_forecasts=not args.no_forecast_verification,
+            target_date=args.date
         )
     elif args.test:
         quick_model_test()
@@ -1406,5 +1456,6 @@ if __name__ == "__main__":
             args.archive_dir, 
             args.model_dir,
             args.forecast_dir,
-            verify_forecasts=True
+            verify_forecasts=True,
+            target_date=args.date
         )
