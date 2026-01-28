@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Change to the api directory (parent of scripts/)
+cd "$(dirname "$0")/.."
+
 # Activate the virtual environment
 source venv/bin/activate
 
