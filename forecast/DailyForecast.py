@@ -1302,22 +1302,23 @@ def generate_complete_forecast():
     logger.info("Generating minimum fuel moisture map...")
     
     # Create an improved colormap with better contrast in critical ranges
+    import matplotlib.colors as mcolors
     from matplotlib.colors import LinearSegmentedColormap
-    
+
     # Define colors at key fuel moisture thresholds with strong visual distinction
     # Focus on making 7-15% range very clear
     colors_and_positions = [
         (0.0, '#4D0000'),    # 0% - Very Dark Red/Brown
-        (0.15, '#8B0000'),   # 4.5% - Dark Red
-        (0.233, '#DC143C'),  # 7% - Crimson (EXTREME threshold)
-        (0.267, '#FF4500'),  # 8% - Orange Red
-        (0.30, '#FF6347'),   # 9% - Tomato (CRITICAL threshold)
-        (0.35, '#FF8C00'),   # 10.5% - Dark Orange
-        (0.40, '#FFA500'),   # 12% - Orange
-        (0.467, '#FFB347'),  # 14% - Light Orange
-        (0.50, '#FFD700'),   # 15% - Gold (ELEVATED threshold)
-        (0.567, '#FFED4E'),  # 17% - Yellow
-        (0.633, '#F0E68C'),  # 19% - Khaki
+        (0.1, '#8B0000'),    # 3% - Dark Red
+        (0.2, '#DC143C'),    # 6% - Crimson (EXTREME threshold)
+        (0.233, '#FF4500'),  # 7% - Orange Red
+        (0.267, '#FF6347'),  # 8% - Tomato (CRITICAL threshold)
+        (0.30, '#FF8C00'),   # 9% - Dark Orange
+        (0.333, '#FFA500'),  # 10% - Orange
+        (0.367, '#FFB347'),  # 11% - Light Orange
+        (0.40, '#FFD700'),   # 12% - Gold (ELEVATED threshold)
+        (0.50, '#FFED4E'),   # 15% - Yellow
+        (0.60, '#F0E68C'),   # 18% - Khaki
         (0.70, '#C8E6C9'),   # 21% - Light Green
         (0.80, '#81C784'),   # 24% - Medium Green
         (0.90, '#4CAF50'),   # 27% - Green
@@ -1333,14 +1334,15 @@ def generate_complete_forecast():
                                                 list(zip(positions, colors)), 
                                                 N=512)
     
-    # Use many levels for smooth gradient
-    fm_levels = np.linspace(0, 30, 512)
+    # Create discrete bins: 1% below 15%, 3% above 15%
+    bounds = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,18,21,24,27,30]
+    norm = mcolors.BoundaryNorm(bounds, fm_cmap.N)
     
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
 
     cs = ax.contourf(lon, lat, min_fuel_moisture_smooth, transform=data_crs,
-                    levels=fm_levels, cmap=fm_cmap, alpha=0.75, zorder=7, 
-                    antialiased=True, extend='both')
+                    levels=bounds, cmap=fm_cmap, norm=norm, alpha=0.75, zorder=7, 
+                    extend='both')
 
     # Add single prominent contour line at 9% threshold
     contour_9 = ax.contour(
@@ -1355,7 +1357,7 @@ def generate_complete_forecast():
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
     cbar = plt.colorbar(cs, cax=cax, label='Fuel Moisture (%)', 
-                       ticks=np.arange(0, 32, 3))
+                       ticks=[0,3,6,9,12,15,18,21,24,27,30])
     
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)

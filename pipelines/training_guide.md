@@ -35,9 +35,30 @@ python3 pipelines/index_stations.py
 - Pre-calculates HRRR grid indices for each station
 - Speeds up extraction by 100x
 
+**Create Snapshots for New HRRR Data**
+```bash
+python3 scripts/create_snapshots.py
+```
+- Scans `cache/hrrr/` for new HRRR files
+- Creates database snapshots for dates that don't exist yet
+- Allows adding new data without deleting existing processed snapshots
+
 ### Phase 2: Extract Weather Features
 
-**Step 1: Reset Snapshots (If Re-processing)**
+**Step 1: Create Snapshots for New Data (If adding new HRRR files)**
+
+If you've added new HRRR files to `cache/hrrr/`:
+
+```bash
+python3 scripts/create_snapshots.py
+```
+
+This will:
+- Scan for new HRRR files that don't have snapshots yet
+- Create new snapshot entries in the database
+- Preserve existing processed snapshots
+
+**Step 2: Reset Snapshots (If Re-processing)**
 
 If you've updated extraction logic or want to re-process existing data:
 
@@ -125,6 +146,7 @@ python3 pipelines/train_model.py
 - Automatically includes precipitation features if available
 - Trains XGBoost model with 200 trees
 - Evaluates performance (MAE, R²)
+- **Saves model with proper archiving**: Uses temporary filename to avoid conflicts, then archives old models and moves to final location
 - Saves model: `models/fuel_moisture_model.json`
 - Creates feature importance plot: `plots/feature_importance.png`
 
@@ -183,12 +205,14 @@ print(df[['temp_c', 'rel_humidity', 'target_fm']].corr())"
 | Step | Command | Output |
 |------|---------|--------|
 | **1. Ingest Observations** | `python3 pipelines/ingest_obs.py` | Database: `observations`, `stations` |
-| **2. Reset (if needed)** | `python3 scripts/reset_snapshots.py` | Clears `weather_features`, resets flags |
-| **3. Extract HRRR** | `python3 pipelines/extract_hrrr.py` | Database: `weather_features` |
-| **4. Generate Training Set** | `python3 pipelines/generate_training_set.py` | `data/training_set_mo.csv` |
-| **5. Feature Engineering** | `python3 pipelines/prepare_features.py` | `data/final_training_data.csv` + plot |
-| **6. Train Model** | `python3 pipelines/train_model.py` | `models/fuel_moisture_model.json` |
-| **7. Test Predictions** | `python3 pipelines/predict.py` | Live predictions |
+| **2. Index Stations (Optional)** | `python3 pipelines/index_stations.py` | Database: station grid indices |
+| **3. Create Snapshots (New Data)** | `python3 scripts/create_snapshots.py` | Database: new snapshot entries |
+| **4. Reset (if re-processing)** | `python3 scripts/reset_snapshots.py` | Clears `weather_features`, resets flags |
+| **5. Extract HRRR** | `python3 pipelines/extract_hrrr.py` | Database: `weather_features` |
+| **6. Generate Training Set** | `python3 pipelines/generate_training_set.py` | `data/training_set_mo.csv` |
+| **7. Feature Engineering** | `python3 pipelines/prepare_features.py` | `data/final_training_data.csv` + plot |
+| **8. Train Model** | `python3 pipelines/train_model.py` | `models/fuel_moisture_model.json` |
+| **9. Test Predictions** | `python3 pipelines/predict.py` | Live predictions |
 
 ---
 
@@ -199,10 +223,10 @@ print(df[['temp_c', 'rel_humidity', 'target_fm']].corr())"
 - Ensure `extract_hrrr.py` ran successfully
 - Verify HRRR files exist in `cache/hrrr/` for those dates
 
-**"No precipitation features found"**
-- Re-run `extract_hrrr.py` to get precipitation data
-- Check that HRRR files contain APCP variable
-- Run `python3 scripts/reset_snapshots.py` first if needed
+**"Model file not found" when running forecasts**
+- Re-run `python3 pipelines/train_model.py` - the latest version fixes the save/archive conflict
+- Check that `models/fuel_moisture_model.json` exists after training
+- If still missing, check the archive directory for the latest model file
 
 **"Model feature mismatch"**
 - Model was trained with different features than you're using

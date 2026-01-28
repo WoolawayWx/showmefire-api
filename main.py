@@ -5,7 +5,6 @@ from services.synoptic import (
     get_station_data, 
     fetch_historical_station_data, 
     save_raw_data_to_archive, 
-    get_raw_data_stats,
     fetch_synoptic_data
 )
 from services.timeseries import get_timeseries_data, fetchtimeseriesdata
@@ -577,6 +576,8 @@ async def get_morning_fuel_moisture():
             detail=f"Error fetching fuel moisture data: {str(e)}"
         )
 
+
+
 @app.get("/api/fuel-moisture/morning/debug")
 async def get_morning_fuel_moisture_debug(
     date: Optional[str] = None,
@@ -632,6 +633,133 @@ async def get_morning_fuel_moisture_debug(
     except Exception as e:
         logger.error(f"Error in debug endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/models/history")
+async def get_model_history():
+    """
+    Get the history of all trained models including archived versions.
+    
+    Returns: Dictionary containing current models and their history
+    """
+    try:
+        config_path = Path("models/config.json")
+        archive_dir = Path("models/archive")
+        
+        if not config_path.exists():
+            return {"success": False, "error": "No model configuration found"}
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Get archived files
+        archived_models = []
+        if archive_dir.exists():
+            for file_path in archive_dir.glob("*"):
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    archived_models.append({
+                        "filename": file_path.name,
+                        "path": str(file_path),
+                        "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    })
+        
+        # Sort archived models by modification time (newest first)
+        archived_models.sort(key=lambda x: x['modified'], reverse=True)
+        
+        return {
+            "success": True,
+            "current_models": config,
+            "archived_models": archived_models,
+            "archive_count": len(archived_models),
+            "total_history_entries": sum(len(model.get('history', [])) for model in config.values() if isinstance(model, dict))
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving model history: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving model history: {str(e)}")
+
+@app.get("/api/models/formulas")
+async def get_model_formulas():
+    """
+    Get the formulas and criteria used by the fuel moisture and fire danger models.
+    
+    Returns: Dictionary containing formulas for both models
+    """
+    try:
+        fuel_moisture_formula = {
+            "model_type": "XGBoost Regression",
+            "description": "Machine learning model that predicts 10-hour fuel moisture percentage",
+            "features": [
+                "temp_c - Temperature in Celsius",
+                "rel_humidity - Relative humidity percentage", 
+                "wind_speed_ms - Wind speed in meters per second",
+                "hour - Hour of day (0-23)",
+                "month - Month of year (1-12)",
+                "emc_baseline - Equilibrium moisture content (Simard 1968: 0.03229 + 0.281073*RH - 0.000578*RH*Temp)",
+                "temp_mean_3h - 3-hour rolling mean temperature",
+                "rh_mean_3h - 3-hour rolling mean relative humidity",
+                "temp_mean_6h - 6-hour rolling mean temperature", 
+                "rh_mean_6h - 6-hour rolling mean relative humidity",
+                "precip_1h - 1-hour precipitation accumulation (mm)",
+                "precip_3h - 3-hour precipitation accumulation (mm)",
+                "precip_6h - 6-hour precipitation accumulation (mm)",
+                "precip_24h - 24-hour precipitation accumulation (mm)",
+                "hours_since_rain - Hours since last significant rain (>0.1mm)"
+            ],
+            "output": "Predicted 10-hour fuel moisture percentage (1-40%)",
+            "baseline_equation": "EMC = 0.03229 + (0.281073 × RH) - (0.000578 × RH × Temp)",
+            "fallback_estimate": "FM ≈ 3 + 0.25 × RH (clamped to 3-30%)"
+        }
+        
+        fire_danger_formula = {
+            "model_type": "Criteria-based Classification",
+            "description": "Fire danger classification based on Missouri fire weather criteria",
+            "criteria_levels": [
+                {
+                    "level": "Low",
+                    "score": 0,
+                    "condition": "FM ≥ 15% (Fuels too wet to carry fire effectively)"
+                },
+                {
+                    "level": "Moderate", 
+                    "score": 1,
+                    "condition": "9% ≤ FM < 15% AND RH < 50% AND Wind ≥ 10 kts"
+                },
+                {
+                    "level": "Elevated",
+                    "score": 2, 
+                    "condition": "FM < 9% AND (RH < 45% OR Wind ≥ 10 kts)"
+                },
+                {
+                    "level": "Critical",
+                    "score": 3,
+                    "condition": "FM < 9% AND RH < 25% AND Wind ≥ 15 kts"
+                },
+                {
+                    "level": "Extreme",
+                    "score": 4,
+                    "condition": "FM < 7% AND RH < 20% AND Wind ≥ 30 kts"
+                }
+            ],
+            "input_variables": {
+                "FM": "10-hour fuel moisture percentage",
+                "RH": "Relative humidity percentage", 
+                "Wind": "Wind speed in knots (kts)"
+            },
+            "output": "Fire danger level (0-4) corresponding to Low-Extreme",
+            "evaluation_order": "Extreme → Critical → Elevated → Moderate → Low (most restrictive first)"
+        }
+        
+        return {
+            "success": True,
+            "fuel_moisture_model": fuel_moisture_formula,
+            "fire_danger_model": fire_danger_formula,
+            "last_updated": "2024-01-28",
+            "version": "1.0"
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving model formulas: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving model formulas: {str(e)}")
 
 if __name__ == '__main__':
     import uvicorn

@@ -392,6 +392,49 @@ def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states
 
     return filepath
 
+
+async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=None):
+    """
+    Fetch fuel moisture observations at a specific time from RAWS stations.
+    
+    Args:
+        target_time: datetime object for the target observation time (UTC). 
+                    If None, defaults to 7 AM Central Time today.
+        states: List of state abbreviations. If None, defaults to MO and surrounding states.
+        networks: List of network IDs. If None, defaults to [2] (RAWS).
+    
+    Returns: Dict with fuel moisture observations from stations near the target time
+    """
+    import pytz
+    
+    # Set defaults
+    if target_time is None:
+        # Default to 7 AM Central Time today
+        central = pytz.timezone('US/Central')
+        now_central = datetime.now(central)
+        target_time = central.localize(datetime(now_central.year, now_central.month, now_central.day, 7, 0, 0))
+        target_time = target_time.astimezone(pytz.UTC)
+    
+    if states is None:
+        states = ["MO", "OK", "AR", "TN", "KY", "IL", "IA", "NE", "KS"]
+    
+    if networks is None:
+        networks = [2]  # RAWS network
+    
+    # Fetch data for a 2-hour window around target time
+    start_time = target_time - timedelta(hours=1)
+    end_time = target_time + timedelta(hours=1)
+    
+    logger.info(f"Fetching fuel moisture data around {target_time} from {len(states)} states, networks: {networks}")
+    
+    # Fetch historical data
+    data = await fetch_historical_station_data(
+        states=states,
+        networks=networks,
+        start_time=start_time,
+        end_time=end_time
+    )
+    
     # Log the response for debugging
     logger.info(f"API Response: SUMMARY={data.get('SUMMARY', {})}")
     if data.get("STATION"):

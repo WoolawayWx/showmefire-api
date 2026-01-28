@@ -107,7 +107,7 @@ def run_miner():
             logger.info(f"✅ Successfully finished all stations for: {row['snapshot_date']} (snapshot id: {row['id']})")
 
         except Exception as e:
-            logger.error(f"Error processing {row.get('hrrr_filename', 'N/A')}: {e}", exc_info=True)
+            logger.error(f"Error processing {row['hrrr_filename']}: {e}", exc_info=True)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
