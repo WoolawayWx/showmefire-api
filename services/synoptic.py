@@ -293,7 +293,7 @@ async def fetch_historical_station_data(states=None, days_back=1, networks=None,
     return data
 
 
-async def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data"):
+def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states=None, networks=None, obs_start_utc=None, obs_end_utc=None):
     """
     Fetch and save raw API response to archive.
     Saves as JSON for later processing.
@@ -301,6 +301,10 @@ async def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data"):
     Args:
         days_back: Number of days to fetch
         archive_dir: Directory to save raw data
+        states: List of state abbreviations
+        networks: List of network IDs
+        obs_start_utc: (optional) UTC datetime for filtering obs window
+        obs_end_utc: (optional) UTC datetime for filtering obs window
     
     Returns: Path to saved file
     """
@@ -309,136 +313,85 @@ async def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data"):
     
     # Fetch data
     logger.info(f"Fetching {days_back} days of raw data...")
-    api_response = await fetch_historical_station_data(days_back=days_back)
+    import asyncio
+    try:
+        api_response = asyncio.run(fetch_historical_station_data(
+            days_back=days_back,
+            states=states,
+            networks=networks
+        ))
+    except RuntimeError:
+        # If already in an event loop (e.g. Jupyter), use create_task
+        import nest_asyncio
+        nest_asyncio.apply()
+        loop = asyncio.get_event_loop()
+        api_response = loop.run_until_complete(fetch_historical_station_data(
+            days_back=days_back,
+            states=states,
+            networks=networks
+        ))
+
+    # If obs_start_utc and obs_end_utc are provided, filter observations
+    if obs_start_utc is not None and obs_end_utc is not None:
+        for station in api_response["STATION"]:
+            obs = station.get("OBSERVATIONS", {})
+            times = obs.get("date_time", [])
+            keep_indices = []
+            for idx, t in enumerate(times):
+                try:
+                    ts = pd.Timestamp(t)
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize('UTC')
+                    else:
+                        ts = ts.tz_convert('UTC')
+                    if obs_start_utc <= ts <= obs_end_utc:
+                        keep_indices.append(idx)
+                except Exception:
+                    continue
+            # Filter all observation arrays to only keep these indices
+            for key in list(obs.keys()):
+                if isinstance(obs[key], list) and len(obs[key]) == len(times):
+                    obs[key] = [obs[key][i] for i in keep_indices]
+            obs["date_time"] = [times[i] for i in keep_indices]
+            station["OBSERVATIONS"] = obs
     
     if not api_response.get("STATION"):
         logger.warning("No data received from API")
         return None
-    
-    # Generate filename with date range
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=days_back)
-    filename = f"raw_data_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.json"
+
+    # Ensure all date_time are in UTC ISO8601 format with Z
+    for station in api_response["STATION"]:
+        obs = station.get("OBSERVATIONS", {})
+        times = obs.get("date_time", [])
+        new_times = []
+        for t in times:
+            if isinstance(t, str):
+                # Parse the time, assuming it's UTC
+                dt = datetime.fromisoformat(t.replace('Z', '+00:00'))
+                new_times.append(dt.strftime('%Y-%m-%dT%H:%M:%SZ'))
+            else:
+                new_times.append(t)
+        obs["date_time"] = new_times
+
+    # Always use US/Central time for filename and time fields
+    import pytz
+    central = pytz.timezone('US/Central')
+    now_central = datetime.now(central)
+    filename = f"raw_data_{now_central.strftime('%Y%m%d')}.json"
     filepath = archive_path / filename
-    
+
+    # Optionally, add a top-level field to indicate the archive time in Central
+    api_response['_archive_time_central'] = now_central.strftime('%Y-%m-%dT%H:%M:%S')
+
     # Save to JSON
     with open(filepath, 'w') as f:
         json.dump(api_response, f, indent=2)
-    
+
     station_count = len(api_response.get("STATION", []))
     logger.info(f"Saved raw data ({station_count} stations) to {filepath}")
-    
+
     return filepath
 
-
-def get_raw_data_stats(api_response):
-    """
-    Extract statistics from raw API response.
-    Useful for API endpoint to show data summary.
-    
-    Returns: Dictionary with summary statistics
-    """
-    if not api_response.get("STATION"):
-        return {"error": "No station data"}
-    
-    stations = api_response["STATION"]
-    stats = {
-        "total_stations": len(stations),
-        "stations_by_network": {},
-        "stations_by_state": {},
-        "date_range": {
-            "start": api_response.get("_metadata", {}).get("start_time"),
-            "end": api_response.get("_metadata", {}).get("end_time")
-        },
-        "variable_coverage": {
-            "fuel_moisture": 0,
-            "relative_humidity": 0,
-            "air_temp": 0,
-            "wind_speed": 0,
-            "solar_radiation": 0
-        },
-        "total_observations": 0
-    }
-    
-    for station in stations:
-        # Count by network
-        network = station.get("MNET_SHORTNAME", "Unknown")
-        stats["stations_by_network"][network] = stats["stations_by_network"].get(network, 0) + 1
-        
-        # Count by state
-        state = station.get("STATE", "Unknown")
-        stats["stations_by_state"][state] = stats["stations_by_state"].get(state, 0) + 1
-        
-        # Check variable coverage
-        obs = station.get("OBSERVATIONS", {})
-        if obs.get("fuel_moisture_set_1"):
-            stats["variable_coverage"]["fuel_moisture"] += 1
-        if obs.get("relative_humidity_set_1"):
-            stats["variable_coverage"]["relative_humidity"] += 1
-        if obs.get("air_temp_set_1"):
-            stats["variable_coverage"]["air_temp"] += 1
-        if obs.get("wind_speed_set_1"):
-            stats["variable_coverage"]["wind_speed"] += 1
-        if obs.get("solar_radiation_set_1"):
-            stats["variable_coverage"]["solar_radiation"] += 1
-        
-        # Count total observations
-        if obs.get("date_time"):
-            stats["total_observations"] += len(obs["date_time"])
-    
-    return stats
-
-
-async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=None):
-    """
-    Fetch fuel moisture observations near a specific time using nearesttime endpoint.
-    Defaults to 7 AM Central Time of the current day.
-    
-    Args:
-        target_time: datetime object in UTC (if None, uses 7 AM CT today)
-        states: List of state abbreviations (default: MO and surrounding states)
-        networks: List of network IDs (default: [2] for RAWS)
-    
-    Returns: Dictionary with station fuel moisture data
-    """
-    if states is None:
-        states = ["MO", "OK", "AR", "TN", "KY", "IL", "IA", "NE", "KS"]
-    
-    if networks is None:
-        networks = [2]  # Network 2 for RAWS stations with fuel moisture
-    
-    # If no target time provided, use 7 AM Central Time today
-    if target_time is None:
-        from pytz import timezone as pytz_timezone
-        central = pytz_timezone('America/Chicago')
-        now_central = datetime.now(central)
-        # Set to 7 AM today in Central Time
-        target_central = now_central.replace(hour=7, minute=0, second=0, microsecond=0)
-        # Convert to UTC
-        target_time = target_central.astimezone(pytz_timezone('UTC'))
-    
-    # Format time for Synoptic API (YYYYMMDDhhmm)
-    attime = target_time.strftime("%Y%m%d%H%M")
-    
-    url = "https://api.synopticdata.com/v2/stations/nearesttime"
-    params = {
-        "token": SYNOPTIC_API_TOKEN,
-        "state": ",".join(states),
-        "attime": attime,
-        "within": "60",  # Within 60 minutes of target time
-        "network": ",".join(map(str, networks)),
-        "vars": "fuel_moisture",
-        "obtimezone": "local"
-    }
-    
-    logger.info(f"Fetching fuel moisture data near {attime} local time ({len(states)} states, networks: {networks})")
-    logger.info(f"Full URL: {url} with params: {params}")
-    
-    async with aiohttp.ClientSession() as session:
-        response = await session.get(url, params=params, timeout=60)
-        response.raise_for_status()
-        data = await response.json()
-    
     # Log the response for debugging
     logger.info(f"API Response: SUMMARY={data.get('SUMMARY', {})}")
     if data.get("STATION"):

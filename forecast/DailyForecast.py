@@ -640,14 +640,18 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     # Initialize JSON data structure for history
     # Convert dates to US/Central
-    run_date_ct = None
+    import pytz
+    central = pytz.timezone('US/Central')
     if run_date:
-        run_date_ct = run_date.tz_localize('UTC').tz_convert('US/Central') if run_date.tzinfo is None else run_date.tz_convert('US/Central')
+        if hasattr(run_date, 'tzinfo') and run_date.tzinfo is not None:
+            run_date_ct = run_date.tz_convert(central)
+        else:
+            run_date_ct = central.localize(run_date)
     else:
-        run_date_ct = pd.Timestamp.now(tz='US/Central')
+        run_date_ct = pd.Timestamp.now(tz=central)
 
     json_output_data = {
-       "run_date": run_date_ct.strftime('%Y-%m-%dT%H:00:00'),
+       "run_date": run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%dT%H:%M:%SZ'),
        "stations": {}
     }
     
@@ -723,13 +727,12 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             run_time_str = base_time.strftime('%Y-%m-%d %H:%M:%S')
             valid_time_str = forecast_time.strftime('%Y-%m-%d %H:%M:%S')
             
-            # Format suitable for JSON (ISO 8601) - Use Central Time
-            if forecast_time.tzinfo is None:
-                forecast_time_ct = forecast_time.tz_localize('UTC').tz_convert('US/Central')
+            # Always save forecast times in US/Central
+            if hasattr(forecast_time, 'tzinfo') and forecast_time.tzinfo is not None:
+                forecast_time_ct = forecast_time.tz_convert(central)
             else:
-                forecast_time_ct = forecast_time.tz_convert('US/Central')
-            
-            json_valid_time = forecast_time_ct.strftime('%Y-%m-%dT%H:00:00')
+                forecast_time_ct = central.localize(forecast_time)
+            json_valid_time = forecast_time.strftime('%Y-%m-%dT%H:%M:%SZ')
 
             for st in station_indices:
                 sx, sy = st['x'], st['y']
@@ -740,6 +743,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_ws = float(ws_ms[sy, sx])
                     val_precip = float(precip_mm[sy, sx])
                     val_fm = float(fm[sy, sx])
+                    val_risk = int(risk[sy, sx])
 
                     forecast_rows.append((
                         st['station_id'],
@@ -767,7 +771,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "rh": round(val_rh, 1),
                         "wind_speed_ms": round(val_ws, 2),
                         "precip_mm": round(val_precip, 2),
-                        "fuel_moisture": round(val_fm, 1)
+                        "fuel_moisture": round(val_fm, 1),
+                        "fire_danger": val_risk
                     })
             
             if forecast_rows:
