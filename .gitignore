@@ -19,3 +19,5 @@ status.json
 banner_config.json
 data/*
 public/rss.xml
+analysis/images
+endofday_sample.json

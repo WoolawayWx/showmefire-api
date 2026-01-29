@@ -99,6 +99,99 @@ def log_memory_usage(note=""):
     process = psutil.Process(os.getpid())
     mem_mb = process.memory_info().rss / 1024 / 1024
     logger.info(f"[MEM] {note} RSS={mem_mb:.1f} MB")
+    
+def validate_and_convert_temperature(temp_values, expected_unit='celsius', source='HRRR'):
+    """
+    Intelligently detects temperature units and converts to Celsius
+    
+    Detection logic:
+    - Kelvin: values typically 200-350K
+    - Fahrenheit: values typically 0-120°F
+    - Celsius: values typically -40 to 50°C
+    """
+    temp_mean = np.nanmean(temp_values)
+    temp_min = np.nanmin(temp_values)
+    temp_max = np.nanmax(temp_values)
+    
+    # Detect if temperature is in Kelvin
+    if temp_min > 200 and temp_max < 350:
+        logger.info(f"  → Detected Kelvin, converting to Celsius")
+        return temp_values - 273.15
+    
+    # Detect if temperature is in Fahrenheit
+    elif temp_min > -20 and temp_max > 60 and temp_mean > 40:
+        logger.info(f"  → Detected Fahrenheit, converting to Celsius")
+        return (temp_values - 32) * 5/9
+    
+    # Already in Celsius
+    else:
+        logger.info(f"  → Already in Celsius")
+        return temp_values
+    
+def validate_and_convert_wind_speed(wind_values, expected_unit='ms', source='HRRR'):
+    """
+    Intelligently detects wind speed units and converts to m/s
+    Returns both m/s and knots
+    
+    Detection logic:
+    - m/s: typical range 0-40 m/s
+    - knots: typical range 0-80 kts  
+    - mph: typical range 0-90 mph
+    """
+    wind_mean = np.nanmean(wind_values)
+    wind_max = np.nanmax(wind_values)
+    
+    # Detect if already in m/s
+    if wind_max < 50 and wind_mean < 15:
+        wind_ms = wind_values
+    
+    # Detect if in knots
+    elif wind_max < 100 and wind_mean < 30:
+        wind_ms = wind_values * 0.514444  # knots to m/s
+    
+    # Detect if in mph
+    elif wind_max < 150 and wind_mean < 40:
+        wind_ms = wind_values * 0.44704  # mph to m/s
+    
+    # Convert to knots for fire danger calculations
+    wind_kts = wind_ms * 1.94384
+    
+    return wind_ms, wind_kts
+
+def validate_relative_humidity(rh_values, source='HRRR'):
+    """
+    Validates RH is in percentage (0-100), not fraction (0-1)
+    
+    Detection logic:
+    - Fraction (0-1): max <= 1.0
+    - Percentage (0-100): typical range 0-100
+    """
+    rh_mean = np.nanmean(rh_values)
+    rh_min = np.nanmin(rh_values)
+    rh_max = np.nanmax(rh_values)
+    
+    # Detect if in fraction (0-1)
+    if rh_max <= 1.0 and rh_mean < 1.0:
+        logger.info(f"  → Detected fraction (0-1), converting to percentage")
+        return rh_values * 100.0
+
+    # Already in percentage
+    elif rh_min >= 0 and rh_max <= 100:
+        logger.info(f"  → Already in percentage (0-100)")
+        return rh_values
+
+    # Over 100% - needs clipping
+    elif rh_max > 100:
+        logger.warning(f"  → RH values exceed 100%, clipping")
+        return np.clip(rh_values, 0, 100)
+
+    # Fallback: uncertain units, try best-effort conversion
+    else:
+        logger.warning(f"  → Uncertain RH units (mean={rh_mean:.2f}, min={rh_min:.2f}, max={rh_max:.2f}); attempting best-effort conversion")
+        if rh_mean < 1.5:
+            return np.clip(rh_values * 100.0, 0, 100)
+        else:
+            return np.clip(rh_values, 0, 100)
 
 
 def calculate_fire_danger(fm, rh, wind_kts):
@@ -537,32 +630,39 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     swe_data, swe_lon, swe_lat = get_snodas_swe_grid(swe_bbox, run_date)
     
     if swe_data is not None:
-         # Interpolate to model grid
-         swe_grid = interpolate_swe_to_grid(swe_data, swe_lon, swe_lat, grid_lon_mesh, grid_lat_mesh)
-         
-         # Mask SWE to Missouri boundaries
-         SCRIPT_DIR = Path(__file__).resolve().parent
-         PROJECT_DIR = SCRIPT_DIR.parent
-         missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-         data_crs = ccrs.PlateCarree()
-         if missouriborder.crs != data_crs.proj4_init:
-             missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-         
-         if not missouriborder.empty:
-             from shapely.geometry import Point
-             from shapely.prepared import prep
-             
-             missouri_geom = missouriborder.geometry.iloc[0]
-             missouri_buffered = missouri_geom.buffer(0.01)
-             prepared_geom = prep(missouri_buffered)
-             
-             points_flat = np.column_stack([grid_lon_mesh.ravel(), grid_lat_mesh.ravel()])
-             mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
-             mask = mask_flat.reshape(grid_lon_mesh.shape)
-             
-             swe_grid = np.where(mask, swe_grid, 0.0)  # Set to 0 outside Missouri
+        # Interpolate to model grid
+        swe_grid = interpolate_swe_to_grid(swe_data, swe_lon, swe_lat, grid_lon_mesh, grid_lat_mesh)
+
+        # Prepare Missouri mask (do not apply to swe_grid used for calculations)
+        SCRIPT_DIR = Path(__file__).resolve().parent
+        PROJECT_DIR = SCRIPT_DIR.parent
+        missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+        data_crs = ccrs.PlateCarree()
+        if missouriborder.crs != data_crs.proj4_init:
+            missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+
+        if not missouriborder.empty:
+            from shapely.geometry import Point
+            from shapely.prepared import prep
+
+            missouri_geom = missouriborder.geometry.iloc[0]
+            missouri_buffered = missouri_geom.buffer(0.01)
+            prepared_geom = prep(missouri_buffered)
+
+            points_flat = np.column_stack([grid_lon_mesh.ravel(), grid_lat_mesh.ravel()])
+            mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
+            mask = mask_flat.reshape(grid_lon_mesh.shape)
+
+            # Keep full SWE grid for calculations (square area). Do NOT mask here.
+            # Masking to Missouri will be applied later only for plotting/export.
+            # However, keep a masked copy available if needed for maps.
+            try:
+                swe_grid_for_map = np.where(mask, swe_grid, np.nan)
+                logger.info("Loaded SWE grid (full extent) — will apply Missouri mask only for maps")
+            except Exception:
+                swe_grid_for_map = None
     else:
-         swe_grid = None
+        swe_grid = None
     
     # Process each forecast hour
     hourly_fm = []
@@ -658,11 +758,20 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     for i, time_step in enumerate(ds_full.step):
         ds_hour = ds_full.sel(step=time_step)
         
-        # Extract forecast variables
-        rh = ds_hour['r2'].values
-        temp = ds_hour['t2m'].values - 273.15  # Convert K to C
+        # Extract forecast variables and validate/convert units
+        # Relative Humidity - validate it's 0-100 not 0-1
+        rh_raw = ds_hour['r2'].values
+        rh = validate_relative_humidity(rh_raw, source='HRRR')
+
+        # Temperature - validate and convert to Celsius
+        temp_raw = ds_hour['t2m'].values
+        temp = validate_and_convert_temperature(temp_raw, expected_unit='kelvin', source='HRRR')
+
+        # Wind components and magnitude - validate units and return both m/s and knots
         u = ds_hour['u10'].values
         v = ds_hour['v10'].values
+        wind_magnitude = np.sqrt(u**2 + v**2)
+        ws_ms, ws_kts = validate_and_convert_wind_speed(wind_magnitude, expected_unit='ms', source='HRRR')
         
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
@@ -677,8 +786,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             except:
                 pass
         
-        ws_kts = np.sqrt(u**2 + v**2) * 1.94384
-        ws_ms = np.sqrt(u**2 + v**2)
+        # ws_ms and ws_kts are provided by validation above
         
         # Get time info
         time_step_value = time_step.values
@@ -892,17 +1000,17 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
         swe_flat = swe_grid.flatten()
         # Convert SWE from mm to inches (1 mm = 0.03937 inches)
         swe_inches = swe_flat * 0.03937
-        
-        # Threshold: 0.04 inches of water equivalent (approx 1mm)
-        has_snow = swe_inches > 0.04
-        
+
+        # Threshold: treat any measurable SWE > 0.01 inches as snow
+        # (previously 0.04 which ignored light but impactful snow)
+        snow_threshold_in = 0.01
+        has_snow = swe_inches > snow_threshold_in
+
         if np.any(has_snow):
             # 1. Reset hours since rain to 0 where snow is present (continuous moisture source)
             hours_since_rain[has_snow] = 0
-            
+
             # 2. Treat SWE as available moisture/precip for the accumulation features
-            # Taking maximum ensures we don't double count if it's actively raining on snow,
-            # but ensures the model sees moisture even if not currently raining.
             precip_24h = np.maximum(precip_24h, swe_inches)
             precip_6h = np.maximum(precip_6h, swe_inches)
             precip_3h = np.maximum(precip_3h, swe_inches)
@@ -919,7 +1027,22 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     preds = FM_MODEL.predict(dmat)
     
     # 4. Reshape back to the original 2D map
-    return preds.reshape(shape)
+    preds_2d = preds.reshape(shape)
+
+    # HARD OVERRIDE FOR SNOW: If SWE is present, force fuels to be saturated
+    # (e.g., 30% fuel moisture) so fire danger becomes zero in those cells.
+    try:
+        if swe_grid is not None:
+            swe_inches_2d = (swe_grid * 0.03937)
+            snow_mask = swe_inches_2d > snow_threshold_in
+            if np.any(snow_mask):
+                logger.info(f"  → Applying SWE fuel moisture override to {np.count_nonzero(snow_mask)} cells (threshold={snow_threshold_in} in)")
+                preds_2d[snow_mask] = 30.0
+    except Exception:
+        # Be conservative: if anything fails here, return predictions unchanged
+        logger.exception("Failed to apply SWE override to fuel moisture predictions")
+
+    return preds_2d
 
 def generate_complete_forecast():
     logger.info("Starting complete fire weather forecast generation.")
@@ -1367,11 +1490,13 @@ def generate_complete_forecast():
         f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
         "Minimum 10-Hour Fuel Moisture (10:00–21:00 CT)\n\n"
         "Critical Thresholds:\n"
-        "< 7%: Extremely Dry - Extreme fire behavior possible\n"
-        "7-9%: Very Dry - Critical fire behavior likely\n"
-        "9-15%: Dry - Elevated fire behavior expected\n"
-        "15-20%: Moderate - Fire activity possible\n"
-        "> 20%: Moist - Fuels less receptive to fire\n\n"
+        "< 7%: Extremely dry — potential for extreme fire behavior\n"
+        "7–9%: Very dry — critical fire behavior likely\n"
+        "9–15%: Dry — elevated fire behavior expected\n"
+        "15–20%: Moderate — some fire activity possible\n"
+        "> 20%: Moist — fuels much less receptive to fire\n\n"
+        "Areas with snow cover will have substantially higher fuel moisture\n"
+        "and greatly reduced ignition potential.\n\n"
         "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR

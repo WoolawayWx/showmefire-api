@@ -19,8 +19,14 @@ station_data = {
 load_dotenv()
 SYNOPTIC_API_TOKEN = os.getenv("SYNOPTIC_API_TOKEN")
 
+from core.ignored_stations import IGNORED_STATIONS
+
 def flatten_station_data(weather_station, metadata_station):
     """Flatten and deduplicate station data for optimized storage"""
+    # Skip ignored stations early
+    stid_check = weather_station.get("STID") or weather_station.get("ID")
+    if stid_check and stid_check in IGNORED_STATIONS:
+        return None
     
     station = {
         "id": weather_station.get("ID"),
@@ -142,9 +148,13 @@ async def fetch_synoptic_data():
         combined_stations = []
         if weather_json.get("STATION"):
             for station in weather_json["STATION"]:
+                # Skip ignored stations
+                if (station.get("STID") or station.get("ID")) in IGNORED_STATIONS:
+                    continue
                 stid = station.get("STID")
                 flattened = flatten_station_data(station, metadata_lookup.get(stid, {}))
-                combined_stations.append(flattened)
+                if flattened is not None:
+                    combined_stations.append(flattened)
         
         station_data["stations"] = combined_stations
         station_data["count"] = len(combined_stations)
@@ -218,7 +228,8 @@ async def fetch_raws_stations_multi_state(states=None):
             # Only include RAWS stations (network SHORTNAME == 'RAWS')
             if meta.get("SHORTNAME") == "RAWS":
                 flattened = flatten_station_data(station, meta)
-                raws_stations.append(flattened)
+                if flattened is not None:
+                    raws_stations.append(flattened)
 
     return raws_stations
 
@@ -384,6 +395,12 @@ def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states
     api_response['_archive_time_central'] = now_central.strftime('%Y-%m-%dT%H:%M:%S')
 
     # Save to JSON
+    # Remove ignored stations from the saved archive
+    try:
+        api_response["STATION"] = [s for s in api_response.get("STATION", []) if (s.get("STID") or s.get("ID")) not in IGNORED_STATIONS]
+    except Exception:
+        pass
+
     with open(filepath, 'w') as f:
         json.dump(api_response, f, indent=2)
 
