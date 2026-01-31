@@ -618,10 +618,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
         print(f"Initialized from RAWS observations: FM range {np.nanmin(initial_fm):.1f}-{np.nanmax(initial_fm):.1f}%")
     else:
-        # Fallback: Use conservative default based on recent weather
-        # You could make this more sophisticated by looking at recent RH trends
-        initial_fm = np.full_like(grid_lon_mesh, 12.0)
-        print("Warning: Using default FM=12% (no RAWS data available)")
+        logger.error("Insufficient RAWS fuel moisture observations (need >=3). Aborting forecast.")
+        raise RuntimeError("Insufficient RAWS fuel moisture observations to initialize forecast. Aborting.")
     
     # --- FETCH SWE DATA ---
     # Define extent same as map generation: (-95.8, -89.1, 35.8, 40.8)
@@ -738,8 +736,6 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         logger.error(f"Failed to load station indices: {e}")
         station_indices = []
 
-    # Initialize JSON data structure for history
-    # Convert dates to US/Central
     import pytz
     central = pytz.timezone('US/Central')
     if run_date:
@@ -801,7 +797,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
-        fm = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history, swe_grid=swe_grid)
+        fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history, swe_grid=swe_grid)
         
         # Update buffers for the next hour
         temp_history.append(temp)
@@ -820,11 +816,17 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         hourly_ws.append(ws_kts)
         hourly_fm.append(fm)
         
-        # Calculate fire danger # Import your existing function
+        # Calculate fire danger
+        # Apply snow mask: areas with snow get LOW fire danger regardless of conditions
         risk = np.zeros_like(rh, dtype=int)
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
-                risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+                if snow_mask[ii, jj]:
+                    # Snow on ground - fire danger is LOW
+                    risk[ii, jj] = 0
+                else:
+                    # Normal fire danger calculation
+                    risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
         hourly_risks.append(risk)
 
         # Save verification data
@@ -841,7 +843,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             else:
                 forecast_time_ct = central.localize(forecast_time)
             json_valid_time = forecast_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-
+            
             for st in station_indices:
                 sx, sy = st['x'], st['y']
                 if 0 <= sx < fm.shape[1] and 0 <= sy < fm.shape[0]:
@@ -918,6 +920,24 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid
 
 def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None, swe_grid=None):
+    """
+    Predict fuel moisture across a grid using XGBoost model.
+    
+    Args:
+        temp_grid: Temperature grid (Celsius)
+        rh_grid: Relative humidity grid (%)
+        ws_grid: Wind speed grid (m/s)
+        hour: Hour of day (0-23)
+        month: Month (1-12)
+        t_hist: List of past temperature grids for rolling means
+        rh_hist: List of past RH grids for rolling means
+        precip_hist: List of past precipitation grids
+        swe_grid: Snow water equivalent grid (mm) - used to create snow mask
+    
+    Returns:
+        preds_2d: Predicted fuel moisture grid (%)
+        snow_mask: Boolean mask indicating snow-covered areas
+    """
     # 1. Flatten the grids into 1D arrays
     shape = temp_grid.shape
     t_flat = temp_grid.flatten()
@@ -1003,7 +1023,7 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
 
         # Threshold: treat any measurable SWE > 0.01 inches as snow
         # (previously 0.04 which ignored light but impactful snow)
-        snow_threshold_in = 0.01
+        snow_threshold_in = 0.04
         has_snow = swe_inches > snow_threshold_in
 
         if np.any(has_snow):
@@ -1029,20 +1049,20 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     # 4. Reshape back to the original 2D map
     preds_2d = preds.reshape(shape)
 
-    # HARD OVERRIDE FOR SNOW: If SWE is present, force fuels to be saturated
-    # (e.g., 30% fuel moisture) so fire danger becomes zero in those cells.
+    # CREATE SNOW MASK (but don't override FM predictions)
+    # Snow mask will be used to suppress fire danger, not to change fuel moisture
+    snow_mask = np.zeros(shape, dtype=bool)
     try:
         if swe_grid is not None:
             swe_inches_2d = (swe_grid * 0.03937)
             snow_mask = swe_inches_2d > snow_threshold_in
             if np.any(snow_mask):
-                logger.info(f"  → Applying SWE fuel moisture override to {np.count_nonzero(snow_mask)} cells (threshold={snow_threshold_in} in)")
-                preds_2d[snow_mask] = 30.0
+                logger.info(f"  → Created snow mask for {np.count_nonzero(snow_mask)} cells (threshold={snow_threshold_in} in)")
+                logger.info(f"  → Snow will suppress fire danger but NOT override fuel moisture predictions")
     except Exception:
-        # Be conservative: if anything fails here, return predictions unchanged
-        logger.exception("Failed to apply SWE override to fuel moisture predictions")
+        logger.exception("Failed to create snow mask")
 
-    return preds_2d
+    return preds_2d, snow_mask
 
 def generate_complete_forecast():
     logger.info("Starting complete fire weather forecast generation.")
@@ -1182,6 +1202,51 @@ def generate_complete_forecast():
 
     if lon.max() > 180:
         lon = np.where(lon > 180, lon - 360, lon)
+        
+    # Subset to Missouri region
+    mo_bounds = {'lat': (35.8, 40.8), 'lon': (-95.8, -89.1)}
+
+    # Find indices for Missouri region
+    lat_mask = (lat >= mo_bounds['lat'][0]) & (lat <= mo_bounds['lat'][1])
+    lon_mask = (lon >= mo_bounds['lon'][0]) & (lon <= mo_bounds['lon'][1])
+
+    if lon.ndim == 2:
+        # Already a mesh - need to find the bounding box
+        combined_mask = lat_mask & lon_mask
+        
+        # Find the rows and columns that contain Missouri data
+        rows_with_data = np.any(combined_mask, axis=1)
+        cols_with_data = np.any(combined_mask, axis=0)
+        
+        row_indices = np.where(rows_with_data)[0]
+        col_indices = np.where(cols_with_data)[0]
+        
+        if len(row_indices) > 0 and len(col_indices) > 0:
+            # Get min/max to form bounding box
+            row_min, row_max = row_indices[0], row_indices[-1] + 1
+            col_min, col_max = col_indices[0], col_indices[-1] + 1
+            
+            # Subset the dataset using the bounding box
+            ds_full = ds_full.isel(y=slice(row_min, row_max), x=slice(col_min, col_max))
+            
+            # Subset the coordinate arrays
+            lon = lon[row_min:row_max, col_min:col_max]
+            lat = lat[row_min:row_max, col_min:col_max]
+            
+            logger.info(f"Subset to Missouri region: {lon.shape} grid cells")
+            logger.info(f"  Lat range: {lat.min():.2f} to {lat.max():.2f}")
+            logger.info(f"  Lon range: {lon.min():.2f} to {lon.max():.2f}")
+        else:
+            logger.warning("No data found in Missouri bounds!")
+    else:
+        # 1D arrays
+        lat_idx = np.where((lat >= mo_bounds['lat'][0]) & (lat <= mo_bounds['lat'][1]))[0]
+        lon_idx = np.where((lon >= mo_bounds['lon'][0]) & (lon <= mo_bounds['lon'][1]))[0]
+        
+        # Subset the dataset
+        ds_full = ds_full.isel(y=lat_idx, x=lon_idx)
+        lon = lon[lon_idx]
+        lat = lat[lat_idx]
 
     # Get port from environment
     port = os.getenv('PORT', '8000')
@@ -1554,24 +1619,34 @@ def generate_complete_forecast():
     # ========== MAP 4: MAXIMUM WIND SPEED ==========
     logger.info("Generating maximum wind speed map...")
     wind_colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
-    wind_levels = [0, 10, 15, 20, 25, 30, 50]
+    wind_levels = [0, 10, 15, 20, 25, 30, 50]  # in knots
     wind_cmap = ListedColormap(wind_colors)
     wind_norm = BoundaryNorm(wind_levels, len(wind_colors))
-    
+
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-    
+
     cs = ax.contourf(lon, lat, max_wind_smooth, transform=data_crs,
-                     levels=wind_levels, cmap=wind_cmap, norm=wind_norm, alpha=0.7, zorder=7, antialiased=True)
+                    levels=wind_levels, cmap=wind_cmap, norm=wind_norm, alpha=0.7, zorder=7, antialiased=True)
     ax.contour(lon, lat, max_wind_smooth, transform=data_crs,
-               levels=wind_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
-    
+            levels=wind_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+
     add_boundaries(ax, data_crs, PROJECT_DIR)
-    
+
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed (knots)')
+    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed')
     cbar.set_ticks([5, 12.5, 17.5, 22.5, 27.5, 40])
-    cbar.set_ticklabels(['<10', '10-15', '15-20', '20-25', '25-30', '>30'])
-    
+
+    # Show both knots and mph
+    # Conversion: 1 knot = 1.15078 mph
+    cbar.set_ticklabels([
+        '<10 kt\n(<12 mph)', 
+        '10-15 kt\n(12-17 mph)', 
+        '15-20 kt\n(17-23 mph)', 
+        '20-25 kt\n(23-29 mph)', 
+        '25-30 kt\n(29-35 mph)', 
+        '>30 kt\n(>35 mph)'
+    ])
+
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
     

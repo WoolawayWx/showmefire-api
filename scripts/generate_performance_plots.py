@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import os
+import argparse
 from pathlib import Path
 
 # Setup paths
@@ -46,7 +47,7 @@ def calculate_fire_danger(fm, rh, wind_ms):
     # LOW default
     return 0
 
-def generate_plots(csv_path):
+def generate_plots(csv_path, plots_dir: Path):
     print(f"Reading data from {csv_path}...")
     try:
         df = pd.read_csv(csv_path)
@@ -168,7 +169,11 @@ def generate_plots(csv_path):
     
     ax.grid(True, alpha=0.3)
     
-    plt.suptitle(f"Forecast vs Observations: {df['valid_time_utc'].iloc[0][:10]}", fontsize=16)
+    if 'valid_time_utc' in df.columns and not df.empty:
+        suptitle_date = str(df['valid_time_utc'].iloc[0])[:10]
+    else:
+        suptitle_date = ''
+    plt.suptitle(f"Forecast vs Observations: {suptitle_date}", fontsize=16)
     plt.tight_layout()
     plt.savefig(plots_dir / '1_scatter_plots.png', dpi=150)
     print(f"Saved scatter plots to {plots_dir / '1_scatter_plots.png'}")
@@ -272,14 +277,163 @@ def generate_plots(csv_path):
     plt.tight_layout()
     plt.savefig(plots_dir / '3_systematic_bias.png', dpi=150)
     print(f"Saved residual plots to {plots_dir / '3_systematic_bias.png'}")
-    plt.close()
+
+
+def generate_verification_history_plots(verification_csv, target_date, output_dir: Path):
+    """Generate verification plots for 7-day, 30-day, and lifetime windows.
+
+    The function reads `verification_csv`, parses the `date` column (expected
+    in YYYYMMDD format), and for each window (7, 30, lifetime) creates three
+    plots: MAE, Bias, and Counts, saved into `output_dir` with a window suffix.
+    """
+    try:
+        vdf = pd.read_csv(verification_csv)
+    except FileNotFoundError:
+        print(f"Verification history not found at {verification_csv}")
+        return
+
+    if vdf.empty:
+        print("Verification history is empty")
+        return
+
+    # Normalize and parse dates
+    vdf['date'] = vdf['date'].astype(str)
+    try:
+        vdf['date_parsed'] = pd.to_datetime(vdf['date'], format='%Y%m%d')
+    except Exception:
+        vdf['date_parsed'] = pd.to_datetime(vdf['date'], errors='coerce')
+
+    vdf = vdf.dropna(subset=['date_parsed']).sort_values('date_parsed')
+
+    # Determine end date (use provided target_date if present, else last available)
+    if target_date:
+        try:
+            end_date = pd.to_datetime(str(target_date), format='%Y%m%d')
+        except Exception:
+            end_date = vdf['date_parsed'].max()
+    else:
+        end_date = vdf['date_parsed'].max()
+
+    windows = [
+        ('7d', pd.Timedelta(days=7)),
+        ('30d', pd.Timedelta(days=30)),
+        ('lifetime', None)
+    ]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for label, delta in windows:
+        if delta is None:
+            window_df = vdf.copy()
+        else:
+            start_date = end_date - (delta - pd.Timedelta(days=1))
+            window_df = vdf[(vdf['date_parsed'] >= start_date) & (vdf['date_parsed'] <= end_date)]
+
+        if window_df.empty:
+            print(f"No verification rows for window {label}; skipping")
+            continue
+
+        x = window_df['date_parsed'].dt.strftime('%Y-%m-%d')
+
+        # Create a single 3-panel figure: MAE | Bias | Counts
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True)
+
+        # MAE (left)
+        ax = axes[0]
+        plotted = False
+        if 'temp_mae_c' in window_df.columns:
+            ax.plot(x, window_df['temp_mae_c'], marker='o', label='Temp MAE (C)')
+            plotted = True
+        if 'rh_mae_pct' in window_df.columns:
+            ax.plot(x, window_df['rh_mae_pct'], marker='o', label='RH MAE (%)')
+            plotted = True
+        if 'fm_mae_pct' in window_df.columns:
+            ax.plot(x, window_df['fm_mae_pct'], marker='o', label='FM MAE (%)')
+            plotted = True
+        if 'wind_mae_ms' in window_df.columns:
+            ax.plot(x, window_df['wind_mae_ms'], marker='o', label='Wind MAE (m/s)')
+            plotted = True
+
+        if plotted:
+            ax.set_ylabel('MAE')
+            ax.set_title(f'MAE ({label})')
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, 'No MAE data', ha='center')
+
+        # Bias (middle)
+        ax = axes[1]
+        plotted = False
+        if 'temp_bias_c' in window_df.columns:
+            ax.plot(x, window_df['temp_bias_c'], marker='o', label='Temp Bias (C)')
+            plotted = True
+        if 'rh_bias_pct' in window_df.columns:
+            ax.plot(x, window_df['rh_bias_pct'], marker='o', label='RH Bias (%)')
+            plotted = True
+        if 'fm_bias_pct' in window_df.columns:
+            ax.plot(x, window_df['fm_bias_pct'], marker='o', label='FM Bias (%)')
+            plotted = True
+        if 'wind_bias_ms' in window_df.columns:
+            ax.plot(x, window_df['wind_bias_ms'], marker='o', label='Wind Bias (m/s)')
+            plotted = True
+
+        if plotted:
+            ax.set_ylabel('Bias')
+            ax.set_title(f'Bias ({label})')
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, 'No Bias data', ha='center')
+
+        # Counts (right)
+        ax = axes[2]
+        plotted = False
+        if 'num_comparisons' in window_df.columns:
+            ax.plot(x, window_df['num_comparisons'], marker='o', label='Num Comparisons')
+            plotted = True
+        if 'num_forecasts' in window_df.columns:
+            ax.plot(x, window_df['num_forecasts'], marker='o', label='Num Forecasts')
+            plotted = True
+
+        if plotted:
+            ax.set_ylabel('Count')
+            ax.set_title(f'Counts ({label})')
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, 'No Count data', ha='center')
+
+        # Format x labels
+        for a in axes:
+            for label_rot in a.get_xticklabels():
+                label_rot.set_rotation(45)
+
+        fig.suptitle(f'Verification Summary ({label})')
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        summary_path = output_dir / f'verification_summary_{label}.png'
+        fig.savefig(summary_path, dpi=150)
+        plt.close(fig)
+        print(f"Saved verification summary to {summary_path}")
 
 if __name__ == "__main__":
-    # Default path
-    comparison_file = reports_dir / 'forecast_comparison_latest.csv'
-    
-    # Allow override via args
-    if len(sys.argv) > 1:
-        comparison_file = Path(sys.argv[1])
-        
-    generate_plots(comparison_file)
+    parser = argparse.ArgumentParser(description="Generate performance plots for forecast validation")
+    parser.add_argument('--date', help='Date string to process (format: YYYYMMDD)')
+    parser.add_argument('--comparison-file', help='Path to a comparison CSV to plot (overrides --date)')
+    args = parser.parse_args()
+
+    if args.comparison_file:
+        comp_path = Path(args.comparison_file)
+        out_dir = reports_dir / 'plots'
+        generate_plots(comp_path, out_dir)
+    elif args.date:
+        # For a date flag, generate verification-summary plots from the
+        # master verification history rather than reading per-date side-by-side files.
+        date_str = args.date
+        out_dir = reports_dir / date_str / 'plots'
+
+        verification_csv = reports_dir / 'verification_history.csv'
+        generate_verification_history_plots(verification_csv, date_str, out_dir)
+    else:
+        # Default behavior: use latest summary file in reports
+        comp_path = reports_dir / 'forecast_comparison_latest.csv'
+        out_dir = reports_dir / 'plots'
+        generate_plots(comp_path, out_dir)
