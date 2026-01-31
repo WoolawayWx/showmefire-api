@@ -34,6 +34,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Ensure a writable data directory (compose mounts ./api/data -> /app/data)
+ENV DATA_DIR=/app/data
+RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
+VOLUME ["/app/data"]
+
+# Copy entrypoint to run DB init before starting the server
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Use production-friendly CMD (no --reload)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
