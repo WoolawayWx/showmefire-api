@@ -19,13 +19,13 @@ station_data = {
 load_dotenv()
 SYNOPTIC_API_TOKEN = os.getenv("SYNOPTIC_API_TOKEN")
 
-from core.ignored_stations import IGNORED_STATIONS
+from core.ignored_stations import get_ignored_stations
 
 def flatten_station_data(weather_station, metadata_station):
     """Flatten and deduplicate station data for optimized storage"""
     # Skip ignored stations early
     stid_check = weather_station.get("STID") or weather_station.get("ID")
-    if stid_check and stid_check in IGNORED_STATIONS:
+    if stid_check and stid_check in get_ignored_stations():
         return None
     
     station = {
@@ -147,9 +147,10 @@ async def fetch_synoptic_data():
         
         combined_stations = []
         if weather_json.get("STATION"):
+            ignored = get_ignored_stations()
             for station in weather_json["STATION"]:
                 # Skip ignored stations
-                if (station.get("STID") or station.get("ID")) in IGNORED_STATIONS:
+                if (station.get("STID") or station.get("ID")) in ignored:
                     continue
                 stid = station.get("STID")
                 flattened = flatten_station_data(station, metadata_lookup.get(stid, {}))
@@ -397,7 +398,8 @@ def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states
     # Save to JSON
     # Remove ignored stations from the saved archive
     try:
-        api_response["STATION"] = [s for s in api_response.get("STATION", []) if (s.get("STID") or s.get("ID")) not in IGNORED_STATIONS]
+        ignored = get_ignored_stations()
+        api_response["STATION"] = [s for s in api_response.get("STATION", []) if (s.get("STID") or s.get("ID")) not in ignored]
     except Exception:
         pass
 

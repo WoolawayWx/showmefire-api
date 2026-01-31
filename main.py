@@ -27,8 +27,10 @@ from core.database import (
     get_latest_forecast,
     get_forecast_by_time,
     get_recent_forecasts,
-    get_forecast_count
+    get_forecast_count,
+    get_db_path
 )
+import sqlite3
 from core.security import (
     verify_password,
     create_access_token,
@@ -110,6 +112,9 @@ app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
+    "http://127.0.0.1:3000",       # Vite/localhost variant
+    "http://localhost:5173",       # Vite default alternative
+    "http://127.0.0.1:5173",       # Vite variant
     # "http://192.168.1.100:8080",    # Example of a local IP for testing
     "https://showmefire.org",
     "https://preview.showmefire.org",# Your production frontend domain
@@ -290,6 +295,120 @@ async def update_banner(banner: BannerData, token: str):
     save_banner_config(banner)
     logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
     return {"success": True, "message": "Banner updated successfully"}
+
+
+@app.get("/api/admin/ignored_stations")
+def admin_list_ignored(token: str):
+    """List ignored stations (admin only)"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT stid, reason, added_at FROM ignored_stations ORDER BY added_at DESC')
+        rows = cursor.fetchall()
+        conn.close()
+        return {"success": True, "ignored": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"Error listing ignored stations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/ignored_stations")
+def admin_add_ignored(payload: dict, token: str):
+    """Add an ignored station. Payload: { stid: 'MBGM7', reason: '...' }"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    stid = (payload.get('stid') or '').strip().upper()
+    reason = payload.get('reason') or None
+    if not stid:
+        raise HTTPException(status_code=400, detail="stid required")
+
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('INSERT OR IGNORE INTO ignored_stations (stid, reason) VALUES (?, ?)', (stid, reason))
+        conn.commit()
+        conn.close()
+        # Invalidate cache if module loaded
+        try:
+            from core.ignored_stations import refresh_ignored_stations
+            refresh_ignored_stations()
+        except Exception:
+            pass
+        return {"success": True, "stid": stid}
+    except Exception as e:
+        logger.error(f"Error adding ignored station {stid}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/ignored_stations/{stid}")
+def admin_remove_ignored(stid: str, token: str):
+    """Remove an ignored station by STID"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    stid = stid.strip().upper()
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM ignored_stations WHERE stid = ?', (stid,))
+        conn.commit()
+        conn.close()
+        try:
+            from core.ignored_stations import refresh_ignored_stations
+            refresh_ignored_stations()
+        except Exception:
+            pass
+        return {"success": True, "stid": stid}
+    except Exception as e:
+        logger.error(f"Error removing ignored station {stid}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/website/version')
+def api_get_website_version():
+    """Public endpoint returning website version"""
+    try:
+        from core.database import get_website_version
+        info = get_website_version()
+        return {"version": info.get('version')}
+    except Exception as e:
+        logger.error(f"Error fetching website version: {e}")
+        return PlainTextResponse('1', status_code=200)
+
+
+@app.post('/api/admin/website/version')
+def admin_set_website_version(payload: dict, token: str):
+    """Admin-only: set website version. Payload: { version: '1.2.3' }"""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    version = (payload.get('version') or '').strip()
+    if not version:
+        raise HTTPException(status_code=400, detail="version required")
+
+    try:
+        from core.database import set_website_version
+        ok = set_website_version(version)
+        if ok:
+            return {"success": True, "version": version}
+        raise HTTPException(status_code=500, detail="Failed to update version")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting website version: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/stations/raws')
 def get_raws_stations():

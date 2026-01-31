@@ -143,6 +143,35 @@ def init_database():
         VALUES (1, 0, 'info', 'Welcome to Show Me Fire', NULL)
     ''')
 
+    # 8. Ignored stations table (IDs of stations to exclude from processing)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ignored_stations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stid TEXT UNIQUE NOT NULL,
+            reason TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Seed with any known ignored stations (keeps existing behavior)
+    try:
+        cursor.execute("INSERT OR IGNORE INTO ignored_stations (stid, reason) VALUES (?, ?)", ('MBGM7', 'legacy default'))
+    except Exception:
+        pass
+
+    # 9. Website info (stores website version and metadata)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS website_info (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            version TEXT DEFAULT '1',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Ensure a single row exists with default version
+    try:
+        cursor.execute("INSERT OR IGNORE INTO website_info (id, version) VALUES (1, '1')")
+    except Exception:
+        pass
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_wf_snapshot ON weather_features(snapshot_id)')
@@ -223,6 +252,34 @@ def get_forecast_count():
     
     conn.close()
     return count
+
+def get_website_version():
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT version, updated_at FROM website_info WHERE id = 1')
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return {"version": "1", "updated_at": None}
+    finally:
+        conn.close()
+
+def set_website_version(version: str):
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('UPDATE website_info SET version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1', (version,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating website version: {e}")
+        return False
+    finally:
+        conn.close()
 
 # --- NEW HELPERS FOR THE HRRR MINER ---
 
