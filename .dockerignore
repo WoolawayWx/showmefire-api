@@ -5,3 +5,14 @@ __pycache__/
 .env
 data/
 *.pyc
+venv/
+.venv/
+__pycache__/
+.git/
+.env
+data/
+cache/
+*.log
+logs/
+images/
+archive/

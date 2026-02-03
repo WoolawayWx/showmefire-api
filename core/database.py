@@ -11,12 +11,13 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 def get_db_path():
-    # Keep your existing logic for path detection
-    if os.path.exists('/home/ubuntu'):
-        return Path('/home/ubuntu/showmefire/showmefire-api/data/showmefire.db')
-    else:
-        # Standardize on one DB name for the whole project
-        return Path(__file__).resolve().parent.parent / 'data' / 'showmefire.db'
+    # 1. Prioritize the Docker container path if it exists
+    if os.path.exists('/app/data/showmefire.db'):
+        return Path('/app/data/showmefire.db')
+
+    # 2. Fallback: Calculate path relative to this file (works for local dev)
+    # core/database.py -> parent=core -> parent=root -> data/showmefire.db
+    return Path(__file__).resolve().parent.parent / 'data' / 'showmefire.db'
     
 def init_database():
     db_path = get_db_path()

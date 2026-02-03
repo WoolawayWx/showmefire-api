@@ -317,7 +317,9 @@ def get_current_fuel_moisture_field(port='8000', target_date=None):
     """
     try:
         # Build URL for the morning fuel moisture endpoint
-        url = f'http://localhost:{port}/api/fuel-moisture/morning'
+        api_host = os.getenv('API_HOST','localhost')
+        url = f'http://{api_host}:{port}/api/fuel-moisture/morning'
+        logger.info(f"Connecting to API at: {url}")
         params = {}
         if target_date:
             params['date'] = target_date
@@ -405,7 +407,6 @@ def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
     Returns: New fuel moisture (%)
     """
     # Calculate equilibrium moisture content (EMC) based on RH and temperature
-    # This is what the fuel "wants" to be at given current conditions
     if rh <= 10:
         emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
     elif rh <= 50:
@@ -452,7 +453,6 @@ def get_snodas_swe_grid(bbox_tuple, date=None):
         
         url = f"https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{year}/{month_str}/SNODAS_{date_str}.tar"
         
-        # Download tarball
         resp = requests.get(url, stream=True, timeout=60)
         resp.raise_for_status()
         
@@ -460,7 +460,6 @@ def get_snodas_swe_grid(bbox_tuple, date=None):
         os.makedirs(extract_dir, exist_ok=True)
         
         with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r") as tar:
-            # Find SWE file (1034)
             swe_file = None
             txt_file = None
             
@@ -474,7 +473,6 @@ def get_snodas_swe_grid(bbox_tuple, date=None):
                 logger.warning("No SWE data found in SNODAS tarball")
                 return None, None, None
                 
-            # Extract and unzip
             tar.extract(swe_file, path=extract_dir)
             if txt_file:
                 tar.extract(txt_file, path=extract_dir)
@@ -486,7 +484,6 @@ def get_snodas_swe_grid(bbox_tuple, date=None):
                 with open(final_dat_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
                     
-            # Create ENVI header
             rows, cols = 3351, 6935
             hdr_content = f"""ENVI
 samples = {cols}
@@ -503,19 +500,12 @@ coordinate system string = {{GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["
             with open(hdr_path, 'w') as f:
                 f.write(hdr_content)
                 
-            # Read raw binary data
-            # SNODAS SWE is 16-bit signed integer, big-endian
             with open(final_dat_path, 'rb') as f:
                 raw_data = np.frombuffer(f.read(), dtype='>i2')  # big-endian 16-bit int
             
-            # Reshape to grid
             swe_data = raw_data.reshape(rows, cols).astype(float)
-            # Convert nodata (-9999) to 0
             swe_data[swe_data < -9000] = 0.0
             
-            # Create coordinate grids
-            # SNODAS is 30-arcsecond grid, ~1km resolution
-            # Extent: -124.73333333 to -66.94168977999999 lon, 24.95001117 to 52.875 lat
             lon_start = -124.73333333
             lat_start = 52.875  # top-left
             lon_end = -66.94168977999999
@@ -526,12 +516,10 @@ coordinate system string = {{GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["
             
             lon_grid, lat_grid = np.meshgrid(lon_coords, lat_coords)
             
-            # Subset to bbox
             minx, miny, maxx, maxy = bbox_tuple
             row_mask = (lat_grid >= miny) & (lat_grid <= maxy)
             col_mask = (lon_grid >= minx) & (lon_grid <= maxx)
             
-            # Find bounding indices
             row_indices = np.where(np.any(row_mask, axis=1))[0]
             col_indices = np.where(np.any(col_mask, axis=0))[0]
             
@@ -696,40 +684,60 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     # Load Station Indices for Verification
     db_path = get_db_path()
+    
+    # Get grid dimensions for validation
+    grid_h, grid_w = grid_lat_mesh.shape
+    
+    recalculate_indices = False
+    station_indices = []
+
     try:
         conn = sqlite3.connect(db_path)
         indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
-        
-        # Fallback if empty (e.g. locally or if not initialized)
-        if indices_df.empty:
-            logger.info("station_grid_indices is empty. Calculating indices from observations on the fly.")
+        print(f"indices_df: ")
+        if not indices_df.empty:
+            # Check if indices from DB fit in our current grid
+            # If we are using a cropped grid but DB has full-grid indices, they will be out of bounds
+            max_x = indices_df['grid_x'].max() if 'grid_x' in indices_df.columns else 0
+            max_y = indices_df['grid_y'].max() if 'grid_y' in indices_df.columns else 0
+            
+            if max_x >= grid_w or max_y >= grid_h:
+                logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Indices likely from full HRRR grid. Recalculating for local crop.")
+                recalculate_indices = True
+            else:
+                # Ensure columns map to what the rest of the code expects (x, y)
+                if 'grid_x' in indices_df.columns:
+                    indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
+                station_indices = indices_df.to_dict('records')
+        else:
+            recalculate_indices = True
+
+        # Fallback if empty or out of bounds
+        if recalculate_indices:
+            logger.info("Calculating station grid indices on the fly...")
             try:
                 stations_df = pd.read_sql("SELECT DISTINCT station_id, latitude, longitude FROM observations", conn)
                 new_indices = []
-                # Use grid mesh from earlier
                 # Ensure we have valid coordinates
                 valid_stations = stations_df.dropna(subset=['latitude', 'longitude'])
                 
                 for _, row in valid_stations.iterrows():
+                    # Find nearest grid point
                     dist = (grid_lat_mesh - row['latitude'])**2 + (grid_lon_mesh - row['longitude'])**2
                     y_idx, x_idx = np.unravel_index(np.argmin(dist), dist.shape)
                     
                     new_indices.append({
                         'station_id': row['station_id'],
-                        'x': int(x_idx),
-                        'y': int(y_idx),
+                        'x': int(x_idx), # Column
+                        'y': int(y_idx), # Row
                         'lat': row['latitude'],
                         'lon': row['longitude']
                     })
                 station_indices = new_indices
+                logger.info(f"Calculated indices for {len(station_indices)} stations.")
             except Exception as e:
                 logger.error(f"Failed to calculate station indices on the fly: {e}")
                 station_indices = []
-        else:
-            # Ensure columns map to what the rest of the code expects (x, y)
-            if 'grid_x' in indices_df.columns:
-                indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
-            station_indices = indices_df.to_dict('records')
 
         conn.close()
     except Exception as e:
@@ -830,6 +838,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         hourly_risks.append(risk)
 
         # Save verification data
+        print(f"Station Indices:{station_indices}")
         if station_indices:
             forecast_rows = []
             
@@ -845,6 +854,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             json_valid_time = forecast_time.strftime('%Y-%m-%dT%H:%M:%SZ')
             
             for st in station_indices:
+                
                 sx, sy = st['x'], st['y']
                 if 0 <= sx < fm.shape[1] and 0 <= sy < fm.shape[0]:
                     # Extract values
@@ -906,9 +916,14 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
 
     # Save standalone JSON station history
-    if run_date and json_output_data['stations']:
+    # MODIFIED: Removed "and json_output_data['stations']" so file is created even if station list is empty
+    if run_date:
         filename = f"station_forecasts_{run_date.strftime('%Y%m%d_%H')}.json"
         save_path = Path("archive/forecasts") / filename
+        
+        if not json_output_data.get('stations'):
+            logger.warning(f"Station list is empty. Generating {filename} with no station data.")
+
         try:
              save_path.parent.mkdir(parents=True, exist_ok=True)
              with open(save_path, 'w') as f:
@@ -976,20 +991,16 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
         'rh_mean_6h': rh_mean_6h
     })
     
-    # Add precipitation features (always, to match FEATURES list)
     if precip_hist is not None and len(precip_hist) > 0:
-        # Combine past + current for precipitation calculations
         curr_precip_stack = precip_hist
         
-        # Calculate rolling sums for precipitation
         precip_1h = curr_precip_stack[-1].flatten() if len(curr_precip_stack) >= 1 else np.zeros(shape).flatten()
         precip_3h = np.sum(curr_precip_stack[-3:], axis=0).flatten() if len(curr_precip_stack) >= 3 else np.zeros(shape).flatten()
         precip_6h = np.sum(curr_precip_stack[-6:], axis=0).flatten() if len(curr_precip_stack) >= 6 else np.zeros(shape).flatten()
         precip_24h = np.sum(curr_precip_stack[-24:], axis=0).flatten() if len(curr_precip_stack) >= 24 else np.zeros(shape).flatten()
         
-        # Calculate hours since rain (>0.1mm threshold)
         hours_since_rain = np.zeros(shape).flatten()
-        # Initialize with max value (24)
+
         hours_since_rain[:] = 24
         
         # Iterate backwards through history to find last rain
@@ -1030,7 +1041,7 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
             # 1. Reset hours since rain to 0 where snow is present (continuous moisture source)
             hours_since_rain[has_snow] = 0
 
-            # 2. Treat SWE as available moisture/precip for the accumulation features
+            # 2. Treat SWE as available moisture/prec for the accumulation features
             precip_24h = np.maximum(precip_24h, swe_inches)
             precip_6h = np.maximum(precip_6h, swe_inches)
             precip_3h = np.maximum(precip_3h, swe_inches)
@@ -1558,7 +1569,7 @@ def generate_complete_forecast():
         "< 7%: Extremely dry — potential for extreme fire behavior\n"
         "7–9%: Very dry — critical fire behavior likely\n"
         "9–15%: Dry — elevated fire behavior expected\n"
-        "15–20%: Moderate — some fire activity possible\n"
+               "15–20%: Moderate — some fire activity possible\n"
         "> 20%: Moist — fuels much less receptive to fire\n\n"
         "Areas with snow cover will have substantially higher fuel moisture\n"
         "and greatly reduced ignition potential.\n\n"
@@ -2196,7 +2207,7 @@ def generate_complete_forecast():
                     cs = ax.contourf(lon, lat, max_temp_smooth_f, transform=data_crs, levels=temp_levels_f, cmap=temp_cmap, alpha=0.7, zorder=7, antialiased=True)
                     contour_levels = np.arange(10, 90, 10)
                     ax.contour(lon, lat, max_temp_smooth_f, transform=data_crs, levels=contour_levels, colors='black', linewidths=0.3, alpha=0.2, zorder=8)
-                    
+
                     add_region_overlay(ax, reg_extent)
                     
                     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
