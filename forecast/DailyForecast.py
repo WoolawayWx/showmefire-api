@@ -600,6 +600,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
     else:
         grid_lon_mesh, grid_lat_mesh = lon, lat
+        
+    
     
     # Initialize fuel moisture field from observations
     if fuel_points and len(fuel_points) >= 3:
@@ -775,8 +777,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         u = ds_hour['u10'].values
         v = ds_hour['v10'].values
         wind_magnitude = np.sqrt(u**2 + v**2)
+        wind_magnitude = wind_magnitude * 0.8
         ws_ms, ws_kts = validate_and_convert_wind_speed(wind_magnitude, expected_unit='ms', source='HRRR')
-        
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
         if has_precip:
@@ -838,7 +840,6 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         hourly_risks.append(risk)
 
         # Save verification data
-        print(f"Station Indices:{station_indices}")
         if station_indices:
             forecast_rows = []
             
@@ -1204,6 +1205,7 @@ def generate_complete_forecast():
             print(f"Warning: Could not save cache file: {e}")
             print("Continuing without caching...")
     
+    
     # Extract coordinates first
     lon = ds_full['longitude'].values
     lat = ds_full['latitude'].values
@@ -1332,8 +1334,10 @@ def generate_complete_forecast():
         # Convert from kg/m² to inches (1 mm = 1 kg/m², 1 inch = 25.4 mm)
         total_precip_inches = total_precip / 25.4
         
+        print(f"Pre-conversion total_precip (mm): min={np.nanmin(total_precip):.3f}, max={np.nanmax(total_precip):.3f}")
+        print(f"Post-conversion total_precip_inches: min={np.nanmin(total_precip_inches):.3f}, max={np.nanmax(total_precip_inches):.3f}")
         # Apply smoothing
-        total_precip_smooth = gaussian_filter(total_precip_inches, sigma=1.5)
+        total_precip_smooth = gaussian_filter(total_precip_inches, sigma=0.2)
     else:
         total_precip_smooth = None
     
@@ -1742,7 +1746,7 @@ def generate_complete_forecast():
             rain_norm = BoundaryNorm(rain_levels, len(rain_colors))
             
             fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-            
+            print(total_precip_smooth)
             # Plot precipitation
             cs = ax.contourf(lon, lat, total_precip_smooth, 
                            levels=rain_levels, cmap=rain_cmap, norm=rain_norm,
@@ -2533,7 +2537,6 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
     previous_temp = None
     
     print(f"\nProcessing {len(ds_full.step)} forecast hours...")
-    
     for i, time_step in enumerate(ds_full.step):
         print(f"\n=== Hour {i+1}/{len(ds_full.step)} ===")
         ds_hour = ds_full.sel(step=time_step)
@@ -2546,7 +2549,9 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         v = ds_hour['v10'].values
         
         ws_kts = np.sqrt(u**2 + v**2) * 1.94384
-        
+        print(f"Wind 10m: {ws_kts}")
+        ws_kts = ws_kts * 0.8 # Convert down from 10m to 20ft. 
+        print(f"Wind 20ft: {ws_kts}")
         # Get time features for this forecast hour
         # Convert time_step to hours - handle both timedelta64 and int64 cases
         time_step_value = time_step.values
@@ -2571,6 +2576,7 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
             n_points = rh.size
             rh_flat = rh.ravel()
             temp_flat = temp.ravel()
+            print(f"Wind 20ft: {ws_kts}")
             ws_flat = ws_kts.ravel()
             prev_fm_flat = previous_fm.ravel()
             prev_rh_flat = (previous_rh.ravel() if previous_rh is not None else rh_flat)

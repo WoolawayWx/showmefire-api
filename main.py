@@ -880,6 +880,15 @@ async def get_model_formulas():
         logger.error(f"Error retrieving model formulas: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving model formulas: {str(e)}")
 
+@app.get("/web/issues")
+async def get_issues():
+    """Get GitHub issues data as JSON"""
+    issues_file = Path("data/issues.json")
+    if issues_file.exists():
+        return FileResponse(issues_file, media_type='application/json')
+    else:
+        raise HTTPException(status_code=404, detail="Issues data not available")
+    
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='127.0.0.1', port=8000)
