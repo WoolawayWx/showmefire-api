@@ -176,6 +176,21 @@ def init_database():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_wf_snapshot ON weather_features(snapshot_id)')
+
+    # 10. Development projects (tracks roadmap items for the website)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS dev_projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            timeline TEXT,
+            status TEXT DEFAULT 'planned',
+            sort_order INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_dev_projects_sort ON dev_projects(sort_order)')
     
     conn.commit()
     conn.close()
@@ -397,5 +412,94 @@ def insert_forecast(valid_time, title, discussion):
         row = cursor.fetchone()
         return row[0] if row else None
         
+    finally:
+        conn.close()
+
+
+# --- Development projects helpers ---
+
+def list_dev_projects() -> List[Dict]:
+    """Return all development projects ordered by sort_order then id."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, description, timeline, status, sort_order, created_at, updated_at
+        FROM dev_projects
+        ORDER BY sort_order ASC, id ASC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def create_dev_project(
+    name: str,
+    description: Optional[str] = None,
+    timeline: Optional[str] = None,
+    status: str = 'planned',
+    sort_order: Optional[int] = None
+) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        if sort_order is None:
+            cursor.execute('SELECT COALESCE(MAX(sort_order), 0) + 1 FROM dev_projects')
+            sort_order = cursor.fetchone()[0]
+
+        cursor.execute('''
+            INSERT INTO dev_projects (name, description, timeline, status, sort_order)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (name, description, timeline, status, sort_order))
+        conn.commit()
+        project_id = cursor.lastrowid
+        cursor.execute('''
+            SELECT id, name, description, timeline, status, sort_order, created_at, updated_at
+            FROM dev_projects WHERE id = ?
+        ''', (project_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def update_dev_project(
+    project_id: int,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    timeline: Optional[str] = None,
+    status: Optional[str] = None,
+    sort_order: Optional[int] = None
+) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE dev_projects
+            SET name = COALESCE(?, name),
+                description = COALESCE(?, description),
+                timeline = COALESCE(?, timeline),
+                status = COALESCE(?, status),
+                sort_order = COALESCE(?, sort_order),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (name, description, timeline, status, sort_order, project_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_dev_project(project_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM dev_projects WHERE id = ?', (project_id,))
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()

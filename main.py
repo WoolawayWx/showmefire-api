@@ -28,7 +28,11 @@ from core.database import (
     get_forecast_by_time,
     get_recent_forecasts,
     get_forecast_count,
-    get_db_path
+    get_db_path,
+    list_dev_projects,
+    create_dev_project,
+    update_dev_project,
+    delete_dev_project
 )
 import sqlite3
 from core.security import (
@@ -132,6 +136,22 @@ app.add_middleware(
 class LoginRequest(BaseModel):
     email:str
     password:str
+
+
+class DevProjectCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    timeline: Optional[str] = None
+    status: str = "planned"
+    sort_order: Optional[int] = None
+
+
+class DevProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    timeline: Optional[str] = None
+    status: Optional[str] = None
+    sort_order: Optional[int] = None
 
 @app.get('/')
 def hello():
@@ -409,6 +429,77 @@ def admin_set_website_version(payload: dict, token: str):
     except Exception as e:
         logger.error(f"Error setting website version: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/projects')
+def get_public_projects():
+    """Public endpoint: list development projects for the website."""
+    try:
+        return {"projects": list_dev_projects()}
+    except Exception as e:
+        logger.error(f"Error fetching projects: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load projects")
+
+
+@app.get('/api/admin/projects')
+def admin_list_projects(token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"success": True, "projects": list_dev_projects()}
+
+
+@app.post('/api/admin/projects')
+def admin_create_project(payload: DevProjectCreate, token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    name = (payload.name or '').strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    project = create_dev_project(
+        name=name,
+        description=payload.description,
+        timeline=payload.timeline,
+        status=payload.status,
+        sort_order=payload.sort_order
+    )
+    return {"success": True, "project": project}
+
+
+@app.put('/api/admin/projects/{project_id}')
+def admin_update_project(project_id: int, payload: DevProjectUpdate, token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    ok = update_dev_project(
+        project_id=project_id,
+        name=payload.name,
+        description=payload.description,
+        timeline=payload.timeline,
+        status=payload.status,
+        sort_order=payload.sort_order
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    projects = list_dev_projects()
+    updated = next((p for p in projects if p['id'] == project_id), None)
+    return {"success": True, "project": updated}
+
+
+@app.delete('/api/admin/projects/{project_id}')
+def admin_delete_project(project_id: int, token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not delete_dev_project(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"success": True, "deleted": project_id}
 
 @app.get('/stations/raws')
 def get_raws_stations():
