@@ -207,7 +207,7 @@ def get_latest_forecast():
     
     cursor.execute('''
         SELECT * FROM forecasts 
-        ORDER BY valid_time DESC 
+        ORDER BY datetime(created_at) DESC 
         LIMIT 1
     ''')
     
