@@ -32,6 +32,7 @@ import xgboost as xgb
 import sys
 import rasterio
 from rasterio.transform import from_bounds
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import sqlite3
 import tarfile
 import gzip
@@ -199,32 +200,35 @@ def calculate_fire_danger(fm, rh, wind_kts):
     Fire Danger Criteria based on ShowMeFire.org:
     Low: FM >= 15%
     Moderate: FM 9-14% WITH (RH < 50% AND Wind >= 10 kts)
-    Elevated: FM < 9% WITH (RH < 45% OR Wind >= 10 kts)
+    Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
     Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
     Extreme: FM < 7% WITH (RH < 20% AND Wind >= 30 kts)
     """
-    # LOW (Fuels are too wet to carry fire effectively)
+    
+    
+    # 1. IMMEDIATE EXIT: If fuels are wet, danger is Low regardless of weather
     if fm >= 15: 
         return 0 
     
-    # 5. EXTREME (The most restrictive)
-    if fm < 7 and rh < 20 and wind_kts >= 30:
+    # 2. EXTREME (Check the worst case first)
+    if fm < 7 and rh < 20 and wind_kts >= 25: # Dropped wind slightly to 25
         return 4
     
-    # 4. CRITICAL (High)
+    # 3. CRITICAL
     if fm < 9 and rh < 25 and wind_kts >= 15:
         return 3
         
-    # 3. ELEVATED
-    if fm < 9 and (rh < 45 or wind_kts >= 10):
-        return 2
+    # 4. ELEVATED (The (AND) OR (AND) Logic)
+    # Scenario A: Dry & Breezy OR Scenario B: Very Dry & Light Wind
+    if fm < 9: 
+        if (rh < 35 and wind_kts >= 12) or (rh < 25 and wind_kts >= 5):
+            return 2
         
-    # 2. MODERATE
-    # Change to AND logic: FM must be low AND weather must be active
-    if (9 <= fm < 15) and (rh < 50 and wind_kts >= 10):
+    # 5. MODERATE (If it didn't hit Elevated, check if it's generally dry/breezy)
+    if fm < 15 and (rh < 45 or wind_kts >= 10):
         return 1
         
-    # 1. LOW (Default if FM is high or conditions aren't met)
+    # 6. DEFAULT TO LOW
     return 0
 
 
@@ -778,7 +782,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         v = ds_hour['v10'].values
         wind_magnitude = np.sqrt(u**2 + v**2)
         wind_magnitude = wind_magnitude * 0.8
-        ws_ms, ws_kts = validate_and_convert_wind_speed(wind_magnitude, expected_unit='ms', source='HRRR')
+        ws_ms = wind_magnitude
+        ws_kts = ws_ms * 1.94384
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
         if has_precip:
@@ -1434,12 +1439,18 @@ def generate_complete_forecast():
         f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
         "Peak Fire Danger Forecast (10:00–21:00 CT)\n\n"
         "Fire Danger Criteria:\n"
-        "Low: FM ≥ 15% (Fuels adequately moist)\n"
-        "Moderate: FM 9-14% with RH < 60% or Wind ≥ 6 kts\n"
-        "Elevated: FM < 9% with RH < 45% or Wind ≥ 10 kts\n"
-        "Critical: FM < 9% with RH < 25% & Wind ≥ 15 kts\n"
-        "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
-        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+        "Low:"
+        "  FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+        "Moderate:"
+        "  FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+        "Elevated:"
+        "  FM < 9% AND (RH < 35% & Wind ≥ 12 kts)\n"
+        "  OR (RH < 25% & Wind ≥ 5 kts)\n\n"
+        "Critical:"
+        "  FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
+        "Extreme:"
+        "  FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
+        "Data Source: HRRR Model Forecast | ShowMeFire ML Model\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
     )
@@ -1449,7 +1460,6 @@ def generate_complete_forecast():
     del fig, ax, cs, cax, cbar
     gc.collect()
     
-    # ========== EXPORT GEOTIFF: PEAK FIRE DANGER ==========
     logger.info("Exporting peak fire danger as GeoTIFF...")
     try:
         geotiff_path = PROJECT_DIR / 'gis/peak_fire_danger.tif'
@@ -1462,42 +1472,95 @@ def generate_complete_forecast():
         lon_min, lon_max = float(lon.min()), float(lon.max())
         lat_min, lat_max = float(lat.min()), float(lat.max())
         
-        # Create transform (maps pixel coordinates to geographic coordinates)
-        # Transform expects origin at top-left (lon_min, lat_max)
-        transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
+        # Create source transform in EPSG:4326
+        src_transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
+        src_crs = "EPSG:4326"
+        dst_crs = "EPSG:3857"  # Web Mercator for MapLibre
         
-        # Flip data vertically - numpy arrays have origin at bottom-left,
-        # but GeoTIFF expects origin at top-left
-        data_flipped = np.flipud(peak_risk_smooth)
+        # Bin smoothed values into discrete fire danger categories before export
+        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+        risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
+        risk_binned = np.clip(risk_binned, 0, 4)
+        risk_binned = np.where(np.isnan(peak_risk_smooth), 255, risk_binned).astype(np.uint8)  # 255 = nodata
+
+        # Flip so row 0 is north (match geospatial convention)
+        data_flipped = np.flipud(risk_binned)
+
+        # Reproject to Web Mercator to align with web maps
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            src_crs, dst_crs, cols, rows,
+            left=lon_min, bottom=lat_min, right=lon_max, top=lat_max
+        )
+
+        risk_3857 = np.full((dst_height, dst_width), 255, dtype=np.uint8)
+        reproject(
+            source=data_flipped,
+            destination=risk_3857,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            src_nodata=255,
+            dst_nodata=255
+        )
         
-        # Write GeoTIFF using rasterio
+        # Create RGBA bands in destination grid
+        rgba_data = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+        
+        # Define color map matching your visualization
+        # (R, G, B, A) values 0-255
+        color_map = {
+            0: (144, 238, 144, 255),  # Low - light green
+            1: (255, 255, 153, 255),  # Moderate - yellow
+            2: (255, 165, 0, 255),    # Elevated - orange
+            3: (255, 69, 0, 255),     # Critical - red-orange
+            4: (139, 0, 0, 255)       # Extreme - dark red
+        }
+        
+        # Apply colors to each pixel based on fire danger value (leave nodata transparent)
+        for value, (r, g, b, a) in color_map.items():
+            mask = risk_3857 == value
+            rgba_data[0][mask] = r  # Red channel
+            rgba_data[1][mask] = g  # Green channel
+            rgba_data[2][mask] = b  # Blue channel
+            rgba_data[3][mask] = a  # Alpha channel
+        
+        # Write RGBA GeoTIFF using rasterio
         with rasterio.open(
             geotiff_path,
             'w',
             driver='GTiff',
-            height=rows,
-            width=cols,
-            count=1,
-            dtype=rasterio.float32,
-            crs='EPSG:4326',
-            transform=transform,
+            height=dst_height,
+            width=dst_width,
+            count=4,  # 4 bands for RGBA
+            dtype=rasterio.uint8,  # 0-255 color values
+            crs=dst_crs,
+            transform=dst_transform,
             compress='lzw',
             tiled=True,
-            nodata=-9999
+            photometric='RGB'  # Specify RGB interpretation
         ) as dst:
-            # Write the flipped data
-            dst.write(data_flipped.astype(np.float32), 1)
+            # Write the RGBA bands
+            dst.write(rgba_data)
             
             # Set metadata
             dst.update_tags(
-                DESCRIPTION='Peak Fire Danger Forecast for Missouri',
+                DESCRIPTION='Peak Fire Danger Forecast for Missouri (RGBA)',
                 MODEL_RUN=RUN_DATE.strftime('%Y-%m-%d %HZ'),
                 VALID_TIME=(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d'),
-                UNITS='Fire Danger Level (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)',
+                COLOR_INTERPRETATION='Red, Green, Blue, Alpha',
+                LEGEND='Low=Light Green, Moderate=Yellow, Elevated=Orange, Critical=Red-Orange, Extreme=Dark Red',
                 SOURCE='HRRR Model + ML Model + RAWS Observations'
             )
+            
+            # Set color interpretation for each band
+            dst.set_band_description(1, 'Red')
+            dst.set_band_description(2, 'Green')
+            dst.set_band_description(3, 'Blue')
+            dst.set_band_description(4, 'Alpha')
         
-        logger.info(f"GeoTIFF saved to {geotiff_path}")
+        logger.info(f"RGBA GeoTIFF saved to {geotiff_path}")
     except Exception as e:
         logger.error(f"Failed to export GeoTIFF: {e}")
     
@@ -1639,7 +1702,7 @@ def generate_complete_forecast():
     wind_norm = BoundaryNorm(wind_levels, len(wind_colors))
 
     fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-
+    
     cs = ax.contourf(lon, lat, max_wind_smooth, transform=data_crs,
                     levels=wind_levels, cmap=wind_cmap, norm=wind_norm, alpha=0.7, zorder=7, antialiased=True)
     ax.contour(lon, lat, max_wind_smooth, transform=data_crs,
