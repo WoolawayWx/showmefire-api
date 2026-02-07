@@ -21,9 +21,10 @@ load_dotenv()
 genai_key = os.getenv('genai_key')
 client = genai.Client(api_key=genai_key)
 
-# Get the most recent forecast JSON
-forecast_date = datetime.now().strftime('%Y-%m-%d')
-forecast_json_path = ARCHIVE_DIR / f"station_forecasts_{forecast_date}.json"
+# Get the most recent forecast JSON (filename format: station_forecasts_YYYYMMDD_HH.json)
+forecast_date = datetime.now().strftime('%Y%m%d')
+forecast_hour = '12'
+forecast_json_path = ARCHIVE_DIR / f"station_forecasts_{forecast_date}_{forecast_hour}.json"
 
 # Load forecast metadata if it exists
 forecast_metadata = {}
@@ -62,6 +63,14 @@ image_configs = {
     "mo-forecastminrh": {
         "param": "Minimum Relative Humidity (%)",
         "instruction": "Read the EXACT percentage numbers on the left legend (likely ranges from 10-100%). Cool colors = high RH (moist), warm colors = low RH (dry). RH below 20% is VERY rare."
+    },
+    "mo-forecastrainfall": {
+        "param": "Total Precipitation (inches)",
+        "instruction": "Read the map and compare to the EXACT measurements on the left legend that is in inches. If it is a white, no rain expected in that area, if it is light blue, some rain, and darker the blue, more rainfall that is possible."
+    },
+    "mo-forecastswe": {
+        "param": "Snow Water Equivalent (inches)",
+        "instruction": "Read the map and compare to the EXACT measurements on the left legend that is in inches. This map helps measure snowfall across the state to identify where snowfall is on hte ground, as such, it heavily limits the fire danger at that location. White is none, while darker the blue, more SWE that is on possible."
     }
 }
 
@@ -106,6 +115,9 @@ Fuel Moisture: {analyses['mo-forecastfuelmoisture']}
 Max Temperature: {analyses['mo-forecastmaxtemp']}
 Max Wind: {analyses['mo-forecastmaxwind']}
 Min Relative Humidity: {analyses['mo-forecastminrh']}
+Forecasted Rainfall via HRRR: {analyses['mo-forecastrainfall']}
+Observed Snow Water Equivalent: {analyses['mo-forecastswe']} 
+
 
 Create a short, catchy headline (5-8 words max) that summarizes the overall fire danger for Missouri.
 
@@ -132,6 +144,8 @@ Fuel Moisture: {analyses['mo-forecastfuelmoisture']}
 Max Temperature: {analyses['mo-forecastmaxtemp']}
 Max Wind: {analyses['mo-forecastmaxwind']}
 Min Relative Humidity: {analyses['mo-forecastminrh']}
+Forecasted Rainfall via HRRR: {analyses['mo-forecastrainfall']}
+Observed Snow Water Equivalent: {analyses['mo-forecastswe']} 
 
 Write a concise 3-4 sentence paragraph summarizing the overall fire danger outlook for Missouri fire departments. 
 
