@@ -1,31 +1,34 @@
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from core.database import insert_forecast
-from datetime import timezone
+from pathlib import Path
+from datetime import datetime, timezone
+import json
+
 from google import genai
 import PIL.Image
 from dotenv import load_dotenv
-import os
-import json
-from datetime import datetime
+
+# Resolve paths inside and outside Docker. Allow overrides via env for mounted paths.
+BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent.parent))
+IMAGES_DIR = Path(os.getenv("IMAGES_DIR", BASE_DIR / "images"))
+ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
+
+sys.path.append(str(BASE_DIR))
+from core.database import insert_forecast
 
 load_dotenv()
 
 genai_key = os.getenv('genai_key')
 client = genai.Client(api_key=genai_key)
 
-images_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'images'))
-archive_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'archive', 'forecasts'))
-
 # Get the most recent forecast JSON
 forecast_date = datetime.now().strftime('%Y-%m-%d')
-forecast_json_path = os.path.join(archive_dir, f"station_forecasts_{forecast_date}.json")
+forecast_json_path = ARCHIVE_DIR / f"station_forecasts_{forecast_date}.json"
 
 # Load forecast metadata if it exists
 forecast_metadata = {}
-if os.path.exists(forecast_json_path):
-    with open(forecast_json_path, 'r') as f:
+if forecast_json_path.exists():
+    with forecast_json_path.open('r') as f:
         forecast_metadata = json.load(f)
     print(f"Loaded forecast metadata from: {forecast_json_path}\n")
 else:
@@ -66,7 +69,7 @@ image_configs = {
 analyses = {}
 
 for image_filename, config in image_configs.items():
-    image_path = os.path.join(images_dir, f"{image_filename}.png")
+    image_path = IMAGES_DIR / f"{image_filename}.png"
     img = PIL.Image.open(image_path)
     
     response = client.models.generate_content(
