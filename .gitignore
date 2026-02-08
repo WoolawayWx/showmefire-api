@@ -21,3 +21,4 @@ data/*
 public/rss.xml
 analysis/images
 endofday_sample.json
+public/image-timeline.json

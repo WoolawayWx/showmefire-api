@@ -2415,7 +2415,13 @@ def generate_complete_forecast():
                 # Upload all generated forecast images dynamically
                 forecast_files = [PROJECT_DIR / 'images' / f for f in all_generated_maps]
                 
-                upload_cdn.run_upload(files_to_upload=forecast_files)
+                # Support test mode with optional path prefix
+                test_prefix = os.getenv('CDN_TEST_PREFIX', None)  # e.g., 'test' for testing
+                if test_prefix:
+                    logger.info(f"Using test prefix: {test_prefix}/")
+                
+                # Use upload_forecast_files to place in yyyy/mm/dd/forecast/ and latest/
+                upload_cdn.upload_forecast_files(files_to_upload=forecast_files, path_prefix=test_prefix)
                 logger.info("✓ Forecast images uploaded to CDN successfully")
         except ImportError as e:
             logger.warning(f"Could not import dependencies for CDN upload (missing boto3?): {e}. Skipping CDN upload.")

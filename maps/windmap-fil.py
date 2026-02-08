@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 import os
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 
 def degrees_to_cardinal(degrees):
     if degrees is None:
@@ -260,9 +261,17 @@ runtime_sec = time.time() - start_time
 print(f"Wind Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
 print(f"Script runtime: {runtime_sec:.2f} seconds")
 
-logging.basicConfig(filename='logs/windmap-fil.log', level=logging.INFO)
-logging.info(f"Wind Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
-logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
+# Set up rotating log handler (max 5MB per file, keep 5 backup files)
+log_file = Path(__file__).parent.parent / 'logs/windmap-fil.log'
+log_file.parent.mkdir(exist_ok=True)
+logger = logging.getLogger('windmap-fil')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+logger.info(f"Wind Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
 plt.close(fig)
 

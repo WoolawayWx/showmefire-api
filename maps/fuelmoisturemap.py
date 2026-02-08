@@ -26,6 +26,7 @@ import matplotlib.image as mpimg
 import geojson
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 from shapely.geometry import Polygon, MultiPolygon
 
 
@@ -218,9 +219,17 @@ runtime_sec = time.time() - start_time
 print(f"Fuel Moisture updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
 print(f"Script runtime: {runtime_sec:.2f} seconds")
 
-logging.basicConfig(filename='logs/fuelmoisturemap.log', level=logging.INFO)
-logging.info(f"Fuel Moisture updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
-logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
+# Set up rotating log handler (max 5MB per file, keep 5 backup files)
+log_file = Path(__file__).parent.parent / 'logs/fuelmoisturemap.log'
+log_file.parent.mkdir(exist_ok=True)
+logger = logging.getLogger('fuelmoisturemap')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+logger.info(f"Fuel Moisture updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
 plt.close(fig)
 
