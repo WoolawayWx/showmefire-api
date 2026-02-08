@@ -1,4 +1,3 @@
-
 import os
 import boto3
 from pathlib import Path
@@ -60,12 +59,122 @@ def upload_to_cdn(files, dest_keys, content_types=None, cache_controls=None):
         except Exception as e:
             print(f" [FAILED] {file_path.name} to {key}: {e}")
 
-def get_rounded_timestamp():
-    """Returns a string like '20251225_2330' rounded to the nearest 15 mins."""
+def get_quarter_hour_path():
+    """Returns a path like '2025/12/25/2330' rounded to the nearest 15 mins."""
     now = datetime.now()
     minute = (now.minute // 15) * 15
     rounded_time = now.replace(minute=minute, second=0, microsecond=0)
-    return rounded_time.strftime('%Y%m%d_%H%M')
+    return rounded_time.strftime('%Y/%m/%d/%H%M')
+
+def get_forecast_path():
+    """Returns a path like '2025/12/25/forecast'."""
+    now = datetime.now()
+    return now.strftime('%Y/%m/%d/forecast')
+
+def generate_image_timeline(hours=12, cdn_base_url='https://cdn.showmefire.org', path_prefix=None):
+    """
+    Generate a JSON timeline of image URLs for the last N hours, grouped by image type.
+    
+    Args:
+        hours: Number of hours to go back (default: 12)
+        cdn_base_url: Base URL for the CDN
+        path_prefix: Optional prefix (e.g., 'test' for testing)
+    
+    Returns:
+        dict: Timeline data with timestamps and URLs grouped by image type
+    """
+    from datetime import timedelta
+    import json
+    
+    now = datetime.now()
+    intervals = hours * 4  # 4 intervals per hour (every 15 minutes)
+    
+    # Image types to track
+    image_files = {
+        'realtimefiredanger': 'mo-realtimefiredanger.png',
+        'fuelmoisture': 'mo-fuelmoisture.png',
+        'rh': 'mo-rh.png',
+        'windfilmap': 'mo-windfilmap.png'
+    }
+    
+    timeline = {
+        'generated_at': now.strftime('%Y-%m-%dT%H:%M:%S'),
+        'hours': hours,
+        'count': intervals,
+        'cdn_base_url': cdn_base_url,
+        'timestamps': []
+    }
+    
+    # Initialize image arrays
+    for image_key in image_files.keys():
+        timeline[image_key] = []
+    
+    # Generate entries from oldest to newest
+    for i in range(intervals - 1, -1, -1):
+        # Go back in 15-minute increments
+        timestamp = now - timedelta(minutes=i * 15)
+        
+        # Round to nearest 15 minutes
+        minute = (timestamp.minute // 15) * 15
+        rounded_time = timestamp.replace(minute=minute, second=0, microsecond=0)
+        
+        # Generate path
+        date_path = rounded_time.strftime('%Y/%m/%d/%H%M')
+        if path_prefix:
+            date_path = f"{path_prefix.rstrip('/')}/{date_path}"
+        
+        # Add timestamp info
+        timeline['timestamps'].append({
+            'timestamp': rounded_time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'timestamp_readable': rounded_time.strftime('%Y-%m-%d %H:%M'),
+            'path': date_path
+        })
+        
+        # Add URLs for each image type
+        for image_key, image_file in image_files.items():
+            timeline[image_key].append({
+                'url': f"{cdn_base_url}/{date_path}/{image_file}",
+                'timestamp': rounded_time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'path': f"{date_path}/{image_file}"
+            })
+    
+    return timeline
+
+def save_image_timeline(output_path=None, hours=12, cdn_base_url='https://cdn.showmefire.org', path_prefix=None):
+    """
+    Generate and save image timeline JSON file.
+    
+    Args:
+        output_path: Path to save JSON file (default: PROJECT_ROOT/public/image-timeline.json)
+        hours: Number of hours to go back
+        cdn_base_url: Base URL for the CDN
+        path_prefix: Optional prefix for testing
+    
+    Returns:
+        Path: Path to saved JSON file
+    """
+    import json
+    
+    if output_path is None:
+        output_path = PROJECT_ROOT / 'public' / 'image-timeline.json'
+    else:
+        output_path = Path(output_path)
+    
+    # Ensure directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Generate timeline
+    timeline = generate_image_timeline(hours=hours, cdn_base_url=cdn_base_url, path_prefix=path_prefix)
+    
+    # Save to file
+    with open(output_path, 'w') as f:
+        json.dump(timeline, f, indent=2)
+    
+    print(f"Image timeline saved to {output_path}")
+    print(f"  - Generated {timeline['count']} timeline entries per image type")
+    print(f"  - Covers last {hours} hours")
+    
+    return output_path
 
 def get_r2_client():
     """Initializes the S3-compatible client for Cloudflare R2."""
@@ -78,21 +187,25 @@ def get_r2_client():
         region_name='auto'
     )
 
-def run_upload(files_to_upload=None):
+def upload_quarter_hour_files(files_to_upload=None, path_prefix=None):
     """
-    Uploads only the specified files if files_to_upload is provided,
-    otherwise uploads all files in FOLDERS_TO_UPLOAD.
+    Uploads files that update on the quarter hour with path structure yyyy/mm/dd/hhmm.
     Args:
         files_to_upload (list of Path or str, optional): List of file paths to upload.
+        path_prefix (str, optional): Prefix to prepend to all paths (e.g., 'test/' for testing).
     """
     if not all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
         print("Error: Missing R2 credentials in .env file.")
         return
 
     s3 = get_r2_client()
-    timestamp_folder = get_rounded_timestamp()
+    timestamp_path = get_quarter_hour_path()
     
-    print(f"--- Starting Sync for interval: {timestamp_folder} ---")
+    # Apply prefix if provided
+    if path_prefix:
+        timestamp_path = f"{path_prefix.rstrip('/')}/{timestamp_path}"
+    
+    print(f"--- Uploading Quarter-Hour Files to: {timestamp_path} ---")
 
     if files_to_upload:
         files = [Path(f) for f in files_to_upload]
@@ -106,14 +219,91 @@ def run_upload(files_to_upload=None):
 
     for file_path in files:
         filename = file_path.name
-        # Set content type based on extension
         content_type = 'application/json' if file_path.suffix == '.geojson' else 'image/png'
         
-        # 1. Path for the archive (e.g., 20251225_2330/mo-fuelmoisture.png)
-        archive_key = f"{timestamp_folder}/{filename}"
+        # Archive path: yyyy/mm/dd/hhmm/filename.png
+        archive_key = f"{timestamp_path}/{filename}"
         
-        # 2. Path for the website (e.g., latest/mo-fuelmoisture.png)
-        latest_key = f"latest/{filename}"
+        # Latest path: latest/filename.png (or test/latest/filename.png)
+        latest_key = f"{path_prefix.rstrip('/')}/latest/{filename}" if path_prefix else f"latest/{filename}"
+
+        try:
+            # Upload to Archive
+            s3.upload_file(
+                str(file_path), BUCKET_NAME, archive_key,
+                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=3600'}
+            )
+            
+            # Upload to Latest
+            s3.upload_file(
+                str(file_path), BUCKET_NAME, latest_key,
+                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
+            )
+            
+            print(f" [OK] {filename} -> R2")
+        except Exception as e:
+            print(f" [FAILED] {filename}: {e}")
+    
+    # Generate and upload timeline JSON
+    try:
+        cdn_base_url = os.getenv('CDN_BASE_URL', 'https://cdn.showmefire.org')
+        timeline_hours = int(os.getenv('TIMELINE_HOURS', '12'))
+        
+        timeline_path = save_image_timeline(
+            hours=timeline_hours, 
+            cdn_base_url=cdn_base_url, 
+            path_prefix=path_prefix
+        )
+        
+        # Upload timeline JSON to CDN
+        timeline_key = f"{path_prefix.rstrip('/')}/image-timeline.json" if path_prefix else "image-timeline.json"
+        s3.upload_file(
+            str(timeline_path), BUCKET_NAME, timeline_key,
+            ExtraArgs={'ContentType': 'application/json', 'CacheControl': 'max-age=300'}
+        )
+        print(f" [OK] image-timeline.json -> {timeline_key}")
+    except Exception as e:
+        print(f" [INFO] Timeline generation skipped or failed: {e}")
+
+def upload_forecast_files(files_to_upload=None, path_prefix=None):
+    """
+    Uploads forecast files with path structure yyyy/mm/dd/forecast.
+    Args:
+        files_to_upload (list of Path or str, optional): List of file paths to upload.
+        path_prefix (str, optional): Prefix to prepend to all paths (e.g., 'test/' for testing).
+    """
+    if not all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID]):
+        print("Error: Missing R2 credentials in .env file.")
+        return
+
+    s3 = get_r2_client()
+    forecast_path = get_forecast_path()
+    
+    # Apply prefix if provided
+    if path_prefix:
+        forecast_path = f"{path_prefix.rstrip('/')}/{forecast_path}"
+    
+    print(f"--- Uploading Forecast Files to: {forecast_path} ---")
+
+    if files_to_upload:
+        files = [Path(f) for f in files_to_upload]
+    else:
+        files = []
+        for folder in FOLDERS_TO_UPLOAD:
+            if not folder.exists():
+                print(f"Skipping {folder.name}: Folder does not exist.")
+                continue
+            files.extend([f for f in folder.glob('*') if f.is_file()])
+
+    for file_path in files:
+        filename = file_path.name
+        content_type = 'application/json' if file_path.suffix == '.geojson' else 'image/png'
+        
+        # Archive path: yyyy/mm/dd/forecast/filename.png
+        archive_key = f"{forecast_path}/{filename}"
+        
+        # Latest path: latest/filename.png (or test/latest/filename.png)
+        latest_key = f"{path_prefix.rstrip('/')}/latest/{filename}" if path_prefix else f"latest/{filename}"
 
         try:
             # Upload to Archive
@@ -132,12 +322,28 @@ def run_upload(files_to_upload=None):
         except Exception as e:
             print(f" [FAILED] {filename}: {e}")
 
+# Backwards compatibility - keep original function name
+def run_upload(files_to_upload=None):
+    """
+    Legacy function. Use upload_quarter_hour_files() or upload_forecast_files() instead.
+    """
+    upload_quarter_hour_files(files_to_upload)
+
 if __name__ == "__main__":
-    # Example: specify files to upload by their paths
-    files_to_upload = [
+    # Get optional test prefix from environment
+    test_prefix = os.getenv('CDN_TEST_PREFIX', None)
+    
+    # Example: Quarter-hour files
+    quarter_hour_files = [
         PROJECT_ROOT / "images" / "mo-windfilmap.png",
         PROJECT_ROOT / "images" / "mo-rh.png",
         PROJECT_ROOT / "images" / "mo-realtimefiredanger.png",
         PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
     ]
-    run_upload(files_to_upload=files_to_upload)
+    upload_quarter_hour_files(files_to_upload=quarter_hour_files, path_prefix=test_prefix)
+    
+    # Example: Forecast files
+    # forecast_files = [
+    #     PROJECT_ROOT / "images" / "forecast-map.png",
+    # ]
+    # upload_forecast_files(files_to_upload=forecast_files, path_prefix=test_prefix)

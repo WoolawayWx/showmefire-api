@@ -76,7 +76,12 @@ def estimate_fuel_moisture(relative_humidity, air_temp=None):
 
 def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
     """
-    Calculate fire danger level based on NWCG standards with extended scale.
+    Fire Danger Criteria based on ShowMeFire.org:
+    Low: FM >= 15%
+    Moderate: FM < 15% WITH (RH < 45% OR Wind >= 10 kts)
+    Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
+    Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
+    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
     
     Parameters:
     - fuel_moisture: 10-hour fuel moisture percentage
@@ -86,68 +91,30 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
     Returns: danger level (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
     """
     
-    # If fuel moisture >= 15%, conditions are generally safe
+    # 1. IMMEDIATE EXIT: If fuels are wet, danger is Low regardless of weather
     if fuel_moisture >= 15:
         return 0  # Low
     
-    # Fuel moisture 10-15% - MODERATE
-    # MODIFICATION: Now requires weather to contribute to the risk.
-    # If it is very humid (>60%) AND calm (<6 kts), downgrades to Low despite dry-ish fuels.
-    if fuel_moisture >= 10:
-        if relative_humidity < 60 or wind_speed_knots >= 6:
-            return 1  # Moderate
-        else:
-            return 0  # Low (Fuels are drying, but weather is benign)
-    
-    # Fuel moisture < 10% - now check RH and wind for increasing danger levels
-    # Following the NWCG table exactly
-    
-    # EXTREME conditions (Level 4): Very dry fuels + high winds + very low RH
-    # FM < 6%, Wind >= 25kts, RH < 15%
-    if fuel_moisture < 6 and wind_speed_knots >= 25 and relative_humidity < 15:
+    # 2. EXTREME (Check the worst case first)
+    if fuel_moisture < 7 and relative_humidity < 20 and wind_speed_knots >= 25:
         return 4  # Extreme
     
-    # Also extreme: FM < 7%, Wind >= 30kts, RH < 20%
-    if fuel_moisture < 7 and wind_speed_knots >= 30 and relative_humidity < 20:
-        return 4  # Extreme
-    
-    # CRITICAL conditions (Level 3): Red Flag Warning criteria per NWCG table
-    # 15-19kts with RH < 20% = Generally Critical (Red Flag)
-    if wind_speed_knots >= 15 and wind_speed_knots < 20 and relative_humidity < 20:
-        return 3  # Critical/Red Flag
-    # 20-24kts with RH < 25% = Red Flag Warning
-    elif wind_speed_knots >= 20 and wind_speed_knots < 25 and relative_humidity < 25:
-        return 3  # Critical/Red Flag
-    # >= 25kts with RH < 25% = Red Flag Warning (detailed below in table)
-    elif wind_speed_knots >= 25 and relative_humidity < 25:
-        return 3  # Critical/Red Flag
-    # Also critical if FM is very low even with slightly higher RH
-    elif fuel_moisture < 7 and wind_speed_knots >= 15 and relative_humidity < 30:
+    # 3. CRITICAL
+    if fuel_moisture < 9 and relative_humidity < 25 and wind_speed_knots >= 15:
         return 3  # Critical
-    
-    # ELEVATED conditions (Level 2): Following NWCG table exactly
-    # 5-9kts with RH < 20% = Elevated
-    if wind_speed_knots >= 5 and wind_speed_knots < 10 and relative_humidity < 20:
-        return 2  # Elevated
-    # 10-14kts with RH < 35% = Elevated
-    elif wind_speed_knots >= 10 and wind_speed_knots < 15 and relative_humidity < 35:
-        return 2  # Elevated
-    # 15-19kts: RH 20-34% = Elevated
-    elif wind_speed_knots >= 15 and wind_speed_knots < 20 and relative_humidity >= 20 and relative_humidity < 35:
-        return 2  # Elevated
-    # 20-24kts: RH 25-44% = Elevated  
-    elif wind_speed_knots >= 20 and wind_speed_knots < 25 and relative_humidity >= 25 and relative_humidity < 45:
-        return 2  # Elevated
-    # >= 25kts: RH 25-44% = Elevated
-    elif wind_speed_knots >= 25 and relative_humidity >= 25 and relative_humidity < 45:
-        return 2  # Elevated
-    
-    # If FM < 10% but doesn't meet elevated criteria, still moderate
-    # We leave this as Moderate because FM < 10 implies 1-hour fuels are very receptive
-    if fuel_moisture < 10:
+        
+    # 4. ELEVATED (The (AND) OR (AND) Logic)
+    # Scenario A: Dry & Breezy OR Scenario B: Very Dry & Light Wind
+    if fuel_moisture < 9:
+        if (relative_humidity < 35 and wind_speed_knots >= 12) or (relative_humidity < 25 and wind_speed_knots >= 5):
+            return 2  # Elevated
+        
+    # 5. MODERATE (If it didn't hit Elevated, check if it's generally dry/breezy)
+    if fuel_moisture < 15 and (relative_humidity < 45 or wind_speed_knots >= 10):
         return 1  # Moderate
-    
-    return 0  # Low
+        
+    # 6. DEFAULT TO LOW
+    return 0
 
 def generate_basemap():
     SCRIPT_DIR = Path(__file__).resolve().parent
@@ -363,15 +330,14 @@ fig.text(
 )
 fig.text(
     0.99, 0.62,
-    
-    "Fire Danger Criteria (aligns with MO AOP guidence)\n"
+    "Fire Danger Criteria:\n"
     "\n"
-    "Low: FM ≥ 15% (Fuels adequately moist)\n"
-    "Moderate: FM 10-14% with RH < 60% or Wind ≥ 6 kts\n"
-    "Elevated: FM < 10% with RH < 45% or Wind ≥ 10 kts\n"
-    "Critical: FM < 10% with RH < 25% & Wind ≥ 15 kts\n"
-    "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
-    "Criteria represent potential for fire ignition and spread.\n\n"
+    "Low: FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+    "Moderate: FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+    "Elevated: FM < 9% AND\n"
+    "  (RH < 35% & Wind ≥ 12 kts) OR (RH < 25% & Wind ≥ 5 kts)\n\n"
+    "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
+    "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
     "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
     "For More Info, Visit ShowMeFire.org",
     fontsize=10,
@@ -413,9 +379,17 @@ runtime_sec = time.time() - start_time
 print(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
 print(f"Script runtime: {runtime_sec:.2f} seconds")
 
-logging.basicConfig(filename='logs/realtimefiredanger.log', level=logging.INFO)
-logging.info(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
-logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
+# Set up rotating log handler (max 5MB per file, keep 5 backup files)
+log_file = Path(__file__).parent.parent / 'logs/realtimefiredanger.log'
+log_file.parent.mkdir(exist_ok=True)
+logger = logging.getLogger('realtimefiredanger')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+logger.info(f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
 plt.close(fig)
 

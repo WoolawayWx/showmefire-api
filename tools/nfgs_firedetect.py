@@ -17,20 +17,14 @@ LOGS_DIR = BASE_DIR / 'logs'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Setup logging with rotation
+# Set up rotating log handler (max 5MB per file, keep 5 backup files)
 LOG_FILE = LOGS_DIR / 'nfgs_firedetect.log'
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('nfgs_firedetect')
 logger.setLevel(logging.INFO)
-
-# Create rotating file handler: 5MB max file size, keep 5 backup files
-handler = RotatingFileHandler(
-    LOG_FILE,
-    maxBytes=5 * 1024 * 1024,  # 5 MB
-    backupCount=5  # Keep 5 previous logs (nfgs_firedetect.log.1, .log.2, etc.)
-)
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+if not logger.handlers:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
 
 def extract_coordinates(event):
     """Extract lat/lon from the satellite imagery link"""
