@@ -684,7 +684,14 @@ async def get_missouri_fires_geojson():
         return FileResponse(geojson_file, media_type='application/geo+json')
     else:
         raise HTTPException(status_code=404, detail="Fire GeoJSON not yet available")
-    
+@app.get("/api/images/timeline")
+async def get_image_timeline():
+    """Get image timeline data for the past 48 hours"""
+    timeline_file = PUBLIC_DIR / "image-timeline.json"
+    if timeline_file.exists():
+        return FileResponse(timeline_file, media_type="application/json")
+    else:
+        raise HTTPException(status_code=404, detail="Timeline file not found")    
 @app.get("/forecast/latest")
 def api_latest_forecast():
     forecast = get_latest_forecast()
