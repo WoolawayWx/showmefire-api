@@ -11,3 +11,5 @@ python scripts/endOfDay.py
 
 # Run the end-of-day validation report script
 python forecast/endOfDayReport.py
+
+python scripts/forecast_obs_comparison.py
