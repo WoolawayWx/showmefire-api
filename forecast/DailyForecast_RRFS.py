@@ -1,0 +1,2766 @@
+import cartopy.crs as ccrs
+import pandas as pd
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from scipy.ndimage import gaussian_filter
+import logging
+import os
+import json
+import matplotlib.patheffects as path_effects
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import numpy as np
+from pathlib import Path
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+import cairosvg
+from io import BytesIO
+import matplotlib.font_manager as font_manager
+import matplotlib.image as mpimg
+from dotenv import load_dotenv
+import time
+import warnings
+from herbie import FastHerbie
+import xarray as xr
+import requests
+from scipy.interpolate import Rbf, RegularGridInterpolator, griddata
+from PIL import Image
+import numpy as np
+import rasterio
+import pickle
+import gc
+import psutil
+import xgboost as xgb
+import sys
+import rasterio
+from rasterio.transform import from_bounds
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+import sqlite3
+import tarfile
+import gzip
+import shutil
+from datetime import datetime
+import io
+from herbie import Herbie
+
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.database import get_db_path
+
+# Load the production model once
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH = os.path.join(BASE_DIR, 'models', 'fuel_moisture_model.json')
+
+FM_MODEL = xgb.Booster()
+try:
+    FM_MODEL.load_model(MODEL_PATH)
+except Exception as e:
+    # Fallback for when running from a different context or if path logic fails
+    FM_MODEL.load_model('models/fuel_moisture_model.json')
+
+# The exact features the model expects
+# Extended features list for models trained with precipitation
+FEATURES = [
+    'temp_c', 'rel_humidity', 'wind_speed_ms', 'hour', 'month',
+    'emc_baseline', 'temp_mean_3h', 'rh_mean_3h', 'temp_mean_6h', 'rh_mean_6h',
+    'precip_1h', 'precip_3h', 'precip_6h', 'precip_24h', 'hours_since_rain'
+]
+
+# Base features list (for models without precipitation)
+# Use this if you haven't retrained with precipitation yet
+# FEATURES = [
+#     'temp_c', 'rel_humidity', 'wind_speed_ms', 'hour', 'month', 
+#     'emc_baseline', 'temp_mean_3h', 'rh_mean_3h', 'temp_mean_6h', 'rh_mean_6h'
+# ]
+
+
+# Suppress Herbie regex warnings
+warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
+
+# Set up logging to file in logs folder
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+log_file_path = os.path.join(LOGS_DIR, 'forecastedfiredanger.log')
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# File handler
+file_handler = logging.FileHandler(log_file_path, mode='a')
+file_handler.setLevel(logging.INFO)
+file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
+
+# Console handler (optional, keeps previous behavior)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(file_formatter)
+logger.addHandler(console_handler)
+
+
+def log_memory_usage(note=""):
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / 1024 / 1024
+    logger.info(f"[MEM] {note} RSS={mem_mb:.1f} MB")
+    
+def validate_and_convert_temperature(temp_values, expected_unit='celsius', source='HRRR'):
+    """
+    Intelligently detects temperature units and converts to Celsius
+    
+    Detection logic:
+    - Kelvin: values typically 200-350K
+    - Fahrenheit: values typically 0-120°F
+    - Celsius: values typically -40 to 50°C
+    """
+    temp_mean = np.nanmean(temp_values)
+    temp_min = np.nanmin(temp_values)
+    temp_max = np.nanmax(temp_values)
+    
+    # Detect if temperature is in Kelvin
+    if temp_min > 200 and temp_max < 350:
+        logger.info(f"  → Detected Kelvin, converting to Celsius")
+        return temp_values - 273.15
+    
+    # Detect if temperature is in Fahrenheit
+    elif temp_min > -20 and temp_max > 60 and temp_mean > 40:
+        logger.info(f"  → Detected Fahrenheit, converting to Celsius")
+        return (temp_values - 32) * 5/9
+    
+    # Already in Celsius
+    else:
+        logger.info(f"  → Already in Celsius")
+        return temp_values
+    
+def validate_and_convert_wind_speed(wind_values, expected_unit='ms', source='HRRR'):
+    """
+    Intelligently detects wind speed units and converts to m/s
+    Returns both m/s and knots
+    
+    Detection logic:
+    - m/s: typical range 0-40 m/s
+    - knots: typical range 0-80 kts  
+    - mph: typical range 0-90 mph
+    """
+    wind_mean = np.nanmean(wind_values)
+    wind_max = np.nanmax(wind_values)
+    
+    # Detect if already in m/s
+    if wind_max < 50 and wind_mean < 15:
+        wind_ms = wind_values
+    
+    # Detect if in knots
+    elif wind_max < 100 and wind_mean < 30:
+        wind_ms = wind_values * 0.514444  # knots to m/s
+    
+    # Detect if in mph
+    elif wind_max < 150 and wind_mean < 40:
+        wind_ms = wind_values * 0.44704  # mph to m/s
+    
+    # Convert to knots for fire danger calculations
+    wind_kts = wind_ms * 1.94384
+    
+    return wind_ms, wind_kts
+
+def validate_relative_humidity(rh_values, source='HRRR'):
+    """
+    Validates RH is in percentage (0-100), not fraction (0-1)
+    
+    Detection logic:
+    - Fraction (0-1): max <= 1.0
+    - Percentage (0-100): typical range 0-100
+    """
+    rh_mean = np.nanmean(rh_values)
+    rh_min = np.nanmin(rh_values)
+    rh_max = np.nanmax(rh_values)
+    
+    # Detect if in fraction (0-1)
+    if rh_max <= 1.0 and rh_mean < 1.0:
+        logger.info(f"  → Detected fraction (0-1), converting to percentage")
+        return rh_values * 100.0
+
+    # Already in percentage
+    elif rh_min >= 0 and rh_max <= 100:
+        logger.info(f"  → Already in percentage (0-100)")
+        return rh_values
+
+    # Over 100% - needs clipping
+    elif rh_max > 100:
+        logger.warning(f"  → RH values exceed 100%, clipping")
+        return np.clip(rh_values, 0, 100)
+
+    # Fallback: uncertain units, try best-effort conversion
+    else:
+        logger.warning(f"  → Uncertain RH units (mean={rh_mean:.2f}, min={rh_min:.2f}, max={rh_max:.2f}); attempting best-effort conversion")
+        if rh_mean < 1.5:
+            return np.clip(rh_values * 100.0, 0, 100)
+        else:
+            return np.clip(rh_values, 0, 100)
+
+
+def calculate_fire_danger(fm, rh, wind_kts):
+    """
+    Fire Danger Criteria based on ShowMeFire.org:
+    Low: FM >= 15%
+    Moderate: FM 9-14% WITH (RH < 50% AND Wind >= 10 kts)
+    Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
+    Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
+    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 30 kts)
+    """
+    
+    
+    # 1. IMMEDIATE EXIT: If fuels are wet, danger is Low regardless of weather
+    if fm >= 15: 
+        return 0 
+    
+    # 2. EXTREME (Check the worst case first)
+    if fm < 7 and rh < 20 and wind_kts >= 25: # Dropped wind slightly to 25
+        return 4
+    
+    # 3. CRITICAL
+    if fm < 9 and rh < 25 and wind_kts >= 15:
+        return 3
+        
+    # 4. ELEVATED (The (AND) OR (AND) Logic)
+    # Scenario A: Dry & Breezy OR Scenario B: Very Dry & Light Wind
+    if fm < 9: 
+        if (rh < 35 and wind_kts >= 12) or (rh < 25 and wind_kts >= 5):
+            return 2
+        
+    # 5. MODERATE (If it didn't hit Elevated, check if it's generally dry/breezy)
+    if fm < 15 and (rh < 45 or wind_kts >= 10):
+        return 1
+        
+    # 6. DEFAULT TO LOW
+    return 0
+
+
+def estimate_fuel_moisture(relative_humidity, air_temp=None):
+    logger.debug(f"Estimating fuel moisture from RH={relative_humidity}, Temp={air_temp}")
+    """
+    Estimate 10-hour fuel moisture from relative humidity.
+    """
+    if relative_humidity is None:
+        return None
+    
+    fm_estimate = 3 + 0.25 * relative_humidity
+    fm_estimate = np.clip(fm_estimate, 3, 30)
+    
+    return fm_estimate
+
+
+def create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi):
+    logger.info(f"Creating base map with extent={extent}, size=({pixelw}x{pixelh}), dpi={mapdpi}")
+    """Create base map figure and axes."""
+    figsize_width = pixelw / mapdpi
+    figsize_height = pixelh / mapdpi
+    
+    fig = plt.figure(figsize=(figsize_width, figsize_height), dpi=mapdpi, facecolor='#E8E8E8')
+    ax = plt.axes([0, 0, 1, 1], projection=map_crs)
+    
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_extent(extent, crs=data_crs)
+    
+    return fig, ax
+
+
+def add_boundaries(ax, data_crs, PROJECT_DIR, county_zorder=5, state_zorder=9):
+    logger.info("Adding county and state boundaries to map.")
+    """Add county and state boundaries to map."""
+    counties = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
+    if counties.crs != data_crs.proj4_init:
+        counties = counties.to_crs(data_crs.proj4_init)
+    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", 
+                      facecolor='none', linewidth=1, zorder=county_zorder)
+    
+    missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+    if missouriborder.crs != data_crs.proj4_init:
+        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+    ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", 
+                      facecolor='none', linewidth=1.5, zorder=state_zorder)
+
+
+def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_DIR):
+    logger.info(f"Adding title and branding: {title}")
+    """Add title, description, and branding to figure."""
+    font_paths = [
+        str(SCRIPT_DIR.parent / 'assets/Montserrat/static/Montserrat-Regular.ttf'),
+        str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf'),
+        str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf')
+    ]
+    for font_path in font_paths:
+        if Path(font_path).exists():
+            font_manager.fontManager.addfont(font_path)
+    plt.rcParams['font.family'] = 'Montserrat'
+    
+    fig.text(0.99, 0.97, title, fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans')
+    fig.text(0.99, 0.90, subtitle, fontsize=16, ha='right', va='top', fontname='Montserrat')
+    fig.text(0.99, 0.62, description, fontsize=10, ha='right', va='top', linespacing=1.6, fontname='Montserrat')
+    fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
+    
+    # Add logo
+    svg_path = str(SCRIPT_DIR.parent / 'assets/LightBackGroundLogo.svg')
+    try:
+        png_bytes = cairosvg.svg2png(url=svg_path)
+        image = mpimg.imread(BytesIO(png_bytes), format='png')
+        imagebox = OffsetImage(image, zoom=0.03)
+        ab = AnnotationBbox(imagebox, (0.99, 0.01), frameon=False, xycoords='figure fraction', box_alignment=(1, 0))
+        plt.gca().add_artist(ab)
+    except (ImportError, FileNotFoundError):
+        pass
+
+def get_current_fuel_moisture_field(port='8000', target_date=None):
+    logger.info(f"Getting current fuel moisture field from RAWS at 7 AM CT (port={port})")
+    """
+    Get observed fuel moisture from RAWS stations near 7 AM Central Time.
+    Uses the new /api/fuel-moisture/morning endpoint for consistent timing.
+    This provides the starting point for the forecast.
+    
+    Args:
+        port: API port (default: 8000)
+        target_date: Optional date string in YYYY-MM-DD format (default: today)
+    """
+    try:
+        # Build URL for the morning fuel moisture endpoint
+        api_host = os.getenv('API_HOST','localhost')
+        url = f'http://{api_host}:{port}/api/fuel-moisture/morning'
+        logger.info(f"Connecting to API at: {url}")
+        params = {}
+        if target_date:
+            params['date'] = target_date
+        
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if not data.get('success'):
+            logger.warning(f"API returned error: {data}")
+            return None
+        
+        stations = data.get('data', {}).get('stations', [])
+        
+        fuel_points = []
+        for station in stations:
+            obs = station.get('observations', {})
+            fm_data = obs.get('fuel_moisture')
+            
+            if fm_data and isinstance(fm_data, dict):
+                fm_value = fm_data.get('value')
+            elif isinstance(fm_data, (int, float)):
+                fm_value = fm_data
+            else:
+                fm_value = None
+            
+            if fm_value is not None and fm_value > 0:
+                fuel_points.append((
+                    station['longitude'], 
+                    station['latitude'], 
+                    fm_value
+                ))
+        
+        if len(fuel_points) >= 3:
+            target_time = data.get('data', {}).get('target_time_formatted', '7 AM CT')
+            logger.info(f"Found {len(fuel_points)} RAWS stations with fuel moisture data at {target_time}")
+            return fuel_points
+        else:
+            logger.warning(f"Only {len(fuel_points)} RAWS stations available with fuel moisture, using default")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching fuel moisture data from API: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching RAWS data: {e}")
+        return None
+
+
+def interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh):
+    logger.info(f"Interpolating {len(fuel_points) if fuel_points else 0} fuel points to grid.")
+    """
+    Interpolate current RAWS observations to forecast grid.
+    """
+    if not fuel_points:
+        return None
+        
+    fuel_lon = [p[0] for p in fuel_points]
+    fuel_lat = [p[1] for p in fuel_points]
+    fuel_values = [p[2] for p in fuel_points]
+    
+    # Use RBF interpolation
+    fuel_rbf = Rbf(fuel_lon, fuel_lat, fuel_values, function='multiquadric', smooth=0.01)
+    fuel_grid = fuel_rbf(grid_lon_mesh, grid_lat_mesh)
+    fuel_grid = gaussian_filter(fuel_grid, sigma=0.7)
+    
+    return fuel_grid
+
+
+def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
+    logger.debug(f"Estimating FM with lag: RH={rh}, Temp={temp_c}, PrevFM={previous_fm}, Hours={hours_elapsed}")
+    """
+    Estimate fuel moisture accounting for time lag (10-hour fuels).
+    
+    This models the physical process of fuel moisture change rather than
+    just using equilibrium moisture content.
+    
+    Parameters:
+    - rh: Relative humidity (%)
+    - temp_c: Air temperature (°C)
+    - previous_fm: Fuel moisture from previous timestep (%)
+    - hours_elapsed: Hours since last timestep (usually 1)
+    
+    Returns: New fuel moisture (%)
+    """
+    # Calculate equilibrium moisture content (EMC) based on RH and temperature
+    if rh <= 10:
+        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    elif rh <= 50:
+        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+    else:
+        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
+    
+    emc = np.clip(emc, 1, 40)
+    
+    # Calculate response time (tau) for 10-hour fuels
+    # Drying is faster than wetting
+    if previous_fm > emc:  # Drying
+        tau = 10.0 * np.exp(-0.05 * temp_c)
+    else:  # Wetting
+        tau = 10.0 * np.exp(-0.05 * temp_c) * 1.5
+    
+    # Exponential approach to equilibrium
+    # alpha represents fraction of way to equilibrium after time elapsed
+    alpha = 1 - np.exp(-hours_elapsed / tau)
+    
+    # Calculate new fuel moisture
+    fm_new = previous_fm + alpha * (emc - previous_fm)
+    
+    return np.clip(fm_new, 1, 40)
+
+
+def get_snodas_swe_grid(bbox_tuple, date=None):
+    """
+    Fetch SNODAS Snow Water Equivalent (SWE) data directly from NSIDC archive.
+    Returns:
+        swe_grid: 2D numpy array (float) with actual SWE values in mm.
+        lon_grid: 2D longitude grid for the SWE data.
+        lat_grid: 2D latitude grid for the SWE data.
+    """
+    try:
+        logger.info("Fetching SNODAS SWE data...")
+        
+        if date is None:
+            date = datetime.now()
+        
+        date_str = date.strftime("%Y%m%d")
+        year = date.strftime("%Y")
+        month_str = date.strftime("%m_%b")
+        
+        url = f"https://noaadata.apps.nsidc.org/NOAA/G02158/masked/{year}/{month_str}/SNODAS_{date_str}.tar"
+        
+        resp = requests.get(url, stream=True, timeout=60)
+        resp.raise_for_status()
+        
+        extract_dir = "/tmp/snodas_forecast"
+        os.makedirs(extract_dir, exist_ok=True)
+        
+        with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r") as tar:
+            swe_file = None
+            txt_file = None
+            
+            for member in tar.getmembers():
+                if "1034" in member.name and member.name.endswith(".dat.gz"):
+                    swe_file = member
+                if "1034" in member.name and member.name.endswith(".txt.gz"):
+                    txt_file = member
+                    
+            if not swe_file:
+                logger.warning("No SWE data found in SNODAS tarball")
+                return None, None, None
+                
+            tar.extract(swe_file, path=extract_dir)
+            if txt_file:
+                tar.extract(txt_file, path=extract_dir)
+                
+            full_path = os.path.join(extract_dir, swe_file.name)
+            final_dat_path = full_path[:-3]
+            
+            with gzip.open(full_path, 'rb') as f_in:
+                with open(final_dat_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                    
+            rows, cols = 3351, 6935
+            hdr_content = f"""ENVI
+samples = {cols}
+lines   = {rows}
+header offset = 0
+file type = ENVI Standard
+data type = 2
+interleave = bsq
+byte order = 1
+map info = {{Geographic Lat/Lon, 1.0000, 1.0000, -124.73333333, 52.87500000, 0.00833333, 0.00833333, WGS-84, units=Degrees}}
+coordinate system string = {{GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295]]}}
+"""
+            hdr_path = final_dat_path.replace('.dat', '.hdr')
+            with open(hdr_path, 'w') as f:
+                f.write(hdr_content)
+                
+            with open(final_dat_path, 'rb') as f:
+                raw_data = np.frombuffer(f.read(), dtype='>i2')  # big-endian 16-bit int
+            
+            swe_data = raw_data.reshape(rows, cols).astype(float)
+            swe_data[swe_data < -9000] = 0.0
+            
+            lon_start = -124.73333333
+            lat_start = 52.875  # top-left
+            lon_end = -66.94168977999999
+            lat_end = 24.95001117
+            
+            lon_coords = np.linspace(lon_start, lon_end, cols)
+            lat_coords = np.linspace(lat_start, lat_end, rows)
+            
+            lon_grid, lat_grid = np.meshgrid(lon_coords, lat_coords)
+            
+            minx, miny, maxx, maxy = bbox_tuple
+            row_mask = (lat_grid >= miny) & (lat_grid <= maxy)
+            col_mask = (lon_grid >= minx) & (lon_grid <= maxx)
+            
+            row_indices = np.where(np.any(row_mask, axis=1))[0]
+            col_indices = np.where(np.any(col_mask, axis=0))[0]
+            
+            if len(row_indices) == 0 or len(col_indices) == 0:
+                logger.warning("No SNODAS data in bbox")
+                return None, None, None
+                
+            rmin, rmax = row_indices.min(), row_indices.max()
+            cmin, cmax = col_indices.min(), col_indices.max()
+            
+            swe_subset = swe_data[rmin:rmax+1, cmin:cmax+1]
+            lon_subset = lon_grid[rmin:rmax+1, cmin:cmax+1]
+            lat_subset = lat_grid[rmin:rmax+1, cmin:cmax+1]
+            
+            return swe_subset, lon_subset, lat_subset
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch SNODAS SWE: {e}")
+        return None, None, None
+
+def interpolate_swe_to_grid(swe_data, swe_lon, swe_lat, target_lon, target_lat):
+    """
+    Interpolate SNODAS SWE grid to the model grid.
+    swe_data: 2D SWE array
+    swe_lon, swe_lat: 2D coordinate grids
+    target_lon, target_lat: Target coordinate grids
+    """
+    try:
+        # Flatten source data
+        swe_flat = swe_data.flatten()
+        lon_flat = swe_lon.flatten()
+        lat_flat = swe_lat.flatten()
+        
+        # Create interpolator
+        from scipy.interpolate import griddata
+        points = np.column_stack((lat_flat, lon_flat))
+        
+        # Target points
+        if target_lon.ndim == 2:
+            target_points = np.column_stack((target_lat.ravel(), target_lon.ravel()))
+        else:
+            t_lon_mesh, t_lat_mesh = np.meshgrid(target_lon, target_lat)
+            target_points = np.column_stack((t_lat_mesh.ravel(), t_lon_mesh.ravel()))
+            
+        # Interpolate
+        interp_values = griddata(points, swe_flat, target_points, method='linear', fill_value=0)
+        
+        # Reshape to target shape
+        if target_lon.ndim == 2:
+            result = interp_values.reshape(target_lon.shape)
+        else:
+            result = interp_values.reshape(t_lon_mesh.shape)
+            
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error interpolating SWE grid: {e}")
+        return None
+
+def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=None):
+    logger.info("Processing forecast with observations-based fuel moisture.")
+    """
+    Process HRRR forecast with actual fuel moisture observations as starting point.
+    
+    This replaces the simple RH-based estimation with a physics-based model
+    that accounts for:
+    1. Current actual fuel moisture (from RAWS)
+    2. Time lag in fuel response
+    3. Temperature effects on drying/wetting rates
+    
+    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+    """
+    # Get current fuel moisture observations
+    fuel_points = get_current_fuel_moisture_field(port)
+    
+    # Create grid meshes for interpolation
+    if lon.ndim == 1 and lat.ndim == 1:
+        grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+    else:
+        grid_lon_mesh, grid_lat_mesh = lon, lat
+        
+    
+    
+    # Initialize fuel moisture field from observations
+    if fuel_points and len(fuel_points) >= 3:
+        initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
+        print(f"Initialized from RAWS observations: FM range {np.nanmin(initial_fm):.1f}-{np.nanmax(initial_fm):.1f}%")
+    else:
+        logger.error("Insufficient RAWS fuel moisture observations (need >=3). Aborting forecast.")
+        raise RuntimeError("Insufficient RAWS fuel moisture observations to initialize forecast. Aborting.")
+    
+    # --- FETCH SWE DATA ---
+    # Define extent same as map generation: (-95.8, -89.1, 35.8, 40.8)
+    swe_bbox = (-95.8, 35.8, -89.1, 40.8) # MinX, MinY, MaxX, MaxY
+    
+    swe_data, swe_lon, swe_lat = get_snodas_swe_grid(swe_bbox, run_date)
+    
+    if swe_data is not None:
+        # Interpolate to model grid
+        swe_grid = interpolate_swe_to_grid(swe_data, swe_lon, swe_lat, grid_lon_mesh, grid_lat_mesh)
+
+        # Prepare Missouri mask (do not apply to swe_grid used for calculations)
+        SCRIPT_DIR = Path(__file__).resolve().parent
+        PROJECT_DIR = SCRIPT_DIR.parent
+        missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+        data_crs = ccrs.PlateCarree()
+        if missouriborder.crs != data_crs.proj4_init:
+            missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+
+        if not missouriborder.empty:
+            from shapely.geometry import Point
+            from shapely.prepared import prep
+
+            missouri_geom = missouriborder.geometry.iloc[0]
+            missouri_buffered = missouri_geom.buffer(0.01)
+            prepared_geom = prep(missouri_buffered)
+
+            points_flat = np.column_stack([grid_lon_mesh.ravel(), grid_lat_mesh.ravel()])
+            mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
+            mask = mask_flat.reshape(grid_lon_mesh.shape)
+
+            # Keep full SWE grid for calculations (square area). Do NOT mask here.
+            # Masking to Missouri will be applied later only for plotting/export.
+            # However, keep a masked copy available if needed for maps.
+            try:
+                swe_grid_for_map = np.where(mask, swe_grid, np.nan)
+                logger.info("Loaded SWE grid (full extent) — will apply Missouri mask only for maps")
+            except Exception:
+                swe_grid_for_map = None
+    else:
+        swe_grid = None
+    
+    # Process each forecast hour
+    hourly_fm = []
+    hourly_rh = []
+    hourly_ws = []
+    hourly_temp = []
+    hourly_risks = []
+    
+    # Buffers for rolling means
+    temp_history = []
+    rh_history = []
+    precip_history = []
+    
+    # Extract precipitation if available
+    has_precip = False
+    try:
+        if 'apcp' in ds_full or 'APCP' in ds_full or 'tp' in ds_full:
+            has_precip = True
+            logger.info("Precipitation data found in HRRR dataset")
+    except:
+        pass
+    
+    # Prepare base_time for forecast calculations (Model Run Time)
+    # If run_date is provided, use it. Otherwise fallback to now (UTC).
+    # ensure base_time is UTC aware
+    if run_date:
+        if run_date.tzinfo is None:
+            base_time = run_date.tz_localize('UTC')
+        else:
+            base_time = run_date
+    else:
+        base_time = pd.Timestamp.utcnow()
+
+    # Load Station Indices for Verification
+    db_path = get_db_path()
+    
+    # Get grid dimensions for validation
+    grid_h, grid_w = grid_lat_mesh.shape
+    
+    recalculate_indices = False
+    station_indices = []
+
+    try:
+        conn = sqlite3.connect(db_path)
+        indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
+        print(f"indices_df: ")
+        if not indices_df.empty:
+            # Check if indices from DB fit in our current grid
+            # If we are using a cropped grid but DB has full-grid indices, they will be out of bounds
+            max_x = indices_df['grid_x'].max() if 'grid_x' in indices_df.columns else 0
+            max_y = indices_df['grid_y'].max() if 'grid_y' in indices_df.columns else 0
+            
+            if max_x >= grid_w or max_y >= grid_h:
+                logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Indices likely from full HRRR grid. Recalculating for local crop.")
+                recalculate_indices = True
+            else:
+                # Ensure columns map to what the rest of the code expects (x, y)
+                if 'grid_x' in indices_df.columns:
+                    indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
+                station_indices = indices_df.to_dict('records')
+        else:
+            recalculate_indices = True
+
+        # Fallback if empty or out of bounds
+        if recalculate_indices:
+            logger.info("Calculating station grid indices on the fly...")
+            try:
+                stations_df = pd.read_sql("SELECT DISTINCT station_id, latitude, longitude FROM observations", conn)
+                new_indices = []
+                # Ensure we have valid coordinates
+                valid_stations = stations_df.dropna(subset=['latitude', 'longitude'])
+                
+                for _, row in valid_stations.iterrows():
+                    # Find nearest grid point
+                    dist = (grid_lat_mesh - row['latitude'])**2 + (grid_lon_mesh - row['longitude'])**2
+                    y_idx, x_idx = np.unravel_index(np.argmin(dist), dist.shape)
+                    
+                    new_indices.append({
+                        'station_id': row['station_id'],
+                        'x': int(x_idx), # Column
+                        'y': int(y_idx), # Row
+                        'lat': row['latitude'],
+                        'lon': row['longitude']
+                    })
+                station_indices = new_indices
+                logger.info(f"Calculated indices for {len(station_indices)} stations.")
+            except Exception as e:
+                logger.error(f"Failed to calculate station indices on the fly: {e}")
+                station_indices = []
+
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to load station indices: {e}")
+        station_indices = []
+
+    import pytz
+    central = pytz.timezone('US/Central')
+    if run_date:
+        if hasattr(run_date, 'tzinfo') and run_date.tzinfo is not None:
+            run_date_ct = run_date.tz_convert(central)
+        else:
+            run_date_ct = central.localize(run_date)
+    else:
+        run_date_ct = pd.Timestamp.now(tz=central)
+
+    json_output_data = {
+       "run_date": run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%dT%H:%M:%SZ'),
+       "stations": {}
+    }
+    
+    for i, time_step in enumerate(ds_full.step):
+        ds_hour = ds_full.sel(step=time_step)
+        
+        # Extract forecast variables and validate/convert units
+        # Relative Humidity - validate it's 0-100 not 0-1
+        rh_raw = ds_hour['r2'].values
+        rh = validate_relative_humidity(rh_raw, source='HRRR')
+
+        # Temperature - validate and convert to Celsius
+        temp_raw = ds_hour['t2m'].values
+        temp = validate_and_convert_temperature(temp_raw, expected_unit='kelvin', source='HRRR')
+
+        # Wind components and magnitude - validate units and return both m/s and knots
+        u = ds_hour['u10'].values
+        v = ds_hour['v10'].values
+        wind_magnitude = np.sqrt(u**2 + v**2)
+        wind_magnitude = wind_magnitude * 0.8
+        ws_ms = wind_magnitude
+        ws_kts = ws_ms * 1.94384
+        # Extract precipitation if available
+        precip_mm = np.zeros_like(temp)
+        if has_precip:
+            try:
+                if 'apcp' in ds_hour:
+                    precip_mm = ds_hour['apcp'].values
+                elif 'APCP' in ds_hour:
+                    precip_mm = ds_hour['APCP'].values
+                elif 'tp' in ds_hour:
+                    precip_mm = ds_hour['tp'].values
+            except:
+                pass
+        
+        # ws_ms and ws_kts are provided by validation above
+        
+        # Get time info
+        time_step_value = time_step.values
+        if isinstance(time_step_value, np.timedelta64):
+            hours_ahead = int(time_step_value / np.timedelta64(1, 'h'))
+        else:
+            hours_ahead = int(time_step_value / 3600000000000)
+        
+        forecast_time = base_time + pd.Timedelta(hours=hours_ahead)
+        hour_val = forecast_time.hour
+        month_val = forecast_time.month
+        
+        # Calculate fuel moisture with XGBoost
+        print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
+        fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history, swe_grid=swe_grid)
+        
+        # Update buffers for the next hour
+        temp_history.append(temp)
+        rh_history.append(rh)
+        precip_history.append(precip_mm)
+        
+        # Keep buffers at max 24 hours to allow for precip_24h calculation
+        if len(temp_history) > 24:
+            temp_history.pop(0)
+            rh_history.pop(0)
+            precip_history.pop(0)
+        
+        # Save hourly values
+        hourly_rh.append(rh)
+        hourly_temp.append(temp)
+        hourly_ws.append(ws_kts)
+        hourly_fm.append(fm)
+        
+        # Calculate fire danger
+        # Apply snow mask: areas with snow get LOW fire danger regardless of conditions
+        risk = np.zeros_like(rh, dtype=int)
+        for ii in range(rh.shape[0]):
+            for jj in range(rh.shape[1]):
+                if snow_mask[ii, jj]:
+                    # Snow on ground - fire danger is LOW
+                    risk[ii, jj] = 0
+                else:
+                    # Normal fire danger calculation
+                    risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+        hourly_risks.append(risk)
+
+        # Save verification data
+        if station_indices:
+            forecast_rows = []
+            
+            # Use base_time (Model Run Time) as the reference for DB records too
+            run_time_str = base_time.strftime('%Y-%m-%d %H:%M:%S')
+            valid_time_str = forecast_time.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Always save forecast times in US/Central
+            if hasattr(forecast_time, 'tzinfo') and forecast_time.tzinfo is not None:
+                forecast_time_ct = forecast_time.tz_convert(central)
+            else:
+                forecast_time_ct = central.localize(forecast_time)
+            json_valid_time = forecast_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            for st in station_indices:
+                
+                sx, sy = st['x'], st['y']
+                if 0 <= sx < fm.shape[1] and 0 <= sy < fm.shape[0]:
+                    # Extract values
+                    val_t = float(temp[sy, sx])
+                    val_rh = float(rh[sy, sx])
+                    val_ws = float(ws_ms[sy, sx])
+                    val_precip = float(precip_mm[sy, sx])
+                    val_fm = float(fm[sy, sx])
+                    val_risk = int(risk[sy, sx])
+
+                    forecast_rows.append((
+                        st['station_id'],
+                        valid_time_str,
+                        run_time_str,
+                        val_t,
+                        val_rh,
+                        val_ws,
+                        val_precip,
+                        val_fm
+                    ))
+                    
+                    # Add to JSON structure
+                    sid = st['station_id']
+                    if sid not in json_output_data['stations']:
+                        json_output_data['stations'][sid] = {
+                            "lat": st.get('lat'),
+                            "lon": st.get('lon'),
+                            "forecasts": []
+                        }
+                    
+                    json_output_data['stations'][sid]['forecasts'].append({
+                        "time": json_valid_time,
+                        "temp_c": round(val_t, 2),
+                        "rh": round(val_rh, 1),
+                        "wind_speed_ms": round(val_ws, 2),
+                        "precip_mm": round(val_precip, 2),
+                        "fuel_moisture": round(val_fm, 1),
+                        "fire_danger": val_risk
+                    })
+            
+            if forecast_rows:
+                try:
+                    conn = sqlite3.connect(db_path)
+                    conn.executemany('''
+                        INSERT OR REPLACE INTO station_forecasts 
+                        (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms, precip_mm, fuel_moisture)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', forecast_rows)
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Failed to save station forecasts for {valid_time_str}: {e}")
+
+        
+        # Progress indicator
+        if i == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+        elif i % 3 == 0:
+            print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+
+    # Save standalone JSON station history
+    # MODIFIED: Removed "and json_output_data['stations']" so file is created even if station list is empty
+    if run_date:
+        filename = f"station_RRFS_forecasts_{run_date.strftime('%Y%m%d_%H')}.json"
+        save_path = Path("archive/forecasts") / filename
+        
+        if not json_output_data.get('stations'):
+            logger.warning(f"Station list is empty. Generating {filename} with no station data.")
+
+        try:
+             save_path.parent.mkdir(parents=True, exist_ok=True)
+             with open(save_path, 'w') as f:
+                 json.dump(json_output_data, f, indent=2)
+             logger.info(f"Saved station forecast history to {save_path}")
+        except Exception as e:
+             logger.error(f"Failed to save station forecast history JSON: {e}")
+
+    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid
+
+def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None, swe_grid=None):
+    """
+    Predict fuel moisture across a grid using XGBoost model.
+    
+    Args:
+        temp_grid: Temperature grid (Celsius)
+        rh_grid: Relative humidity grid (%)
+        ws_grid: Wind speed grid (m/s)
+        hour: Hour of day (0-23)
+        month: Month (1-12)
+        t_hist: List of past temperature grids for rolling means
+        rh_hist: List of past RH grids for rolling means
+        precip_hist: List of past precipitation grids
+        swe_grid: Snow water equivalent grid (mm) - used to create snow mask
+    
+    Returns:
+        preds_2d: Predicted fuel moisture grid (%)
+        snow_mask: Boolean mask indicating snow-covered areas
+    """
+    # 1. Flatten the grids into 1D arrays
+    shape = temp_grid.shape
+    t_flat = temp_grid.flatten()
+    rh_flat = rh_grid.flatten()
+    ws_flat = ws_grid.flatten()
+    
+    # 2. Build the DataFrame for the model
+    
+    # Prepare history including current frame for rolling means
+    if t_hist is None: t_hist = []
+    if rh_hist is None: rh_hist = []
+    
+    # Combine past + current for calculation
+    curr_t_stack = t_hist + [temp_grid]
+    curr_rh_stack = rh_hist + [rh_grid]
+    
+    # Calculate rolling means
+    t_mean_3h = np.mean(curr_t_stack[-3:], axis=0).flatten()
+    rh_mean_3h = np.mean(curr_rh_stack[-3:], axis=0).flatten()
+    t_mean_6h = np.mean(curr_t_stack[-6:], axis=0).flatten()
+    rh_mean_6h = np.mean(curr_rh_stack[-6:], axis=0).flatten()
+    
+    # Standard Simard (1968) EMC calculation for the model baseline
+    emc_baseline = 0.03229 + (0.281073 * rh_flat) - (0.000578 * rh_flat * t_flat)
+    
+    df = pd.DataFrame({
+        'temp_c': t_flat,
+        'rel_humidity': rh_flat,
+        'wind_speed_ms': ws_flat,
+        'hour': hour,
+        'month': month,
+        'emc_baseline': emc_baseline,
+        'temp_mean_3h': t_mean_3h,
+        'rh_mean_3h': rh_mean_3h,
+        'temp_mean_6h': t_mean_6h,
+        'rh_mean_6h': rh_mean_6h
+    })
+    
+    if precip_hist is not None and len(precip_hist) > 0:
+        curr_precip_stack = precip_hist
+        
+        precip_1h = curr_precip_stack[-1].flatten() if len(curr_precip_stack) >= 1 else np.zeros(shape).flatten()
+        precip_3h = np.sum(curr_precip_stack[-3:], axis=0).flatten() if len(curr_precip_stack) >= 3 else np.zeros(shape).flatten()
+        precip_6h = np.sum(curr_precip_stack[-6:], axis=0).flatten() if len(curr_precip_stack) >= 6 else np.zeros(shape).flatten()
+        precip_24h = np.sum(curr_precip_stack[-24:], axis=0).flatten() if len(curr_precip_stack) >= 24 else np.zeros(shape).flatten()
+        
+        hours_since_rain = np.zeros(shape).flatten()
+
+        hours_since_rain[:] = 24
+        
+        # Iterate backwards through history to find last rain
+        # curr_precip_stack contains history leading up to current hour
+        # Index -1 is current/latest hour.
+        for h in range(len(curr_precip_stack)):
+            # Look at hour h hours ago (0 is current)
+            # h=0 -> index -1
+            # h=1 -> index -2
+            precip_at_h = curr_precip_stack[-(h+1)].flatten()
+            mask = precip_at_h > 0.1
+            
+            # Where it rained 'h' hours ago, update hours_since_rain if it hasn't been set yet (or is > h)
+            # Since we iterate 0 to N, the first time we see rain is the most recent.
+            update_mask = mask & (hours_since_rain > h)
+            hours_since_rain[update_mask] = h
+            
+    else:
+        # No precipitation data - use zeros
+        precip_1h = np.zeros(shape).flatten()
+        precip_3h = np.zeros(shape).flatten()
+        precip_6h = np.zeros(shape).flatten()
+        precip_24h = np.zeros(shape).flatten()
+        hours_since_rain = np.full(shape, 24).flatten()  # Assume no rain for 24 hours
+        
+    # --- INCORPORATE SNOW WATER EQUIVALENT (SWE) ---
+    if swe_grid is not None:
+        swe_flat = swe_grid.flatten()
+        # Convert SWE from mm to inches (1 mm = 0.03937 inches)
+        swe_inches = swe_flat * 0.03937
+
+        # Threshold: treat any measurable SWE > 0.01 inches as snow
+        # (previously 0.04 which ignored light but impactful snow)
+        snow_threshold_in = 0.04
+        has_snow = swe_inches > snow_threshold_in
+
+        if np.any(has_snow):
+            # 1. Reset hours since rain to 0 where snow is present (continuous moisture source)
+            hours_since_rain[has_snow] = 0
+
+            # 2. Treat SWE as available moisture/prec for the accumulation features
+            precip_24h = np.maximum(precip_24h, swe_inches)
+            precip_6h = np.maximum(precip_6h, swe_inches)
+            precip_3h = np.maximum(precip_3h, swe_inches)
+            precip_1h = np.maximum(precip_1h, swe_inches)
+    
+    df['precip_1h'] = precip_1h
+    df['precip_3h'] = precip_3h
+    df['precip_6h'] = precip_6h
+    df['precip_24h'] = precip_24h
+    df['hours_since_rain'] = hours_since_rain
+    
+    # 3. Convert to DMatrix and Predict
+    dmat = xgb.DMatrix(df[FEATURES])
+    preds = FM_MODEL.predict(dmat)
+    
+    # 4. Reshape back to the original 2D map
+    preds_2d = preds.reshape(shape)
+
+    # CREATE SNOW MASK (but don't override FM predictions)
+    # Snow mask will be used to suppress fire danger, not to change fuel moisture
+    snow_mask = np.zeros(shape, dtype=bool)
+    try:
+        if swe_grid is not None:
+            swe_inches_2d = (swe_grid * 0.03937)
+            snow_mask = swe_inches_2d > snow_threshold_in
+            if np.any(snow_mask):
+                logger.info(f"  → Created snow mask for {np.count_nonzero(snow_mask)} cells (threshold={snow_threshold_in} in)")
+                logger.info(f"  → Snow will suppress fire danger but NOT override fuel moisture predictions")
+    except Exception:
+        logger.exception("Failed to create snow mask")
+
+    return preds_2d, snow_mask
+
+def generate_complete_forecast():
+    logger.info("Starting complete fire weather forecast generation.")
+    """
+    Generate complete suite of fire weather forecast maps.
+    """
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    PROJECT_DIR = SCRIPT_DIR.parent
+    
+    load_dotenv()
+    start_time = time.time()
+    logger.info("Loaded environment variables.")
+    
+    # Configuration
+    now = pd.Timestamp.utcnow()
+    logger.info(f"Current UTC time: {now}")
+    
+    # Always use the most recent available 12z run
+    # HRRR runs are available ~1-2 hours after model time
+    # So 12z run is typically available by ~14z (2pm UTC)
+    if now.hour < 14:
+        logger.info("Using previous day's 12z HRRR run.")
+        # If before 14z, use yesterday's 12z run (most recent available)
+        RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        logger.info("Using today's 12z HRRR run.")
+        # If after 14z, today's 12z run should be available
+        RUN_DATE = now.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    # Ensure RUN_DATE is tz-naive (UTC)
+    if RUN_DATE.tzinfo is not None:
+        RUN_DATE = RUN_DATE.tz_convert('UTC').tz_localize(None)
+    
+    FORECAST_HOURS = range(4, 16)
+    
+    pixelw = 2048
+    pixelh = 1152
+    mapdpi = 144
+    extent = (-95.8, -89.1, 35.8, 40.8)
+    
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
+    
+    cache_dir = PROJECT_DIR / 'cache' / 'RRFS'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Cache directory: {cache_dir}")
+    
+    today_str = RUN_DATE.strftime('%Y%m%d')
+    logger.info(f"Cleaning up old RRFS cache files (keeping only {today_str})...")
+    
+    try:
+        for cache_file in cache_dir.glob('*.nc'):
+            file_date_str = cache_file.stem.split('_')[1]  # Extract date from filename
+            if file_date_str != today_str:
+                logger.info(f"Removing old cache file: {cache_file.name}")
+                cache_file.unlink()
+        logger.info("Cache cleanup complete")
+    except Exception as e:
+        logger.warning(f"Error during cache cleanup: {e}")
+    
+    # Check for any cache file matching the date pattern, regardless of hour
+    # This helps if we have 12z data but the script is looking for 13z or vice versa
+    date_str = RUN_DATE.strftime('%Y%m%d')
+    potential_caches = list(cache_dir.glob(f"hrrr_{date_str}_*z_f04-15.nc"))
+    
+    if potential_caches:
+        # Use the most recent cache file found for this date
+        cache_file = sorted(potential_caches)[-1]
+        logger.info(f"Found existing cache file: {cache_file}")
+    else:
+        # Default to the specific run hour we calculated
+        cache_file = cache_dir / f"RRFS_{RUN_DATE.strftime('%Y%m%d_%H')}z_f04-15.nc"
+        logger.info(f"No cache found matching pattern hrrr_{date_str}_*z_f04-15.nc")
+        
+        # Debug: List files in directory to help diagnose
+        if cache_dir.exists():
+            logger.info(f"Listing files in {cache_dir}:")
+            files = list(cache_dir.glob("*"))
+            if not files:
+                logger.info("  (Directory is empty)")
+            for f in files:
+                logger.info(f"  {f.name}")
+        else:
+            logger.info(f"  (Directory {cache_dir} does not exist)")
+    
+    if cache_file.exists():
+        logger.info("Loading RRFS data from cache.")
+        print(f"Loading cached RRFS data from {cache_file}...")
+        try:
+            # Remove chunks argument to avoid dask dependency
+            ds_full = xr.open_dataset(cache_file, decode_cf=False)
+            print("Loaded from cache successfully")
+        except Exception as e:
+            print(f"Error loading cache: {e}")
+            print("Deleting corrupted cache and re-downloading...")
+            cache_file.unlink()
+            # Fall through to download section
+    
+    if not cache_file.exists():
+        logger.info("Downloading RRFS data (not found in cache). This may take a while...")
+        print(f"Downloading RRFS data for {RUN_DATE} UTC...")
+        
+        # RRFS is MUCH larger than HRRR - need to be selective about what we download
+        # Only download the specific variables we need, not all hybrid levels
+        
+        try:
+            FH = FastHerbie(
+                DATES=[RUN_DATE],
+                fxx=list(FORECAST_HOURS),
+                model='rrfs',
+                product='natlev.3km',
+                max_threads=3,        # add this to avoid timeouts
+            )
+
+            logger.info("Downloading 2m temperature and RH...")
+            ds_rh_temp = FH.xarray(":(TMP|RH):2 m above ground:")  # add trailing :
+            if isinstance(ds_rh_temp, list):
+                ds_rh_temp = xr.concat(ds_rh_temp, dim="valid_time")  # concat not [0]
+
+            logger.info("Downloading 10m winds...")
+            ds_wind = FH.xarray(":(UGRD|VGRD):10 m above ground:")  # add trailing :
+            if isinstance(ds_wind, list):
+                ds_wind = xr.concat(ds_wind, dim="valid_time")
+
+            ds_full = ds_rh_temp.merge(ds_wind, compat='override')
+
+            try:
+                logger.info("Downloading precipitation data...")
+                ds_precip = FH.xarray(":APCP:surface:")  # add trailing :
+                if isinstance(ds_precip, list):
+                    ds_precip = xr.concat(ds_precip, dim="valid_time")
+                ds_full = ds_full.merge(ds_precip, compat='override')
+            except Exception as e:
+                logger.warning(f"Could not download precipitation data: {e}")
+
+            logger.info("Loading data into memory...")
+            ds_full = ds_full.load()
+            
+            # Save to cache
+            logger.info(f"Saving RRFS data to cache: {cache_file}")
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            ds_full.to_netcdf(cache_file, engine='netcdf4', mode='w')
+            logger.info(f"✓ Cache saved successfully to {cache_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to download RRFS data: {e}")
+            raise RuntimeError(f"RRFS data download failed: {e}")
+    
+    
+    # Extract coordinates first
+    lon = ds_full['longitude'].values
+    lat = ds_full['latitude'].values
+
+    if lon.ndim == 1 and lat.ndim == 1:
+        lon, lat = np.meshgrid(lon, lat)
+
+    if lon.max() > 180:
+        lon = np.where(lon > 180, lon - 360, lon)
+        
+    # Subset to Missouri region
+    mo_bounds = {'lat': (35.8, 40.8), 'lon': (-95.8, -89.1)}
+
+    # Find indices for Missouri region
+    lat_mask = (lat >= mo_bounds['lat'][0]) & (lat <= mo_bounds['lat'][1])
+    lon_mask = (lon >= mo_bounds['lon'][0]) & (lon <= mo_bounds['lon'][1])
+
+    if lon.ndim == 2:
+        # Already a mesh - need to find the bounding box
+        combined_mask = lat_mask & lon_mask
+        
+        # Find the rows and columns that contain Missouri data
+        rows_with_data = np.any(combined_mask, axis=1)
+        cols_with_data = np.any(combined_mask, axis=0)
+        
+        row_indices = np.where(rows_with_data)[0]
+        col_indices = np.where(cols_with_data)[0]
+        
+        if len(row_indices) > 0 and len(col_indices) > 0:
+            # Get min/max to form bounding box
+            row_min, row_max = row_indices[0], row_indices[-1] + 1
+            col_min, col_max = col_indices[0], col_indices[-1] + 1
+            
+            # Subset the dataset using the bounding box
+            ds_full = ds_full.isel(y=slice(row_min, row_max), x=slice(col_min, col_max))
+            
+            # Subset the coordinate arrays
+            lon = lon[row_min:row_max, col_min:col_max]
+            lat = lat[row_min:row_max, col_min:col_max]
+            
+            logger.info(f"Subset to Missouri region: {lon.shape} grid cells")
+            logger.info(f"  Lat range: {lat.min():.2f} to {lat.max():.2f}")
+            logger.info(f"  Lon range: {lon.min():.2f} to {lon.max():.2f}")
+        else:
+            logger.warning("No data found in Missouri bounds!")
+    else:
+        # 1D arrays
+        lat_idx = np.where((lat >= mo_bounds['lat'][0]) & (lat <= mo_bounds['lat'][1]))[0]
+        lon_idx = np.where((lon >= mo_bounds['lon'][0]) & (lon <= mo_bounds['lon'][1]))[0]
+        
+        # Subset the dataset
+        ds_full = ds_full.isel(y=lat_idx, x=lon_idx)
+        lon = lon[lon_idx]
+        lat = lat[lat_idx]
+
+    # Get port from environment
+    port = os.getenv('PORT', '8000')
+
+    # Process data with observations-based fuel moisture
+    logger.info("Processing forecast data with RAWS observations...")
+
+    # --- Save initialization observation data for ML/verification ---
+    # Try to get the current fuel moisture field (RAWS obs)
+
+    # Continue with forecast using ML model
+    hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid = process_forecast_with_observations(
+        ds_full, lon, lat, port=port, run_date=RUN_DATE
+    )
+    
+    # --- Extract and process precipitation data ---
+    logger.info("Extracting precipitation data from HRRR...")
+    try:
+        # Try common HRRR precipitation variable names
+        precip = None
+        if 'tp' in ds_full:
+            precip = ds_full['tp'].values
+            logger.info("Found 'tp' (total precipitation) variable")
+        elif 'apcp' in ds_full:
+            precip = ds_full['apcp'].values
+            logger.info("Found 'apcp' (accumulated precipitation) variable")
+        elif 'APCP' in ds_full:
+            precip = ds_full['APCP'].values
+            logger.info("Found 'APCP' variable")
+        elif 'precipitation' in ds_full:
+            precip = ds_full['precipitation'].values
+            logger.info("Found 'precipitation' variable")
+        else:
+            logger.warning(f"No precipitation variable found. Available variables: {list(ds_full.data_vars)}")
+            precip = None
+    except Exception as e:
+        logger.error(f"Error extracting precipitation: {e}")
+        precip = None
+    
+    # Calculate peak/min values FIRST (before cropping)
+    combined_risk = np.stack(hourly_risks, axis=0)
+    peak_risk = np.nanmax(combined_risk, axis=0)
+    
+    combined_fm = np.stack(hourly_fm, axis=0)
+    min_fuel_moisture = np.nanmin(combined_fm, axis=0)
+    
+    combined_rh = np.stack(hourly_rh, axis=0)
+    min_rh = np.nanmin(combined_rh, axis=0)
+    
+    combined_ws = np.stack(hourly_ws, axis=0)
+    max_wind = np.nanmax(combined_ws, axis=0)
+    
+    combined_temp = np.stack(hourly_temp, axis=0)
+    max_temp = np.nanmax(combined_temp, axis=0)
+    
+    # Apply smoothing
+    peak_risk_smooth = gaussian_filter(peak_risk.astype(float), sigma=1.5)
+    min_fuel_moisture_smooth = gaussian_filter(min_fuel_moisture, sigma=1.5)
+    min_rh_smooth = gaussian_filter(min_rh, sigma=1.5)
+    max_wind_smooth = gaussian_filter(max_wind, sigma=1.5)
+    max_temp_smooth = gaussian_filter(max_temp, sigma=1.5)
+    
+    # Process precipitation if available
+    if precip is not None:
+        logger.info("Processing precipitation data...")
+        # Sum total precipitation across all forecast hours
+        if precip.ndim == 3:
+            total_precip = np.sum(precip, axis=0)  # Sum over time dimension
+        else:
+            total_precip = precip
+        
+        # Convert from kg/m² to inches (1 mm = 1 kg/m², 1 inch = 25.4 mm)
+        total_precip_inches = total_precip / 25.4
+        
+        print(f"Pre-conversion total_precip (mm): min={np.nanmin(total_precip):.3f}, max={np.nanmax(total_precip):.3f}")
+        print(f"Post-conversion total_precip_inches: min={np.nanmin(total_precip_inches):.3f}, max={np.nanmax(total_precip_inches):.3f}")
+        # Apply smoothing
+        total_precip_smooth = gaussian_filter(total_precip_inches, sigma=0.2)
+    else:
+        total_precip_smooth = None
+    
+    # Extract and process coordinates
+    lon = ds_full['longitude'].values
+    lat = ds_full['latitude'].values
+    
+    if lon.ndim == 1 and lat.ndim == 1:
+        lon, lat = np.meshgrid(lon, lat)
+    
+    if lon.max() > 180:
+        lon = np.where(lon > 180, lon - 360, lon)
+    
+    # Crop to Missouri region
+    lon_mask = (lon >= extent[0] - 0.5) & (lon <= extent[1] + 0.5)
+    lat_mask = (lat >= extent[2] - 0.5) & (lat <= extent[3] + 0.5)
+    combined_mask = lon_mask & lat_mask
+    
+    rows = np.any(combined_mask, axis=1)
+    cols = np.any(combined_mask, axis=0)
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    
+    lon = lon[rmin:rmax+1, cmin:cmax+1]
+    lat = lat[rmin:rmax+1, cmin:cmax+1]
+    peak_risk_smooth = peak_risk_smooth[rmin:rmax+1, cmin:cmax+1]
+    min_fuel_moisture_smooth = min_fuel_moisture_smooth[rmin:rmax+1, cmin:cmax+1]
+    min_rh_smooth = min_rh_smooth[rmin:rmax+1, cmin:cmax+1]
+    max_wind_smooth = max_wind_smooth[rmin:rmax+1, cmin:cmax+1]
+    max_temp_smooth = max_temp_smooth[rmin:rmax+1, cmin:cmax+1]
+    
+    # Crop precipitation data too
+    if total_precip_smooth is not None:
+        total_precip_smooth = total_precip_smooth[rmin:rmax+1, cmin:cmax+1]
+
+    # Crop SWE data
+    if swe_grid is not None:
+        swe_grid = swe_grid[rmin:rmax+1, cmin:cmax+1]
+
+    # Mask to Missouri
+    missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+    if missouriborder.crs != data_crs.proj4_init:
+        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+    
+    if not missouriborder.empty:
+        from shapely.geometry import Point
+        from shapely.prepared import prep
+        
+        missouri_geom = missouriborder.geometry.iloc[0]
+        missouri_buffered = missouri_geom.buffer(0.01)
+        prepared_geom = prep(missouri_buffered)
+        
+        points_flat = np.column_stack([lon.ravel(), lat.ravel()])
+        mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
+        mask = mask_flat.reshape(lon.shape)
+        
+        peak_risk_smooth = np.where(mask, peak_risk_smooth, np.nan)
+        min_fuel_moisture_smooth = np.where(mask, min_fuel_moisture_smooth, np.nan)
+        min_rh_smooth = np.where(mask, min_rh_smooth, np.nan)
+        max_wind_smooth = np.where(mask, max_wind_smooth, np.nan)
+        max_temp_smooth = np.where(mask, max_temp_smooth, np.nan)
+        
+        # Mask precipitation too
+        if total_precip_smooth is not None:
+            total_precip_smooth = np.where(mask, total_precip_smooth, np.nan)
+
+    # ========== MAP 1: PEAK FIRE DANGER ==========
+    logger.info("Generating peak fire danger map...")
+    colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
+    labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
+    bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+    cmap = ListedColormap(colors)
+    norm = BoundaryNorm(bins, len(colors))
+    
+    fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+    
+    cs = ax.contourf(lon, lat, peak_risk_smooth, transform=data_crs,
+                     levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True)
+    ax.contour(lon, lat, peak_risk_smooth, transform=data_crs,
+               levels=bins[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+    
+    add_boundaries(ax, data_crs, PROJECT_DIR)
+    
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Fire Danger Level')
+    cbar.set_ticks([0, 1, 2, 3, 4])
+    cbar.set_ticklabels(labels)
+    
+    ax.set_anchor('W')
+    plt.subplots_adjust(left=0.05)
+    
+    add_title_and_branding(
+        fig, "Missouri Peak Fire Danger Forecast",
+        f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+        "Peak Fire Danger Forecast (10:00–21:00 CT)\n\n"
+        "Fire Danger Criteria:\n"
+        "Low:"
+        "  FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+        "Moderate:"
+        "  FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+        "Elevated:"
+        "  FM < 9% WITH (RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)\n"
+        "Critical:"
+        "  FM < 9% WITH (RH < 25% AND Wind >= 15 kts)\n\n"
+        "Extreme:"
+        "  FM < 7% WITH (RH < 20% AND Wind >= 30 kts)\n\n"
+        "Data Source: HRRR Model Forecast | ShowMeFire ML Model\n"
+        "For More Info, Visit ShowMeFire.org",
+        RUN_DATE, SCRIPT_DIR
+    )
+    
+    fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastfiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
+    
+    logger.info("Exporting peak fire danger as GeoTIFF...")
+    try:
+        geotiff_path = PROJECT_DIR / 'gis/peak_fire_danger.tif'
+        geotiff_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Get data dimensions
+        rows, cols = peak_risk_smooth.shape
+        
+        # Calculate bounds
+        lon_min, lon_max = float(lon.min()), float(lon.max())
+        lat_min, lat_max = float(lat.min()), float(lat.max())
+        
+        # Create source transform in EPSG:4326
+        src_transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
+        src_crs = "EPSG:4326"
+        dst_crs = "EPSG:3857"  # Web Mercator for MapLibre
+        
+        # Bin smoothed values into discrete fire danger categories before export
+        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+        risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
+        risk_binned = np.clip(risk_binned, 0, 4)
+        risk_binned = np.where(np.isnan(peak_risk_smooth), 255, risk_binned).astype(np.uint8)  # 255 = nodata
+
+        # Flip so row 0 is north (match geospatial convention)
+        data_flipped = np.flipud(risk_binned)
+
+        # Reproject to Web Mercator to align with web maps
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            src_crs, dst_crs, cols, rows,
+            left=lon_min, bottom=lat_min, right=lon_max, top=lat_max
+        )
+
+        risk_3857 = np.full((dst_height, dst_width), 255, dtype=np.uint8)
+        reproject(
+            source=data_flipped,
+            destination=risk_3857,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            src_nodata=255,
+            dst_nodata=255
+        )
+        
+        # Create RGBA bands in destination grid
+        rgba_data = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
+        
+        # Define color map matching your visualization
+        # (R, G, B, A) values 0-255
+        color_map = {
+            0: (144, 238, 144, 255),  # Low - light green
+            1: (255, 255, 153, 255),  # Moderate - yellow
+            2: (255, 165, 0, 255),    # Elevated - orange
+            3: (255, 69, 0, 255),     # Critical - red-orange
+            4: (139, 0, 0, 255)       # Extreme - dark red
+        }
+        
+        # Apply colors to each pixel based on fire danger value (leave nodata transparent)
+        for value, (r, g, b, a) in color_map.items():
+            mask = risk_3857 == value
+            rgba_data[0][mask] = r  # Red channel
+            rgba_data[1][mask] = g  # Green channel
+            rgba_data[2][mask] = b  # Blue channel
+            rgba_data[3][mask] = a  # Alpha channel
+        
+        # Write RGBA GeoTIFF using rasterio
+        with rasterio.open(
+            geotiff_path,
+            'w',
+            driver='GTiff',
+            height=dst_height,
+            width=dst_width,
+            count=4,  # 4 bands for RGBA
+            dtype=rasterio.uint8,  # 0-255 color values
+            crs=dst_crs,
+            transform=dst_transform,
+            compress='lzw',
+            tiled=True,
+            photometric='RGB'  # Specify RGB interpretation
+        ) as dst:
+            # Write the RGBA bands
+            dst.write(rgba_data)
+            
+            # Set metadata
+            dst.update_tags(
+                DESCRIPTION='Peak Fire Danger Forecast for Missouri (RGBA)',
+                MODEL_RUN=RUN_DATE.strftime('%Y-%m-%d %HZ'),
+                VALID_TIME=(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d'),
+                COLOR_INTERPRETATION='Red, Green, Blue, Alpha',
+                LEGEND='Low=Light Green, Moderate=Yellow, Elevated=Orange, Critical=Red-Orange, Extreme=Dark Red',
+                SOURCE='HRRR Model + ML Model + RAWS Observations'
+            )
+            
+            # Set color interpretation for each band
+            dst.set_band_description(1, 'Red')
+            dst.set_band_description(2, 'Green')
+            dst.set_band_description(3, 'Blue')
+            dst.set_band_description(4, 'Alpha')
+        
+        logger.info(f"RGBA GeoTIFF saved to {geotiff_path}")
+    except Exception as e:
+        logger.error(f"Failed to export GeoTIFF: {e}")
+    
+    # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
+    logger.info("Generating minimum fuel moisture map...")
+    
+    # Create an improved colormap with better contrast in critical ranges
+    import matplotlib.colors as mcolors
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # Define colors at key fuel moisture thresholds with strong visual distinction
+    # Focus on making 7-15% range very clear
+    colors_and_positions = [
+        (0.0, '#4D0000'),    # 0% - Very Dark Red/Brown
+        (0.1, '#8B0000'),    # 3% - Dark Red
+        (0.2, '#DC143C'),    # 6% - Crimson (EXTREME threshold)
+        (0.233, '#FF4500'),  # 7% - Orange Red
+        (0.267, '#FF6347'),  # 8% - Tomato (CRITICAL threshold)
+        (0.30, '#FF8C00'),   # 9% - Dark Orange
+        (0.333, '#FFA500'),  # 10% - Orange
+        (0.367, '#FFB347'),  # 11% - Light Orange
+        (0.40, '#FFD700'),   # 12% - Gold (ELEVATED threshold)
+        (0.50, '#FFED4E'),   # 15% - Yellow
+        (0.60, '#F0E68C'),   # 18% - Khaki
+        (0.70, '#C8E6C9'),   # 21% - Light Green
+        (0.80, '#81C784'),   # 24% - Medium Green
+        (0.90, '#4CAF50'),   # 27% - Green
+        (1.0, '#2E7D32')     # 30% - Dark Green
+    ]
+    
+    # Unzip into separate lists
+    positions = [x[0] for x in colors_and_positions]
+    colors = [x[1] for x in colors_and_positions]
+    
+    # Create custom colormap
+    fm_cmap = LinearSegmentedColormap.from_list('fm_enhanced', 
+                                                list(zip(positions, colors)), 
+                                                N=512)
+    
+    # Create discrete bins: 1% below 15%, 3% above 15%
+    bounds = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,18,21,24,27,30]
+    norm = mcolors.BoundaryNorm(bounds, fm_cmap.N)
+    
+    fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+
+    cs = ax.contourf(lon, lat, min_fuel_moisture_smooth, transform=data_crs,
+                    levels=bounds, cmap=fm_cmap, norm=norm, alpha=0.75, zorder=7, 
+                    extend='both')
+
+    # Add single prominent contour line at 9% threshold
+    contour_9 = ax.contour(
+        lon, lat, min_fuel_moisture_smooth, levels=[9], 
+        colors='black', linestyles='dotted', 
+        linewidths=2, transform=data_crs, zorder=8, alpha=0.7
+    )
+    # Label the 9% contour
+    ax.clabel(contour_9, inline=True, fontsize=9, fmt='%g%%', inline_spacing=10)
+
+    add_boundaries(ax, data_crs, PROJECT_DIR)
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Fuel Moisture (%)', 
+                       ticks=[0,3,6,9,12,15,18,21,24,27,30])
+    
+    ax.set_anchor('W')
+    plt.subplots_adjust(left=0.05)
+    
+    add_title_and_branding(
+        fig, "Missouri Minimum Fuel Moisture Forecast",
+        f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+        "Minimum 10-Hour Fuel Moisture (10:00–21:00 CT)\n\n"
+        "Critical Thresholds:\n"
+        "< 7%: Extremely dry — potential for extreme fire behavior\n"
+        "7–9%: Very dry — critical fire behavior likely\n"
+        "9–15%: Dry — elevated fire behavior expected\n"
+        "15–20%: Moderate — some fire activity possible\n"
+        "> 20%: Moist — fuels much less receptive to fire\n\n"
+        "Areas with snow cover will have substantially higher fuel moisture\n"
+        "and greatly reduced ignition potential.\n\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+        "For More Info, Visit ShowMeFire.org",
+        RUN_DATE, SCRIPT_DIR
+    )
+    
+    fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastfuelmoisture.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
+    
+    # ========== MAP 3: MINIMUM RELATIVE HUMIDITY ==========
+    logger.info("Generating minimum relative humidity map...")
+    rh_colors = ['#8B0000', '#FF0000', '#FFA500', '#FFED4E', '#90EE90', '#228B22']
+    rh_levels = [0, 15, 25, 35, 50, 65, 100]
+    rh_cmap = ListedColormap(rh_colors)
+    rh_norm = BoundaryNorm(rh_levels, len(rh_colors))
+    
+    fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+    
+    cs = ax.contourf(lon, lat, min_rh_smooth, transform=data_crs,
+                     levels=rh_levels, cmap=rh_cmap, norm=rh_norm, alpha=0.7, zorder=7, antialiased=True)
+    ax.contour(lon, lat, min_rh_smooth, transform=data_crs,
+               levels=rh_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+    
+    add_boundaries(ax, data_crs, PROJECT_DIR)
+    
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Relative Humidity (%)')
+    cbar.set_ticks([7.5, 20, 30, 42.5, 57.5, 82.5])
+    cbar.set_ticklabels(['<15%', '15-25%', '25-35%', '35-50%', '50-65%', '>65%'])
+    
+    ax.set_anchor('W')
+    plt.subplots_adjust(left=0.05)
+    
+    add_title_and_branding(
+        fig, "Missouri Minimum Relative Humidity Forecast",
+        f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+        "Minimum Relative Humidity (10:00–21:00 CT)\n\n"
+        "Critical Thresholds:\n"
+        "< 15%: Extremely Dry - Critical fire conditions\n"
+        "15-25%: Very Dry - Red Flag criteria with wind\n"
+        "25-35%: Dry - Elevated fire danger possible\n"
+        "35-50%: Moderate - Normal fire activity\n"
+        "> 50%: Moist - Fire spread limited\n\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+        "For More Info, Visit ShowMeFire.org",
+        RUN_DATE, SCRIPT_DIR
+    )
+    
+    fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastminrh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
+    
+    # ========== MAP 4: MAXIMUM WIND SPEED ==========
+    logger.info("Generating maximum wind speed map...")
+    wind_colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
+    wind_levels = [0, 10, 15, 20, 25, 30, 50]  # in knots
+    wind_cmap = ListedColormap(wind_colors)
+    wind_norm = BoundaryNorm(wind_levels, len(wind_colors))
+
+    fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+    
+    cs = ax.contourf(lon, lat, max_wind_smooth, transform=data_crs,
+                    levels=wind_levels, cmap=wind_cmap, norm=wind_norm, alpha=0.7, zorder=7, antialiased=True)
+    ax.contour(lon, lat, max_wind_smooth, transform=data_crs,
+            levels=wind_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+
+    add_boundaries(ax, data_crs, PROJECT_DIR)
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed')
+    cbar.set_ticks([5, 12.5, 17.5, 22.5, 27.5, 40])
+
+    # Show both knots and mph
+    # Conversion: 1 knot = 1.15078 mph
+    cbar.set_ticklabels([
+        '<10 kt\n(<12 mph)', 
+        '10-15 kt\n(12-17 mph)', 
+        '15-20 kt\n(17-23 mph)', 
+        '20-25 kt\n(23-29 mph)', 
+        '25-30 kt\n(29-35 mph)', 
+        '>30 kt\n(>35 mph)'
+    ])
+
+    ax.set_anchor('W')
+    plt.subplots_adjust(left=0.05)
+    
+    add_title_and_branding(
+        fig, "Missouri Maximum Wind Speed Forecast",
+        f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+        "Maximum Sustained Wind Speed (10:00–21:00 CT)\n\n"
+        "Critical Thresholds:\n"
+        "< 10 kts: Light winds - Normal fire behavior\n"
+        "10-15 kts: Moderate - Increased fire activity\n"
+        "15-20 kts: Strong - Red Flag criteria with low RH\n"
+        "20-25 kts: Very Strong - Critical fire weather\n"
+        "> 25 kts: Extreme - Dangerous fire conditions\n\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+        "For More Info, Visit ShowMeFire.org",
+        RUN_DATE, SCRIPT_DIR
+    )
+    
+    fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastmaxwind.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
+    
+    # ========== MAP 5: MAXIMUM TEMPERATURE ==========
+    logger.info("Generating maximum temperature map...")
+    # Define temperature levels and colors in Fahrenheit
+    temp_cmap = plt.cm.YlOrRd   # Or try: plt.cm.RdYlBu_r, plt.cm.jet, plt.cm.plasma
+
+    # Smooth gradient from 0°F to 90°F
+    temp_levels_f = np.linspace(-20, 120, 50)
+
+    # Convert max_temp_smooth from C to F for plotting
+    max_temp_smooth_f = max_temp_smooth * 9/5 + 32
+
+    fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+
+    cs = ax.contourf(lon, lat, max_temp_smooth_f, transform=data_crs,
+                    levels=temp_levels_f, cmap=temp_cmap, alpha=0.7, zorder=7, antialiased=True)
+
+    # Contour lines every 10°F
+    contour_levels = np.arange(10, 90, 10)
+    ax.contour(lon, lat, max_temp_smooth_f, transform=data_crs,
+            levels=contour_levels, colors='black', linewidths=1, alpha=0.5, zorder=8)
+
+    add_boundaries(ax, data_crs, PROJECT_DIR)
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
+    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
+    
+    ax.set_anchor('W')
+    plt.subplots_adjust(left=0.05)
+    
+    add_title_and_branding(
+        fig, "Missouri Maximum Temperature Forecast",
+        f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+        "Maximum Temperature (10:00–21:00 CT)\n\n"
+        "Temperature influences fire behavior:\n"
+        "Higher temperatures increase fuel dryness\n"
+        "and fire spread rates.\n\n"
+        "Combined with low humidity and wind,\n"
+        "high temperatures create dangerous\n"
+        "fire weather conditions.\n\n"
+        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+        "For More Info, Visit ShowMeFire.org",
+        RUN_DATE, SCRIPT_DIR
+    )
+    
+    fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastmaxtemp.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    del fig, ax, cs, cax, cbar
+    gc.collect()
+    
+    # ========== MAP 6: RAINFALL/PRECIPITATION ==========
+    if total_precip_smooth is not None:
+        logger.info("Generating rainfall forecast map...")
+        try:
+            # Use a blue colormap for precipitation
+            rain_colors = ['#FFFFFF', '#E0F0FF', '#B0D4FF', '#6AB4FF', '#0080FF', '#0050D0', '#003080']
+            rain_levels = [0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+            rain_cmap = ListedColormap(rain_colors)
+            rain_norm = BoundaryNorm(rain_levels, len(rain_colors))
+            
+            fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+            print(total_precip_smooth)
+            # Plot precipitation
+            cs = ax.contourf(lon, lat, total_precip_smooth, 
+                           levels=rain_levels, cmap=rain_cmap, norm=rain_norm,
+                           transform=data_crs, alpha=0.8, zorder=7, antialiased=True)
+            
+            # Add contour lines
+            ax.contour(lon, lat, total_precip_smooth, transform=data_crs,
+                      levels=rain_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+            
+            add_boundaries(ax, data_crs, PROJECT_DIR)
+            
+            cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+            cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
+            cbar.set_ticks(rain_levels)
+            cbar.set_ticklabels([f'{x:.2f}"' if x < 1 else f'{x:.1f}"' for x in rain_levels])
+            
+            ax.set_anchor('W')
+            plt.subplots_adjust(left=0.05)
+            
+            add_title_and_branding(
+                fig, "Missouri Forecast Precipitation",
+                f"RRFS Variant | Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                "Total Precipitation Forecast (10:00–21:00 CT)\n\n"
+                "Accumulated precipitation from\n"
+                f"{RUN_DATE.strftime('%Hz %b %d')} through forecast hour 15.\n\n"
+                "Precipitation reduces fire danger by:\n"
+                "• Increasing fuel moisture\n"
+                "• Raising relative humidity\n"
+                "• Potentially preventing ignition\n\n"
+                "> 0.5\": Significant fire danger reduction\n"
+                "> 1.0\": Major impact on fire activity\n\n"
+                "Data Source: HRRR Model Forecast\n"
+                "For More Info, Visit ShowMeFire.org",
+                RUN_DATE, SCRIPT_DIR
+            )
+            
+            fig.savefig(PROJECT_DIR / 'images/mo-RRFS-forecastrainfall.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            plt.close(fig)
+            logger.info(f"Saved rainfall forecast map")
+            
+            del fig, ax, cs, cax, cbar
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Error generating rainfall map: {e}")
+            
+    else:
+        logger.info("Skipping rainfall map - no precipitation data available")
+
+    # ========== MAP 7: SNOW WATER EQUIVALENT ==========
+    # Fetch SWE data for mapping
+    swe_bbox = (-95.8, 35.8, -89.1, 40.8)
+    swe_data, swe_lon, swe_lat = get_snodas_swe_grid(swe_bbox, RUN_DATE)
+    
+    if swe_data is not None:
+        logger.info("Generating SWE map...")
+        try:
+            # Convert SWE from mm to inches for display
+            swe_inches = swe_data * 0.03937
+            
+            # Mask to Missouri
+            missouriborder = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+            if missouriborder.crs != data_crs.proj4_init:
+                missouriborder = missouriborder.to_crs(data_crs.proj4_init)
+            
+            if not missouriborder.empty:
+                from shapely.geometry import Point
+                from shapely.prepared import prep
+                
+                missouri_geom = missouriborder.geometry.iloc[0]
+                missouri_buffered = missouri_geom.buffer(0.01)
+                prepared_geom = prep(missouri_buffered)
+                
+                points_flat = np.column_stack([swe_lon.ravel(), swe_lat.ravel()])
+                mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
+                mask = mask_flat.reshape(swe_lon.shape)
+
+                swe_inches = np.where(mask, swe_inches, np.nan)
+            
+            fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+            
+            # Plot SWE as contours
+            levels = [i * 0.1 for i in range(26)]  # 0, 0.1, 0.2, ..., 2.5 inches
+            # Create blue gradient colors
+            colors = ['#ffffff']  # white for 0
+            # Add blue gradient from light to dark
+            for i in range(1, 26):
+                intensity = 255 - int((i / 25) * 200)  # fade from 255 to 55
+                colors.append(f'#{intensity:02x}{intensity:02x}ff')
+            cmap = ListedColormap(colors)
+            norm = BoundaryNorm(levels, len(colors))
+            
+            cs = ax.contourf(swe_lon, swe_lat, swe_inches, transform=data_crs,
+                             levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7, antialiased=True)
+            
+            # Add colorbar on the left
+            cax = fig.add_axes([0.02, 0.25, 0.02, 0.5])
+            cbar = plt.colorbar(cs, cax=cax, orientation='vertical')
+            cbar.set_label('Snow Water Equivalent (inches)', fontsize=10)
+            cbar.ax.tick_params(labelsize=8)
+            
+            add_boundaries(ax, data_crs, PROJECT_DIR)
+            
+            ax.set_anchor('W')
+            plt.subplots_adjust(left=0.08, right=0.95)  # Make room for left colorbar
+            
+            add_title_and_branding(
+                fig, "Missouri Snow Water Equivalent",
+                f"Valid: {RUN_DATE.strftime('%Y-%m-%d')}",
+                "Snow Water Equivalent (Daily Analysis)\n\n"
+                "Amount of water contained within the snowpack.\n"
+                "Acting as a significant suppressant for fire danger.\n\n"
+                "Model treats this as effective precipitation,\n"
+                "maintaining high fuel moisture in snow-covered areas.\n\n"
+                "Data Source: NOAA SNODAS Analysis\n"
+                "For More Info, Visit ShowMeFire.org",
+                RUN_DATE, SCRIPT_DIR
+            )
+            
+            fig.savefig(PROJECT_DIR / 'images/mo-forecastswe.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            plt.close(fig)
+            logger.info(f"Saved SWE map")
+            
+            del fig, ax, cs, cax, cbar
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"Error generating SWE map: {e}")
+            
+    else:
+        logger.info("Skipping SWE map - no SWE data available")
+
+
+    # ========== REGIONAL MAPS ==========
+    # Check for state_only flag
+    state_only = os.getenv('state_only', 'false').lower() == 'true'
+    
+    # List to keep track of ALL generated map files for logging/upload
+    all_generated_maps = [
+        'mo-RRFS-forecastfiredanger.png',
+        'mo-RRFS-forecastfuelmoisture.png',
+        'mo-RRFS-forecastminrh.png',
+        'mo-RRFS-forecastmaxwind.png',
+        'mo-RRFS-forecastmaxtemp.png',
+    ]
+    if total_precip_smooth is not None:
+        all_generated_maps.append('mo-RRFS-forecastrainfall.png')
+        
+    if swe_data is not None:
+        all_generated_maps.append('mo-forecastswe.png')
+    
+    if state_only:
+        logger.info("state_only is True. Skipping generation of regional maps.")
+    else:
+        logger.info("Generating Regional specific maps...")
+        
+        regions_dir = PROJECT_DIR / 'maps/shapefiles/SEMA Regions'
+        # Find all Region*.shp files (e.g., RegionA.shp, RegionD.shp, RegionI.shp)
+        region_shapes = sorted(regions_dir.glob('Region*.shp'))
+
+        region_config = {
+            'regg': {'zoom_factor': 1.5, 'h_shift': 0.6, 'v_shift': 0.05},
+        }
+        
+        # Default values if region not specified in config
+        default_config = {
+            'zoom_factor': 1.15,  # Zoom out by 15%
+            'h_shift': 0.35,      # Horizontal shift (0-1, proportion of excess width)
+            'v_shift': 0.05,      # Vertical shift (proportion of height to move up)
+        }
+        
+        if not region_shapes:
+            logger.warning(f"No region shapefiles found in {regions_dir}")
+        else:
+            logger.info(f"Found {len(region_shapes)} region(s) to process: {[r.stem for r in region_shapes]}")
+            
+            for region_path in region_shapes:
+                region_filename = region_path.stem  # e.g. "RegionD" or "Region_D"
+                # Convert "RegionD" -> "Region D"
+                region_display_name = region_filename.replace("Region", "Region ").replace("_", " ").strip()
+                # Convert "RegionD" -> "regd"
+                region_code = region_filename.lower().replace("region", "reg").replace("_", "")
+                
+                logger.info(f"Processing {region_display_name} ({region_code})...")
+                
+                try:
+                    if not region_path.exists():
+                        logger.warning(f"Shapefile not found: {region_path}")
+                        continue
+                        
+                    reg_gdf = gpd.read_file(region_path)
+                    if reg_gdf.crs != data_crs.proj4_init:
+                        reg_gdf = reg_gdf.to_crs(data_crs.proj4_init)
+                    
+                    # --- 1. Prepare Boundaries ---
+                    # Pre-load and clip counties to current Region so lines only show INSIDE the region
+                    counties = gpd.read_file(PROJECT_DIR / 'maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
+                    if counties.crs != data_crs.proj4_init:
+                        counties = counties.to_crs(data_crs.proj4_init)
+
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        counties_clipped = gpd.clip(counties, reg_gdf)
+
+                    # --- 2. Prepare Masks ---
+                    from shapely.prepared import prep
+                    from shapely.geometry import Point, box
+                    
+                    reg_geom = reg_gdf.geometry.iloc[0]
+                    
+                    # Buffer the geometry for the DATA mask (approx 3 miles)
+                    # This ensures data extends slightly PAST the border, eliminating white gaps
+                    reg_buffered = reg_geom.buffer(0.04)
+                    reg_prep = prep(reg_buffered)
+                    
+                    points_flat = np.column_stack([lon.ravel(), lat.ravel()])
+                    reg_mask_flat = np.array([reg_prep.contains(Point(pt)) for pt in points_flat])
+                    reg_mask = reg_mask_flat.reshape(lon.shape)
+                    
+                    # Get custom configuration for this region, or use defaults
+                    config = region_config.get(region_code, default_config)
+                    zoom_factor = config.get('zoom_factor', default_config['zoom_factor'])
+                    h_shift_factor = config.get('h_shift', default_config['h_shift'])
+                    v_shift_factor = config.get('v_shift', default_config['v_shift'])
+                    
+                    logger.info(f"{region_display_name} using: zoom={zoom_factor}, h_shift={h_shift_factor}, v_shift={v_shift_factor}")
+                    
+                    # Get extent and adjust for 16:9 aspect ratio to fill frame
+                    rb = reg_gdf.total_bounds
+                    minx, miny, maxx, maxy = rb
+                    cx = (minx + maxx) / 2
+                    cy = (miny + maxy) / 2
+                    
+                    # Start with tight bounds plus small buffer
+                    buffer_deg = 0.1
+                    width_deg = (maxx - minx) + buffer_deg
+                    height_deg = (maxy - miny) + buffer_deg
+                    
+                    # ZOOM OUT: Scale up the extent dimensions to make the map appear smaller
+                    # Use custom zoom factor for this region
+                    width_deg *= zoom_factor
+                    height_deg *= zoom_factor
+                    
+                    # Calculate aspect ratios
+                    target_ar = pixelw / pixelh
+                    avg_lat_rad = np.radians(cy)
+                    lon_scale = np.cos(avg_lat_rad)
+                    current_ar = (width_deg * lon_scale) / height_deg
+                    
+                    if current_ar < target_ar:
+                        # Region is too narrow/tall - Expand width
+                        new_width_deg = (height_deg * target_ar) / lon_scale
+                        
+                        # SHIFT LOGIC (Horizontal): Move region to the left (by shifting view center RIGHT)
+                        # Use custom horizontal shift factor for this region
+                        excess_width = new_width_deg - width_deg
+                        shift_offset_x = excess_width * h_shift_factor
+                        new_cx = cx + shift_offset_x
+                        
+                        # SHIFT LOGIC (Vertical): Move region UP (by shifting view center DOWN)
+                        # This clears the branding logo at the bottom
+                        # Use custom vertical shift factor for this region
+                        shift_offset_y = height_deg * v_shift_factor
+                        new_cy = cy - shift_offset_y
+                        
+                        reg_extent = (new_cx - new_width_deg/2, new_cx + new_width_deg/2, 
+                                    new_cy - height_deg/2, new_cy + height_deg/2)
+                    else:
+                        # Region is too wide
+                        new_height_deg = (width_deg * lon_scale) / target_ar
+                        
+                        # Vertical Shift: Move region UP
+                        # Use custom vertical shift factor for this region
+                        shift_offset_y = new_height_deg * v_shift_factor
+                        new_cy = cy - shift_offset_y
+                        
+                        reg_extent = (cx - width_deg/2, cx + width_deg/2, 
+                                    new_cy - new_height_deg/2, new_cy + new_height_deg/2)
+                    
+                    # Apply mask to data
+                    reg_risk = np.where(reg_mask, peak_risk_smooth, np.nan)
+                    reg_fm = np.where(reg_mask, min_fuel_moisture_smooth, np.nan)
+                    reg_rh = np.where(reg_mask, min_rh_smooth, np.nan)
+                    reg_wind = np.where(reg_mask, max_wind_smooth, np.nan)
+                    reg_temp = np.where(reg_mask, max_temp_smooth, np.nan)
+                    
+                    # Helper function for Region borders and masking
+                    def add_region_overlay(ax, extent):
+                        # 1. Add clipped county lines (internal only)
+                        ax.add_geometries(counties_clipped.geometry, crs=data_crs, edgecolor="#B6B6B6", 
+                                        facecolor='none', linewidth=1, zorder=5)
+                        
+                        # 2. Create "Inverted Mask" to hide spilled data outside border
+                        # Create a box larger than the map extent
+                        extent_box = box(extent[0]-1, extent[2]-1, extent[1]+1, extent[3]+1)
+                        inverted_mask = extent_box.difference(reg_geom)
+                        
+                        # Draw mask with background color to crop data cleanly at the line
+                        ax.add_geometries([inverted_mask], crs=data_crs, facecolor='#E8E8E8', edgecolor='none', zorder=9)
+                        
+                        # 3. Draw heavy region boundary on top
+                        ax.add_geometries([reg_geom], crs=data_crs, edgecolor="black", facecolor='none', linewidth=2, zorder=10)
+
+                    # 1. Regional Peak Fire Danger
+                    fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                    colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
+                    labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
+                    bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+                    cmap = ListedColormap(colors)
+                    norm = BoundaryNorm(bins, len(colors))
+                    cs = ax.contourf(lon, lat, reg_risk, transform=data_crs, levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True)
+                    ax.contour(lon, lat, reg_risk, transform=data_crs, levels=bins[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                    
+                    add_region_overlay(ax, reg_extent)
+                    
+                    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                    cbar = plt.colorbar(cs, cax=cax, label='Fire Danger Level')
+                    cbar.set_ticks([0, 1, 2, 3, 4])
+                    cbar.set_ticklabels(labels)
+                    ax.set_anchor('W')
+                    plt.subplots_adjust(left=0.05)
+
+                    add_title_and_branding(
+                        fig, f"Missouri - {region_display_name} Peak Fire Danger", 
+                        f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                        "Peak Fire Danger Forecast (10:00–21:00 CT)\n\n"
+                        "Fire Danger Criteria:\n"
+                        "Low: FM ≥ 15% (Fuels adequately moist)\n"
+                        "Moderate: FM 9-14% with RH < 60% or Wind ≥ 6 kts\n"
+                        "Elevated: FM < 9% with RH < 45% or Wind ≥ 10 kts\n"
+                        "Critical: FM < 9% with RH < 25% & Wind ≥ 15 kts\n"
+                        "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
+                        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+                        "For More Info, Visit ShowMeFire.org", 
+                        RUN_DATE, SCRIPT_DIR
+                    )
+                    filename = f'{region_code}-forecastfiredanger.png'
+                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    all_generated_maps.append(filename)
+                    plt.close(fig)
+                    del fig, ax, cs, cax, cbar
+                    gc.collect()
+                
+                    # 2. Fuel Moisture
+                    fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                    cs = ax.contourf(lon, lat, reg_fm, transform=data_crs, levels=fm_levels, cmap=fm_cmap, alpha=0.75, zorder=7, antialiased=True, extend='both')
+                    contour_9 = ax.contour(lon, lat, reg_fm, levels=[9], colors='black', linestyles='dotted', linewidths=2, transform=data_crs, zorder=8, alpha=0.7)
+                    ax.clabel(contour_9, inline=True, fontsize=9, fmt='%g%%', inline_spacing=10)
+                    
+                    add_region_overlay(ax, reg_extent)
+                    
+                    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                    cbar = plt.colorbar(cs, cax=cax, label='Fuel Moisture (%)', ticks=np.arange(0, 32, 3))
+                    ax.set_anchor('W')
+                    plt.subplots_adjust(left=0.05)
+                    
+                    add_title_and_branding(
+                        fig, f"Missouri - {region_display_name} Fuel Moisture", 
+                        f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                        "Minimum 10-Hour Fuel Moisture (10:00–21:00 CT)\n\n"
+                        "Critical Thresholds:\n"
+                        "< 7%: Extremely Dry - Extreme fire behavior possible\n"
+                        "7-9%: Very Dry - Critical fire behavior likely\n"
+                        "9-15%: Dry - Elevated fire behavior expected\n"
+                        "15-20%: Moderate - Fire activity possible\n"
+                        "> 20%: Moist - Fuels less receptive to fire\n\n"
+                        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+                        "For More Info, Visit ShowMeFire.org",
+                        RUN_DATE, SCRIPT_DIR
+                    )
+                    filename = f'{region_code}-forecastfuelmoisture.png'
+                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    all_generated_maps.append(filename)
+                    plt.close(fig)
+                    del fig, ax, cs, cax, cbar
+                    gc.collect()
+                
+                    # 3. Minimum RH
+                    fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                    rh_colors = ['#8B0000', '#FF0000', '#FFA500', '#FFED4E', '#90EE90', '#228B22']
+                    rh_levels = [0, 15, 25, 35, 50, 65, 100]
+                    rh_cmap = ListedColormap(rh_colors)
+                    rh_norm = BoundaryNorm(rh_levels, len(rh_colors))
+                    cs = ax.contourf(lon, lat, reg_rh, transform=data_crs, levels=rh_levels, cmap=rh_cmap, norm=rh_norm, alpha=0.7, zorder=7, antialiased=True)
+                    ax.contour(lon, lat, reg_rh, transform=data_crs, levels=rh_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                    
+                    add_region_overlay(ax, reg_extent)
+                    
+                    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                    cbar = plt.colorbar(cs, cax=cax, label='Relative Humidity (%)')
+                    cbar.set_ticks([7.5, 20, 30, 42.5, 57.5, 82.5])
+                    cbar.set_ticklabels(['<15%', '15-25%', '25-35%', '35-50%', '50-65%', '>65%'])
+                    ax.set_anchor('W')
+                    plt.subplots_adjust(left=0.05)
+                    
+                    add_title_and_branding(
+                        fig, f"Missouri - {region_display_name} Minimum RH", 
+                        f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                        "Minimum Relative Humidity (10:00–21:00 CT)\n\n"
+                        "Critical Thresholds:\n"
+                        "< 15%: Extremely Dry - Critical fire conditions\n"
+                        "15-25%: Very Dry - Red Flag criteria with wind\n"
+                        "25-35%: Dry - Elevated fire danger possible\n"
+                        "35-50%: Moderate - Normal fire activity\n"
+                        "> 50%: Moist - Fire spread limited\n\n"
+                        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+                        "For More Info, Visit ShowMeFire.org",
+                        RUN_DATE, SCRIPT_DIR
+                    )
+                    filename = f'{region_code}-forecastminrh.png'
+                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    all_generated_maps.append(filename)
+                    plt.close(fig)
+                    del fig, ax, cs, cax, cbar
+                    gc.collect()
+                
+                    # 4. Maximum Wind
+                    fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                    wind_colors = ['#90EE90', '#FFED4E', '#FFA500', '#FF6347', '#FF0000', '#8B0000']
+                    wind_levels = [0, 10, 15, 20, 25, 30, 50]
+                    wind_cmap = ListedColormap(wind_colors)
+                    wind_norm = BoundaryNorm(wind_levels, len(wind_colors))
+                    cs = ax.contourf(lon, lat, reg_wind, transform=data_crs, levels=wind_levels, cmap=wind_cmap, norm=wind_norm, alpha=0.7, zorder=7, antialiased=True)
+                    ax.contour(lon, lat, reg_wind, transform=data_crs, levels=wind_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                    
+                    add_region_overlay(ax, reg_extent)
+                    
+                    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed (knots)')
+                    cbar.set_ticks([5, 12.5, 17.5, 22.5, 27.5, 40])
+                    cbar.set_ticklabels(['<10', '10-15', '15-20', '20-25', '25-30', '>30'])
+                    ax.set_anchor('W')
+                    plt.subplots_adjust(left=0.05)
+                    
+                    add_title_and_branding(
+                        fig, f"Missouri - {region_display_name} Maximum Wind", 
+                        f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                        "Maximum Sustained Wind Speed (10:00–21:00 CT)\n\n"
+                        "Critical Thresholds:\n"
+                        "< 10 kts: Light winds - Normal fire behavior\n"
+                        "10-15 kts: Moderate - Increased fire activity\n"
+                        "15-20 kts: Strong - Red Flag criteria with low RH\n"
+                        "20-25 kts: Very Strong - Critical fire weather\n"
+                        "> 25 kts: Extreme - Dangerous fire conditions\n\n"
+                        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+                        "For More Info, Visit ShowMeFire.org",
+                        RUN_DATE, SCRIPT_DIR
+                    )
+                    filename = f'{region_code}-forecastmaxwind.png'
+                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    all_generated_maps.append(filename)
+                    plt.close(fig)
+                    del fig, ax, cs, cax, cbar
+                    gc.collect()
+                
+                    # 5. Maximum Temperature
+                    fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                    max_temp_smooth_f = reg_temp * 9/5 + 32
+                    temp_cmap = plt.cm.turbo
+                    temp_levels_f = np.linspace(0, 90, 50)
+                    cs = ax.contourf(lon, lat, max_temp_smooth_f, transform=data_crs, levels=temp_levels_f, cmap=temp_cmap, alpha=0.7, zorder=7, antialiased=True)
+                    contour_levels = np.arange(10, 90, 10)
+                    ax.contour(lon, lat, max_temp_smooth_f, transform=data_crs, levels=contour_levels, colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+
+                    add_region_overlay(ax, reg_extent)
+                    
+                    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
+                    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
+                    ax.set_anchor('W')
+                    plt.subplots_adjust(left=0.05)
+                    
+                    add_title_and_branding(
+                        fig, f"Missouri - {region_display_name} Max Temp", 
+                        f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                        "Maximum Temperature (10:00–21:00 CT)\n\n"
+                        "Temperature influences fire behavior:\n"
+                        "Higher temperatures increase fuel dryness\n"
+                        "and fire spread rates.\n\n"
+                        "Combined with low humidity and wind,\n"
+                        "high temperatures create dangerous\n"
+                        "fire weather conditions.\n\n"
+                        "Data Source: HRRR Model Forecast | ML Model | Observations\n"
+                        "For More Info, Visit ShowMeFire.org",
+                        RUN_DATE, SCRIPT_DIR
+                    )
+                    filename = f'{region_code}-forecastmaxtemp.png'
+                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    all_generated_maps.append(filename)
+                    plt.close(fig)
+                    del fig, ax, cs, cax, cbar
+                    gc.collect()
+                    
+                    # 6. Rainfall/Precipitation
+                    if total_precip_smooth is not None:
+                        reg_precip = np.where(reg_mask, total_precip_smooth, np.nan)
+                        fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
+                        rain_colors = ['#FFFFFF', '#E0F0FF', '#B0D4FF', '#6AB4FF', '#0080FF', '#0050D0', '#003080']
+                        rain_levels = [0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+                        rain_cmap = ListedColormap(rain_colors)
+                        rain_norm = BoundaryNorm(rain_levels, len(rain_colors))
+                        cs = ax.contourf(lon, lat, reg_precip, levels=rain_levels, cmap=rain_cmap, norm=rain_norm, transform=data_crs, alpha=0.8, zorder=7, antialiased=True)
+                        ax.contour(lon, lat, reg_precip, transform=data_crs, levels=rain_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                        
+                        add_region_overlay(ax, reg_extent)
+                        
+                        cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+                        cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
+                        cbar.set_ticks(rain_levels)
+                        cbar.set_ticklabels([f'{x:.2f}"' if x < 1 else f'{x:.1f}"' for x in rain_levels])
+                        ax.set_anchor('W')
+                        plt.subplots_adjust(left=0.05)
+                        
+                        add_title_and_branding(
+                            fig, f"Missouri - {region_display_name} Precipitation", 
+                            f"Model Run: {RUN_DATE.strftime('%Y-%m-%d %HZ')} | Valid: {(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d')}",
+                            "Total Precipitation Forecast (10:00–21:00 CT)\n\n"
+                            "Accumulated precipitation from\n"
+                            f"{RUN_DATE.strftime('%Hz %b %d')} through forecast hour 15.\n\n"
+                            "Precipitation reduces fire danger by:\n"
+                            "• Increasing fuel moisture\n"
+                            "• Raising relative humidity\n"
+                            "• Potentially preventing ignition\n\n"
+                            "> 0.5\": Significant fire danger reduction\n"
+                            "> 1.0\": Major impact on fire activity\n\n"
+                            "Data Source: HRRR Model Forecast\n"
+                            "For More Info, Visit ShowMeFire.org",
+                            RUN_DATE, SCRIPT_DIR
+                        )
+                        filename = f'{region_code}-forecastrainfall.png'
+                        fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                        all_generated_maps.append(filename)
+                        plt.close(fig)
+                        del fig, ax, cs, cax, cbar
+                        gc.collect()
+
+                    logger.info(f"{region_display_name} maps generated successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Error generating maps for {region_display_name} from {region_path.name}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
+    runtime_sec = time.time() - start_time
+
+    print(f"\nAll forecast maps generated successfully!")
+    for map_file in all_generated_maps:
+        print(f"  images/{map_file}")
+    print(f"Script runtime: {runtime_sec:.2f} seconds")
+
+    # Log results
+    logging.basicConfig(filename='logs/forecastfiredanger.log', level=logging.INFO)
+    logging.info(f"All forecast maps updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+    logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
+
+    # Update status file
+    status_file = PROJECT_DIR / 'status.json'
+    if status_file.exists():
+        try:
+            with open(status_file, 'r') as f:
+                status = json.load(f)
+        except json.JSONDecodeError:
+            status = {}
+    else:
+        status = {}
+
+    status['ForecastFireDanger'] = {
+        'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+        'model_run': RUN_DATE.strftime('%Y-%m-%d %HZ'),
+        'status': 'updated',
+        'runtime_sec': round(runtime_sec, 2),
+        'maps_generated': all_generated_maps,
+        'log': [
+            f"All forecast maps updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
+            f"Script runtime: {runtime_sec:.2f} seconds"
+        ]
+    }
+
+    with open(status_file, 'w') as f:
+        json.dump(status, f, indent=4)
+    
+    # Upload to CDN if enabled (default: true if not specified)
+    upload_forecast = os.getenv('uploadForecast', 'true').lower() == 'true'
+    
+    if upload_forecast:
+        logger.info("Uploading forecast images to CDN...")
+        try:
+            # Add scripts directory to path
+            scripts_dir = PROJECT_DIR / 'scripts'
+            
+            # Check if upload_cdn.py exists
+            upload_cdn_path = scripts_dir / 'upload_cdn.py'
+            if not upload_cdn_path.exists():
+                logger.warning(f"upload_cdn.py not found at {upload_cdn_path}. Skipping CDN upload.")
+            else:
+                if str(scripts_dir) not in sys.path:
+                    sys.path.insert(0, str(scripts_dir))
+                
+                # Import the upload function
+                import upload_cdn
+                
+                # Upload all generated forecast images dynamically
+                forecast_files = [PROJECT_DIR / 'images' / f for f in all_generated_maps]
+                
+                # Support test mode with optional path prefix
+                test_prefix = os.getenv('CDN_TEST_PREFIX', None)  # e.g., 'test' for testing
+                if test_prefix:
+                    logger.info(f"Using test prefix: {test_prefix}/")
+                
+                # Use upload_forecast_files to place in yyyy/mm/dd/forecast/ and latest/
+                upload_cdn.upload_forecast_files(files_to_upload=forecast_files, path_prefix=test_prefix)
+                logger.info("✓ Forecast images uploaded to CDN successfully")
+        except ImportError as e:
+            logger.warning(f"Could not import dependencies for CDN upload (missing boto3?): {e}. Skipping CDN upload.")
+        except Exception as e:
+            logger.error(f"Error uploading to CDN: {e}")
+    else:
+        logger.info("CDN upload disabled (uploadForecast=false in .env)")
+
+    return peak_risk_smooth
+
+import pickle
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+def load_ml_model(model_path="models/fuel_moisture_model_latest.pkl"):
+    """
+    Load the trained ML model.
+    
+    Returns: model_dict or None if model doesn't exist
+    """
+    model_file = Path(model_path)
+    
+    if not model_file.exists():
+        print(f"ML model not found at {model_path}")
+        print("Falling back to physics-based estimation")
+        return None
+    
+    try:
+        with open(model_file, 'rb') as f:
+            model_dict = pickle.load(f)
+        print(f"✓ Loaded ML model from {model_path}")
+        print(f"  Test MAE: {model_dict['test_metrics']['mae']:.3f}%")
+        return model_dict
+    except Exception as e:
+        print(f"Error loading ML model: {e}")
+        print("Falling back to physics-based estimation")
+        return None
+
+
+def calculate_vpd(temp_c, rh):
+    """Calculate Vapor Pressure Deficit (VPD) in kPa."""
+    # Saturation vapor pressure (kPa)
+    svp = 0.6108 * np.exp(17.27 * temp_c / (temp_c + 237.3))
+    # Actual vapor pressure
+    avp = svp * (rh / 100)
+    # VPD
+    vpd = svp - avp
+    return vpd
+
+
+def calculate_nelson_emc(rh, temp_c):
+    """Calculate equilibrium moisture content using Nelson's equations."""
+    if rh <= 10:
+        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    elif rh <= 50:
+        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+    else:
+        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
+    
+    return np.clip(emc, 1, 40)
+
+
+def prepare_ml_features(rh, temp_c, wind_kts, solar, precip, prev_fm, prev_rh, prev_temp,
+                       hour, day_of_year, month, latitude, longitude, elevation):
+    """
+    Prepare features for ML model prediction.
+    Must match the exact features used during training.
+    
+    Returns: DataFrame with features in correct order
+    """
+    # Calculate derived features
+    temp_f = temp_c * 9/5 + 32
+    emc_simple = 3 + 0.25 * rh
+    emc_nelson = calculate_nelson_emc(rh, temp_c)
+    vpd = calculate_vpd(temp_c, rh)
+    wind_temp_interaction = wind_kts * temp_c
+    
+    # Create feature dictionary
+    features = {
+        'rh': rh,
+        'temp': temp_f,
+        'temp_c': temp_c,
+        'wind': wind_kts,
+        'solar': solar if solar is not None else 0,
+        'precip': precip if precip is not None else 0,
+        'prev_rh': prev_rh,
+        'prev_temp': prev_temp,
+        'prev_fm': prev_fm,
+        'rh_3h_avg': prev_rh,  # Simplified - would need 3 hours of history
+        'temp_3h_avg': prev_temp,  # Simplified
+        'emc_simple': emc_simple,
+        'emc_nelson': emc_nelson,
+        'vpd': vpd,
+        'wind_temp_interaction': wind_temp_interaction,
+        'hour': hour,
+        'day_of_year': day_of_year,
+        'month': month,
+        'latitude': latitude,
+        'longitude': longitude,
+        'elevation': elevation
+    }
+    
+    return features
+
+
+def predict_with_ml_model(model_dict, features_dict):
+    """
+    Use ML model to predict fuel moisture.
+    
+    Args:
+        model_dict: Loaded model dictionary
+        features_dict: Dictionary of features
+    
+    Returns: Predicted fuel moisture (%)
+    """
+    # Create DataFrame with single row
+    df = pd.DataFrame([features_dict])
+    
+    # Ensure features are in correct order (same as training)
+    feature_names = model_dict['feature_names']
+    df = df[feature_names]
+    
+    # Scale features
+    scaler = model_dict['scaler']
+    features_scaled = scaler.transform(df)
+    
+    # Predict
+    model = model_dict['model']
+    prediction = model.predict(features_scaled)[0]
+    
+    return np.clip(prediction, 1, 40)
+
+
+def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path="models/fuel_moisture_model_latest.pkl"):
+    """
+    Process HRRR forecast using ML model for fuel moisture prediction.
+    Falls back to physics-based model if ML model unavailable.
+    
+    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+    """
+    
+    
+    # Try to load ML model
+    model_dict = load_ml_model(ml_model_path)
+    use_ml = model_dict is not None
+    
+    if use_ml:
+        print("Using ML model for fuel moisture prediction")
+    else:
+        print("Using physics-based model for fuel moisture prediction")
+    
+    # Get current fuel moisture observations
+    fuel_points = get_current_fuel_moisture_field(port)
+    
+    # Create grid meshes for interpolation
+    if lon.ndim == 1 and lat.ndim == 1:
+        grid_lon_mesh, grid_lat_mesh = np.meshgrid(lon, lat)
+    else:
+        grid_lon_mesh, grid_lat_mesh = lon, lat
+    
+    # Initialize fuel moisture field from observations
+    if fuel_points and len(fuel_points) >= 3:
+        initial_fm = interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh)
+        print(f"Initialized from RAWS observations: FM range {np.nanmin(initial_fm):.1f}-{np.nanmax(initial_fm):.1f}%")
+    else:
+        initial_fm = np.full_like(grid_lon_mesh, 12.0)
+        print("Warning: Using default FM=12% (no RAWS data available)")
+    
+    # Get current time info for features
+    now = pd.Timestamp.utcnow()
+    
+    # Process each forecast hour
+    hourly_fm = []
+    hourly_rh = []
+    hourly_ws = []
+    hourly_temp = []
+    hourly_risks = []
+    
+    previous_fm = initial_fm.copy()
+    previous_rh = None
+    previous_temp = None
+    
+    print(f"\nProcessing {len(ds_full.step)} forecast hours...")
+    for i, time_step in enumerate(ds_full.step):
+        print(f"\n=== Hour {i+1}/{len(ds_full.step)} ===")
+        ds_hour = ds_full.sel(step=time_step)
+        
+        # Extract forecast variables
+        print("  Extracting forecast variables...")
+        rh = ds_hour['r2'].values
+        temp = ds_hour['t2m'].values - 273.15  # Convert K to C
+        u = ds_hour['u10'].values
+        v = ds_hour['v10'].values
+        
+        ws_kts = np.sqrt(u**2 + v**2) * 1.94384
+        print(f"Wind 10m: {ws_kts}")
+        ws_kts = ws_kts * 0.8 # Convert down from 10m to 20ft. 
+        print(f"Wind 20ft: {ws_kts}")
+        # Get time features for this forecast hour
+        # Convert time_step to hours - handle both timedelta64 and int64 cases
+        time_step_value = time_step.values
+        if isinstance(time_step_value, np.timedelta64):
+            hours_ahead = int(time_step_value / np.timedelta64(1, 'h'))
+        else:
+            # If it's an int64, it's likely nanoseconds
+            hours_ahead = int(time_step_value / 3600000000000)  # nanoseconds to hours
+        forecast_time = now + pd.Timedelta(hours=hours_ahead)
+        hour = forecast_time.hour
+        day_of_year = forecast_time.dayofyear
+        month = forecast_time.month
+        
+        # Calculate fuel moisture
+        fm = np.zeros_like(rh)
+        
+        if use_ml:
+            # Vectorized ML prediction - much faster than loop
+            print(f"  Processing {rh.size} grid points with ML model...")
+            
+            # Flatten arrays for batch processing
+            n_points = rh.size
+            rh_flat = rh.ravel()
+            temp_flat = temp.ravel()
+            print(f"Wind 20ft: {ws_kts}")
+            ws_flat = ws_kts.ravel()
+            prev_fm_flat = previous_fm.ravel()
+            prev_rh_flat = (previous_rh.ravel() if previous_rh is not None else rh_flat)
+            prev_temp_flat = (previous_temp.ravel() if previous_temp is not None else temp_flat)
+            grid_lat_flat = grid_lat_mesh.ravel()
+            grid_lon_flat = grid_lon_mesh.ravel();
+            
+            # Calculate derived features (vectorized)
+            print("  Calculating features...")
+            temp_f = temp_flat * 9/5 + 32
+            emc_simple = 3 + 0.25 * rh_flat
+            emc_nelson = np.array([calculate_nelson_emc(rh_flat[k], temp_flat[k]) for k in range(n_points)])
+            vpd = calculate_vpd(temp_flat, rh_flat)
+            wind_temp_interaction = ws_flat * temp_flat
+            
+            # Build feature DataFrame for all points at once
+            print("  Building feature matrix...")
+            features_df = pd.DataFrame({
+                'rh': rh_flat,
+                'temp': temp_f,
+                'temp_c': temp_flat,
+                'wind': ws_flat,
+                'solar': 0,
+                'precip': 0,
+                'prev_rh': prev_rh_flat,
+                'prev_temp': prev_temp_flat,
+                'prev_fm': prev_fm_flat,
+                'rh_3h_avg': prev_rh_flat,
+                'temp_3h_avg': prev_temp_flat,
+                'emc_simple': emc_simple,
+                'emc_nelson': emc_nelson,
+                'vpd': vpd,
+                'wind_temp_interaction': wind_temp_interaction,
+                'hour': hour,
+                'day_of_year': day_of_year,
+                'month': month,
+                'latitude': grid_lat_flat,
+                'longitude': grid_lon_flat,
+                'elevation': 0
+            })
+            
+            # Ensure correct feature order
+            feature_names = model_dict['feature_names']
+            features_df = features_df[feature_names]
+            
+            # Scale and predict all at once
+            print("  Running ML predictions...")
+            scaler = model_dict['scaler']
+            features_scaled = scaler.transform(features_df)
+            
+            model = model_dict['model']
+            predictions = model.predict(features_scaled)
+            predictions = np.clip(predictions, 1, 40)
+            
+            # Reshape back to grid
+            fm = predictions.reshape(rh.shape)
+            
+        else:
+            # Fallback to physics-based lag model
+            print(f"  Processing with physics-based model...")
+            for ii in range(rh.shape[0]):
+                if ii % 10 == 0:
+                    print(f"    Row {ii}/{rh.shape[0]}")
+                for jj in range(rh.shape[1]):
+                    fm[ii, jj] = estimate_fuel_moisture_with_lag(
+                        rh[ii, jj], 
+                        temp[ii, jj], 
+                        previous_fm[ii, jj],
+                        hours_elapsed=1
+                    )
+        
+        # Store for next iteration
+        previous_fm = fm.copy()
+        previous_rh = rh.copy()
+        previous_temp = temp.copy()
+        
+        # Save hourly values
+        hourly_rh.append(rh)
+        hourly_temp.append(temp)
+        hourly_ws.append(ws_kts)
+        hourly_fm.append(fm)
+        
+        # Calculate fire danger
+        print(f"  Calculating fire danger levels...")
+        risk = np.zeros_like(rh, dtype=int)
+        for ii in range(rh.shape[0]):
+            for jj in range(rh.shape[1]):
+                risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+        hourly_risks.append(risk)
+        
+        # Progress summary
+        print(f"  ✓ Hour {i+1} complete: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+    
+    print("\n✓ All forecast hours processed successfully!\n")
+    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+
+
+if __name__ == "__main__":
+    logger.info("Running as main script.")
+    generate_complete_forecast()
