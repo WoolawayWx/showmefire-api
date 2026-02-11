@@ -23,6 +23,7 @@ from typing import Optional
 from services.rss import generate_rss_feed
 from pathlib import Path
 from pytz import timezone
+import pandas as pd
 from core.database import (
     get_latest_forecast,
     get_forecast_by_time,
@@ -986,6 +987,23 @@ async def get_issues():
         return FileResponse(issues_file, media_type='application/json')
     else:
         raise HTTPException(status_code=404, detail="Issues data not available")
+
+
+def get_verificationcsv ():
+    try:
+        df = pd.read_csv('reports/verification_history.csv')    
+        csv_string = df.to_csv(index=False)
+        return csv_string
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+@app.get("/get-csv/")
+async def get_csv():
+    try:
+        csv_data = get_verificationcsv()
+        return csv_data
+    except HTTPException as e:
+        return {"error": str(e)}
     
 if __name__ == '__main__':
     import uvicorn

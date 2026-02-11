@@ -35,6 +35,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
 # Ensure a writable data directory (compose mounts ./api/data -> /app/data)
 ENV DATA_DIR=/app/data
 RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
