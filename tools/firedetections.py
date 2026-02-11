@@ -28,9 +28,51 @@ if not logger.handlers:
 # API endpoint for advanced fire detections
 API_URL = "https://re-ngfs.ssec.wisc.edu/api/shapes?products=NGFS-SCENE-CONUS-EAST"
 
-def fetch_advanced_fire_detections():
+def filter_by_state(data, states=['MO']):
+    """
+    Filter fire detections by state(s).
+    
+    Args:
+        data: GeoJSON FeatureCollection
+        states: List of state abbreviations (e.g., ['MO', 'KS', 'AR'])
+    
+    Returns:
+        Filtered GeoJSON FeatureCollection
+    """
+    if not isinstance(data, dict) or data.get('type') != 'FeatureCollection':
+        return data
+    
+    # Convert states to uppercase for case-insensitive matching
+    states = [s.upper() for s in states]
+    
+    # Filter features by state (including empty/None as "Unknown")
+    filtered_features = [
+        feature for feature in data.get('features', [])
+        if (
+            feature.get('properties', {}).get('state', '').upper() in states or
+            not feature.get('properties', {}).get('state')  # Include if state is None/empty
+        )
+    ]
+    
+    # Update metadata
+    original_count = data.get('metadata', {}).get('feature_count', 0)
+    data['features'] = filtered_features
+    data['metadata']['feature_count'] = len(filtered_features)
+    data['metadata']['filtered_by_states'] = states + ['Unknown']
+    data['metadata']['original_feature_count'] = original_count
+    
+    logger.info(f"Filtered from {original_count} to {len(filtered_features)} features for states: {', '.join(states)} + Unknown")
+    
+    return data
+
+def fetch_advanced_fire_detections(filter_states=None):
     """
     Fetch advanced fire detection data from NGFS API.
+    
+    Args:
+        filter_states: List of state abbreviations to filter by (e.g., ['MO', 'KS'])
+                      If None, returns all states
+    
     Returns GeoJSON FeatureCollection with comprehensive fire detection data.
     """
     logger.info(f"Fetching advanced fire detections from {API_URL}")
@@ -51,6 +93,11 @@ def fetch_advanced_fire_detections():
             }
             
             logger.info(f"Successfully fetched {len(data.get('features', []))} fire detection features")
+            
+            # Apply state filter if specified
+            if filter_states:
+                data = filter_by_state(data, filter_states)
+            
             return data
         else:
             logger.warning("Unexpected data format from API")
@@ -87,9 +134,15 @@ def fetch_advanced_fire_detections():
             }
         }
 
-def save_detections(data):
-    """Save fire detections to GIS directory as GeoJSON"""
-    output_path = GIS_DIR / 'ngfs_advanced_fire_detections.geojson'
+def save_detections(data, suffix=''):
+    """
+    Save fire detections to GIS directory as GeoJSON
+    
+    Args:
+        data: GeoJSON FeatureCollection
+        suffix: Optional suffix for filename (e.g., '_missouri')
+    """
+    output_path = GIS_DIR / f'ngfs_advanced_fire_detections{suffix}.geojson'
     
     try:
         with open(output_path, 'w') as f:
@@ -107,17 +160,22 @@ def main():
     """Main execution function for scheduled runs"""
     logger.info("Starting advanced fire detection fetch")
     
-    data = fetch_advanced_fire_detections()
-    save_path = save_detections(data)
+    # Fetch all detections
+    all_data = fetch_advanced_fire_detections()
+    save_detections(all_data)
     
-    if save_path:
-        feature_count = len(data.get('features', []))
-        print(f"✓ Successfully fetched and saved {feature_count} fire detections")
-        print(f"  - Saved to: {save_path}")
-        return data
-    else:
-        print("✗ Failed to save fire detections")
-        return None
+    # Fetch Missouri + Unknown detections (default behavior)
+    mo_data = fetch_advanced_fire_detections(filter_states=['MO'])
+    save_detections(mo_data, suffix='_missouri')
+    
+    all_count = len(all_data.get('features', []))
+    mo_count = len(mo_data.get('features', []))
+    
+    print(f"✓ Successfully fetched and saved fire detections")
+    print(f"  - All states: {all_count} detections")
+    print(f"  - Missouri + Unknown: {mo_count} detections")
+    
+    return all_data
 
 if __name__ == "__main__":
     main()
