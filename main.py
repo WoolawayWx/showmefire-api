@@ -686,7 +686,7 @@ async def get_missouri_fires_geojson():
     else:
         raise HTTPException(status_code=404, detail="Fire GeoJSON not yet available")
 
-@app.get("/api/fires/detections/advanced")
+@app.get("/fires/detections/advanced")
 async def get_advanced_fire_detections():
     """Get advanced NGFS fire detections for CONUS-EAST as GeoJSON"""
     from pathlib import Path
