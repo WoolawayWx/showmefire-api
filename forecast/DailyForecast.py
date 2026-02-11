@@ -1412,7 +1412,7 @@ def generate_complete_forecast():
     # ========== MAP 1: PEAK FIRE DANGER ==========
     logger.info("Generating peak fire danger map...")
     colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
-    labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
+    labels = ['Low', 'Moderate', 'Elevated \nHigh', 'Critical \n Very High', 'Extreme']
     bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
     cmap = ListedColormap(colors)
     norm = BoundaryNorm(bins, len(colors))
@@ -1711,7 +1711,9 @@ def generate_complete_forecast():
     add_boundaries(ax, data_crs, PROJECT_DIR)
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed')
+    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed (knots)', orientation='vertical')
+    cbar.ax.yaxis.set_label_position('left')
+    cbar.ax.tick_params(labelleft=False, labelright=True)
     cbar.set_ticks([5, 12.5, 17.5, 22.5, 27.5, 40])
 
     # Show both knots and mph
