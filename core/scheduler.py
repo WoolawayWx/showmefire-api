@@ -6,6 +6,7 @@ from pytz import timezone
 from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state
 from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
+from tools.firedetections import main as fetch_advanced_fire_detections
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour='10-22',  # 10 AM through 10 PM
         id='fetch_fire_detections'
     )
+    
+    # Run advanced fire detections every 5 minutes
+    scheduler.add_job(
+        fetch_advanced_fire_detections,
+        'interval',
+        minutes=5,
+        id='fetch_advanced_fire_detections'
+    )
+    
     scheduler.start()
     logger.info("Scheduler started")
 

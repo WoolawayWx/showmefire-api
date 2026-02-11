@@ -685,6 +685,18 @@ async def get_missouri_fires_geojson():
         return FileResponse(geojson_file, media_type='application/geo+json')
     else:
         raise HTTPException(status_code=404, detail="Fire GeoJSON not yet available")
+
+@app.get("/api/fires/detections/advanced")
+async def get_advanced_fire_detections():
+    """Get advanced NGFS fire detections for CONUS-EAST as GeoJSON"""
+    from pathlib import Path
+    gis_dir = Path(GIS_DIR)
+    geojson_file = gis_dir / 'ngfs_advanced_fire_detections.geojson'
+    if geojson_file.exists():
+        return FileResponse(geojson_file, media_type='application/geo+json')
+    else:
+        raise HTTPException(status_code=404, detail="Advanced fire detection data not yet available")
+
 @app.get("/api/images/timeline")
 async def get_image_timeline():
     """Get image timeline data for the past 48 hours"""
