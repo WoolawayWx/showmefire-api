@@ -45,23 +45,20 @@ def filter_by_state(data, states=['MO']):
     # Convert states to uppercase for case-insensitive matching
     states = [s.upper() for s in states]
     
-    # Filter features by state (including empty/None as "Unknown")
+    # Filter features by STATE property (not 'state')
     filtered_features = [
         feature for feature in data.get('features', [])
-        if (
-            feature.get('properties', {}).get('state', '').upper() in states or
-            not feature.get('properties', {}).get('state')  # Include if state is None/empty
-        )
+        if feature.get('properties', {}).get('STATE', '').upper() in states
     ]
     
     # Update metadata
     original_count = data.get('metadata', {}).get('feature_count', 0)
     data['features'] = filtered_features
     data['metadata']['feature_count'] = len(filtered_features)
-    data['metadata']['filtered_by_states'] = states + ['Unknown']
+    data['metadata']['filtered_by_states'] = states
     data['metadata']['original_feature_count'] = original_count
     
-    logger.info(f"Filtered from {original_count} to {len(filtered_features)} features for states: {', '.join(states)} + Unknown")
+    logger.info(f"Filtered from {original_count} to {len(filtered_features)} features for states: {', '.join(states)}")
     
     return data
 
@@ -160,22 +157,16 @@ def main():
     """Main execution function for scheduled runs"""
     logger.info("Starting advanced fire detection fetch")
     
-    # Fetch all detections
-    all_data = fetch_advanced_fire_detections()
-    save_detections(all_data)
-    
-    # Fetch Missouri + Unknown detections (default behavior)
+    # Fetch Missouri detections only
     mo_data = fetch_advanced_fire_detections(filter_states=['MO'])
     save_detections(mo_data, suffix='_missouri')
     
-    all_count = len(all_data.get('features', []))
     mo_count = len(mo_data.get('features', []))
     
     print(f"✓ Successfully fetched and saved fire detections")
-    print(f"  - All states: {all_count} detections")
-    print(f"  - Missouri + Unknown: {mo_count} detections")
+    print(f"  - Missouri: {mo_count} detections")
     
-    return all_data
+    return mo_data
 
 if __name__ == "__main__":
     main()
