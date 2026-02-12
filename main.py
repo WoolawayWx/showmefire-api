@@ -696,7 +696,7 @@ async def get_advanced_fire_detections():
     """Get advanced NGFS fire detections for CONUS-EAST as GeoJSON"""
     from pathlib import Path
     gis_dir = Path(GIS_DIR)
-    geojson_file = gis_dir / 'ngfs_advanced_fire_detections.geojson'
+    geojson_file = gis_dir / 'ngfs_advanced_fire_detections_missouri.geojson'
     if geojson_file.exists():
         return FileResponse(geojson_file, media_type='application/geo+json')
     else:
