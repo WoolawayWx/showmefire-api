@@ -205,18 +205,20 @@ def get_latest_forecast():
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    cursor.execute('''
-        SELECT * FROM forecasts 
-        ORDER BY id DESC 
-        LIMIT 1
-    ''')
-    
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        return dict(row)
-    return None
+    try:
+        cursor.execute('''
+            SELECT * FROM forecasts 
+            ORDER BY id DESC 
+            LIMIT 1
+        ''')
+        
+        row = cursor.fetchone()
+        
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
 
 def get_forecast_by_time(valid_time):
     """
