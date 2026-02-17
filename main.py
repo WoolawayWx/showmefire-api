@@ -118,7 +118,6 @@ class NoCacheStaticFiles(StaticFiles):
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
 app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
-app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -1021,6 +1020,8 @@ async def get_csv():
         return csv_data
     except HTTPException as e:
         return {"error": str(e)}
+    
+app.mount("/", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
     
 
 if __name__ == '__main__':
