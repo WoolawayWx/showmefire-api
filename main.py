@@ -65,6 +65,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
+from routers import tiles
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -118,6 +119,9 @@ class NoCacheStaticFiles(StaticFiles):
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
 app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
+
+# Include tile router for GeoTIFF rendering
+app.include_router(tiles.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

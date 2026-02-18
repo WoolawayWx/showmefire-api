@@ -37,51 +37,83 @@ def load_all_observations(raw_data_dir):
     logger.info(f"Loading observations from {len(files)} files...")
     
     for file in files:
-        with open(file, 'r') as f:
-            raw = json.load(f)
-            
-        if "STATION" not in raw:
-            continue
-            
-        for station in raw["STATION"]:
-            stid = station["STID"]
-            if stid not in obs_data:
-                obs_data[stid] = {}
-                
-            observations = station.get("OBSERVATIONS", {})
-            times = observations.get("date_time", [])
-            
-            # Map variable names (e.g., air_temp_set_1 -> temp_c)
-            # Synoptic returns F for english units usually, need to check metadata
-            # For now assuming the raw_data was fetched with units=english (F)
-            # But the forecast is in C. We'll need to convert.
-            
-            temps = observations.get("air_temp_set_1", [])
-            rhs = observations.get("relative_humidity_set_1", [])
-            wspds = observations.get("wind_speed_set_1", []) # kts or mph? Usually mph/kts depending on request
-            fms = observations.get("fuel_moisture_set_1", [])
-            
-            # Check length matches
-            if not all(len(x) == len(times) for x in [temps, rhs] if x):
+        try:
+            with open(file, 'r') as f:
+                raw_content = json.load(f)
+
+            # Handle if file is list vs dict
+            if isinstance(raw_content, list):
+                # Data is a list of station dictionaries
+                # Expected format: [{ 'STID': '...', 'OBSERVATIONS': { ... } }, ...]
+                stations_iter = raw_content
+            elif isinstance(raw_content, dict):
+                # If it's a dict, it might be keyed by STID or simply wrapped
+                if "STATION" in raw_content:
+                     stations_iter = raw_content["STATION"]
+                else:
+                     # Assume it's { "STID": {...}, ... }
+                     # Convert to list format to unify processing
+                     stations_iter = [{"STID": k, "OBSERVATIONS": v} for k, v in raw_content.items()]
+            else:
+                logger.warning(f"Unknown format in {file}")
                 continue
                 
-            for i, time_str in enumerate(times):
-                # time_str is ISO8601 UTC (e.g. 2026-01-16T16:17:00Z)
-                # Normalize to hourly if needed?
-                # For now store exact matches or close matches
+            for station in stations_iter:
+                # Get ID safely
+                stid = station.get("STID")
+                if not stid:
+                    continue
+                    
+                if stid not in obs_data:
+                    obs_data[stid] = {}
                 
-                # Parse time
-                dt = pd.to_datetime(time_str)
-                # Round to nearest hour for comparison?
-                dt_round = dt.round('h')
+                # Check where observations are located
+                observations = station.get("OBSERVATIONS")
+                if not observations:
+                    # Sometimes the station dict IS the observation dict minus the STID key
+                    # depending on how it was saved.
+                    # But typically Synoptic separates them.
+                    # If observations is missing, check if keys like "air_temp_set_1" exist directly
+                    if "air_temp_set_1" in station:
+                        observations = station
+                    else:
+                        continue
                 
-                # Store
-                obs_data[stid][dt_round] = {
-                    "temp_f": temps[i] if i < len(temps) else None,
-                    "rh": rhs[i] if i < len(rhs) else None,
-                    "wind_speed": wspds[i] if i < len(wspds) else None,
-                    "fuel_moisture": fms[i] if i < len(fms) else None
-                }
+                # Extract time array and variable arrays
+                times = observations.get("date_time", []) # Synoptic usually uses 'date_time', sometimes 'TIME'
+                if not times:
+                    times = observations.get("TIME", [])
+
+                temps = observations.get("air_temp_set_1", [])
+                rhs = observations.get("relative_humidity_set_1", [])
+                wind_speeds = observations.get("wind_speed_set_1", [])
+                
+                # Add FM manually if available
+                # Synoptic often sends "fuel_moisture_set_1"
+                fms = observations.get("fuel_moisture_set_1", [])
+
+                # Process this station's timeline
+                for i, time_str in enumerate(times):
+                    try:
+                        dt = pd.to_datetime(time_str)
+                        if dt.tzinfo is None:
+                            dt = dt.tz_localize('UTC')
+                        else:
+                            dt = dt.tz_convert('UTC')
+                        
+                        dt_round = dt.round('h')
+
+                        obs_data[stid][dt_round] = {
+                            "temp_c": temps[i] if i < len(temps) else None,
+                            "rh": rhs[i] if i < len(rhs) else None,
+                            "wind_m_s": wind_speeds[i] if i < len(wind_speeds) else None,
+                            "fm": fms[i] if i < len(fms) else None
+                        }
+                    except (ValueError, IndexError):
+                        continue
+                        
+        except Exception as e:
+            logger.error(f"Error loading {file}: {e}")
                 
     return obs_data
 
@@ -92,7 +124,7 @@ def compare_forecast_obs(forecast_path, obs_data):
     try:
         data = load_forecast_file(forecast_path)
     except Exception as e:
-        logger.error(f"Error loading {forecast_path}: {e}")
+        logger.error(f"Failed to load forecast file {forecast_path}: {e}")
         return []
 
     forecast_run_date = data.get("run_date")
@@ -100,75 +132,73 @@ def compare_forecast_obs(forecast_path, obs_data):
     
     comparisons = []
     
-    for stid, station_info in data.get("stations", {}).items():
-        if stid not in obs_data:
+    comparisons = []
+    
+    stations = data.get("stations", {})
+    if not stations:
+        logger.warning(f"No stations found in forecast file {forecast_path}. Skipping.")
+        return []
+    
+    for stid, station_info in stations.items():
+        station_obs = obs_data.get(stid, {})
+        
+        if not station_obs:
             continue
-            
-        station_obs = obs_data[stid]
         
         for fcst in station_info.get("forecasts", []):
             fcst_time_str = fcst["time"]
             
-            # Parse forecast time - handle both UTC (with Z) and US/Central (without Z)
-            dt_fcst = pd.Timestamp(fcst_time_str)
-            
-            if dt_fcst.tzinfo is None:
-                # Naive timestamp, assume US/Central
-                dt_fcst_utc = dt_fcst.tz_localize('US/Central').tz_convert('UTC')
-            else:
-                # Already timezone-aware, convert to UTC if needed
-                dt_fcst_utc = dt_fcst.tz_convert('UTC') if dt_fcst.tz != 'UTC' else dt_fcst
-            
-            # Look for matching observation
-            if dt_fcst_utc in station_obs:
-                obs = station_obs[dt_fcst_utc]
+            # Robust forecast time parsing
+            try:
+                dt_fcst = pd.Timestamp(fcst_time_str)
+                if dt_fcst.tzinfo is None:
+                    # Assume UTC if naive, as most standardized storage is UTC
+                    dt_fcst = dt_fcst.tz_localize('UTC')
+                else:
+                    dt_fcst = dt_fcst.tz_convert('UTC')
                 
-                # Metrics to compare
-                # Temp: Forecast is C, Obs might be F. 
-                # Let's see... API usually calls units='english' -> F.
-                # Forecast JSON says "temp_c".
-                
-                obs_temp_c = (obs["temp_f"] - 32) * 5/9 if obs["temp_f"] is not None else None
-                
-                # Wind conversion: API often returns m/s if not specified, or kts/mph.
-                # Assuming Synoptic returned 'm/s' or similar. 
-                # forecast is m/s. 
-                # If obs is mph/kts we need conversion. 
-                # For now assuming obs is m/s or close enough to compare raw, 
-                # but we'll add it to CSV to verify later.
-                obs_wind = obs["wind_speed"]
+                # Round to nearest hour to match observation keys
+                dt_fcst_round = dt_fcst.round('h')
 
-                if obs_temp_c is not None:
-                    # Calculate lead hour
-                    run_dt = pd.Timestamp(forecast_run_date)
-                    if run_dt.tzinfo is None:
-                        run_dt_utc = run_dt.tz_localize('UTC')
-                    else:
-                        run_dt_utc = run_dt.tz_convert('UTC')
+                if dt_fcst_round in station_obs:
+                    obs = station_obs[dt_fcst_round]
+                    obs = station_obs[dt_fcst_round]
                     
-                    lead_hours = int((dt_fcst_utc - run_dt_utc).total_seconds() / 3600)
-                    
-                    comparisons.append({
-                        "station_id": stid,
-                        "valid_time_utc": dt_fcst_utc.isoformat(),
-                        "lead_hour": lead_hours,
+                    # Store comparison if we have valid observation data
+                    if obs.get("temp_c") is not None:
+                        # Convert forecast F to C for comparison if needed, 
+                        # OR ensure your forecast is already C. 
+                        # Assuming forecast is C based on variable names like 'temp_forecast_c' later.
                         
-                        "temp_fcst": fcst["temp_c"],
-                        "temp_obs": obs_temp_c,
-                        "temp_error": fcst["temp_c"] - obs_temp_c,
-                        
-                        "rh_fcst": fcst["rh"],
-                        "rh_obs": obs["rh"],
-                        "rh_error": fcst["rh"] - (obs["rh"] if obs["rh"] is not None else 0),
-                        
-                        "fm_fcst": fcst["fuel_moisture"],
-                        "fm_obs": obs["fuel_moisture"],
-                        "fm_error": fcst["fuel_moisture"] - (obs["fuel_moisture"] if obs["fuel_moisture"] is not None else 0) if obs["fuel_moisture"] is not None else None,
+                        # Check units! If your forecast JSON has temp in F (common in US), convert.
+                        # If forecast is Celsius, use directly.
+                        # Assuming forecast is in Celsius for now based on 'temp_forecast_c' in dataframe code.
+                        fcst_temp = fcst.get("temp")
+                        fcst_rh = fcst.get("humidity")
+                        fcst_wind = fcst.get("wind_speed")
+                        fcst_fm = fcst.get("fuel_moisture_10hr")
 
-                        "wind_fcst": fcst["wind_speed_ms"],
-                        "wind_obs": obs_wind,
-                        "wind_error": fcst["wind_speed_ms"] - (obs_wind if obs_wind is not None else 0) if obs_wind is not None else None
-                    })
+                        comparisons.append({
+                            "station_id": stid,
+                            "run_date": forecast_run_date,
+                            "valid_time_utc": dt_fcst_round,
+                            "lead_hour": int((dt_fcst_round - pd.Timestamp(forecast_run_date).tz_convert('UTC')).total_seconds() / 3600),
+                            "temp_fcst": fcst_temp,
+                            "temp_obs": obs.get("temp_c"),
+                            "temp_error": fcst_temp - obs.get("temp_c"),
+                            "rh_fcst": fcst_rh,
+                            "rh_obs": obs.get("rh"),
+                            "rh_error": fcst_rh - obs.get("rh"),
+                            "wind_fcst": fcst_wind,
+                            "wind_obs": obs.get("wind_m_s"),
+                            "wind_error": (fcst_wind - obs.get("wind_m_s")) if obs.get("wind_m_s") is not None else None,
+                            "fm_fcst": fcst_fm,
+                            "fm_obs": obs.get("fm"),
+                            "fm_error": (fcst_fm - obs.get("fm")) if obs.get("fm") is not None and fcst_fm is not None else None
+                        })
+            except Exception as e:
+                # logger.debug(f"Skipping forecast point due to error: {e}")
+                continue
     
     return comparisons
 

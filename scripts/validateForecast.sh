@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
-TODAY=$(date -u +%Y%m%d)
+TODAY=$(TZ="America/Chicago" date +%Y%m%d)
 
 PYTHON=${PYTHON:-python3}
 

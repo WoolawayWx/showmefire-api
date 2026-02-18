@@ -43,6 +43,7 @@ import io
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import get_db_path
+from export_fire_danger_gis import export_all_gis_formats
 
 # Load the production model once
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -699,48 +700,73 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     try:
         conn = sqlite3.connect(db_path)
-        indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
-        print(f"indices_df: ")
-        if not indices_df.empty:
-            # Check if indices from DB fit in our current grid
-            # If we are using a cropped grid but DB has full-grid indices, they will be out of bounds
-            max_x = indices_df['grid_x'].max() if 'grid_x' in indices_df.columns else 0
-            max_y = indices_df['grid_y'].max() if 'grid_y' in indices_df.columns else 0
-            
-            if max_x >= grid_w or max_y >= grid_h:
-                logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Indices likely from full HRRR grid. Recalculating for local crop.")
-                recalculate_indices = True
-            else:
-                # Ensure columns map to what the rest of the code expects (x, y)
-                if 'grid_x' in indices_df.columns:
-                    indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
-                station_indices = indices_df.to_dict('records')
-        else:
+        # Check if table exists first
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='station_grid_indices'")
+        if not cursor.fetchone():
+            logger.warning("Table station_grid_indices does not exist. recreating...")
             recalculate_indices = True
+        else:
+            indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
+            print(f"indices_df shape: {indices_df.shape}")
+            
+            if not indices_df.empty:
+                # Check if indices from DB fit in our current grid
+                max_x = indices_df['grid_x'].max() if 'grid_x' in indices_df.columns else 0
+                max_y = indices_df['grid_y'].max() if 'grid_y' in indices_df.columns else 0
+                
+                if max_x >= grid_w or max_y >= grid_h:
+                    logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Recalculating.")
+                    recalculate_indices = True
+                else:
+                    if 'grid_x' in indices_df.columns:
+                        indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
+                    station_indices = indices_df.to_dict('records')
+            else:
+                recalculate_indices = True
 
         # Fallback if empty or out of bounds
         if recalculate_indices:
             logger.info("Calculating station grid indices on the fly...")
             try:
+                # Try to get stations from active observations table first
                 stations_df = pd.read_sql("SELECT DISTINCT station_id, latitude, longitude FROM observations", conn)
+                
+                # If that's empty, try to get from station metadata table if it exists
+                if stations_df.empty:
+                     logger.warning("No stations found in observations table. Checking 'stations' table...")
+                     try:
+                         stations_df = pd.read_sql("SELECT id as station_id, latitude, longitude FROM stations", conn)
+                     except:
+                         pass
+
+                if stations_df.empty:
+                     logger.error("No stations found in database to generate forecasts for!")
+                
                 new_indices = []
-                # Ensure we have valid coordinates
                 valid_stations = stations_df.dropna(subset=['latitude', 'longitude'])
                 
                 for _, row in valid_stations.iterrows():
                     # Find nearest grid point
+                    # Simple distance check
                     dist = (grid_lat_mesh - row['latitude'])**2 + (grid_lon_mesh - row['longitude'])**2
                     y_idx, x_idx = np.unravel_index(np.argmin(dist), dist.shape)
                     
                     new_indices.append({
                         'station_id': row['station_id'],
-                        'x': int(x_idx), # Column
-                        'y': int(y_idx), # Row
+                        'x': int(x_idx), 
+                        'y': int(y_idx),
                         'lat': row['latitude'],
                         'lon': row['longitude']
                     })
+                
                 station_indices = new_indices
                 logger.info(f"Calculated indices for {len(station_indices)} stations.")
+                
+                # Optional: Save back to DB to avoid calc next time
+                # if station_indices:
+                #    save_indices_to_db(station_indices, conn) # Needs implementation
+                
             except Exception as e:
                 logger.error(f"Failed to calculate station indices on the fly: {e}")
                 station_indices = []
@@ -749,6 +775,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     except Exception as e:
         logger.error(f"Failed to load station indices: {e}")
         station_indices = []
+
+    if not station_indices:
+        logger.error("CRITICAL: No station indices available. effectively skipping station forecast generation.")
 
     import pytz
     central = pytz.timezone('US/Central')
@@ -1460,109 +1489,13 @@ def generate_complete_forecast():
     del fig, ax, cs, cax, cbar
     gc.collect()
     
-    logger.info("Exporting peak fire danger as GeoTIFF...")
-    try:
-        geotiff_path = PROJECT_DIR / 'gis/peak_fire_danger.tif'
-        geotiff_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Get data dimensions
-        rows, cols = peak_risk_smooth.shape
-        
-        # Calculate bounds
-        lon_min, lon_max = float(lon.min()), float(lon.max())
-        lat_min, lat_max = float(lat.min()), float(lat.max())
-        
-        # Create source transform in EPSG:4326
-        src_transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
-        src_crs = "EPSG:4326"
-        dst_crs = "EPSG:3857"  # Web Mercator for MapLibre
-        
-        # Bin smoothed values into discrete fire danger categories before export
-        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
-        risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
-        risk_binned = np.clip(risk_binned, 0, 4)
-        risk_binned = np.where(np.isnan(peak_risk_smooth), 255, risk_binned).astype(np.uint8)  # 255 = nodata
-
-        # Flip so row 0 is north (match geospatial convention)
-        data_flipped = np.flipud(risk_binned)
-
-        # Reproject to Web Mercator to align with web maps
-        dst_transform, dst_width, dst_height = calculate_default_transform(
-            src_crs, dst_crs, cols, rows,
-            left=lon_min, bottom=lat_min, right=lon_max, top=lat_max
-        )
-
-        risk_3857 = np.full((dst_height, dst_width), 255, dtype=np.uint8)
-        reproject(
-            source=data_flipped,
-            destination=risk_3857,
-            src_transform=src_transform,
-            src_crs=src_crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest,
-            src_nodata=255,
-            dst_nodata=255
-        )
-        
-        # Create RGBA bands in destination grid
-        rgba_data = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
-        
-        # Define color map matching your visualization
-        # (R, G, B, A) values 0-255
-        color_map = {
-            0: (144, 238, 144, 255),  # Low - light green
-            1: (255, 255, 153, 255),  # Moderate - yellow
-            2: (255, 165, 0, 255),    # Elevated - orange
-            3: (255, 69, 0, 255),     # Critical - red-orange
-            4: (139, 0, 0, 255)       # Extreme - dark red
-        }
-        
-        # Apply colors to each pixel based on fire danger value (leave nodata transparent)
-        for value, (r, g, b, a) in color_map.items():
-            mask = risk_3857 == value
-            rgba_data[0][mask] = r  # Red channel
-            rgba_data[1][mask] = g  # Green channel
-            rgba_data[2][mask] = b  # Blue channel
-            rgba_data[3][mask] = a  # Alpha channel
-        
-        # Write RGBA GeoTIFF using rasterio
-        with rasterio.open(
-            geotiff_path,
-            'w',
-            driver='GTiff',
-            height=dst_height,
-            width=dst_width,
-            count=4,  # 4 bands for RGBA
-            dtype=rasterio.uint8,  # 0-255 color values
-            crs=dst_crs,
-            transform=dst_transform,
-            compress='lzw',
-            tiled=True,
-            photometric='RGB'  # Specify RGB interpretation
-        ) as dst:
-            # Write the RGBA bands
-            dst.write(rgba_data)
-            
-            # Set metadata
-            dst.update_tags(
-                DESCRIPTION='Peak Fire Danger Forecast for Missouri (RGBA)',
-                MODEL_RUN=RUN_DATE.strftime('%Y-%m-%d %HZ'),
-                VALID_TIME=(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d'),
-                COLOR_INTERPRETATION='Red, Green, Blue, Alpha',
-                LEGEND='Low=Light Green, Moderate=Yellow, Elevated=Orange, Critical=Red-Orange, Extreme=Dark Red',
-                SOURCE='HRRR Model + ML Model + RAWS Observations'
-            )
-            
-            # Set color interpretation for each band
-            dst.set_band_description(1, 'Red')
-            dst.set_band_description(2, 'Green')
-            dst.set_band_description(3, 'Blue')
-            dst.set_band_description(4, 'Alpha')
-        
-        logger.info(f"RGBA GeoTIFF saved to {geotiff_path}")
-    except Exception as e:
-        logger.error(f"Failed to export GeoTIFF: {e}")
+    # Export GIS formats (GeoTIFF + GeoJSON polygons + GeoJSON points)
+    logger.info("Exporting peak fire danger in all GIS formats...")
+    gis_files = export_all_gis_formats(
+        peak_risk_smooth, lon, lat,
+        run_date=RUN_DATE,
+        out_dir=PROJECT_DIR / 'gis'
+    )
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     logger.info("Generating minimum fuel moisture map...")
@@ -1636,7 +1569,7 @@ def generate_complete_forecast():
         "< 7%: Extremely dry — potential for extreme fire behavior\n"
         "7–9%: Very dry — critical fire behavior likely\n"
         "9–15%: Dry — elevated fire behavior expected\n"
-               "15–20%: Moderate — some fire activity possible\n"
+        "15–20%: Moderate — some fire activity possible\n"
         "> 20%: Moist — fuels much less receptive to fire\n\n"
         "Areas with snow cover will have substantially higher fuel moisture\n"
         "and greatly reduced ignition potential.\n\n"
@@ -1857,7 +1790,6 @@ def generate_complete_forecast():
 
         except Exception as e:
             logger.error(f"Error generating rainfall map: {e}")
-            
     else:
         logger.info("Skipping rainfall map - no precipitation data available")
 
@@ -1940,7 +1872,6 @@ def generate_complete_forecast():
 
         except Exception as e:
             logger.error(f"Error generating SWE map: {e}")
-            
     else:
         logger.info("Skipping SWE map - no SWE data available")
 
