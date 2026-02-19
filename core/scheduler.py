@@ -7,7 +7,7 @@ from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_sta
 from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
-from api.alerts.activemoalerts import run_active_mo_alerts
+from alerts.activemoalerts import run_active_mo_alerts
 
 logger = logging.getLogger(__name__)
 
