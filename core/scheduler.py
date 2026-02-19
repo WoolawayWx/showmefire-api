@@ -7,6 +7,7 @@ from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_sta
 from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
+from api.alerts.activemoalerts import run_active_mo_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
     
     scheduler.add_job(
         firedetect, 
