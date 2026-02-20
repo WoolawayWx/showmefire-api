@@ -741,9 +741,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 if stations_df.empty:
                      logger.warning("No stations found in observations table. Checking 'stations' table...")
                      try:
-                         stations_df = pd.read_sql("SELECT id as station_id, latitude, longitude FROM stations", conn)
-                     except:
-                         pass
+                         stations_df = pd.read_sql("SELECT id as station_id, lat as latitude, lon as longitude FROM stations", conn)
+                     except Exception as e:
+                         logger.error(f"Failed to query stations table: {e}")
 
                 if stations_df.empty:
                      logger.error("No stations found in database to generate forecasts for!")

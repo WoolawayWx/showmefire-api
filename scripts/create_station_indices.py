@@ -18,6 +18,29 @@ def main():
 	conn = sqlite3.connect(db_path)
 	cursor = conn.cursor()
 
+	# Create stations table if it doesn't exist
+	cursor.execute('''
+		CREATE TABLE IF NOT EXISTS stations (
+			id TEXT PRIMARY KEY,
+			name TEXT,
+			state TEXT,
+			lat REAL,
+			lon REAL
+		)
+	''')
+
+	# Create station_grid_indices table if it doesn't exist
+	cursor.execute('''
+		CREATE TABLE IF NOT EXISTS station_grid_indices (
+			station_id TEXT PRIMARY KEY,
+			x INTEGER,
+			y INTEGER,
+			lat REAL,
+			lon REAL,
+			FOREIGN KEY (station_id) REFERENCES stations (id)
+		)
+	''')
+
 	for stn in obs_data['STATION']:
 		stn_id = stn['STID']
 		lat = float(stn['LATITUDE'])
