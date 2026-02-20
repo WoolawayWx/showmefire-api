@@ -1152,7 +1152,7 @@ def generate_complete_forecast():
     data_crs = ccrs.PlateCarree()
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
     
-    cache_dir = PROJECT_DIR / 'cache' / 'hrrr'
+    cache_dir = Path('/app/cache/hrrr')
     cache_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Cache directory: {cache_dir}")
     
@@ -1473,12 +1473,11 @@ def generate_complete_forecast():
         "Moderate:"
         "  FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
         "Elevated:"
-        "  FM < 9% AND (RH < 35% & Wind ≥ 12 kts)\n"
-        "  OR (RH < 25% & Wind ≥ 5 kts)\n\n"
+        "  FM < 9% WITH (RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)\n"
         "Critical:"
-        "  FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
+        "  FM < 9% WITH (RH < 25% AND Wind >= 15 kts)\n\n"
         "Extreme:"
-        "  FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
+        "  FM < 7% WITH (RH < 20% AND Wind >= 25 kts)\n\n"
         "Data Source: HRRR Model Forecast | ShowMeFire ML Model\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
@@ -1489,7 +1488,6 @@ def generate_complete_forecast():
     del fig, ax, cs, cax, cbar
     gc.collect()
     
-    # Export GIS formats (GeoTIFF + GeoJSON polygons + GeoJSON points)
     logger.info("Exporting peak fire danger in all GIS formats...")
     gis_files = export_all_gis_formats(
         peak_risk_smooth, lon, lat,
@@ -1499,13 +1497,10 @@ def generate_complete_forecast():
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     logger.info("Generating minimum fuel moisture map...")
-    
-    # Create an improved colormap with better contrast in critical ranges
+
     import matplotlib.colors as mcolors
     from matplotlib.colors import LinearSegmentedColormap
 
-    # Define colors at key fuel moisture thresholds with strong visual distinction
-    # Focus on making 7-15% range very clear
     colors_and_positions = [
         (0.0, '#4D0000'),    # 0% - Very Dark Red/Brown
         (0.1, '#8B0000'),    # 3% - Dark Red
@@ -1569,7 +1564,7 @@ def generate_complete_forecast():
         "< 7%: Extremely dry — potential for extreme fire behavior\n"
         "7–9%: Very dry — critical fire behavior likely\n"
         "9–15%: Dry — elevated fire behavior expected\n"
-        "15–20%: Moderate — some fire activity possible\n"
+                      "15–20%: Moderate — some fire activity possible\n"
         "> 20%: Moist — fuels much less receptive to fire\n\n"
         "Areas with snow cover will have substantially higher fuel moisture\n"
         "and greatly reduced ignition potential.\n\n"
@@ -2599,7 +2594,7 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
             features_df = pd.DataFrame({
                 'rh': rh_flat,
                 'temp': temp_f,
-                'temp_c': temp_flat,
+                'temp_c': temp_c,
                 'wind': ws_flat,
                 'solar': 0,
                 'precip': 0,
