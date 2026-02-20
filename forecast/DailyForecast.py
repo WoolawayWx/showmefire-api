@@ -711,16 +711,21 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             print(f"indices_df shape: {indices_df.shape}")
             
             if not indices_df.empty:
-                # Check if indices from DB fit in our current grid
-                max_x = indices_df['grid_x'].max() if 'grid_x' in indices_df.columns else 0
-                max_y = indices_df['grid_y'].max() if 'grid_y' in indices_df.columns else 0
+                # Normalize column names: accept grid_x/grid_y or x/y
+                if 'grid_x' in indices_df.columns:
+                    indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
+                
+                if 'x' in indices_df.columns and 'y' in indices_df.columns:
+                    max_x = int(indices_df['x'].max())
+                    max_y = int(indices_df['y'].max())
+                else:
+                    max_x = 0
+                    max_y = 0
                 
                 if max_x >= grid_w or max_y >= grid_h:
-                    logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Recalculating.")
+                    logger.warning(f"Stored indices (max x={max_x}, y={max_y}) exceed current grid size ({grid_w}x{grid_h}). Recalculating for subset grid.")
                     recalculate_indices = True
                 else:
-                    if 'grid_x' in indices_df.columns:
-                        indices_df = indices_df.rename(columns={'grid_x': 'x', 'grid_y': 'y'})
                     station_indices = indices_df.to_dict('records')
             else:
                 recalculate_indices = True
@@ -772,6 +777,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 station_indices = []
 
         conn.close()
+        logger.info(f"Loaded station indices: {station_indices}")
     except Exception as e:
         logger.error(f"Failed to load station indices: {e}")
         station_indices = []
@@ -779,6 +785,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     if not station_indices:
         logger.error("CRITICAL: No station indices available. effectively skipping station forecast generation.")
 
+    logger.info(f"Loaded station indices: {station_indices}")
     import pytz
     central = pytz.timezone('US/Central')
     if run_date:
@@ -958,6 +965,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         
         if not json_output_data.get('stations'):
             logger.warning(f"Station list is empty. Generating {filename} with no station data.")
+            
 
         try:
              save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1427,7 +1435,7 @@ def generate_complete_forecast():
         points_flat = np.column_stack([lon.ravel(), lat.ravel()])
         mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
         mask = mask_flat.reshape(lon.shape)
-        
+
         peak_risk_smooth = np.where(mask, peak_risk_smooth, np.nan)
         min_fuel_moisture_smooth = np.where(mask, min_fuel_moisture_smooth, np.nan)
         min_rh_smooth = np.where(mask, min_rh_smooth, np.nan)
@@ -1477,7 +1485,7 @@ def generate_complete_forecast():
         "Critical:"
         "  FM < 9% WITH (RH < 25% AND Wind >= 15 kts)\n\n"
         "Extreme:"
-        "  FM < 7% WITH (RH < 20% AND Wind >= 25 kts)\n\n"
+        "  FM < 7% WITH (RH < 20% AND Wind >= 30 kts)\n\n"
         "Data Source: HRRR Model Forecast | ShowMeFire ML Model\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
@@ -1564,7 +1572,7 @@ def generate_complete_forecast():
         "< 7%: Extremely dry — potential for extreme fire behavior\n"
         "7–9%: Very dry — critical fire behavior likely\n"
         "9–15%: Dry — elevated fire behavior expected\n"
-                      "15–20%: Moderate — some fire activity possible\n"
+        "15–20%: Moderate — some fire activity possible\n"
         "> 20%: Moist — fuels much less receptive to fire\n\n"
         "Areas with snow cover will have substantially higher fuel moisture\n"
         "and greatly reduced ignition potential.\n\n"
@@ -1815,7 +1823,7 @@ def generate_complete_forecast():
                 points_flat = np.column_stack([swe_lon.ravel(), swe_lat.ravel()])
                 mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
                 mask = mask_flat.reshape(swe_lon.shape)
-                
+
                 swe_inches = np.where(mask, swe_inches, np.nan)
             
             fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
@@ -2322,6 +2330,8 @@ def generate_complete_forecast():
     
     # Upload to CDN if enabled (default: true if not specified)
     upload_forecast = os.getenv('uploadForecast', 'true').lower() == 'true'
+    # Set the param to false to stop uploading temp.
+    upload_forecast = 'false'
     
     if upload_forecast:
         logger.info("Uploading forecast images to CDN...")
