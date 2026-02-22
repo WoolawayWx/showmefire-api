@@ -6,9 +6,11 @@ import logging
 import pandas as pd
 import json
 from pathlib import Path
+from urllib.parse import urlencode
 # from broadcast import broadcast_update
 
 logger = logging.getLogger(__name__)
+SYNOPTIC_DEBUG = os.getenv("SYNOPTIC_DEBUG", "false").lower() in {"1", "true", "yes", "on"}
 
 station_data = {
     "stations": None,
@@ -20,6 +22,12 @@ load_dotenv()
 SYNOPTIC_API_TOKEN = os.getenv("SYNOPTIC_API_TOKEN")
 
 from core.ignored_stations import get_ignored_stations
+
+
+def _debug(msg: str):
+    """Emit debug logs only when SYNOPTIC_DEBUG is enabled."""
+    if SYNOPTIC_DEBUG:
+        logger.debug(msg)
 
 def flatten_station_data(weather_station, metadata_station):
     """Flatten and deduplicate station data for optimized storage"""
@@ -109,6 +117,7 @@ async def fetch_synoptic_data():
     global station_data
     
     try:
+        _debug("Starting fetch_synoptic_data()")
         weather_url = "https://api.synopticdata.com/v2/stations/latest"
         weather_params = {
             "token": SYNOPTIC_API_TOKEN,
@@ -133,10 +142,18 @@ async def fetch_synoptic_data():
             weather_response = await session.get(weather_url, params=weather_params, timeout=30)
             weather_response.raise_for_status()
             weather_json = await weather_response.json()
+            _debug(
+                f"Weather API OK: status={weather_response.status} "
+                f"stations={len(weather_json.get('STATION') or [])}"
+            )
             
             metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
             metadata_response.raise_for_status()
             metadata_json = await metadata_response.json()
+            _debug(
+                f"Metadata API OK: status={metadata_response.status} "
+                f"stations={len(metadata_json.get('STATION') or [])}"
+            )
         
         metadata_lookup = {}
         if metadata_json.get("STATION"):
@@ -146,16 +163,21 @@ async def fetch_synoptic_data():
                     metadata_lookup[stid] = station
         
         combined_stations = []
+        skipped_ignored = 0
+        skipped_flatten_none = 0
         if weather_json.get("STATION"):
             ignored = get_ignored_stations()
             for station in weather_json["STATION"]:
                 # Skip ignored stations
                 if (station.get("STID") or station.get("ID")) in ignored:
+                    skipped_ignored += 1
                     continue
                 stid = station.get("STID")
                 flattened = flatten_station_data(station, metadata_lookup.get(stid, {}))
                 if flattened is not None:
                     combined_stations.append(flattened)
+                else:
+                    skipped_flatten_none += 1
         
         station_data["stations"] = combined_stations
         station_data["count"] = len(combined_stations)
@@ -163,6 +185,13 @@ async def fetch_synoptic_data():
         station_data["error"] = None
         
         logger.info(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
+        _debug(
+            "fetch_synoptic_data summary: "
+            f"combined={len(combined_stations)} "
+            f"metadata_matched={sum(1 for s in combined_stations if s.get('network'))} "
+            f"skipped_ignored={skipped_ignored} "
+            f"skipped_flatten_none={skipped_flatten_none}"
+        )
         
         # Broadcast update to WebSocket clients
         # await broadcast_update("synoptic", station_data)
@@ -170,6 +199,7 @@ async def fetch_synoptic_data():
     except Exception as e:
         station_data["error"] = str(e)
         logger.error(f"Error fetching station data: {e}")
+        _debug(f"fetch_synoptic_data exception type={type(e).__name__}")
         # await broadcast_update("synoptic", station_data)
 
 def get_station_data():
@@ -184,6 +214,7 @@ async def fetch_raws_stations_multi_state(states=None):
     """
     if states is None:
         states = ["MO", "OK", "AR", "TN", "KY", "IL", "IA", "NE", "KS"]
+    _debug(f"Starting fetch_raws_stations_multi_state() states={states}")
 
     weather_url = "https://api.synopticdata.com/v2/stations/latest"
     weather_params = {
@@ -204,15 +235,26 @@ async def fetch_raws_stations_multi_state(states=None):
         "sensorvars": "1",
         "network": "2"
     }
+    
+    print(f"{weather_url}?{urlencode(weather_params)}")
+    print(f"{metadata_url}?{urlencode(metadata_params)}")
 
     async with aiohttp.ClientSession() as session:
         weather_response = await session.get(weather_url, params=weather_params, timeout=30)
         weather_response.raise_for_status()
         weather_json = await weather_response.json()
+        _debug(
+            f"RAWS weather API OK: status={weather_response.status} "
+            f"stations={len(weather_json.get('STATION') or [])}"
+        )
 
         metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
         metadata_response.raise_for_status()
         metadata_json = await metadata_response.json()
+        _debug(
+            f"RAWS metadata API OK: status={metadata_response.status} "
+            f"stations={len(metadata_json.get('STATION') or [])}"
+        )
 
     metadata_lookup = {}
     if metadata_json.get("STATION"):
@@ -222,6 +264,7 @@ async def fetch_raws_stations_multi_state(states=None):
                 metadata_lookup[stid] = station
 
     raws_stations = []
+    non_raws_seen = 0
     if weather_json.get("STATION"):
         for station in weather_json["STATION"]:
             stid = station.get("STID")
@@ -231,7 +274,14 @@ async def fetch_raws_stations_multi_state(states=None):
                 flattened = flatten_station_data(station, meta)
                 if flattened is not None:
                     raws_stations.append(flattened)
-
+            else:
+                non_raws_seen += 1
+    _debug(
+        "fetch_raws_stations_multi_state summary: "
+        f"raws={len(raws_stations)} "
+        f"non_raws_seen={non_raws_seen} "
+        f"metadata_lookup_size={len(metadata_lookup)}"
+    )
     return raws_stations
 
 
@@ -287,6 +337,7 @@ async def fetch_historical_station_data(states=None, days_back=1, networks=None,
     }
     
     logger.info(f"Fetching data from {start_str} to {end_str} ({len(states)} states, networks: {networks})")
+    print(f"{url}?{urlencode(params)}")
     
     async with aiohttp.ClientSession() as session:
         response = await session.get(url, params=params, timeout=120)

@@ -29,6 +29,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 from shapely.geometry import Polygon, MultiPolygon
 
+from realtime_geotiff import export_continuous_rgba_geotiff
+
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -108,6 +110,21 @@ if points:
         grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
         within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
         grid_values[~within_mask] = np.nan
+
+    geotiff_ok = export_continuous_rgba_geotiff(
+        grid_values=grid_values,
+        lon_mesh=grid_lon_mesh,
+        lat_mesh=grid_lat_mesh,
+        out_path=SCRIPT_DIR.parent / 'gis/realtime/fuel_moisture.tif',
+        cmap_name='RdYlGn',
+        vmin=0,
+        vmax=30,
+        description='Missouri realtime fuel moisture (RGBA)',
+        source='Synoptic RAWS observations + ShowMeFire interpolation',
+        legend='Fuel Moisture (%) mapped with RdYlGn, transparent outside Missouri',
+    )
+    if not geotiff_ok:
+        print("Warning: Failed to export fuel moisture GeoTIFF")
     
     cs = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,

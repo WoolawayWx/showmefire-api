@@ -191,6 +191,28 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dev_projects_sort ON dev_projects(sort_order)')
+
+    # 11. Briefings (singleton config row: id must be 1)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS briefings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            title TEXT,
+            file_path TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            expires_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_briefings_active ON briefings(is_active)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_briefings_expires ON briefings(expires_at)')
+    # Ensure singleton row exists
+    cursor.execute('''
+        INSERT OR IGNORE INTO briefings (id, title, file_path, is_active, expires_at)
+        VALUES (1, NULL, '', 0, NULL)
+    ''')
+    # Cleanup safety in case older schema/data allowed multiple rows
+    cursor.execute('DELETE FROM briefings WHERE id != 1')
     
     conn.commit()
     conn.close()
@@ -506,3 +528,122 @@ def delete_dev_project(project_id: int) -> bool:
         return cursor.rowcount > 0
     finally:
         conn.close()
+
+
+# --- Briefings helpers ---
+
+def list_briefings() -> List[Dict]:
+    """Return all briefings ordered by newest first."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
+        FROM briefings
+        ORDER BY id DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_briefing_config() -> Dict:
+    """Return the singleton briefing configuration row (id=1)."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
+        FROM briefings
+        WHERE id = 1
+    ''')
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def create_briefing(
+    file_path: str,
+    title: Optional[str] = None,
+    is_active: bool = True,
+    expires_at: Optional[str] = None
+) -> Dict:
+    """
+    Create a briefing record.
+    expires_at should be an ISO timestamp string (or None).
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO briefings (id, title, file_path, is_active, expires_at)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                file_path = excluded.file_path,
+                is_active = excluded.is_active,
+                expires_at = excluded.expires_at,
+                updated_at = CURRENT_TIMESTAMP
+        ''', (title, file_path, 1 if is_active else 0, expires_at))
+        conn.commit()
+        cursor.execute('''
+            SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
+            FROM briefings WHERE id = 1
+        ''')
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def update_briefing(
+    briefing_id: int = 1,
+    title: Optional[str] = None,
+    file_path: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    expires_at: Optional[str] = None
+) -> bool:
+    """Update one briefing row. Pass only fields you want to change."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        is_active_db = None if is_active is None else (1 if is_active else 0)
+        cursor.execute('''
+            UPDATE briefings
+            SET title = COALESCE(?, title),
+                file_path = COALESCE(?, file_path),
+                is_active = COALESCE(?, is_active),
+                expires_at = COALESCE(?, expires_at),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (title, file_path, is_active_db, expires_at, 1))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_active_briefings() -> List[Dict]:
+    """
+    Return active briefings where expiration is unset or in the future.
+    Uses UTC CURRENT_TIMESTAMP from SQLite.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
+        FROM briefings
+        WHERE is_active = 1
+          AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+        ORDER BY id DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]

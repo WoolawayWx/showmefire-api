@@ -27,6 +27,8 @@ import time
 import logging
 from logging.handlers import RotatingFileHandler
 
+from realtime_geotiff import export_continuous_rgba_geotiff
+
 def degrees_to_cardinal(degrees):
     if degrees is None:
         return ""
@@ -153,6 +155,21 @@ if points:
         grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
         within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
         grid_values[~within_mask] = np.nan
+
+    geotiff_ok = export_continuous_rgba_geotiff(
+        grid_values=grid_values,
+        lon_mesh=grid_lon_mesh,
+        lat_mesh=grid_lat_mesh,
+        out_path=SCRIPT_DIR.parent / 'gis/realtime/wind_speed.tif',
+        cmap_name='RdYlGn_r',
+        vmin=0,
+        vmax=51,
+        description='Missouri realtime sustained wind speed (RGBA)',
+        source='Synoptic observations + ShowMeFire interpolation',
+        legend='Sustained wind speed (mph) mapped with RdYlGn_r, transparent outside Missouri',
+    )
+    if not geotiff_ok:
+        print("Warning: Failed to export wind speed GeoTIFF")
 
     # Plotting (same as rhmap)
     cs = ax.contourf(

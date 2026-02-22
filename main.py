@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
 from services.synoptic import (
@@ -38,7 +38,9 @@ from core.database import (
     list_dev_projects,
     create_dev_project,
     update_dev_project,
-    delete_dev_project
+    delete_dev_project,
+    get_briefing_config,
+    create_briefing
 )
 import sqlite3
 from core.security import (
@@ -119,6 +121,9 @@ class NoCacheStaticFiles(StaticFiles):
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
 app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
+OPSBRIEF_DIR = Path(__file__).resolve().parent / "files" / "opsbrief"
+OPSBRIEF_DIR.mkdir(parents=True, exist_ok=True)
+OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 
 # Include tile router for GeoTIFF rendering
 app.include_router(tiles.router)
@@ -161,6 +166,13 @@ class DevProjectUpdate(BaseModel):
     timeline: Optional[str] = None
     status: Optional[str] = None
     sort_order: Optional[int] = None
+
+
+class OpsBriefConfigUpdate(BaseModel):
+    title: Optional[str] = None
+    file_path: Optional[str] = None
+    is_active: Optional[bool] = None
+    expires_at: Optional[str] = None
 
 @app.get('/')
 def hello():
@@ -509,6 +521,177 @@ def admin_delete_project(project_id: int, token: str):
     if not delete_dev_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
     return {"success": True, "deleted": project_id}
+
+
+@app.get("/api/admin/opsbrief/files")
+def admin_list_opsbrief_files(token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    files = []
+    for f in sorted(OPSBRIEF_DIR.glob("*")):
+        if f.is_file():
+            stat = f.stat()
+            files.append({
+                "name": f.name,
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            })
+    return {"success": True, "files": files}
+
+
+@app.post("/api/admin/opsbrief/upload")
+async def admin_upload_opsbrief(token: str, upload: UploadFile = File(...)):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    filename = Path(upload.filename or "").name
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    if filename.lower() == OPSBRIEF_FALLBACK_FILE:
+        raise HTTPException(status_code=400, detail=f"{OPSBRIEF_FALLBACK_FILE} is reserved and cannot be overwritten")
+
+    target = OPSBRIEF_DIR / filename
+    content = await upload.read()
+    with open(target, "wb") as f:
+        f.write(content)
+
+    return {"success": True, "filename": filename}
+
+
+@app.delete("/api/admin/opsbrief/files/{filename}")
+def admin_delete_opsbrief_file(filename: str, token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    safe_name = Path(filename).name
+    if safe_name.lower() == OPSBRIEF_FALLBACK_FILE:
+        raise HTTPException(status_code=400, detail=f"{OPSBRIEF_FALLBACK_FILE} cannot be deleted")
+
+    target = OPSBRIEF_DIR / safe_name
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    target.unlink()
+    return {"success": True, "deleted": safe_name}
+
+
+@app.get("/api/admin/opsbrief/config")
+def admin_get_opsbrief_config(token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    config = get_briefing_config()
+    return {"success": True, "config": config}
+
+
+@app.post("/api/admin/opsbrief/config")
+def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, token: str):
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if payload.file_path is not None:
+        safe_name = Path(payload.file_path).name
+        if safe_name:
+            file_path = OPSBRIEF_DIR / safe_name
+            if not file_path.exists():
+                raise HTTPException(status_code=400, detail="Selected file does not exist")
+        else:
+            safe_name = ""
+    else:
+        safe_name = None
+
+    # Upsert singleton config row (always overwrite provided values cleanly)
+    current = get_briefing_config() or {}
+    create_briefing(
+        file_path=(safe_name if safe_name is not None else (current.get("file_path") or "")),
+        title=(payload.title if payload.title is not None else current.get("title")),
+        is_active=(payload.is_active if payload.is_active is not None else bool(current.get("is_active"))),
+        expires_at=payload.expires_at
+    )
+
+    return {"success": True, "config": get_briefing_config()}
+
+
+@app.get("/api/opsbrief")
+def public_opsbrief_info():
+    config = get_briefing_config()
+    if not config:
+        return {"active": False, "url": None}
+
+    is_active = bool(config.get("is_active"))
+    file_name = config.get("file_path") or ""
+    expires_at = config.get("expires_at")
+    if not is_active or not file_name:
+        return {"active": False, "url": None}
+
+    if expires_at:
+        try:
+            expires_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            now_utc = datetime.now(expires_dt.tzinfo) if expires_dt.tzinfo else datetime.utcnow()
+            if expires_dt <= now_utc:
+                return {"active": False, "url": None}
+        except Exception:
+            pass
+
+    file_path = OPSBRIEF_DIR / Path(file_name).name
+    if not file_path.exists():
+        return {"active": False, "url": None}
+
+    return {
+        "active": True,
+        "title": config.get("title"),
+        "url": "/api/opsbrief/view"
+    }
+
+
+@app.get("/api/opsbrief/view")
+def public_opsbrief_view():
+    fallback_file = OPSBRIEF_DIR / OPSBRIEF_FALLBACK_FILE
+
+    def _serve_fallback():
+        if fallback_file.exists():
+            return FileResponse(
+                fallback_file,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'inline; filename="{OPSBRIEF_FALLBACK_FILE}"'}
+            )
+        raise HTTPException(status_code=404, detail="Fallback briefing file not found")
+
+    config = get_briefing_config()
+    if not config or not bool(config.get("is_active")):
+        return _serve_fallback()
+
+    file_name = config.get("file_path") or ""
+    if not file_name:
+        return _serve_fallback()
+
+    expires_at = config.get("expires_at")
+    if expires_at:
+        try:
+            expires_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            now_utc = datetime.now(expires_dt.tzinfo) if expires_dt.tzinfo else datetime.utcnow()
+            if expires_dt <= now_utc:
+                return _serve_fallback()
+        except ValueError:
+            pass
+
+    file_path = OPSBRIEF_DIR / Path(file_name).name
+    if not file_path.exists():
+        return _serve_fallback()
+
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{Path(file_name).name}"'}
+    )
 
 @app.get('/stations/raws')
 def get_raws_stations():

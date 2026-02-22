@@ -26,6 +26,8 @@ import os
 import time
 import logging
 
+from realtime_geotiff import export_discrete_rgba_geotiff
+
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
     lon_max = center_lon + zoom_width / 2
@@ -282,6 +284,26 @@ if rh_points and wind_points and fuel_points:
         grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
         within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
         grid_values[~within_mask] = np.nan
+
+    danger_class_colors = {
+        0: (144, 238, 144, 255),  # Low
+        1: (255, 237, 78, 255),   # Moderate
+        2: (255, 165, 0, 255),    # Elevated
+        3: (255, 0, 0, 255),      # Critical
+        4: (139, 0, 0, 255),      # Extreme
+    }
+    geotiff_ok = export_discrete_rgba_geotiff(
+        grid_values=grid_values,
+        lon_mesh=grid_lon_mesh,
+        lat_mesh=grid_lat_mesh,
+        out_path=SCRIPT_DIR.parent / 'gis/realtime/realtime_fire_danger.tif',
+        class_colors=danger_class_colors,
+        description='Missouri realtime fire danger classes (RGBA)',
+        source='Synoptic observations + ShowMeFire fire danger model',
+        legend='Low=green, Moderate=yellow, Elevated=orange, Critical=red, Extreme=dark red',
+    )
+    if not geotiff_ok:
+        print("Warning: Failed to export realtime fire danger GeoTIFF")
 
     cs = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
