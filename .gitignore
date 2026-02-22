@@ -24,4 +24,3 @@ endofday_sample.json
 public/image-timeline.json
 Dockerfile.dev
 data_archive/*
-files/opsbrief/*.pdf
