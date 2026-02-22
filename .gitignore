@@ -25,3 +25,4 @@ public/image-timeline.json
 Dockerfile.dev
 data_archive/*
 files/opsbrief/*.pdf
+daily_station_summary.json
