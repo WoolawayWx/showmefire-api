@@ -552,10 +552,13 @@ async def admin_upload_opsbrief(token: str, upload: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="filename required")
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    if filename.lower() == OPSBRIEF_FALLBACK_FILE:
-        raise HTTPException(status_code=400, detail=f"{OPSBRIEF_FALLBACK_FILE} is reserved and cannot be overwritten")
-
     target = OPSBRIEF_DIR / filename
+    if filename.lower() == OPSBRIEF_FALLBACK_FILE and target.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{OPSBRIEF_FALLBACK_FILE} already exists and cannot be overwritten"
+        )
+
     content = await upload.read()
     with open(target, "wb") as f:
         f.write(content)
