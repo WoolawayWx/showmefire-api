@@ -7,7 +7,7 @@ from rasterio.features import geometry_mask
 # Danger levels: 0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme
 # 255 = nodata in the GeoTIFF
 DANGER_LABELS = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
-AREA_THRESHOLD = 0.10  # A level must cover ≥10% of the county to count
+AREA_THRESHOLD = 0.20  # A level must cover ≥10% of the county to count
 
 COUNTY_SHAPEFILE = 'maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'
 FIRE_DANGER_TIF  = '/app/gis/peak_fire_danger.tif'

@@ -44,6 +44,11 @@ echo "Running AI Text Generation"
 "$PYTHON" "$PROJECT_DIR/forecast/forecast_ai.py" >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
+echo "Updating Per County Maps"
+
+"$PYTHON" "$PROJECT_DIR/forecast/PerCounty.py" >> "$LOG_FILE" 2>&1
+EXIT_CODE=$?
+
 if [ $EXIT_CODE -eq 0 ]; then
     echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
 else
