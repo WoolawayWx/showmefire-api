@@ -19,4 +19,5 @@ except Exception as e:
 PY
 
 # Exec the main process
+service cron start
 exec "$@"

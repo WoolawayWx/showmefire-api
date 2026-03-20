@@ -3,6 +3,8 @@
 config_local.py
 __pycache__/
 venv/
+.venv
+.venv311
 *.pyc
 .DS_Store
 beta/
@@ -27,3 +29,4 @@ data_archive/*
 files/opsbrief/*.pdf
 daily_station_summary.json
 daily_station_summary.json
+requirements.lock.txt

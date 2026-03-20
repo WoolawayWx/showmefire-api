@@ -200,6 +200,45 @@ def validate_relative_humidity(rh_values, source='HRRR'):
             return np.clip(rh_values, 0, 100)
 
 
+def get_precip_dataarray(dataset):
+    """Return the first matching precipitation DataArray from known variable names."""
+    for var_name in ('tp', 'apcp', 'APCP', 'precipitation'):
+        if var_name in dataset:
+            return var_name, dataset[var_name]
+    return None, None
+
+
+def convert_precip_to_mm(precip_values, units=None, source='HRRR', var_name='precip'):
+    """
+    Normalize precipitation values to millimeters.
+
+    Supported unit families:
+    - mm / kg m-2 / kg m**-2 (already mm-equivalent)
+    - m (meters water equivalent)
+    - in / inch / inches
+    """
+    units_norm = (units or '').strip().lower()
+    compact = units_norm.replace(' ', '').replace('^', '').replace('*', '')
+
+    if not units_norm:
+        logger.warning(f"{source} {var_name}: missing precipitation units; assuming mm")
+        return precip_values
+
+    if any(token in compact for token in ('mm', 'kgm-2', 'kg/m2', 'kgm**-2', 'kgm-2s-1', 'kg/m^2')):
+        return precip_values
+
+    if compact in ('m', 'meter', 'meters', 'metre', 'metres') or units_norm in ('m', 'meter', 'meters', 'metre', 'metres'):
+        logger.info(f"{source} {var_name}: converting precipitation from meters to mm")
+        return precip_values * 1000.0
+
+    if any(token in compact for token in ('inch', 'inches')) or units_norm in ('in', 'inch', 'inches'):
+        logger.info(f"{source} {var_name}: converting precipitation from inches to mm")
+        return precip_values * 25.4
+
+    logger.warning(f"{source} {var_name}: unrecognized precipitation units '{units}'; assuming mm")
+    return precip_values
+
+
 def calculate_fire_danger(fm, rh, wind_kts):
     """
     Fire Danger Criteria based on ShowMeFire.org:
@@ -675,12 +714,16 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     
     # Extract precipitation if available
     has_precip = False
+    precip_var_name = None
+    precip_units = None
     try:
-        if 'apcp' in ds_full or 'APCP' in ds_full or 'tp' in ds_full:
+        precip_var_name, precip_da = get_precip_dataarray(ds_full)
+        if precip_da is not None:
             has_precip = True
-            logger.info("Precipitation data found in HRRR dataset")
-    except:
-        pass
+            precip_units = precip_da.attrs.get('units')
+            logger.info(f"Precipitation data found in RRFS dataset: var={precip_var_name}, units={precip_units}")
+    except Exception as e:
+        logger.warning(f"Unable to inspect precipitation metadata: {e}")
     
     # Prepare base_time for forecast calculations (Model Run Time)
     # If run_date is provided, use it. Otherwise fallback to now (UTC).
@@ -793,14 +836,16 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         precip_mm = np.zeros_like(temp)
         if has_precip:
             try:
-                if 'apcp' in ds_hour:
-                    precip_mm = ds_hour['apcp'].values
-                elif 'APCP' in ds_hour:
-                    precip_mm = ds_hour['APCP'].values
-                elif 'tp' in ds_hour:
-                    precip_mm = ds_hour['tp'].values
-            except:
-                pass
+                if precip_var_name and precip_var_name in ds_hour:
+                    precip_raw = ds_hour[precip_var_name].values
+                    precip_mm = convert_precip_to_mm(
+                        precip_raw,
+                        units=precip_units,
+                        source='RRFS',
+                        var_name=precip_var_name,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to normalize hourly precipitation: {e}")
         
         # ws_ms and ws_kts are provided by validation above
         
@@ -872,7 +917,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_t = float(temp[sy, sx])
                     val_rh = float(rh[sy, sx])
                     val_ws = float(ws_ms[sy, sx])
-                    val_precip = float(precip_mm[sy, sx])
+                    val_precip_mm = float(precip_mm[sy, sx])
+                    val_precip_in = val_precip_mm / 25.4
                     val_fm = float(fm[sy, sx])
                     val_risk = int(risk[sy, sx])
 
@@ -883,7 +929,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         val_t,
                         val_rh,
                         val_ws,
-                        val_precip,
+                        val_precip_mm,
                         val_fm
                     ))
                     
@@ -901,7 +947,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "temp_c": round(val_t, 2),
                         "rh": round(val_rh, 1),
                         "wind_speed_ms": round(val_ws, 2),
-                        "precip_mm": round(val_precip, 2),
+                        "precip_in": round(val_precip_in, 3),
+                        "precip_mm": round(val_precip_mm, 2),
                         "fuel_moisture": round(val_fm, 1),
                         "fire_danger": val_risk
                     })
@@ -1306,23 +1353,15 @@ def generate_complete_forecast():
     # --- Extract and process precipitation data ---
     logger.info("Extracting precipitation data from HRRR...")
     try:
-        # Try common HRRR precipitation variable names
         precip = None
-        if 'tp' in ds_full:
-            precip = ds_full['tp'].values
-            logger.info("Found 'tp' (total precipitation) variable")
-        elif 'apcp' in ds_full:
-            precip = ds_full['apcp'].values
-            logger.info("Found 'apcp' (accumulated precipitation) variable")
-        elif 'APCP' in ds_full:
-            precip = ds_full['APCP'].values
-            logger.info("Found 'APCP' variable")
-        elif 'precipitation' in ds_full:
-            precip = ds_full['precipitation'].values
-            logger.info("Found 'precipitation' variable")
+        precip_units = None
+        precip_var_name, precip_da = get_precip_dataarray(ds_full)
+        if precip_da is not None:
+            precip = precip_da.values
+            precip_units = precip_da.attrs.get('units')
+            logger.info(f"Found '{precip_var_name}' precipitation variable (units={precip_units})")
         else:
             logger.warning(f"No precipitation variable found. Available variables: {list(ds_full.data_vars)}")
-            precip = None
     except Exception as e:
         logger.error(f"Error extracting precipitation: {e}")
         precip = None
@@ -1355,14 +1394,21 @@ def generate_complete_forecast():
         logger.info("Processing precipitation data...")
         # Sum total precipitation across all forecast hours
         if precip.ndim == 3:
-            total_precip = np.sum(precip, axis=0)  # Sum over time dimension
+            total_precip_raw = np.sum(precip, axis=0)  # Sum over time dimension
         else:
-            total_precip = precip
+            total_precip_raw = precip
+
+        total_precip_mm = convert_precip_to_mm(
+            total_precip_raw,
+            units=precip_units,
+            source='RRFS',
+            var_name=precip_var_name or 'precip',
+        )
         
-        # Convert from kg/m² to inches (1 mm = 1 kg/m², 1 inch = 25.4 mm)
-        total_precip_inches = total_precip / 25.4
+        # Convert from mm to inches for map display
+        total_precip_inches = total_precip_mm / 25.4
         
-        print(f"Pre-conversion total_precip (mm): min={np.nanmin(total_precip):.3f}, max={np.nanmax(total_precip):.3f}")
+        print(f"Normalized total_precip_mm: min={np.nanmin(total_precip_mm):.3f}, max={np.nanmax(total_precip_mm):.3f}")
         print(f"Post-conversion total_precip_inches: min={np.nanmin(total_precip_inches):.3f}, max={np.nanmax(total_precip_inches):.3f}")
         # Apply smoothing
         total_precip_smooth = gaussian_filter(total_precip_inches, sigma=0.2)

@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     shared-mime-info \
     sqlite3 \
     curl \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,13 +26,12 @@ RUN python -m venv $VIRTUAL_ENV
 # Updating PATH ensures specific venv binaries are used automatically
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+RUN python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
 # Upgrade pip to avoid the notice in your logs
 RUN pip install --upgrade pip
 
-COPY requirements.txt .
-
-# Install dependencies (now tracking into /app/venv)
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock.txt .
+RUN python -m pip install --no-cache-dir -r requirements.lock.txt
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
 COPY . .
 
@@ -40,6 +40,10 @@ COPY . .
 ENV DATA_DIR=/app/data
 RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
 VOLUME ["/app/data"]
+
+RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
+    && echo "30 14 * * * root /bin/bash /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
+    && chmod 0644 /etc/cron.d/forecasts
 
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -50,3 +54,4 @@ EXPOSE 8000
 
 # Use production-friendly CMD (no --reload)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+

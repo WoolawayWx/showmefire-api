@@ -66,7 +66,7 @@ image_configs = {
     },
     "mo-forecastrainfall": {
         "param": "Total Precipitation (inches)",
-        "instruction": "Read the map and compare to the EXACT measurements on the left legend that is in inches. If it is a white, no rain expected in that area, if it is light blue, some rain, and darker the blue, more rainfall that is possible."
+        "instruction": "Read the map and compare to the EXACT measurements on the left legend in inches. Use the legend numbers exactly as shown: white means little to no rain, light blue means light rainfall, and darker blue means higher rainfall totals."
     },
     "mo-forecastswe": {
         "param": "Snow Water Equivalent (inches)",
