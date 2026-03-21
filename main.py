@@ -870,6 +870,15 @@ async def get_missouri_fires():
         return FileResponse(json_file, media_type='application/json')
     else:
         raise HTTPException(status_code=404, detail="Fire data not yet available")
+    
+@app.get("/fires/satdet")
+async def get_satdet_fires():
+    """Get current Missouri satellite fire detections as GeoJSON"""
+    geojson_file = Path(GIS_DIR) / 'satfiredetection.geojson'
+    if geojson_file.exists():
+        return FileResponse(geojson_file, media_type='application/geo+json')
+    else:
+        raise HTTPException(status_code=404, detail="Fire data not yet available")
 
 @app.get("/api/fires/missouri/geojson")
 async def get_missouri_fires_geojson():
