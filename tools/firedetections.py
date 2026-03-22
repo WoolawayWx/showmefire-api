@@ -24,8 +24,8 @@ GIS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Set up rotating log handler
-LOG_FILE = LOGS_DIR / 'ngfs_advanced_detections.log'
-logger = logging.getLogger('ngfs_advanced_detections')
+LOG_FILE = LOGS_DIR / 'firedetections.log'
+logger = logging.getLogger('firedetections')
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
@@ -377,6 +377,33 @@ def save_detections(data, suffix=''):
         suffix: Optional suffix for filename (e.g., '_missouri')
     """
     output_path = GIS_DIR / f'satfiredetection.geojson'
+
+    # If a fetch returns zero features, preserve the previous feature list so
+    # downstream consumers keep receiving non-empty data for this update.
+    incoming_features = data.get('features', []) if isinstance(data, dict) else []
+    if isinstance(incoming_features, list) and len(incoming_features) == 0 and output_path.exists():
+        try:
+            with open(output_path, 'r') as f:
+                existing_data = json.load(f)
+
+            existing_features = existing_data.get('features', []) if isinstance(existing_data, dict) else []
+            if isinstance(existing_features, list) and existing_features:
+                data = dict(data) if isinstance(data, dict) else {'type': 'FeatureCollection'}
+                data['features'] = existing_features
+
+                metadata = data.get('metadata') if isinstance(data.get('metadata'), dict) else {}
+                metadata['used_previous_features'] = True
+                metadata['previous_feature_count'] = len(existing_features)
+                metadata['fallback_reason'] = 'Fetched dataset contained zero features'
+                data['metadata'] = metadata
+
+                logger.warning(
+                    'Fetched zero features; reusing %s existing features from %s',
+                    len(existing_features),
+                    output_path,
+                )
+        except Exception as e:
+            logger.warning(f"Unable to reuse existing detections from {output_path}: {e}")
     
     try:
         with open(output_path, 'w') as f:
@@ -392,12 +419,26 @@ def save_detections(data, suffix=''):
 
 def main():
     """Main execution function for scheduled runs"""
-    logger.info("Starting FIRMS 24h fire detection fetch")
+    run_started_at = datetime.utcnow()
+    logger.info("Starting FIRMS 24h fire detection fetch at %s", run_started_at.isoformat() + 'Z')
     
     mo_data = fetch_firms_24h_detections()
-    save_detections(mo_data, suffix='_missouri')
+    output_path = save_detections(mo_data, suffix='_missouri')
     
     mo_count = len(mo_data.get('features', []))
+    metadata = mo_data.get('metadata', {}) if isinstance(mo_data, dict) else {}
+    fetched_at = metadata.get('fetched_at', 'unknown')
+
+    run_finished_at = datetime.utcnow()
+    run_duration_sec = (run_finished_at - run_started_at).total_seconds()
+    logger.info(
+        'Run finished at %s | fetched_at=%s | missouri_detections=%s | output=%s | duration_seconds=%.2f',
+        run_finished_at.isoformat() + 'Z',
+        fetched_at,
+        mo_count,
+        output_path or 'save_failed',
+        run_duration_sec,
+    )
     
     print(f"✓ Successfully fetched and saved fire detections")
     print(f"  - Missouri: {mo_count} detections")

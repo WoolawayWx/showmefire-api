@@ -43,7 +43,13 @@ VOLUME ["/app/data"]
 
 RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
     && echo "30 14 * * * root /bin/bash /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
+    && echo "" >> /etc/cron.d/forecasts \
     && chmod 0644 /etc/cron.d/forecasts
+
+RUN echo "TZ=America/Chicago" > /etc/cron.d/validate \
+    && echo "30 22 * * * root /bin/bash /app/scripts/validateForecast.sh >> /app/logs/valForecast.log 2>&1" >> /etc/cron.d/validate \
+    && echo "" >> /etc/cron.d/validate \
+    && chmod 0644 /etc/cron.d/validate
 
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
