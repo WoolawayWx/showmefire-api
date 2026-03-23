@@ -1,15 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Change to the api directory (parent of scripts/)
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Activate the virtual environment
-source venv/bin/activate
-
-# Run the end-of-day data archiving script
-python scripts/endOfDay.py
-
-# Run the end-of-day validation report script
-python forecast/endOfDayReport.py
-
-python scripts/forecast_obs_comparison.py
+# Keep legacy entrypoint behavior but delegate to the canonical wrapper.
+exec "$SCRIPT_DIR/validateForecast.sh" "$@"

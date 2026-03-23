@@ -28,6 +28,60 @@ REPORTS_DIR.mkdir(exist_ok=True)
 PLOTS_DIR = REPORTS_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = REPORTS_DIR / "validation_history.json"
+VERIFICATION_CSV_FILE = REPORTS_DIR / "verification_history.csv"
+
+
+def _to_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def export_verification_history_csv(history):
+    """Generate compatibility CSV from canonical JSON history."""
+    rows = []
+
+    for entry in history:
+        date_value = str(entry.get('date', '')).strip()
+        if not date_value:
+            continue
+
+        # Keep legacy-compatible compact date format in CSV.
+        date_compact = date_value.replace('-', '')
+        metrics = entry.get('metrics', {})
+
+        temp = metrics.get('Temperature (C)', {})
+        rh = metrics.get('Relative Humidity (%)', {})
+        wind = metrics.get('Wind Speed (m/s)', {})
+        fm = metrics.get('Fuel Moisture (%)', {})
+
+        rows.append({
+            'date': date_compact,
+            'generated_at': entry.get('generated_at') or datetime.utcnow().isoformat() + 'Z',
+            'num_forecasts': 1,
+            'num_comparisons': int(entry.get('record_count', 0) or 0),
+            'temp_mae_c': _to_float_or_none(temp.get('mae')),
+            'temp_bias_c': _to_float_or_none(temp.get('bias')),
+            'rh_mae_pct': _to_float_or_none(rh.get('mae')),
+            'rh_bias_pct': _to_float_or_none(rh.get('bias')),
+            'wind_mae_ms': _to_float_or_none(wind.get('mae')),
+            'wind_bias_ms': _to_float_or_none(wind.get('bias')),
+            'fm_mae_pct': _to_float_or_none(fm.get('mae')),
+            'fm_bias_pct': _to_float_or_none(fm.get('bias')),
+            'fm_count': int(fm.get('count', 0) or 0),
+        })
+
+    verification_df = pd.DataFrame(rows)
+    if verification_df.empty:
+        logger.warning("No history rows available to export verification CSV.")
+        return
+
+    verification_df = verification_df.sort_values('date')
+    verification_df.to_csv(VERIFICATION_CSV_FILE, index=False)
+    logger.info(f"Updated verification history CSV: {VERIFICATION_CSV_FILE}")
 
 def load_latest_file(directory: Path, prefix: str):
     """Finds the most recent file in a directory matching a prefix."""
@@ -473,7 +527,7 @@ def main():
     
     if not forecast_data or not raw_data:
         logger.error("Missing data files. Aborting.")
-        return
+        sys.exit(1)
 
     # 2. Determine Time Window
     # Use the forecast run_date to determine the validation window
@@ -498,11 +552,11 @@ def main():
     
     if fc_df.empty:
         logger.warning("Forecast DataFrame is empty (no relevant timestamps).")
-        return
+        sys.exit(1)
         
     if obs_df.empty:
         logger.warning("Observation DataFrame is empty.")
-        return
+        sys.exit(1)
         
     # 4. Merge
     logger.info("Merging forecasts and observations...")
@@ -510,7 +564,7 @@ def main():
     
     if merged.empty:
         logger.warning("No overlapping records found between forecast and observations.")
-        return
+        sys.exit(1)
         
     logger.info(f"Found {len(merged)} overlapping records for validation.")
     
@@ -529,6 +583,7 @@ def main():
     report_date = datetime.now().strftime("%Y-%m-%d")
     report = {
         'date': report_date,
+        'generated_at': datetime.utcnow().isoformat() + 'Z',
         'forecast_source': fc_file.name,
         'observation_source': raw_file.name,
         'metrics': results,
@@ -544,6 +599,7 @@ def main():
     # Update History
     logger.info("Updating validation history...")
     history = update_history(report)
+    export_verification_history_csv(history)
 
     # Console Output
     print("\n" + "="*50)
