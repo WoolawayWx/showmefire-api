@@ -25,8 +25,15 @@ from dotenv import load_dotenv
 import os
 import time
 import logging
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
 from realtime_geotiff import export_discrete_rgba_geotiff
+from station_danger_history import (
+    count_station_fire_danger_categories,
+    append_fire_danger_snapshot,
+    export_fire_danger_daily_csv,
+)
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -176,6 +183,7 @@ port = os.getenv('PORT', '8000')
 # --- Use RAWS endpoint for fuel moisture ---
 response = requests.get(f'http://localhost:{port}/stations/raws')
 raws_stations = response.json()['stations']
+station_danger_summary = count_station_fire_danger_categories(raws_stations)
 
 # Use all stations for RH and wind, but only RAWS for fuel moisture
 response_all = requests.get(f'http://localhost:{port}/stations')
@@ -429,11 +437,35 @@ status['RealtimeFireDanger'] = {
     'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
     'status': 'updated',
     'runtime_sec': round(runtime_sec, 2),
+    'station_fire_danger_counts': station_danger_summary['counts'],
+    'total_mo_stations': station_danger_summary['total_mo_stations'],
+    'classified_mo_stations': station_danger_summary['classified_mo_stations'],
+    'unclassified_mo_stations': station_danger_summary['unclassified_mo_stations'],
     'log': [
         f"Fire Danger Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
-        f"Script runtime: {runtime_sec:.2f} seconds"
+        f"Script runtime: {runtime_sec:.2f} seconds",
+        (
+            "Station fire danger counts: "
+            f"Low={station_danger_summary['counts']['Low']}, "
+            f"Moderate={station_danger_summary['counts']['Moderate']}, "
+            f"High={station_danger_summary['counts']['High']}, "
+            f"Very High={station_danger_summary['counts']['Very High']}, "
+            f"Extreme={station_danger_summary['counts']['Extreme']}"
+        )
     ]
 }
 
 with open(status_file, 'w') as f:
     json.dump(status, f, indent=4)
+
+try:
+    history = append_fire_danger_snapshot(
+        summary=station_danger_summary,
+        run_time_utc=datetime.now(timezone.utc),
+        keep_hours=48,
+    )
+    csv_path = export_fire_danger_daily_csv(history)
+    logger.info(f"Saved fire danger 48h history snapshots: {len(history)}")
+    logger.info(f"Updated daily fire danger CSV: {csv_path}")
+except Exception as e:
+    logger.error(f"Failed to persist fire danger history artifacts: {e}")

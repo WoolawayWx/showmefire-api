@@ -21,6 +21,10 @@ from starlette.responses import Response
 from datetime import datetime, timedelta
 from typing import Optional
 from services.rss import generate_rss_feed
+from maps.station_danger_history import (
+    count_station_fire_danger_categories,
+    get_recent_fire_danger_history,
+)
 from pathlib import Path
 from pytz import timezone
 import pandas as pd
@@ -702,6 +706,67 @@ def get_raws_stations():
     Get all RAWS stations in MO, OK, AR, TN, KY, IL, IA, NE, KS.
     """
     return raws_station_data
+
+
+@app.get('/api/stations/fire-danger-counts')
+def get_station_fire_danger_counts():
+    """Return station danger counts from latest map status, with live fallback."""
+    status_path = Path(__file__).resolve().parent / 'status.json'
+
+    # Preferred source: map update output written every refresh.
+    if status_path.exists():
+        try:
+            with open(status_path, 'r') as f:
+                status_data = json.load(f)
+
+            realtime_fire = status_data.get('RealtimeFireDanger') or {}
+            if realtime_fire.get('station_fire_danger_counts'):
+                return {
+                    'source': 'status_file_realtime',
+                    'last_update': realtime_fire.get('last_update'),
+                    'counts': realtime_fire.get('station_fire_danger_counts'),
+                    'total_mo_stations': realtime_fire.get('total_mo_stations'),
+                    'classified_mo_stations': realtime_fire.get('classified_mo_stations'),
+                    'unclassified_mo_stations': realtime_fire.get('unclassified_mo_stations'),
+                }
+
+            realtime_fm = status_data.get('RealTimeFuelMoisture') or {}
+            if realtime_fm.get('station_fire_danger_counts'):
+                return {
+                    'source': 'status_file_fuelmoisture',
+                    'last_update': realtime_fm.get('last_update'),
+                    'counts': realtime_fm.get('station_fire_danger_counts'),
+                    'total_mo_stations': realtime_fm.get('total_mo_stations'),
+                    'classified_mo_stations': realtime_fm.get('classified_mo_stations'),
+                    'unclassified_mo_stations': realtime_fm.get('unclassified_mo_stations'),
+                }
+        except Exception as e:
+            logger.warning(f"Unable to read station counts from status file: {e}")
+
+    # Fallback source: in-memory RAWS station feed.
+    stations = raws_station_data.get('stations') or []
+    if not stations:
+        raise HTTPException(status_code=404, detail='No station data available')
+
+    summary = count_station_fire_danger_categories(stations)
+    return {
+        'source': 'raws_live',
+        'last_update': raws_station_data.get('last_updated'),
+        **summary,
+    }
+
+
+@app.get('/api/stations/fire-danger-counts/history')
+def get_station_fire_danger_counts_history(last_hours: int = 48):
+    """Return station fire danger count snapshots for the trailing time window."""
+    hours = max(1, min(last_hours, 168))
+    snapshots = get_recent_fire_danger_history(last_hours=hours)
+    return {
+        'source': 'history_file',
+        'last_hours': hours,
+        'snapshot_count': len(snapshots),
+        'snapshots': snapshots,
+    }
 
 @app.get("/api/historical/fetch")
 async def fetch_historical_data(

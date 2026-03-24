@@ -55,11 +55,13 @@ def generate_summary():
         model="gemini-2.5-flash-lite",
         contents=[
             f"You are analyzing Missouri fire weather graphics. The only fire danger levels present on the map are: {levels_str}.",
-            f"Explicitly mention each of these levels and the regions where they appear. Do NOT mention any other danger levels.",
-            "Write a very short summary (1-2 sentences) of the current fire weather conditions for Missouri.",
-            "Describe which geographic regions (e.g., north, south, central, southwest, etc.) are experiencing each present fire danger level, and include any notable weather patterns (such as humidity, fuel moisture, or wind) that are visible in the graphics.",
-            "Do not include advice or recommendations for fire departments.",
-            "Respond with one concise paragraph."
+            f"Explicitly mention each of these levels — {levels_str} — and the regions where they appear. Do NOT mention any other danger levels.",
+            "Write a concise single paragraph summary of current fire weather conditions for Missouri.",
+            "Lead with the highest fire danger level and its region, then describe lower danger levels.",
+            "Only describe factors that directly drive fire danger: relative humidity, wind speed, and fuel moisture. Do not mention temperature, precipitation, rainfall, snowfall, or snow water equivalent under any circumstances.",
+            "Describe geographic regions using directional terms (north, south, central, etc.).",
+            "Do not include advice, recommendations, or outlooks for fire departments or the public.",
+            "Do not use bullet points, headers, or lists. Respond in plain prose only.",
         ] + images
     )
 
