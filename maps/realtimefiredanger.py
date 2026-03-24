@@ -30,7 +30,8 @@ from logging.handlers import RotatingFileHandler
 
 from realtime_geotiff import export_discrete_rgba_geotiff
 from station_danger_history import (
-    count_station_fire_danger_categories,
+    count_station_fire_danger_categories_from_grid,
+    empty_station_fire_danger_summary,
     append_fire_danger_snapshot,
     export_fire_danger_daily_csv,
 )
@@ -183,7 +184,7 @@ port = os.getenv('PORT', '8000')
 # --- Use RAWS endpoint for fuel moisture ---
 response = requests.get(f'http://localhost:{port}/stations/raws')
 raws_stations = response.json()['stations']
-station_danger_summary = count_station_fire_danger_categories(raws_stations)
+station_danger_summary = empty_station_fire_danger_summary(raws_stations)
 
 # Use all stations for RH and wind, but only RAWS for fuel moisture
 response_all = requests.get(f'http://localhost:{port}/stations')
@@ -292,6 +293,14 @@ if rh_points and wind_points and fuel_points:
         grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
         within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
         grid_values[~within_mask] = np.nan
+
+    station_danger_summary = count_station_fire_danger_categories_from_grid(
+        stations=raws_stations,
+        grid_values=grid_values,
+        lon_mesh=grid_lon_mesh,
+        lat_mesh=grid_lat_mesh,
+        state_filter='MO',
+    )
 
     danger_class_colors = {
         0: (144, 238, 144, 255),  # Low
@@ -448,8 +457,8 @@ status['RealtimeFireDanger'] = {
             "Station fire danger counts: "
             f"Low={station_danger_summary['counts']['Low']}, "
             f"Moderate={station_danger_summary['counts']['Moderate']}, "
-            f"High={station_danger_summary['counts']['High']}, "
-            f"Very High={station_danger_summary['counts']['Very High']}, "
+            f"Elevated={station_danger_summary['counts']['Elevated']}, "
+            f"Critical={station_danger_summary['counts']['Critical']}, "
             f"Extreme={station_danger_summary['counts']['Extreme']}"
         )
     ]

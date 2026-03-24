@@ -22,8 +22,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 from services.rss import generate_rss_feed
 from maps.station_danger_history import (
-    count_station_fire_danger_categories,
     get_recent_fire_danger_history,
+    normalize_fire_danger_counts,
 )
 from pathlib import Path
 from pytz import timezone
@@ -710,7 +710,7 @@ def get_raws_stations():
 
 @app.get('/api/stations/fire-danger-counts')
 def get_station_fire_danger_counts():
-    """Return station danger counts from latest map status, with live fallback."""
+    """Return station danger counts from latest realtime artifacts."""
     status_path = Path(__file__).resolve().parent / 'status.json'
 
     # Preferred source: map update output written every refresh.
@@ -743,16 +743,19 @@ def get_station_fire_danger_counts():
         except Exception as e:
             logger.warning(f"Unable to read station counts from status file: {e}")
 
-    # Fallback source: in-memory RAWS station feed.
-    stations = raws_station_data.get('stations') or []
-    if not stations:
-        raise HTTPException(status_code=404, detail='No station data available')
+    # Fallback source: most recent persisted history snapshot.
+    snapshots = get_recent_fire_danger_history(last_hours=168)
+    if not snapshots:
+        raise HTTPException(status_code=503, detail='No realtime fire danger count artifacts available')
 
-    summary = count_station_fire_danger_categories(stations)
+    latest_snapshot = snapshots[-1]
     return {
-        'source': 'raws_live',
-        'last_update': raws_station_data.get('last_updated'),
-        **summary,
+        'source': 'history_snapshot',
+        'last_update': latest_snapshot.get('timestamp_local') or latest_snapshot.get('timestamp_utc'),
+        'counts': normalize_fire_danger_counts(latest_snapshot.get('counts', {})),
+        'total_mo_stations': latest_snapshot.get('total_mo_stations'),
+        'classified_mo_stations': latest_snapshot.get('classified_mo_stations'),
+        'unclassified_mo_stations': latest_snapshot.get('unclassified_mo_stations'),
     }
 
 
