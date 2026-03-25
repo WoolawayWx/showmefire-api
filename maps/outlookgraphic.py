@@ -335,7 +335,7 @@ def render_outlook(fig, ax, data_crs, payload: dict, day: int):
     )
 
 
-def update_status(runtime_sec: float, feature_count: int, day: int, output_file: Path, output_webp: Path):
+def update_status(runtime_sec: float, feature_count: int, day: int, output_file: Path, output_webp: Path | None):
     if STATUS_FILE.exists():
         try:
             with STATUS_FILE.open("r", encoding="utf-8") as f:
@@ -352,7 +352,7 @@ def update_status(runtime_sec: float, feature_count: int, day: int, output_file:
         "feature_count": feature_count,
         "day": day,
         "output": str(output_file),
-        "output_webp": str(output_webp),
+        "output_webp": str(output_webp) if output_webp else None,
     }
 
     with STATUS_FILE.open("w", encoding="utf-8") as f:
@@ -384,14 +384,19 @@ def main():
 
     active_output_file.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(active_output_file, dpi=mapdpi, bbox_inches=None, pad_inches=0)
-    fig.savefig(
-        active_output_webp_file,
-        dpi=mapdpi,
-        bbox_inches=None,
-        pad_inches=0,
-        format="webp",
-        pil_kwargs={"quality": 82},
-    )
+    saved_webp_file: Path | None = None
+    try:
+        fig.savefig(
+            active_output_webp_file,
+            dpi=mapdpi,
+            bbox_inches=None,
+            pad_inches=0,
+            format="webp",
+            pil_kwargs={"quality": 82},
+        )
+        saved_webp_file = active_output_webp_file
+    except Exception as exc:
+        logger.warning("WebP output failed for day %s: %s", day, exc)
     plt.close(fig)
 
     runtime_sec = (datetime.now() - start).total_seconds()
@@ -401,10 +406,16 @@ def main():
     logger.info("Feature count: %s", feature_count)
     logger.info("Script runtime: %.2f seconds", runtime_sec)
     logger.info("Saved PNG: %s", active_output_file)
-    logger.info("Saved WebP: %s", active_output_webp_file)
+    if saved_webp_file:
+        logger.info("Saved WebP: %s", saved_webp_file)
+    else:
+        logger.info("Saved WebP: unavailable (encoder unsupported or save failure)")
 
-    update_status(runtime_sec, feature_count, day, active_output_file, active_output_webp_file)
-    print(f"Outlook day {day} graphic updated: {active_output_file} | {active_output_webp_file}")
+    update_status(runtime_sec, feature_count, day, active_output_file, saved_webp_file)
+    if saved_webp_file:
+        print(f"Outlook day {day} graphic updated: {active_output_file} | {saved_webp_file}")
+    else:
+        print(f"Outlook day {day} graphic updated: {active_output_file} | webp unavailable")
 
 
 if __name__ == "__main__":

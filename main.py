@@ -117,19 +117,25 @@ class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
 
-        is_outlook_image = path.startswith("mo-outlook-day") and (
-            path.endswith(".png") or path.endswith(".webp")
-        )
+        try:
+            is_outlook_image = path.startswith("mo-outlook-day") and (
+                path.endswith(".png") or path.endswith(".webp")
+            )
 
-        if is_outlook_image:
-            response.headers["Cache-Control"] = "public, max-age=900"
-            response.headers.pop("Pragma", None)
-            response.headers.pop("Expires", None)
-            return response
+            # Only apply long-lived headers to successful outlook image responses.
+            if is_outlook_image and response.status_code == 200:
+                response.headers["Cache-Control"] = "public, max-age=900"
+                response.headers["Pragma"] = "public"
+                response.headers["Expires"] = ""
+                return response
 
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        except Exception:
+            # Never fail static file delivery because of cache-header customization.
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+
         return response
 
 # Use this instead of the default StaticFiles
