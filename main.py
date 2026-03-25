@@ -71,7 +71,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles
+from routers import tiles, outlook
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -116,6 +116,17 @@ app = FastAPI(
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
+
+        is_outlook_image = path.startswith("mo-outlook-day") and (
+            path.endswith(".png") or path.endswith(".webp")
+        )
+
+        if is_outlook_image:
+            response.headers["Cache-Control"] = "public, max-age=900"
+            response.headers.pop("Pragma", None)
+            response.headers.pop("Expires", None)
+            return response
+
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
@@ -131,6 +142,7 @@ OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 
 # Include tile router for GeoTIFF rendering
 app.include_router(tiles.router)
+app.include_router(outlook.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

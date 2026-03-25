@@ -51,6 +51,11 @@ RUN echo "TZ=America/Chicago" > /etc/cron.d/validate \
     && echo "" >> /etc/cron.d/validate \
     && chmod 0644 /etc/cron.d/validate
 
+RUN echo "TZ=America/Chicago" > /etc/cron.d/validate \
+    && echo "00 02 * * * root /bin/bash /app/scripts/create_empty_outlook_maps.sh >> /app/logs/reate_empty_outlook_maps.log 2>&1" >> /etc/cron.d/validate \
+    && echo "" >> /etc/cron.d/validate \
+    && chmod 0644 /etc/cron.d/validate
+
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
