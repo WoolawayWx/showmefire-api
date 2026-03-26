@@ -95,3 +95,5 @@ async def generate_outlook_graphic(token: str, day: int = 2, valid_date: Optiona
     except Exception as exc:
         logger.error("Failed to generate outlook graphic: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to generate outlook graphic") from exc
+
+

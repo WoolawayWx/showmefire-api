@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from shapely.geometry import shape, mapping
 from shapely.validation import make_valid
+from services.discord_notifier import notify_outlook_published
 
 from core.config import DATA_DIR, GIS_DIR
 
@@ -342,6 +343,7 @@ def generate_graphic(editor_email: str, day: int, valid_date: Optional[str] = No
         raise HTTPException(status_code=500, detail="Outlook graphic script not found")
 
     command = [sys.executable, str(OUTLOOK_GRAPHIC_SCRIPT), "--day", str(day)]
+    command.extend(["--source", "auto"])
     if normalized_valid_date:
         command.extend(["--valid-date", normalized_valid_date])
     if normalized_issue_time:
@@ -379,6 +381,45 @@ def generate_graphic(editor_email: str, day: int, valid_date: Optional[str] = No
     })
     idx["history"] = idx["history"][-50:]
     _save_index(idx)
+
+    source = _read_json(_published_file(day), fallback=None)
+    if not source:
+        source = _read_json(_draft_file(day), fallback=_empty_feature_collection())
+
+    feature_count = len(source.get("features", [])) if isinstance(source, dict) else 0
+    normalized_outlook_text = _normalize_outlook_text((source or {}).get("outlook_text"))
+
+    effective_issue_time = normalized_issue_time
+    if not effective_issue_time and feature_count > 0:
+        first_props = ((source.get("features") or [{}])[0].get("properties") or {})
+        raw_issue_time = str(first_props.get("issue_time") or "").strip()
+        if raw_issue_time:
+            try:
+                effective_issue_time = datetime.fromisoformat(raw_issue_time.replace("Z", "+00:00")).isoformat()
+            except ValueError:
+                effective_issue_time = None
+
+    effective_valid_date = normalized_valid_date
+    if not effective_valid_date and effective_issue_time:
+        try:
+            effective_valid_date = datetime.fromisoformat(
+                effective_issue_time.replace("Z", "+00:00")
+            ).date().isoformat()
+        except ValueError:
+            effective_valid_date = None
+
+    try:
+        notify_outlook_published(
+            day=day,
+            feature_count=feature_count,
+            published_at=now_iso,
+            issue_time=effective_issue_time,
+            valid_date=effective_valid_date,
+            outlook_text=normalized_outlook_text,
+            image_version=str(int(datetime.now(timezone.utc).timestamp())),
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit Discord outlook graphic event: %s", exc)
 
     return {
         "message": "Outlook graphic generated",

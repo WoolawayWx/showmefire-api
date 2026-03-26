@@ -71,7 +71,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook
+from routers import tiles, outlook, discord_admin
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -149,6 +149,7 @@ OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 # Include tile router for GeoTIFF rendering
 app.include_router(tiles.router)
 app.include_router(outlook.router)
+app.include_router(discord_admin.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

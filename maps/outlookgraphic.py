@@ -21,8 +21,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from core.database import get_latest_forecast
-
 STATUS_FILE = PROJECT_DIR / "status.json"
 
 OUTLOOK_COLOR = "#FFA500"
@@ -100,6 +98,10 @@ def normalize_valid_date(valid_date: str | None) -> str:
 
 def published_outlook_file(day: int) -> Path:
     return PROJECT_DIR / "gis" / f"outlook_day{day}_published.geojson"
+
+
+def draft_outlook_file(day: int) -> Path:
+    return PROJECT_DIR / "gis" / f"outlook_day{day}_draft.geojson"
 
 
 def output_image_file(day: int) -> Path:
@@ -210,12 +212,19 @@ def add_branding(fig, ax, day: int, valid_date: str, updated_time: datetime):
         pass
 
 
-def load_outlook_geojson(day: int) -> dict:
-    published_file = published_outlook_file(day)
-    if not published_file.exists():
+def load_outlook_geojson(day: int, source: str = "published") -> dict:
+    if source == "draft":
+        target_file = draft_outlook_file(day)
+    elif source == "auto":
+        draft_file = draft_outlook_file(day)
+        target_file = draft_file if draft_file.exists() else published_outlook_file(day)
+    else:
+        target_file = published_outlook_file(day)
+
+    if not target_file.exists():
         return {"type": "FeatureCollection", "features": [], "outlook_text": ""}
 
-    with published_file.open("r", encoding="utf-8") as f:
+    with target_file.open("r", encoding="utf-8") as f:
         payload = json.load(f)
 
     if payload.get("type") != "FeatureCollection":
@@ -241,16 +250,6 @@ def wrap_paragraphs(text: str, width: int = 58) -> str:
             )
     return "\n".join(parts)
 
-def get_forecast_discussion_text() -> str:
-    try:
-        latest_forecast = get_latest_forecast()
-        if not latest_forecast:
-            return ""
-        return str(latest_forecast.get("discussion") or "").strip()
-    except Exception:
-        return ""
-
-
 def render_outlook(fig, ax, data_crs, payload: dict, day: int):
     features = payload.get("features", [])
 
@@ -275,7 +274,6 @@ def render_outlook(fig, ax, data_crs, payload: dict, day: int):
                 )
 
     outlook_text = str(payload.get("outlook_text") or "").strip()
-    forecast_discussion = get_forecast_discussion_text()
     feature_count = len(features)
     no_risk = feature_count == 0
 
@@ -298,14 +296,12 @@ def render_outlook(fig, ax, data_crs, payload: dict, day: int):
             },
             color="#434343",
         )
-    elif forecast_discussion:
-        synopsis = forecast_discussion
     elif outlook_text:
         synopsis = outlook_text
     else:
-        synopsis = "15% Risk (Elevated/High Fire Weather Conditions)"
+        synopsis = ""
 
-    if not no_risk:
+    if not no_risk and synopsis:
         wrapped_discussion = wrap_paragraphs(f"Discussion: {synopsis}", width=58)
 
         fig.text(
@@ -364,6 +360,13 @@ def main():
     parser.add_argument("--day", type=int, default=2, help="Outlook day to render (2 or 3)")
     parser.add_argument("--valid-date", type=str, default=None, help="Outlook valid date in YYYY-MM-DD")
     parser.add_argument("--issue-time", type=str, default=None, help="Issue datetime in ISO format")
+    parser.add_argument(
+        "--source",
+        type=str,
+        choices=["published", "draft", "auto"],
+        default="published",
+        help="GeoJSON source to render (published, draft, or auto=draft then published)",
+    )
     args = parser.parse_args()
     day = normalize_day(args.day)
     valid_date = normalize_valid_date(args.valid_date)
@@ -374,7 +377,7 @@ def main():
     start = datetime.now()
     logger = setup_logger(day)
 
-    payload = load_outlook_geojson(day)
+    payload = load_outlook_geojson(day, source=args.source)
     payload_issue_time = extract_payload_issue_time(payload)
     updated_time = cli_issue_time or payload_issue_time or central_now()
 

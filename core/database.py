@@ -10,6 +10,67 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS discord_admin_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            channel_id TEXT DEFAULT '',
+            channel_name TEXT DEFAULT '',
+            forecast_channel_id TEXT DEFAULT '',
+            forecast_channel_name TEXT DEFAULT '',
+            outlook_channel_id TEXT DEFAULT '',
+            outlook_channel_name TEXT DEFAULT '',
+            forecast_role_ids TEXT DEFAULT '',
+            outlook_role_ids TEXT DEFAULT '',
+            event_url_override TEXT DEFAULT '',
+            event_secret_override TEXT DEFAULT '',
+            image_fetch_retries INTEGER DEFAULT 3,
+            image_fetch_timeout_ms INTEGER DEFAULT 5000,
+            dedupe_ttl_ms INTEGER DEFAULT 21600000,
+            updated_by TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO discord_admin_settings (
+            id,
+            channel_id,
+            channel_name,
+            forecast_channel_id,
+            forecast_channel_name,
+            outlook_channel_id,
+            outlook_channel_name,
+            forecast_role_ids,
+            outlook_role_ids,
+            event_url_override,
+            event_secret_override,
+            image_fetch_retries,
+            image_fetch_timeout_ms,
+            dedupe_ttl_ms,
+            updated_by
+        ) VALUES (1, '', '', '', '', '', '', '', '', '', '', 3, 5000, 21600000, NULL)
+    ''')
+
+    cursor.execute("PRAGMA table_info(discord_admin_settings)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "forecast_channel_id" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN forecast_channel_id TEXT DEFAULT ''")
+    if "forecast_channel_name" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN forecast_channel_name TEXT DEFAULT ''")
+    if "outlook_channel_id" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN outlook_channel_id TEXT DEFAULT ''")
+    if "outlook_channel_name" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN outlook_channel_name TEXT DEFAULT ''")
+    if "forecast_role_ids" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN forecast_role_ids TEXT DEFAULT ''")
+    if "outlook_role_ids" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN outlook_role_ids TEXT DEFAULT ''")
+    if "event_url_override" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_url_override TEXT DEFAULT ''")
+    if "event_secret_override" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_secret_override TEXT DEFAULT ''")
+
 def get_db_path():
     # 1. Prioritize the Docker container path if it exists
     if os.path.exists('/app/data/showmefire.db'):
@@ -27,6 +88,12 @@ def init_database():
     try: conn.execute('ALTER TABLE snapshots ADD COLUMN is_processed INTEGER DEFAULT 0')
     except: pass
     try: conn.execute('ALTER TABLE snapshots ADD COLUMN hrrr_filename TEXT')
+    except: pass
+    try: conn.execute("ALTER TABLE forecasts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    except: pass
+    try: conn.execute('ALTER TABLE forecasts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+    except: pass
+    try: conn.execute('ALTER TABLE forecasts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
     except: pass
 
     cursor = conn.cursor()
@@ -173,11 +240,14 @@ def init_database():
     except Exception:
         pass
 
+    # 10. Discord admin settings (singleton config row for website control panel)
+    _ensure_discord_settings_table(cursor)
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_wf_snapshot ON weather_features(snapshot_id)')
 
-    # 10. Development projects (tracks roadmap items for the website)
+    # 11. Development projects (tracks roadmap items for the website)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS dev_projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,7 +262,7 @@ def init_database():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_dev_projects_sort ON dev_projects(sort_order)')
 
-    # 11. Briefings (singleton config row: id must be 1)
+    # 12. Briefings (singleton config row: id must be 1)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS briefings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -321,6 +391,140 @@ def set_website_version(version: str):
     finally:
         conn.close()
 
+
+def get_discord_admin_settings() -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        _ensure_discord_settings_table(cursor)
+        conn.commit()
+        cursor.execute('''
+            SELECT
+                channel_id,
+                channel_name,
+                forecast_channel_id,
+                forecast_channel_name,
+                outlook_channel_id,
+                outlook_channel_name,
+                forecast_role_ids,
+                outlook_role_ids,
+                event_url_override,
+                event_secret_override,
+                image_fetch_retries,
+                image_fetch_timeout_ms,
+                dedupe_ttl_ms,
+                updated_by,
+                updated_at
+            FROM discord_admin_settings
+            WHERE id = 1
+        ''')
+        row = cursor.fetchone()
+        return dict(row) if row else {
+            "channel_id": "",
+            "channel_name": "",
+            "forecast_channel_id": "",
+            "forecast_channel_name": "",
+            "outlook_channel_id": "",
+            "outlook_channel_name": "",
+            "forecast_role_ids": "",
+            "outlook_role_ids": "",
+            "event_url_override": "",
+            "event_secret_override": "",
+            "image_fetch_retries": 3,
+            "image_fetch_timeout_ms": 5000,
+            "dedupe_ttl_ms": 21600000,
+            "updated_by": None,
+            "updated_at": None,
+        }
+    finally:
+        conn.close()
+
+
+def update_discord_admin_settings(
+    *,
+    channel_id: Optional[str] = None,
+    channel_name: Optional[str] = None,
+    forecast_channel_id: Optional[str] = None,
+    forecast_channel_name: Optional[str] = None,
+    outlook_channel_id: Optional[str] = None,
+    outlook_channel_name: Optional[str] = None,
+    forecast_role_ids: Optional[str] = None,
+    outlook_role_ids: Optional[str] = None,
+    event_url_override: Optional[str] = None,
+    event_secret_override: Optional[str] = None,
+    image_fetch_retries: Optional[int] = None,
+    image_fetch_timeout_ms: Optional[int] = None,
+    dedupe_ttl_ms: Optional[int] = None,
+    updated_by: Optional[str] = None,
+) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        _ensure_discord_settings_table(cursor)
+        cursor.execute('''
+            UPDATE discord_admin_settings
+            SET channel_id = COALESCE(?, channel_id),
+                channel_name = COALESCE(?, channel_name),
+                forecast_channel_id = COALESCE(?, forecast_channel_id),
+                forecast_channel_name = COALESCE(?, forecast_channel_name),
+                outlook_channel_id = COALESCE(?, outlook_channel_id),
+                outlook_channel_name = COALESCE(?, outlook_channel_name),
+                forecast_role_ids = COALESCE(?, forecast_role_ids),
+                outlook_role_ids = COALESCE(?, outlook_role_ids),
+                event_url_override = COALESCE(?, event_url_override),
+                event_secret_override = COALESCE(?, event_secret_override),
+                image_fetch_retries = COALESCE(?, image_fetch_retries),
+                image_fetch_timeout_ms = COALESCE(?, image_fetch_timeout_ms),
+                dedupe_ttl_ms = COALESCE(?, dedupe_ttl_ms),
+                updated_by = COALESCE(?, updated_by),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        ''', (
+            channel_id,
+            channel_name,
+            forecast_channel_id,
+            forecast_channel_name,
+            outlook_channel_id,
+            outlook_channel_name,
+            forecast_role_ids,
+            outlook_role_ids,
+            event_url_override,
+            event_secret_override,
+            image_fetch_retries,
+            image_fetch_timeout_ms,
+            dedupe_ttl_ms,
+            updated_by,
+        ))
+        conn.commit()
+        cursor.execute('''
+            SELECT
+                channel_id,
+                channel_name,
+                forecast_channel_id,
+                forecast_channel_name,
+                outlook_channel_id,
+                outlook_channel_name,
+                forecast_role_ids,
+                outlook_role_ids,
+                event_url_override,
+                event_secret_override,
+                image_fetch_retries,
+                image_fetch_timeout_ms,
+                dedupe_ttl_ms,
+                updated_by,
+                updated_at
+            FROM discord_admin_settings
+            WHERE id = 1
+        ''')
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
 # --- NEW HELPERS FOR THE HRRR MINER ---
 
 def get_all_stations():
@@ -396,6 +600,19 @@ def set_hrrr_filename(snapshot_id: int, filename: str):
     conn.commit()
     conn.close()
 
+
+def _ensure_forecasts_schema(cursor: sqlite3.Cursor) -> None:
+    """Ensure legacy databases have the columns required by forecast writes."""
+    cursor.execute("PRAGMA table_info(forecasts)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "title" not in columns:
+        cursor.execute("ALTER TABLE forecasts ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+    if "created_at" not in columns:
+        cursor.execute("ALTER TABLE forecasts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    if "updated_at" not in columns:
+        cursor.execute("ALTER TABLE forecasts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
 def insert_forecast(valid_time, title, discussion):
     """
     Inserts a new forecast into the database.
@@ -413,6 +630,7 @@ def insert_forecast(valid_time, title, discussion):
     cursor = conn.cursor()
     
     try:
+        _ensure_forecasts_schema(cursor)
         cursor.execute('''
             INSERT INTO forecasts (valid_time, title, discussion)
             VALUES (?, ?, ?)

@@ -36,18 +36,45 @@ echo "=== Starting fire danger forecast at $(date) ===" >> "$LOG_FILE" 2>&1
 echo "Running from: $PROJECT_DIR" >> "$LOG_FILE" 2>&1
 echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
 
-"$PYTHON" "$PROJECT_DIR/forecast/DailyForecast.py" >> "$LOG_FILE" 2>&1
+run_step() {
+    local step_name="$1"
+    local script_path="$2"
+
+    echo "=== $step_name ===" >> "$LOG_FILE" 2>&1
+    "$PYTHON" "$script_path" >> "$LOG_FILE" 2>&1
+    local step_exit=$?
+    if [ $step_exit -ne 0 ]; then
+        echo "=== $step_name FAILED with exit code $step_exit at $(date) ===" >> "$LOG_FILE" 2>&1
+        return $step_exit
+    fi
+
+    return 0
+}
+
+run_step "Running Daily Forecast" "$PROJECT_DIR/forecast/DailyForecast.py"
 EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
+    exit $EXIT_CODE
+fi
 
-echo "Running AI Text Generation"
-
-"$PYTHON" "$PROJECT_DIR/forecast/forecast_ai.py" >> "$LOG_FILE" 2>&1
+run_step "Running AI Text Generation" "$PROJECT_DIR/forecast/forecast_ai.py"
 EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
+    exit $EXIT_CODE
+fi
 
-echo "Updating Per County Maps"
-
-"$PYTHON" "$PROJECT_DIR/forecast/PerCounty.py" >> "$LOG_FILE" 2>&1
+run_step "Updating Per County Maps" "$PROJECT_DIR/forecast/PerCounty.py"
 EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
+    exit $EXIT_CODE
+fi
+
+echo "=== Sending forecast maps to Discord ===" >> "$LOG_FILE" 2>&1
+"$PYTHON" "$PROJECT_DIR/scripts/notify_forecast_complete.py" >> "$LOG_FILE" 2>&1 || \
+  echo "WARNING: Forecast Discord completion notification failed at $(date)" >> "$LOG_FILE" 2>&1
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
