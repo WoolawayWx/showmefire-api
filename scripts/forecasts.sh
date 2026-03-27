@@ -82,4 +82,11 @@ else
     echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
 fi
 
+run_step "Running BETA Forecast" "$PROJECT_DIR/forecast/DailyForecast_ModelFD.py"
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
+    exit $EXIT_CODE
+fi
+
 exit $EXIT_CODE
