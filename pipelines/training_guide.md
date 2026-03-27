@@ -273,3 +273,47 @@ api/
     ├── station_preview.png      # Data quality viz
     └── feature_importance.png   # Model insights
 ```
+
+---
+
+## 🧪 Standalone Fire Danger Model (Experimental)
+
+An isolated prototype now exists at `api/fire-danger-model/`.
+
+Important:
+- It is not integrated into the live forecast pipeline.
+- It does not replace `calculate_fire_danger` logic in production.
+- It is intended for model experimentation and verification only.
+
+### Standalone Commands
+
+```bash
+# 1) Prepare standalone train/test sets from final training data
+python3 fire-danger-model/data_prep.py
+
+# 2) Train standalone regression model (mapped to danger categories for scoring)
+python3 fire-danger-model/train.py
+
+# 3) Evaluate with fixed-label Macro F1 (category mapping), confusion matrix, and regression metrics
+python3 fire-danger-model/evaluate.py
+
+# 4) Run local inference on CSV/JSON feature payloads
+python3 fire-danger-model/infer.py --input-file fire-danger-model/data/prepared_test.csv
+```
+
+### Output Locations
+
+- Prepared datasets: `fire-danger-model/data/`
+- Model artifacts: `fire-danger-model/models/`
+- Evaluation reports: `fire-danger-model/reports/`
+
+### Standalone Validation Notes
+
+- The standalone model excludes `target_fm` from features to avoid target leakage.
+- Category mapping uses calibrated score thresholds saved in model metadata.
+- Evaluation includes gate outputs:
+  - High-impact class support gate
+  - Primary Macro F1 gate
+  - Rule-baseline comparison gate
+
+When and if this model is promoted later, integration should be handled in a separate change set.

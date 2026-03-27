@@ -64,6 +64,48 @@ FEATURES = [
     'precip_1h', 'precip_3h', 'precip_6h', 'precip_24h', 'hours_since_rain'
 ]
 
+
+def env_bool(name, default=False):
+    """Parse a boolean environment variable safely."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def env_float(name, default):
+    """Parse a float environment variable safely with fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        warnings.warn(f"Invalid float for {name}={raw!r}; using default {default}")
+        return default
+
+
+# Forecast tuning knobs (override via .env when needed)
+APPLY_HRRR_BIAS_CORRECTION = env_bool('APPLY_HRRR_BIAS_CORRECTION', True)
+TEMP_BIAS_CORRECTION_C = env_float('TEMP_BIAS_CORRECTION_C', 1.2)
+RH_BIAS_CORRECTION_PCT = env_float('RH_BIAS_CORRECTION_PCT', -4.0)
+
+# Keep separate wind treatment for ML input vs fire-behavior thresholds.
+# The ML model feature expects wind_speed_ms; preserve raw 10m m/s for model input.
+# Fire danger thresholds use an adjusted near-surface approximation (default 0.8 factor).
+HRRR_FIRE_WIND_REDUCTION_FACTOR = env_float('HRRR_FIRE_WIND_REDUCTION_FACTOR', 0.8)
+
+# Optional smoothing for hourly categorical risk grids before persistence.
+APPLY_HOURLY_RISK_SMOOTHING = env_bool('APPLY_HOURLY_RISK_SMOOTHING', True)
+HOURLY_RISK_SMOOTHING_SIGMA = env_float('HOURLY_RISK_SMOOTHING_SIGMA', 1.0)
+
+# SNODAS-derived snow threshold in inches of SWE.
+SNOW_THRESHOLD_IN = env_float('SNOW_THRESHOLD_IN', 0.04)
+
+# Optional floor for fuel moisture under snow for visual consistency in FM products.
+# Set to 0 to disable, or e.g. 30 to force minimum 30% where snow exists.
+SNOW_FM_FLOOR_PCT = env_float('SNOW_FM_FLOOR_PCT', 30.0)
+
 # Base features list (for models without precipitation)
 # Use this if you haven't retrained with precipitation yet
 # FEATURES = [
@@ -452,15 +494,15 @@ def estimate_fuel_moisture_with_lag(rh, temp_c, previous_fm, hours_elapsed=1):
     
     Returns: New fuel moisture (%)
     """
-    # Calculate equilibrium moisture content (EMC) based on RH and temperature
-    if rh <= 10:
-        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    # Calculate equilibrium moisture content (EMC) with a monotonic Simard/Nelson-style form.
+    if rh < 10:
+        emc = 0.03229 + 0.281073 * rh - 0.000578 * rh * temp_c
     elif rh <= 50:
-        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+        emc = 2.22749 + 0.160107 * rh - 0.01478 * temp_c
     else:
-        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
-    
-    emc = np.clip(emc, 1, 40)
+        emc = 21.0606 + 0.005565 * rh**2 - 0.00035 * rh * temp_c - 0.483199 * rh
+
+    emc = np.clip(emc, 1, 35)
     
     # Calculate response time (tau) for 10-hour fuels
     # Drying is faster than wetting
@@ -858,13 +900,21 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         temp_raw = ds_hour['t2m'].values
         temp = validate_and_convert_temperature(temp_raw, expected_unit='kelvin', source='HRRR')
 
+        # Optional static HRRR bias correction (calibrated from verification reports).
+        if APPLY_HRRR_BIAS_CORRECTION:
+            temp = temp + TEMP_BIAS_CORRECTION_C
+
         # Wind components and magnitude - validate units and return both m/s and knots
         u = ds_hour['u10'].values
         v = ds_hour['v10'].values
         wind_magnitude = np.sqrt(u**2 + v**2)
-        wind_magnitude = wind_magnitude * 0.8
         ws_ms = wind_magnitude
-        ws_kts = ws_ms * 1.94384
+        ws_fire_ms = ws_ms * HRRR_FIRE_WIND_REDUCTION_FACTOR
+        ws_kts = ws_fire_ms * 1.94384
+
+        # Optional static RH correction after unit normalization.
+        if APPLY_HRRR_BIAS_CORRECTION:
+            rh = np.clip(rh + RH_BIAS_CORRECTION_PCT, 0, 100)
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
         if has_precip:
@@ -880,7 +930,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             except Exception as e:
                 logger.warning(f"Failed to normalize hourly precipitation: {e}")
         
-        # ws_ms and ws_kts are provided by validation above
+        # Keep ML input wind at raw 10m m/s; fire-danger thresholds use ws_kts.
         
         # Get time info
         time_step_value = time_step.values
@@ -925,6 +975,13 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 else:
                     # Normal fire danger calculation
                     risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+
+        if APPLY_HOURLY_RISK_SMOOTHING:
+            smoothed_risk = gaussian_filter(risk.astype(float), sigma=HOURLY_RISK_SMOOTHING_SIGMA)
+            risk = np.clip(np.rint(smoothed_risk), 0, 4).astype(int)
+            # Keep snow cells hard-forced to LOW after smoothing to avoid category bleed.
+            risk[snow_mask] = 0
+
         hourly_risks.append(risk)
 
         # Save verification data
@@ -949,7 +1006,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     # Extract values
                     val_t = float(temp[sy, sx])
                     val_rh = float(rh[sy, sx])
-                    val_ws = float(ws_ms[sy, sx])
+                    val_ws = float(ws_fire_ms[sy, sx])
                     val_precip_mm = float(precip_mm[sy, sx])
                     val_precip_in = val_precip_mm / 25.4
                     val_fm = float(fm[sy, sx])
@@ -1124,10 +1181,8 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
         # Convert SWE from mm to inches (1 mm = 0.03937 inches)
         swe_inches = swe_flat * 0.03937
 
-        # Threshold: treat any measurable SWE > 0.01 inches as snow
-        # (previously 0.04 which ignored light but impactful snow)
-        snow_threshold_in = 0.04
-        has_snow = swe_inches > snow_threshold_in
+        # Threshold: treat measurable SWE above SNOW_THRESHOLD_IN as snow-covered.
+        has_snow = swe_inches > SNOW_THRESHOLD_IN
 
         if np.any(has_snow):
             # 1. Reset hours since rain to 0 where snow is present (continuous moisture source)
@@ -1152,15 +1207,23 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     # 4. Reshape back to the original 2D map
     preds_2d = preds.reshape(shape)
 
+    # Optional map-consistency adjustment: ensure snowy cells are represented as moist fuels.
+    if SNOW_FM_FLOOR_PCT > 0 and swe_grid is not None:
+        try:
+            has_snow_2d = (swe_grid * 0.03937) > SNOW_THRESHOLD_IN
+            preds_2d = np.where(has_snow_2d, np.maximum(preds_2d, SNOW_FM_FLOOR_PCT), preds_2d)
+        except Exception:
+            logger.exception("Failed to apply snow fuel-moisture floor")
+
     # CREATE SNOW MASK (but don't override FM predictions)
     # Snow mask will be used to suppress fire danger, not to change fuel moisture
     snow_mask = np.zeros(shape, dtype=bool)
     try:
         if swe_grid is not None:
             swe_inches_2d = (swe_grid * 0.03937)
-            snow_mask = swe_inches_2d > snow_threshold_in
+            snow_mask = swe_inches_2d > SNOW_THRESHOLD_IN
             if np.any(snow_mask):
-                logger.info(f"  → Created snow mask for {np.count_nonzero(snow_mask)} cells (threshold={snow_threshold_in} in)")
+                logger.info(f"  → Created snow mask for {np.count_nonzero(snow_mask)} cells (threshold={SNOW_THRESHOLD_IN} in)")
                 logger.info(f"  → Snow will suppress fire danger but NOT override fuel moisture predictions")
     except Exception:
         logger.exception("Failed to create snow mask")
@@ -2376,10 +2439,8 @@ def generate_complete_forecast():
     with open(status_file, 'w') as f:
         json.dump(status, f, indent=4)
     
-    # Upload to CDN if enabled (default: true if not specified)
-    upload_forecast = os.getenv('uploadForecast', 'true').lower() == 'true'
-    # Set the param to false to stop uploading temp.
-    upload_forecast = 'false'
+    # Upload to CDN only when uploadForecast is truthy.
+    upload_forecast = env_bool('uploadForecast', True)
     
     if upload_forecast:
         logger.info("Uploading forecast images to CDN...")
@@ -2461,14 +2522,14 @@ def calculate_vpd(temp_c, rh):
 
 def calculate_nelson_emc(rh, temp_c):
     """Calculate equilibrium moisture content using Nelson's equations."""
-    if rh <= 10:
-        emc = 0.03 + 0.2626 * rh - 0.00104 * rh * temp_c
+    if rh < 10:
+        emc = 0.03229 + 0.281073 * rh - 0.000578 * rh * temp_c
     elif rh <= 50:
-        emc = 2.22 - 0.160 * rh + 0.01660 * temp_c
+        emc = 2.22749 + 0.160107 * rh - 0.01478 * temp_c
     else:
-        emc = 21.06 - 0.4944 * rh + 0.005565 * rh**2 - 0.00063 * rh * temp_c
-    
-    return np.clip(emc, 1, 40)
+        emc = 21.0606 + 0.005565 * rh**2 - 0.00035 * rh * temp_c - 0.483199 * rh
+
+    return np.clip(emc, 1, 35)
 
 
 def prepare_ml_features(rh, temp_c, wind_kts, solar, precip, prev_fm, prev_rh, prev_temp,
@@ -2720,6 +2781,10 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
+        if APPLY_HOURLY_RISK_SMOOTHING:
+            smoothed_risk = gaussian_filter(risk.astype(float), sigma=HOURLY_RISK_SMOOTHING_SIGMA)
+            risk = np.clip(np.rint(smoothed_risk), 0, 4).astype(int)
+
         hourly_risks.append(risk)
         
         # Progress summary

@@ -14,3 +14,16 @@ DATA_DIR = Path("data")
 # File Paths
 MISSOURI_FIRES_JSON = DATA_DIR / "missouri_fires_coords.json"
 MISSOURI_FIRES_GEOJSON = DATA_DIR / "missouri_fires.geojson"
+
+
+def _parse_office_codes(raw: str):
+	offices = [code.strip().upper() for code in raw.split(",") if code.strip()]
+	return offices or ["EAX", "SGF", "LSX"]
+
+
+AFD_OFFICES = _parse_office_codes(os.getenv("AFD_OFFICES", "EAX,SGF,LSX"))
+
+try:
+	AFD_POLL_MINUTES = max(1, int(os.getenv("AFD_POLL_MINUTES", "60")))
+except ValueError:
+	AFD_POLL_MINUTES = 60

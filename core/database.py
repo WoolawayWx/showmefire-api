@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +283,33 @@ def init_database():
     ''')
     # Cleanup safety in case older schema/data allowed multiple rows
     cursor.execute('DELETE FROM briefings WHERE id != 1')
+
+    # 13. NWS Area Forecast Discussions (AFDs)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS afds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            office TEXT NOT NULL,
+            product_id TEXT NOT NULL UNIQUE,
+            issued_at TIMESTAMP NOT NULL,
+            raw_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Keep only one row per office (the latest by issued_at, then id).
+    cursor.execute('''
+        DELETE FROM afds
+        WHERE EXISTS (
+            SELECT 1
+            FROM afds newer
+            WHERE newer.office = afds.office
+              AND (
+                  newer.issued_at > afds.issued_at
+                  OR (newer.issued_at = afds.issued_at AND newer.id > afds.id)
+              )
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_afds_office_issued_at ON afds(office, issued_at DESC)')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_afds_unique_office ON afds(office)')
     
     conn.commit()
     conn.close()
@@ -865,3 +892,102 @@ def get_active_briefings() -> List[Dict]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+# --- AFD helpers ---
+
+def get_known_afd_product_ids(office: Optional[str] = None) -> set:
+    """Return known AFD product IDs, optionally filtered by office."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        if office:
+            cursor.execute('SELECT product_id FROM afds WHERE office = ?', (office.upper(),))
+        else:
+            cursor.execute('SELECT product_id FROM afds')
+        rows = cursor.fetchall()
+        return {row[0] for row in rows if row and row[0]}
+    finally:
+        conn.close()
+
+
+def insert_afd_records(records: Iterable[Dict]) -> int:
+    """Insert or update latest AFD per office. Returns changed row count."""
+    payload = []
+    for record in records:
+        office = (record.get('office') or '').upper()
+        product_id = record.get('product_id')
+        if not office or not product_id:
+            continue
+
+        issued_at = record.get('issued_at')
+        if isinstance(issued_at, datetime):
+            issued_at_value = issued_at.isoformat()
+        else:
+            issued_at_value = str(issued_at)
+
+        payload.append((
+            office,
+            product_id,
+            issued_at_value,
+            record.get('raw_text', ''),
+        ))
+
+    if not payload:
+        return 0
+
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        before = conn.total_changes
+        cursor.executemany('''
+            INSERT INTO afds (office, product_id, issued_at, raw_text)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(office) DO UPDATE SET
+                product_id = excluded.product_id,
+                issued_at = excluded.issued_at,
+                raw_text = excluded.raw_text,
+                created_at = CURRENT_TIMESTAMP
+            WHERE excluded.issued_at > afds.issued_at
+               OR (excluded.issued_at = afds.issued_at AND excluded.product_id != afds.product_id)
+        ''', payload)
+        conn.commit()
+        return conn.total_changes - before
+    finally:
+        conn.close()
+
+
+def get_afds_by_office(office: str, limit: int = 10, since: Optional[str] = None) -> List[Dict]:
+    """Return most recent AFDs for an office, newest first."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    office_code = office.upper()
+    safe_limit = max(1, min(limit, 100))
+
+    try:
+        if since:
+            cursor.execute('''
+                SELECT office, product_id, issued_at, raw_text, created_at
+                FROM afds
+                WHERE office = ? AND issued_at >= ?
+                ORDER BY issued_at DESC
+                LIMIT ?
+            ''', (office_code, since, safe_limit))
+        else:
+            cursor.execute('''
+                SELECT office, product_id, issued_at, raw_text, created_at
+                FROM afds
+                WHERE office = ?
+                ORDER BY issued_at DESC
+                LIMIT ?
+            ''', (office_code, safe_limit))
+
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()

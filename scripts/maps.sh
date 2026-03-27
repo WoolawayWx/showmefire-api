@@ -33,8 +33,15 @@ for script in ./maps/*.py; do
     fi
 done
 
-echo "Uploading to CDN..."
-python scripts/upload_cdn.py
+UPLOAD_FORECAST_VALUE="${uploadForecast:-true}"
+UPLOAD_FORECAST_VALUE="$(echo "$UPLOAD_FORECAST_VALUE" | tr '[:upper:]' '[:lower:]')"
+
+if [[ "$UPLOAD_FORECAST_VALUE" == "false" || "$UPLOAD_FORECAST_VALUE" == "0" || "$UPLOAD_FORECAST_VALUE" == "no" || "$UPLOAD_FORECAST_VALUE" == "off" ]]; then
+    echo "CDN upload disabled (uploadForecast=false)"
+else
+    echo "Uploading to CDN..."
+    python scripts/upload_cdn.py
+fi
 
 echo "Generating RSS feed..."
 python -m services.rss --add-summary

@@ -8,6 +8,8 @@ from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
+from services.afds import ingest_latest_afds
+from core.config import AFD_POLL_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,14 @@ async def fetch_and_store_raws_stations():
         raws_station_data["stations"] = []
         raws_station_data["last_updated"] = datetime.now().isoformat()
 
+
+async def fetch_and_store_afds():
+    """Fetch new AFD products and persist them to the database."""
+    try:
+        await ingest_latest_afds()
+    except Exception as e:
+        logger.error("Error fetching/storing AFDs: %s", e, exc_info=True)
+
 def create_scheduler():
     central_tz = timezone('America/Chicago')
     return AsyncIOScheduler(timezone=central_tz)
@@ -38,6 +48,7 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    scheduler.add_job(fetch_and_store_afds, 'interval', minutes=AFD_POLL_MINUTES, id='fetch_afds')
     scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
     
     scheduler.add_job(
@@ -63,3 +74,4 @@ async def run_initial_fetches():
     await fetch_synoptic_data()
     await fetchtimeseriesdata()
     await fetch_and_store_raws_stations()
+    await fetch_and_store_afds()

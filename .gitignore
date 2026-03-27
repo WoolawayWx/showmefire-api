@@ -29,3 +29,6 @@ data_archive/*
 files/opsbrief/*.pdf
 daily_station_summary.json
 daily_station_summary.json
+fire-danger-model/reports
+fire-danger-model/data/
+plots/

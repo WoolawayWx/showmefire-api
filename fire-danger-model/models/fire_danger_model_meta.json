@@ -1,0 +1,129 @@
+{
+  "model_type": "xgboost_regressor",
+  "created_utc": "20260327_174558",
+  "versioned_model_path": "/app/fire-danger-model/models/fire_danger_model_20260327_174558.json",
+  "latest_model_path": "/app/fire-danger-model/models/fire_danger_model.json",
+  "feature_columns": [
+    "temp_c",
+    "rel_humidity",
+    "wind_speed_ms",
+    "hour",
+    "month",
+    "emc_baseline",
+    "temp_mean_3h",
+    "rh_mean_3h",
+    "temp_mean_6h",
+    "rh_mean_6h",
+    "precip_1h",
+    "precip_3h",
+    "precip_6h",
+    "precip_24h",
+    "hours_since_rain"
+  ],
+  "target_score_col": "fire_danger_score",
+  "target_category_col": "fire_danger_category",
+  "category_thresholds": [
+    0.49974793280125596,
+    1.4930043518543243,
+    2.493524730205536,
+    3.5
+  ],
+  "class_distribution": {
+    "train": {
+      "0": 787,
+      "1": 1288,
+      "2": 33,
+      "3": 0,
+      "4": 0
+    },
+    "test": {
+      "0": 153,
+      "1": 375,
+      "2": 0,
+      "3": 0,
+      "4": 0
+    }
+  },
+  "training_metrics": {
+    "train": {
+      "mae": 0.008423423435874653,
+      "rmse": 0.02328436751955367,
+      "r2": 0.9979231953761957,
+      "macro_f1": 0.6,
+      "weighted_f1": 1.0
+    },
+    "test": {
+      "mae": 0.010731625215405736,
+      "rmse": 0.016765089846210127,
+      "r2": 0.9986342949448792,
+      "macro_f1": 0.4,
+      "weighted_f1": 1.0
+    }
+  },
+  "split_metadata": {
+    "source": "/app/data/final_training_data.csv",
+    "split_strategy": "time",
+    "random_state": 42,
+    "train_fraction": 0.8,
+    "n_rows_total": 2636,
+    "n_rows_train": 2108,
+    "n_rows_test": 528,
+    "feature_columns": [
+      "temp_c",
+      "rel_humidity",
+      "wind_speed_ms",
+      "hour",
+      "month",
+      "emc_baseline",
+      "temp_mean_3h",
+      "rh_mean_3h",
+      "temp_mean_6h",
+      "rh_mean_6h",
+      "precip_1h",
+      "precip_3h",
+      "precip_6h",
+      "precip_24h",
+      "hours_since_rain"
+    ],
+    "target_score_col": "fire_danger_score",
+    "target_category_col": "fire_danger_category",
+    "all_category_ids": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "class_distribution": {
+      "full": {
+        "0": 940,
+        "1": 1663,
+        "2": 33,
+        "3": 0,
+        "4": 0
+      },
+      "train": {
+        "0": 787,
+        "1": 1288,
+        "2": 33,
+        "3": 0,
+        "4": 0
+      },
+      "test": {
+        "0": 153,
+        "1": 375,
+        "2": 0,
+        "3": 0,
+        "4": 0
+      }
+    }
+  },
+  "parameters": {
+    "n_estimators": 300,
+    "learning_rate": 0.05,
+    "max_depth": 5,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "objective": "reg:squarederror"
+  }
+}

@@ -1,6 +1,8 @@
 import json
 import os
 import sys
+import argparse
+import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,8 +29,6 @@ REPORTS_DIR = Path(BASE_DIR) / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 PLOTS_DIR = REPORTS_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
-HISTORY_FILE = REPORTS_DIR / "validation_history.json"
-VERIFICATION_CSV_FILE = REPORTS_DIR / "verification_history.csv"
 
 
 def _to_float_or_none(value):
@@ -40,7 +40,7 @@ def _to_float_or_none(value):
         return None
 
 
-def export_verification_history_csv(history):
+def export_verification_history_csv(history, verification_csv_file):
     """Generate compatibility CSV from canonical JSON history."""
     rows = []
 
@@ -80,8 +80,8 @@ def export_verification_history_csv(history):
         return
 
     verification_df = verification_df.sort_values('date')
-    verification_df.to_csv(VERIFICATION_CSV_FILE, index=False)
-    logger.info(f"Updated verification history CSV: {VERIFICATION_CSV_FILE}")
+    verification_df.to_csv(verification_csv_file, index=False)
+    logger.info(f"Updated verification history CSV: {verification_csv_file}")
 
 def load_latest_file(directory: Path, prefix: str):
     """Finds the most recent file in a directory matching a prefix."""
@@ -101,7 +101,13 @@ def load_latest_file(directory: Path, prefix: str):
     with open(latest_file, 'r') as f:
         return json.load(f), latest_file
 
-def find_matching_files(forecast_dir, raw_dir):
+def extract_date_token(filename: str):
+    """Extract YYYYMMDD token from filename if present."""
+    m = re.search(r"(20\d{6})", filename)
+    return m.group(1) if m else None
+
+
+def find_matching_files(forecast_dir, raw_dir, forecast_glob_pattern="station_forecasts_*.json"):
     """
     Attempts to find a forecast file and a raw data file that share the same date.
     Returns (forecast_data, forecast_file, raw_data, raw_file)
@@ -109,7 +115,7 @@ def find_matching_files(forecast_dir, raw_dir):
     if not forecast_dir.exists() or not raw_dir.exists():
         return None, None, None, None
 
-    fc_files = sorted(list(forecast_dir.glob("station_forecasts_*.json")), reverse=True)
+    fc_files = sorted(list(forecast_dir.glob(forecast_glob_pattern)), reverse=True)
     raw_files = sorted(list(raw_dir.glob("raw_data_*.json")), reverse=True)
     
     if not fc_files or not raw_files:
@@ -117,11 +123,9 @@ def find_matching_files(forecast_dir, raw_dir):
 
     # Try to find a match
     for fc_file in fc_files:
-        # Extract date YYYYMMDD from station_forecasts_YYYYMMDD_HH.json
         try:
-            parts = fc_file.name.split('_')
-            if len(parts) >= 3:
-                fc_date_str = parts[2] # 20260122
+            fc_date_str = extract_date_token(fc_file.name)
+            if fc_date_str:
                 
                 # Look for raw file containing this date in its name
                 for raw_file in raw_files:
@@ -348,13 +352,15 @@ def calculate_metrics(merged_df, variable_map):
         print(f"{metric_name}: MAE={round(mae, 4)}, RMSE={round(rmse, 4)}, Bias={round(bias, 4)}, Count={len(valid)}, Correlation={round(corr, 4)}")
     return metrics
 
-def generate_plots(merged_df, variable_map, report_date):
+def generate_plots(merged_df, variable_map, report_date, report_suffix=""):
     """
     Generates scatter plots for Predicted vs Observed values.
     Saves plots to REPORTS_DIR/plots/{date}/
     """
-    # Create daily directory for plots
+    # Create daily directory for plots; suffix gets an isolated subfolder.
     daily_plot_dir = REPORTS_DIR / report_date / "plots"
+    if report_suffix:
+        daily_plot_dir = daily_plot_dir / report_suffix
     daily_plot_dir.mkdir(parents=True, exist_ok=True)
     
     sns.set_theme(style="whitegrid")
@@ -392,14 +398,14 @@ def generate_plots(merged_df, variable_map, report_date):
         saved_plots.append(str(filepath))
     return saved_plots
 
-def update_history(report):
+def update_history(report, history_file):
     """
     Updates the historical validation JSON file.
     """
     history = []
-    if HISTORY_FILE.exists():
+    if history_file.exists():
         try:
-            with open(HISTORY_FILE, 'r') as f:
+            with open(history_file, 'r') as f:
                 history = json.load(f)
         except json.JSONDecodeError:
             logger.warning("Could not read history file. Starting fresh.")
@@ -416,7 +422,7 @@ def update_history(report):
     # Sort by date
     history.sort(key=lambda x: x['date'])
     
-    with open(HISTORY_FILE, 'w') as f:
+    with open(history_file, 'w') as f:
         json.dump(history, f, indent=2, default=str)
         
     return history
@@ -450,14 +456,15 @@ def get_history_df(history):
     df = df.set_index('date').sort_index()
     return df
 
-def generate_history_plots(df, report_date):
+def generate_history_plots(df, report_date, report_suffix=""):
     """
     Generates rolling average plots for 7, 30, and 60 days.
     """
     if df.empty:
         return []
 
-    plot_dir = REPORTS_DIR / report_date / "plots" / "history"
+    history_dir = "history" if not report_suffix else f"history_{report_suffix}"
+    plot_dir = REPORTS_DIR / report_date / "plots" / history_dir
     plot_dir.mkdir(parents=True, exist_ok=True)
     
     sns.set_theme(style="whitegrid")
@@ -519,11 +526,36 @@ def print_rolling_averages(df, window=7):
             print(f"{col:<20} : {latest[col]:.4f}")
         print("="*50 + "\n")
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="End-of-day forecast validation report generator")
+    parser.add_argument(
+        "--forecast-glob",
+        default="station_forecasts_*.json",
+        help="Glob pattern in archive/forecasts used to select forecast JSON files",
+    )
+    parser.add_argument(
+        "--report-suffix",
+        default="",
+        help="Optional suffix for report/history output names (example: beta)",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    suffix = args.report_suffix.strip().lower()
+    suffix_tag = f"_{suffix}" if suffix else ""
+    history_file = REPORTS_DIR / f"validation_history{suffix_tag}.json"
+    verification_csv_file = REPORTS_DIR / f"verification_history{suffix_tag}.csv"
+
     logger.info("Starting End of Day Validation Report...")
     
     # 1. Load Data (Auto-matching dates)
-    forecast_data, fc_file, raw_data, raw_file = find_matching_files(FORECAST_DIR, RAW_DATA_DIR)
+    forecast_data, fc_file, raw_data, raw_file = find_matching_files(
+        FORECAST_DIR,
+        RAW_DATA_DIR,
+        forecast_glob_pattern=args.forecast_glob,
+    )
     
     if not forecast_data or not raw_data:
         logger.error("Missing data files. Aborting.")
@@ -584,6 +616,8 @@ def main():
     report = {
         'date': report_date,
         'generated_at': datetime.utcnow().isoformat() + 'Z',
+        'report_suffix': suffix or 'default',
+        'forecast_glob': args.forecast_glob,
         'forecast_source': fc_file.name,
         'observation_source': raw_file.name,
         'metrics': results,
@@ -593,13 +627,13 @@ def main():
     
     # Generate Plots
     logger.info("Generating plots...")
-    plot_files = generate_plots(merged, variable_map, report_date)
+    plot_files = generate_plots(merged, variable_map, report_date, report_suffix=suffix)
     report['plots'] = plot_files
     
     # Update History
     logger.info("Updating validation history...")
-    history = update_history(report)
-    export_verification_history_csv(history)
+    history = update_history(report, history_file)
+    export_verification_history_csv(history, verification_csv_file)
 
     # Console Output
     print("\n" + "="*50)
@@ -628,7 +662,7 @@ def main():
     # Generate History Plots
     if not history_df.empty:
         logger.info("Generating historical trend plots...")
-        generate_history_plots(history_df, report_date)
+        generate_history_plots(history_df, report_date, report_suffix=suffix)
     
     # Save Daily JSON Report
     # We save this in a date-specific folder alongside plots now, or just the main reports dir?
@@ -636,12 +670,13 @@ def main():
     daily_report_dir = REPORTS_DIR / report_date
     daily_report_dir.mkdir(parents=True, exist_ok=True)
     
-    report_file = daily_report_dir / "validation_summary.json"
+    report_filename = f"validation_summary{suffix_tag}.json"
+    report_file = daily_report_dir / report_filename
     with open(report_file, 'w') as f:
         json.dump(report, f, indent=2, default=str)
         
     # Also save to main dir for compat
-    legacy_report_file = REPORTS_DIR / f"validation_summary_{report_date}.json"
+    legacy_report_file = REPORTS_DIR / f"validation_summary{suffix_tag}_{report_date}.json"
     with open(legacy_report_file, 'w') as f:
         json.dump(report, f, indent=2, default=str)
     

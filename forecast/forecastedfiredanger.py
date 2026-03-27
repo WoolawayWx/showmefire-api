@@ -1089,23 +1089,28 @@ def generate_complete_forecast():
     print(f"Script runtime: {runtime_sec:.2f} seconds")
 
     # ========== UPLOAD FORECAST MAPS TO CDN ==========
+    upload_forecast = os.getenv('uploadForecast', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
     upload_success = False
     upload_to_cdn = None
-    try:
-        # Try absolute import (if run as a module)
-        from cdnupload import upload_to_cdn
-        upload_success = True
-    except ImportError:
+
+    if upload_forecast:
         try:
-            # Try relative import (if run as a script)
-            import sys
-            sys.path.append(str(PROJECT_DIR))
+            # Try absolute import (if run as a module)
             from cdnupload import upload_to_cdn
             upload_success = True
         except ImportError:
-            print("[WARN] cdnupload.py not found or upload_to_cdn not available. Skipping CDN upload.")
+            try:
+                # Try relative import (if run as a script)
+                import sys
+                sys.path.append(str(PROJECT_DIR))
+                from cdnupload import upload_to_cdn
+                upload_success = True
+            except ImportError:
+                print("[WARN] cdnupload.py not found or upload_to_cdn not available. Skipping CDN upload.")
+    else:
+        print("CDN upload disabled (uploadForecast=false in .env)")
 
-    if upload_success and upload_to_cdn:
+    if upload_forecast and upload_success and upload_to_cdn:
         forecast_files = [
             PROJECT_DIR / 'images/mo-forecastfiredanger.png',
             PROJECT_DIR / 'images/mo-forecastfuelmoisture.png',

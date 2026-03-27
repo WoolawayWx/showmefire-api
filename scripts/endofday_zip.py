@@ -151,8 +151,16 @@ def parse_args():
     return p.parse_args()
 
 
+def upload_enabled_from_env(default=True):
+    raw = os.environ.get('uploadForecast')
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
 def main():
     args = parse_args()
+    upload_enabled = upload_enabled_from_env(default=True)
     includes = args.include or DEFAULT_INCLUDES
     includes = [str(x) for x in dict.fromkeys(includes)]
 
@@ -169,6 +177,10 @@ def main():
         collect_items(staging, includes)
         zip_path = make_zip_from_staging(staging, out_zip)
         print(f'Created zip: {zip_path}')
+        if not upload_enabled:
+            print('Uploads disabled (uploadForecast=false). Keeping archive locally and skipping CDN/R2 upload.')
+            return 0
+
         filename = args.object_name or Path(zip_path).name
         date_prefix = time.strftime('%Y%m%d') + '_archive'
         archive_key = f"{date_prefix}/{filename}"

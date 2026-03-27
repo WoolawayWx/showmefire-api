@@ -34,6 +34,7 @@ from goes2go import GOES
 from rio_tiler.io import COGReader
 from rio_tiler.colormap import cmap
 from core.database import (
+    init_database,
     get_latest_forecast,
     get_forecast_by_time,
     get_recent_forecasts,
@@ -71,7 +72,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin
+from routers import tiles, outlook, discord_admin, afds
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -87,6 +88,12 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     run_scheduler = os.getenv("run_sch", "false").lower() == "true"
     scheduler_local = None
+
+    try:
+        init_database()
+    except Exception as exc:
+        logger.error("Database initialization failed: %s", exc, exc_info=True)
+        raise
 
     if run_scheduler:
         logger.info("Starting scheduler...")
@@ -150,6 +157,7 @@ OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 app.include_router(tiles.router)
 app.include_router(outlook.router)
 app.include_router(discord_admin.router)
+app.include_router(afds.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
