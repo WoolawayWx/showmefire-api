@@ -3,12 +3,23 @@ import os
 import uuid
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import request, error
+
+from dotenv import load_dotenv
 
 from core.database import get_discord_admin_settings
 
 logger = logging.getLogger(__name__)
+
+# Ensure direct script/cron executions see the same .env values as app startup.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DOTENV_PATH = _PROJECT_ROOT / ".env"
+if _DOTENV_PATH.exists():
+    load_dotenv(dotenv_path=_DOTENV_PATH)
+else:
+    load_dotenv()
 
 DISCORD_EVENT_URL = os.getenv("DISCORD_EVENT_URL", "").strip()
 DISCORD_EVENT_SECRET = os.getenv("DISCORD_EVENT_SECRET", os.getenv("DISCORD_WEBHOOK_SECRET", "")).strip()
