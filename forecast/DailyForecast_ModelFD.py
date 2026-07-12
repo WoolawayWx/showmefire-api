@@ -44,20 +44,20 @@ import io
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import get_db_path
 from export_fire_danger_gis import export_all_gis_formats
+from models.versioning import load_active_model_path
+from services.spatial_fm import try_predict as try_predict_spatial_fm
 
-# Load the production model once
+# BASE_DIR still needed for the standalone experimental fire-danger model below,
+# which has its own versioning under fire-danger-model/ (see fire-danger-model/config.py)
+# and is intentionally not part of the api/models/versioning.py registry.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_PATH = os.path.join(BASE_DIR, 'models', 'fuel_moisture_model.json')
 FD_MODEL_PATH = os.path.join(BASE_DIR, 'fire-danger-model', 'models', 'fire_danger_model.json')
 FD_MODEL_META_PATH = os.path.join(BASE_DIR, 'fire-danger-model', 'models', 'fire_danger_model_meta.json')
 FD_DEFAULT_CATEGORY_THRESHOLDS = [0.5, 1.5, 2.5, 3.5]
 
+# Load the production (stable) fuel-moisture model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
-try:
-    FM_MODEL.load_model(MODEL_PATH)
-except Exception as e:
-    # Fallback for when running from a different context or if path logic fails
-    FM_MODEL.load_model('models/fuel_moisture_model.json')
+FM_MODEL.load_model(str(load_active_model_path("fuel_moisture")))
 
 # The exact features the model expects
 # Extended features list for models trained with precipitation
@@ -777,6 +777,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     else:
         logger.error("Insufficient RAWS fuel moisture observations (need >=3). Aborting forecast.")
         raise RuntimeError("Insufficient RAWS fuel moisture observations to initialize forecast. Aborting.")
+
+    spatial_prediction = try_predict_spatial_fm(ds_full, fuel_points, run_date)
     
     # --- FETCH SWE DATA ---
     # Define extent same as map generation: (-95.8, -89.1, 35.8, 40.8)
@@ -1025,6 +1027,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
         fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history, swe_grid=swe_grid)
+        if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
+            fm = spatial_prediction["p50"][i]
         
         # Save hourly values
         hourly_rh.append(rh)

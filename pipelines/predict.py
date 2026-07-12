@@ -8,6 +8,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import get_db_path
+from models.versioning import load_active_model_path
 
 def get_danger_info(row):
     fm = row['predicted_fuel_moisture']
@@ -34,14 +35,15 @@ def get_danger_info(row):
         return f"{GREEN}LOW{RESET}"
 
 def run_live_prediction():
-    # 1. Load the trained model
-    model_path = 'models/fuel_moisture_model.json'
-    if not os.path.exists(model_path):
-        print("❌ Model artifact not found. Please run training first.")
+    # 1. Load the trained (stable) model - see models/versioning.py
+    try:
+        model_path = load_active_model_path("fuel_moisture")
+    except FileNotFoundError:
+        print("❌ No stable model registered. Please run training + promote_model.py first.")
         return
-    
+
     model = xgb.XGBRegressor()
-    model.load_model(model_path)
+    model.load_model(str(model_path))
     
     # 2. Get the most recent weather data from the DB
     # We need at least the last 6 hours to calculate the rolling means (lags)

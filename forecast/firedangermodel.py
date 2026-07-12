@@ -17,10 +17,11 @@ import pandas as pd
 import numpy as np
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 from datetime import datetime
 import pickle
-import shutil
 from typing import Dict, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,77 +44,8 @@ from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings('ignore')
 
-def update_model_config(model_type, model_filename, performance_metrics=None):
-    """Update the models/config.json with new model information and maintain history."""
-    config_path = Path('models/config.json')
-    archive_dir = Path('models/archive')
-    archive_dir.mkdir(exist_ok=True)
-    
-    # Load existing config or create default
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-    else:
-        config = {
-            "fuel_moisture": {
-                "active_version": None,
-                "threshold": 0.85,
-                "last_updated": None,
-                "history": []
-            },
-            "fire_danger": {
-                "active_version": None,
-                "history": []
-            }
-        }
-    
-    # Archive the current model if it exists
-    if model_type in config and config[model_type]["active_version"]:
-        current_model = config[model_type]["active_version"]
-        model_path = Path('models') / current_model
-        
-        if model_path.exists():
-            # Create archive filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_filename = f"{Path(current_model).stem}_{timestamp}{Path(current_model).suffix}"
-            archive_path = archive_dir / archive_filename
-            
-            # Move to archive
-            shutil.move(str(model_path), str(archive_path))
-            logger.info(f"Archived previous model: {current_model} → {archive_filename}")
-            
-            # Add to history
-            history_entry = {
-                "version": current_model,
-                "archived_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "archive_path": str(archive_path),
-                "performance": config[model_type].get("performance", {}),
-                "last_updated": config[model_type].get("last_updated")
-            }
-            
-            if "history" not in config[model_type]:
-                config[model_type]["history"] = []
-            config[model_type]["history"].append(history_entry)
-            
-            # Keep only last 10 entries in history
-            if len(config[model_type]["history"]) > 10:
-                config[model_type]["history"] = config[model_type]["history"][-10:]
-    
-    # Update the specific model section with new model
-    if model_type in config:
-        config[model_type]["active_version"] = model_filename
-        config[model_type]["last_updated"] = datetime.now().strftime("%Y-%m-%d")
-        
-        # Add performance metrics if provided
-        if performance_metrics:
-            config[model_type]["performance"] = performance_metrics
-    
-    # Save updated config
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    logger.info(f"Updated {config_path} with new {model_type} model: {model_filename}")
-    logger.info(f"History maintained: {len(config[model_type].get('history', []))} previous versions")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models.versioning import register_trained_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1103,23 +1035,29 @@ def train_and_save_fire_danger_model(archive_dir: str = "archive/raw_data",
     # 4. Save model
     model_path = Path(model_dir) / f"fire_danger_model_{datetime.now().strftime('%Y%m%d')}.pkl"
     save_model(model_dict, model_path)
-    
+
+    # Kept for any ad-hoc scripts still reading the static "latest" filename directly.
     latest_path = Path(model_dir) / "fire_danger_model_latest.pkl"
     save_model(model_dict, latest_path)
-    
-    # 5. Update model configuration
+
+    # 5. Register in the shared version registry (lands as a beta candidate)
+    test_metrics = model_dict.get('test_metrics', {})
     performance_metrics = {
-        "mae": round(model_dict.get('mae', 0), 3),
-        "r2_score": round(model_dict.get('r2', 0), 3),
+        "mae": round(test_metrics.get('mae', 0), 3),
+        "r2_score": round(test_metrics.get('r2', 0), 3),
         "training_samples": len(model_dict.get('y_train', [])),
         "test_samples": len(model_dict.get('y_test', []))
     }
-    
-    update_model_config(
+
+    version = register_trained_model(
         model_type="fire_danger",
-        model_filename=latest_path.name,
-        performance_metrics=performance_metrics
+        source_path=model_path,
+        performance=performance_metrics,
+        bump="patch",
+        channel="beta",
     )
+    logger.info(f"Registered fire_danger model as beta version {version}")
+    logger.info(f"Promote it with: python pipelines/promote_model.py --model fire_danger --version {version}")
     
     # 6. Generate report
     generate_fire_danger_report(model_dict)

@@ -80,6 +80,7 @@ multidict==6.7.0
 netCDF4==1.7.3
 numexpr==2.14.1
 numpy==2.2.6
+onnxruntime==1.23.2
 packaging==25.0
 pandas==2.3.3
 passlib==1.7.4

@@ -26,10 +26,16 @@ import pickle
 import gc
 import psutil
 import xgboost as xgb
+import sys
 
-# Load the production model once
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models.versioning import load_active_model_path
+from services.spatial_fm import try_predict as try_predict_spatial_fm
+
+# Load the production (stable) model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
-FM_MODEL.load_model('models/fuel_moisture_model.json')
+FM_MODEL.load_model(str(load_active_model_path("fuel_moisture")))
 
 # The exact features the model expects
 # Extended features list for models trained with precipitation
@@ -311,6 +317,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         # You could make this more sophisticated by looking at recent RH trends
         initial_fm = np.full_like(grid_lon_mesh, 12.0)
         print("Warning: Using default FM=12% (no RAWS data available)")
+
+    spatial_prediction = try_predict_spatial_fm(ds_full, fuel_points)
     
     # Process each forecast hour
     hourly_fm = []
@@ -373,6 +381,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
         fm = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history)
+        if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
+            fm = spatial_prediction["p50"][i]
         
         # Update buffers for the next hour
         temp_history.append(temp)
