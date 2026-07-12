@@ -11,7 +11,7 @@ from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive
-from services.rtma_capture import fetch_rtma, latest_complete_hour
+from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour
 from core.config import AFD_POLL_MINUTES
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,10 @@ async def capture_latest_rtma():
     """Run Herbie/netCDF work off the API event loop."""
     try:
         await asyncio.to_thread(fetch_rtma, latest_complete_hour())
+        try:
+            await asyncio.to_thread(cleanup_rtma_cache)
+        except Exception as cleanup_error:
+            logger.error("RTMA capture succeeded but retention cleanup failed: %s", cleanup_error, exc_info=True)
     except Exception as e:
         logger.error("RTMA capture failed: %s", e, exc_info=True)
 

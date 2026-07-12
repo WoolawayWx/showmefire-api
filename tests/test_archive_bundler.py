@@ -5,12 +5,26 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services import archive_bundler
-from services.rtma_capture import _sanitize_dataset
+from services.rtma_capture import _sanitize_dataset, cleanup_rtma_cache
+from datetime import datetime, timezone
 import numpy as np
 import xarray as xr
 
 
 class ArchiveMergeTests(unittest.TestCase):
+    def test_rtma_is_not_a_permanent_archive_source(self):
+        self.assertFalse(any(path.name == "rtma" for path in archive_bundler.SOURCE_DIRS))
+
+    def test_rtma_retention_removes_only_expired_analysis_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            old = root / "rtma_20260701_12z.nc"; recent = root / "rtma_20260708_12z.nc"
+            temporary = root / "rtma_20260701_12z.nc.tmp"; manifest = root / "backfill_manifest.json"
+            old.write_bytes(b"old"); recent.write_bytes(b"recent"); temporary.write_bytes(b"temp"); manifest.write_text("{}")
+            result = cleanup_rtma_cache(root, datetime(2026, 7, 12, 12, tzinfo=timezone.utc), retention_days=7)
+            self.assertEqual(result, {"removed_files": 1, "removed_bytes": 3})
+            self.assertFalse(old.exists()); self.assertTrue(recent.exists()); self.assertTrue(temporary.exists()); self.assertTrue(manifest.exists())
+
     def test_rtma_scalar_step_dtype_is_removed_before_serialization(self):
         ds = xr.Dataset({"t2m": (("y", "x"), np.ones((2, 2)))}, coords={"step": np.timedelta64(0, "h")})
         ds["step"].attrs["dtype"] = "timedelta64[ns]"

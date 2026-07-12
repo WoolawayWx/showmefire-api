@@ -14,19 +14,19 @@ the previous complete UTC analysis hour. Historical maintenance commands are
 explicit and resumable:
 
 ```bash
-# Inspect or backfill RTMA. Run the archive bundler afterward to atomically
-# merge new hours into existing daily archives.
-python scripts/backfill_rtma.py --dry-run
-python scripts/backfill_rtma.py
-python -m services.archive_bundler
-
 # Backfill the rolling one-year Synoptic entitlement in UTC daily chunks.
 python scripts/backfill_synoptic.py --dry-run
 python scripts/backfill_synoptic.py
+
+# Bundle HRRR, observations, and forecasts. RTMA is intentionally excluded.
+python -m services.archive_bundler
 ```
 
 Fuel moisture is sourced only from Synoptic station observations. RTMA is
 stored as analyzed meteorological input and is never used as an FM label.
+Hourly live RTMA is retained for seven days by default and is not permanently
+archived. Historical RTMA is fetched in `ShowMeFire-Models` from local HRRR
+initialization timestamps.
 
 Spatial releases contain ONNX, checkpoint, static NetCDF, manifest,
 evaluation, and smoke-test assets. Import verifies the whole contract before

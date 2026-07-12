@@ -38,7 +38,6 @@ def _resolve_root():
 ROOT_DIR = _resolve_root()
 SOURCE_DIRS = [
     ROOT_DIR / "cache" / "hrrr",
-    ROOT_DIR / "cache" / "rtma",
     ROOT_DIR / "archive" / "forecasts",
     ROOT_DIR / "archive" / "raw_data",
 ]

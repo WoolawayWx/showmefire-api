@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from herbie import Herbie
 
 logger = logging.getLogger(__name__)
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
+RTMA_FILE_RE = re.compile(r"^rtma_(\d{8})_(\d{2})z\.nc$")
 
 
 def _root() -> Path:
@@ -119,6 +122,41 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
 def latest_complete_hour(now: datetime | None = None) -> datetime:
     now = now or datetime.now(timezone.utc)
     return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+
+
+def cleanup_rtma_cache(cache_dir: Path | None = None, now: datetime | None = None, retention_days: int | None = None):
+    """Remove expired operational RTMA analyses and nothing else."""
+    cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    if not cache_dir.is_dir():
+        return {"removed_files": 0, "removed_bytes": 0}
+    if retention_days is None:
+        try:
+            retention_days = int(os.getenv("RTMA_RETENTION_DAYS", "7"))
+        except ValueError:
+            logger.warning("Invalid RTMA_RETENTION_DAYS; using 7")
+            retention_days = 7
+    if retention_days < 1:
+        raise ValueError("RTMA_RETENTION_DAYS must be at least 1")
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cutoff = now.astimezone(timezone.utc) - timedelta(days=retention_days)
+    removed_files = removed_bytes = 0
+    for path in cache_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = RTMA_FILE_RE.fullmatch(path.name)
+        if not match:
+            continue
+        analysis_time = datetime.strptime("".join(match.groups()), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        if analysis_time >= cutoff:
+            continue
+        size = path.stat().st_size
+        path.unlink()
+        removed_files += 1
+        removed_bytes += size
+    logger.info("RTMA retention cleanup removed %d file(s), %.1f MB", removed_files, removed_bytes / 1e6)
+    return {"removed_files": removed_files, "removed_bytes": removed_bytes}
 
 
 def main():
