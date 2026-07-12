@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
-from herbie import FastHerbie
+from herbie import Herbie
 
 logger = logging.getLogger(__name__)
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
@@ -22,8 +22,28 @@ def _as_dataset(value):
     if isinstance(value, list):
         if not value:
             raise RuntimeError("Herbie returned no RTMA datasets")
-        return xr.merge(value, compat="override")
-    return value
+        value = xr.merge([_sanitize_dataset(item) for item in value], compat="override")
+    return _sanitize_dataset(value)
+
+
+def _sanitize_dataset(ds: xr.Dataset) -> xr.Dataset:
+    """Remove cfgrib attributes that collide with xarray serialization.
+
+    RTMA analysis has no meaningful forecast lead, so its scalar/length-one
+    ``step`` coordinate is dropped after Herbie opens the GRIB.
+    """
+    ds = ds.copy(deep=False)
+    if "step" in ds.dims and ds.sizes["step"] == 1:
+        ds = ds.isel(step=0, drop=True)
+    elif "step" in ds.coords and "step" not in ds.dims:
+        ds = ds.drop_vars("step")
+    for name in ds.variables:
+        ds[name].attrs.pop("dtype", None)
+        ds[name].attrs.pop("source", None)
+        # A dtype in encoding is valid, but removing it makes merged datasets
+        # deterministic across xarray/cfgrib versions and netCDF engines.
+        ds[name].encoding.pop("dtype", None)
+    return ds
 
 
 def _crop(ds: xr.Dataset) -> xr.Dataset:
@@ -65,16 +85,19 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
             pass
         target.unlink(missing_ok=True)
 
-    fh = FastHerbie(DATES=[run_dt], fxx=[0], model="rtma", product="anl")
+    # A single analysis does not need FastHerbie. FastHerbie always runs
+    # combine_nested(time, step), which triggers an xarray/cfgrib collision
+    # when RTMA's scalar step coordinate carries a GRIB ``dtype`` attribute.
+    h = Herbie(run_dt, fxx=0, model="rtma", product="anl")
     try:
-        therm = _as_dataset(fh.xarray(":(TMP|DPT):2 m above ground:"))
+        therm = _as_dataset(h.xarray(":(?:TMP|DPT):2 m above ground:"))
     except Exception:
-        therm = _as_dataset(fh.xarray(":(TMP|DPT):2 m"))
+        therm = _as_dataset(h.xarray(":(?:TMP|DPT):2 m"))
     try:
-        wind = _as_dataset(fh.xarray(":(UGRD|VGRD):10 m above ground:"))
+        wind = _as_dataset(h.xarray(":(?:UGRD|VGRD):10 m above ground:"))
     except Exception:
-        wind = _as_dataset(fh.xarray(":(UGRD|VGRD):10 m"))
-    ds = xr.merge([therm, wind], compat="override")
+        wind = _as_dataset(h.xarray(":(?:UGRD|VGRD):10 m"))
+    ds = _sanitize_dataset(xr.merge([therm, wind], compat="override"))
     if "r2" not in ds:
         if "t2m" not in ds or "d2m" not in ds:
             raise KeyError(f"RTMA variables cannot derive RH: {list(ds.data_vars)}")
@@ -82,9 +105,7 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
         ds["r2"].attrs.update({"long_name": "relative humidity", "units": "%", "derived_from": "t2m,d2m Magnus formula"})
     ds = _crop(ds).load()
     ds.attrs.update({"requested_analysis_time_utc": run_dt.isoformat() + "Z", "domain_bbox": str(MO_BUFFERED_BBOX)})
-    for var in ds.variables:
-        for attr in ("dtype", "source"):
-            ds[var].attrs.pop(attr, None)
+    ds = _sanitize_dataset(ds)
     temp = target.with_suffix(".nc.tmp")
     ds.to_netcdf(temp, engine="netcdf4")
     with xr.open_dataset(temp) as check:

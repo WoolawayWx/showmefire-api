@@ -5,9 +5,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services import archive_bundler
+from services.rtma_capture import _sanitize_dataset
+import numpy as np
+import xarray as xr
 
 
 class ArchiveMergeTests(unittest.TestCase):
+    def test_rtma_scalar_step_dtype_is_removed_before_serialization(self):
+        ds = xr.Dataset({"t2m": (("y", "x"), np.ones((2, 2)))}, coords={"step": np.timedelta64(0, "h")})
+        ds["step"].attrs["dtype"] = "timedelta64[ns]"
+        sanitized = _sanitize_dataset(ds)
+        self.assertNotIn("step", sanitized.coords)
+        with tempfile.TemporaryDirectory() as root:
+            sanitized.to_netcdf(Path(root) / "rtma.nc")
+
     def test_existing_members_survive_and_partial_hours_merge(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
