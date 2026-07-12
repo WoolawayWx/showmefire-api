@@ -11,6 +11,10 @@ beta/
 images/*
 gis/*
 models/*
+# Registry implementation and migration logic are application source code.
+# Runtime config, trained artifacts, and model versions remain ignored.
+!models/versioning.py
+!models/migrate_config.py
 reports/*
 archive/*
 
