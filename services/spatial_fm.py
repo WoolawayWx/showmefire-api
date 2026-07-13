@@ -75,6 +75,39 @@ def _field(ds, name, x, y, steps, default=0):
     return values.astype("float32")
 
 
+def _normalizer(contract, name):
+    item = contract["normalizers"][name]
+    return (np.asarray(item["mean"], "float32").reshape(1, -1, 1, 1),
+            np.asarray(item["std"], "float32").reshape(1, -1, 1, 1))
+
+
+def _antecedent_rtma(root, init_stamp, lat, lon, allowed_missing=2):
+    """Build 13 causal frames, carrying only earlier analyzed weather forward."""
+    frames, missing, times = [], [], []
+    previous = None
+    for offset in range(-12, 1):
+        stamp = init_stamp + pd.Timedelta(hours=offset); times.append(stamp.isoformat())
+        path = root / "cache" / "rtma" / f"rtma_{stamp:%Y%m%d_%H}z.nc"
+        try:
+            with xr.open_dataset(path) as rtma:
+                temp = _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.t2m.values)
+                temp = np.where(temp > 150, temp - 273.15, temp)
+                rh = _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.r2.values)
+                wind = np.hypot(_map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.u10.values),
+                                _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.v10.values))
+                previous = np.stack((temp, rh, wind)).astype("float32")
+            frame = np.concatenate((previous, np.ones((1, *lat.shape), "float32")))
+        except Exception:
+            missing.append(stamp.isoformat())
+            if previous is None:
+                raise ValueError(f"earliest antecedent RTMA unavailable: {stamp.isoformat()}")
+            frame = np.concatenate((previous, np.zeros((1, *lat.shape), "float32")))
+        frames.append(frame)
+    if len(missing) > allowed_missing:
+        raise ValueError(f"antecedent RTMA missing {len(missing)} hours; maximum is {allowed_missing}")
+    return np.stack(frames), missing, times
+
+
 def try_predict(hrrr: xr.Dataset, fuel_points, run_date=None):
     """Return native-grid quantiles or None; never prevents legacy serving."""
     started = time.perf_counter()
@@ -84,33 +117,33 @@ def try_predict(hrrr: xr.Dataset, fuel_points, run_date=None):
         init_value = run_date if run_date is not None else np.asarray(hrrr.time.values).squeeze()
         init_stamp = pd.Timestamp(init_value)
         init_stamp = init_stamp.tz_localize("UTC") if init_stamp.tzinfo is None else init_stamp.tz_convert("UTC")
-        timestamp = init_stamp.to_pydatetime()
         root = Path("/app") if Path("/app").exists() else Path(__file__).resolve().parent.parent
-        rtma_path = root / "cache" / "rtma" / f"rtma_{timestamp:%Y%m%d_%H}z.nc"
-        if not rtma_path.exists(): raise FileNotFoundError(f"RTMA anchor missing: {rtma_path.name}")
-        steps = hrrr.sizes.get("step", 1)
-        if steps != int(contract["sequence_steps"]): raise ValueError(f"forecast sequence mismatch: {steps}")
+        if contract.get("teacher_exported") is not False: raise ValueError("model contract does not prohibit teacher export")
+        leads = [int(value) for value in contract.get("hrrr_leads", range(4, 16))]
+        if leads != list(range(4, 16)): raise ValueError(f"unsupported HRRR lead contract: {leads}")
+        all_steps = np.asarray(hrrr.step.values).reshape(-1) if "step" in hrrr.coords else np.arange(hrrr.sizes.get("step", 1))
+        all_leads = [int(pd.to_timedelta(value).total_seconds() // 3600) for value in all_steps]
+        if any(lead not in all_leads for lead in leads): raise ValueError("HRRR does not contain exact f04-f15 sequence")
+        indices = [all_leads.index(lead) for lead in leads]; steps = len(leads)
         x, y, lat, lon = static["x"], static["y"], static["lat"], static["lon"]
-        with xr.open_dataset(rtma_path) as rtma:
-            rtma_temp = _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.t2m.values); rtma_temp = np.where(rtma_temp > 150, rtma_temp - 273.15, rtma_temp)
-            rtma_rh = _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.r2.values)
-            rtma_wind = np.hypot(_map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.u10.values), _map(rtma.latitude.values, rtma.longitude.values, lat, lon, rtma.v10.values))
+        antecedent, missing_antecedent, antecedent_times = _antecedent_rtma(
+            root, init_stamp, lat, lon, int(contract.get("allowed_missing_antecedent", 2)))
         initial, distance, effective = _idw(fuel_points, lat, lon); obs_mask = np.zeros_like(initial, "float32")
         station_tree = cKDTree(np.column_stack((lat.ravel(), lon.ravel())))
         for point in fuel_points: obs_mask.ravel()[station_tree.query([point[1], point[0]])[1]] = 1
         age = np.zeros_like(initial, "float32")
-        temp = _field(hrrr, "t2m", x, y, steps); temp = np.where(temp > 150, temp - 273.15, temp); rh = _field(hrrr, "r2", x, y, steps)
-        wind = np.hypot(_field(hrrr, "u10", x, y, steps), _field(hrrr, "v10", x, y, steps)); precip = _field(hrrr, "apcp", x, y, steps)
-        current = [initial, obs_mask, age, distance, effective, rtma_temp, rtma_rh, rtma_wind]; dynamic = []
-        for step in range(steps):
-            valid_stamp = init_stamp + (pd.to_timedelta(hrrr.step.values[step]) if "step" in hrrr.coords else pd.Timedelta(hours=step))
-            hour = valid_stamp.hour * 2 * np.pi / 24
-            dynamic.append(np.stack([temp[step], rh[step], wind[step], precip[step], *current, np.full_like(initial, np.sin(hour)), np.full_like(initial, np.cos(hour))]))
-        dynamic = np.asarray(dynamic, "float32")
-        dynamic_mean = np.asarray(contract["dynamic_mean"], "float32").reshape(1, -1, 1, 1)
-        dynamic_std = np.asarray(contract["dynamic_std"], "float32").reshape(1, -1, 1, 1)
-        feed = {"dynamic_sequence": ((dynamic - dynamic_mean) / dynamic_std)[None], "static_continuous": static["continuous"][None],
-                "static_categorical": static["categorical"][None], "physics_trajectory": _physics(initial, temp, rh)[None]}
+        temp = _field(hrrr, "t2m", x, y, len(all_leads))[indices]; temp = np.where(temp > 150, temp - 273.15, temp)
+        rh = _field(hrrr, "r2", x, y, len(all_leads))[indices]
+        wind = np.hypot(_field(hrrr, "u10", x, y, len(all_leads))[indices], _field(hrrr, "v10", x, y, len(all_leads))[indices])
+        precip = _field(hrrr, "apcp", x, y, len(all_leads))[indices]
+        hrrr_forecast = np.stack((temp, rh, wind, precip), axis=1).astype("float32")
+        current = np.stack((initial, obs_mask, age, distance, effective)).astype("float32")
+        antecedent_mean, antecedent_std = _normalizer(contract, "antecedent")
+        hrrr_mean, hrrr_std = _normalizer(contract, "hrrr")
+        feed = {"antecedent_rtma": ((antecedent - antecedent_mean) / antecedent_std)[None],
+                "hrrr_forecast": ((hrrr_forecast - hrrr_mean) / hrrr_std)[None], "current_fm_state": current[None],
+                "static_continuous": static["continuous"][None], "static_categorical": static["categorical"][None],
+                "physics_trajectory": _physics(initial, temp, rh)[None]}
         output = runtime["session"].run(None, feed)[0][0]
         if not np.isfinite(output).all() or not (np.all(output[:, 0] <= output[:, 1]) and np.all(output[:, 1] <= output[:, 2])): raise ValueError("invalid spatial quantiles")
         native_lat, native_lon = hrrr.latitude.values, np.where(hrrr.longitude.values > 180, hrrr.longitude.values - 360, hrrr.longitude.values)
@@ -122,7 +155,9 @@ def try_predict(hrrr: xr.Dataset, fuel_points, run_date=None):
         result["nearest_station_distance_deg"] = _map(lat, lon, native_lat, native_lon, distance)
         result["effective_station_count"] = _map(lat, lon, native_lat, native_lon, effective)
         _diagnostics.update({"available": True, "fallback": False, "fallback_reason": None, "last_success": datetime.now(timezone.utc).isoformat(),
-                             "inference_ms": round((time.perf_counter() - started) * 1000, 1), "bundle": contract["bundle_file"], "feature_set": contract["feature_set"]})
+                             "inference_ms": round((time.perf_counter() - started) * 1000, 1), "bundle": contract["bundle_file"], "feature_set": contract["feature_set"],
+                             "antecedent_expected": len(antecedent_times), "antecedent_missing": len(missing_antecedent),
+                             "antecedent_missing_times": missing_antecedent, "teacher_exported": False})
         return result
     except Exception as exc:
         logger.warning("Spatial FM unavailable; retaining XGBoost forecast: %s", exc)

@@ -25,7 +25,10 @@ python -m services.archive_bundler
 Fuel moisture is sourced only from Synoptic station observations. RTMA is
 stored as analyzed meteorological input and is never used as an FM label.
 Hourly live RTMA is retained for seven days by default and is not permanently
-archived. Historical RTMA is fetched in `ShowMeFire-Models` from local HRRR
+archived. Spatial inference uses initialization minus 12 hours through
+initialization (13 causal frames). It carries an earlier frame across at most
+two missing hours and falls back to XGBoost when three are missing. The API
+never loads future RTMA. Historical/realized RTMA is fetched in `ShowMeFire-Models` from local HRRR
 initialization timestamps.
 
 Spatial releases contain ONNX, checkpoint, static NetCDF, manifest,
