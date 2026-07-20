@@ -19,13 +19,18 @@ backlog) and as a scheduled job via core/scheduler.py.
 """
 import asyncio
 import logging
+import os
 import re
 import shutil
 import sys
 import zipfile
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 
 def _resolve_root():
@@ -42,6 +47,15 @@ SOURCE_DIRS = [
     ROOT_DIR / "archive" / "raw_data",
 ]
 OUTPUT_DIR = ROOT_DIR / "data_archive_day"
+
+# Finished daily zips are pushed here and removed from local disk immediately
+# after a verified upload - the server is meant to hold at most one day's
+# in-progress zip at a time, not an ever-growing archive.
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_BUCKET = os.getenv("R2_BUCKET", "cdn-showmefire")
+R2_ARCHIVE_PREFIX = "data-archive"
 
 DATE_RE = re.compile(r"(20\d{6})")
 
@@ -152,22 +166,89 @@ def add_files_to_existing_zip(date, paths):
     return final_path
 
 
+def _r2_credentials_present():
+    return all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID])
+
+
+def _r2_client():
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        service_name="s3",
+        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+
+
+def _r2_key_for_date(date):
+    return f"{R2_ARCHIVE_PREFIX}/{date}.zip"
+
+
+def restore_from_r2_if_needed(date, final_path):
+    """Pull a previously-uploaded zip back down so a later run for the same
+    date (e.g. backlog reprocessing) can still merge into it instead of
+    silently starting over and clobbering the R2 object with a partial zip.
+    """
+    if final_path.exists() or not _r2_credentials_present():
+        return
+    key = _r2_key_for_date(date)
+    try:
+        s3 = _r2_client()
+        s3.head_object(Bucket=R2_BUCKET, Key=key)
+    except Exception:
+        return
+    try:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        s3.download_file(R2_BUCKET, key, str(final_path))
+        logger.info(f"{date}: restored existing archive from R2 ({R2_BUCKET}/{key}) for merge")
+    except Exception as e:
+        logger.warning(f"{date}: failed to restore existing archive from R2 ({R2_BUCKET}/{key}): {e}")
+
+
+def upload_and_remove_local(date, zip_path):
+    """Push the finished zip to R2 and delete the local copy. Leaves the zip
+    on disk (rather than losing data) if credentials are missing or the
+    upload fails, so the next run can retry."""
+    if not _r2_credentials_present():
+        logger.warning(f"{date}: R2 credentials not configured; leaving archive on local disk at {zip_path}")
+        return
+    key = _r2_key_for_date(date)
+    try:
+        s3 = _r2_client()
+        s3.upload_file(str(zip_path), R2_BUCKET, key, ExtraArgs={"ContentType": "application/zip"})
+    except Exception as e:
+        logger.error(f"{date}: failed to upload archive to R2 ({R2_BUCKET}/{key}); leaving local copy at {zip_path}: {e}")
+        return
+    zip_path.unlink()
+    logger.info(f"{date}: uploaded archive to R2 ({R2_BUCKET}/{key}) and removed local copy")
+
+
 def process_date(date, paths):
     final_path = OUTPUT_DIR / f"{date}.zip"
+    restore_from_r2_if_needed(date, final_path)
+
     if final_path.exists():
-        return add_files_to_existing_zip(date, paths)
-    zip_path = write_zip_for_date(date, paths)
-    ok, reason = verify_zip(zip_path, paths)
-    if not ok:
-        logger.error(f"{date}: verification FAILED ({reason}); leaving originals and zip in place for inspection")
-        return
+        final_path = add_files_to_existing_zip(date, paths)
+    else:
+        zip_path = write_zip_for_date(date, paths)
+        ok, reason = verify_zip(zip_path, paths)
+        if not ok:
+            logger.error(f"{date}: verification FAILED ({reason}); leaving originals and zip in place for inspection")
+            return
 
-    freed = 0
-    for path in paths:
-        freed += path.stat().st_size
-        path.unlink()
+        freed = 0
+        for path in paths:
+            freed += path.stat().st_size
+            path.unlink()
 
-    logger.info(f"{date}: wrote {len(paths)} file(s) -> {zip_path} (verified, freed {freed / 1e6:.1f} MB)")
+        logger.info(f"{date}: wrote {len(paths)} file(s) -> {zip_path} (verified, freed {freed / 1e6:.1f} MB)")
+        final_path = zip_path
+
+    upload_and_remove_local(date, final_path)
 
 
 def run_archive_bundle():
