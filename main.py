@@ -72,7 +72,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -159,6 +159,7 @@ app.include_router(outlook.router)
 app.include_router(discord_admin.router)
 app.include_router(afds.router)
 app.include_router(spatial_model.router)
+app.include_router(mobile.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -645,14 +646,28 @@ def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, token: str):
 
     # Upsert singleton config row (always overwrite provided values cleanly)
     current = get_briefing_config() or {}
-    create_briefing(
+    updated = create_briefing(
         file_path=(safe_name if safe_name is not None else (current.get("file_path") or "")),
         title=(payload.title if payload.title is not None else current.get("title")),
         is_active=(payload.is_active if payload.is_active is not None else bool(current.get("is_active"))),
         expires_at=payload.expires_at
     )
 
-    return {"success": True, "config": get_briefing_config()}
+    new_config = updated or get_briefing_config() or {}
+    became_active = bool(new_config.get("is_active")) and (
+        not bool(current.get("is_active"))
+        or str(new_config.get("file_path") or "") != str(current.get("file_path") or "")
+        or str(new_config.get("title") or "") != str(current.get("title") or "")
+    )
+    if became_active and new_config.get("file_path"):
+        try:
+            from services.mobile_push import notify_sitrep
+            identity = f"{new_config.get('file_path')}:{new_config.get('updated_at') or new_config.get('title') or ''}"
+            notify_sitrep(title=str(new_config.get("title") or "New situation report available"), identity=identity)
+        except Exception as exc:
+            logger.warning("Failed to emit mobile SitRep event: %s", exc)
+
+    return {"success": True, "config": new_config}
 
 
 @app.get("/api/opsbrief")

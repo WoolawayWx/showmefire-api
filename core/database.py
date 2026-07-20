@@ -310,6 +310,52 @@ def init_database():
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_afds_office_issued_at ON afds(office, issued_at DESC)')
     cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_afds_unique_office ON afds(office)')
+
+    # 14. Anonymous mobile push subscriptions and delivery bookkeeping
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_push_subscriptions (
+            installation_id TEXT PRIMARY KEY,
+            expo_push_token TEXT NOT NULL UNIQUE,
+            platform TEXT NOT NULL,
+            app_version TEXT NOT NULL DEFAULT '',
+            forecast_enabled INTEGER NOT NULL DEFAULT 0,
+            sitrep_enabled INTEGER NOT NULL DEFAULT 0,
+            fire_weather_enabled INTEGER NOT NULL DEFAULT 0,
+            county_fips_json TEXT NOT NULL DEFAULT '[]',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mobile_push_enabled ON mobile_push_subscriptions(enabled)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_push_events (
+            event_key TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_push_tickets (
+            ticket_id TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            event_key TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (installation_id) REFERENCES mobile_push_subscriptions(installation_id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mobile_ticket_created ON mobile_push_tickets(created_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mobile_push_receipts (
+            ticket_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            error TEXT,
+            checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (ticket_id) REFERENCES mobile_push_tickets(ticket_id)
+        )
+    ''')
     
     conn.commit()
     conn.close()

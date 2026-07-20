@@ -12,6 +12,7 @@ from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour
+from services.mobile_push import check_push_receipts
 from core.config import AFD_POLL_MINUTES
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
     scheduler.add_job(fetch_and_store_afds, 'interval', minutes=AFD_POLL_MINUTES, id='fetch_afds')
     scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
+    scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
     
     scheduler.add_job(
         firedetect, 

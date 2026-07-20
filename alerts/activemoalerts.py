@@ -1,6 +1,7 @@
 import requests
 import os
 import json
+from pathlib import Path
 
 # Define the API endpoint
 API_URL = 'https://api.weather.gov/alerts/active?area=MO'
@@ -72,6 +73,12 @@ def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_pat
     if alerts and zones:
         enriched_alerts = enrich_alerts_with_zones(alerts, zones)
         save_json_to_file(enriched_alerts, out_path)
+        try:
+            from services.mobile_content import active_fire_weather_alerts
+            from services.mobile_push import process_fire_weather_alerts
+            process_fire_weather_alerts(active_fire_weather_alerts(Path(out_path)))
+        except Exception as exc:
+            print(f"Mobile fire weather notification processing failed: {exc}")
         return True
     return False
 

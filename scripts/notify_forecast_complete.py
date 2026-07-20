@@ -9,6 +9,7 @@ sys.path.append(str(BASE_DIR))
 
 from core.database import get_latest_forecast
 from services.discord_notifier import notify_forecast_ready
+from services.mobile_push import notify_forecast
 
 MAP_FILES = [
     "mo-forecastfiredanger.png",
@@ -53,6 +54,9 @@ def main() -> int:
         print(f"Forecast completion Discord event sent with {len(image_urls)} map image(s)")
     else:
         print("Forecast completion Discord event was not sent")
+
+    mobile_sent = notify_forecast(latest)
+    print(f"Forecast completion mobile event delivered to {mobile_sent} device(s)")
 
     return 0
 
