@@ -55,7 +55,7 @@ def main() -> int:
     else:
         print("Forecast completion Discord event was not sent")
 
-    mobile_sent = notify_forecast(latest)
+    mobile_sent = notify_forecast(latest, image_urls[0] if image_urls else None)
     print(f"Forecast completion mobile event delivered to {mobile_sent} device(s)")
 
     return 0

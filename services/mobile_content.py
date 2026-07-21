@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable
+from urllib.parse import urlencode
 
 import shapefile
 
@@ -147,6 +148,8 @@ def build_mobile_content(api_base_url: str = PUBLIC_API_BASE_URL, cdn_base_url: 
     forecast = get_latest_forecast()
     forecast_payload = None
     if forecast:
+        revision = str(forecast.get("updated_at") or forecast.get("id") or forecast.get("valid_time") or "")
+        version_query = f"?{urlencode({'v': revision})}" if revision else ""
         forecast_payload = {
             "id": int(forecast["id"]),
             "title": str(forecast.get("title") or "Daily Fire Weather Forecast"),
@@ -154,7 +157,7 @@ def build_mobile_content(api_base_url: str = PUBLIC_API_BASE_URL, cdn_base_url: 
             "validTime": str(forecast.get("valid_time") or ""),
             "updatedAt": str(forecast.get("updated_at") or "") or None,
             "maps": [
-                {"key": key, "title": title, "url": f"{cdn_base_url}/{filename}"}
+                {"key": key, "title": title, "url": f"{cdn_base_url}/{filename}{version_query}"}
                 for key, title, filename in FORECAST_MAPS
             ],
         }

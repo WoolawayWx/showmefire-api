@@ -152,8 +152,11 @@ def send_mobile_event(
     url: str,
     county_fips: Iterable[str] | None = None,
     extra_data: dict[str, Any] | None = None,
+    image_url: str | None = None,
 ) -> int:
     payload = {"title": title, "body": body, "url": url, **(extra_data or {})}
+    if image_url:
+        payload["imageUrl"] = image_url
     if not record_event(event_key, event_type, payload):
         return 0
 
@@ -162,8 +165,9 @@ def send_mobile_event(
     sent = 0
     for start in range(0, len(subscriptions), 100):
         batch_subscriptions = subscriptions[start:start + 100]
-        messages = [
-            {
+        messages = []
+        for item in batch_subscriptions:
+            message = {
                 "to": item["expo_push_token"],
                 "title": title,
                 "body": body[:500],
@@ -172,8 +176,10 @@ def send_mobile_event(
                 "channelId": channel,
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
             }
-            for item in batch_subscriptions
-        ]
+            if image_url:
+                message["richContent"] = {"image": image_url}
+                message["mutableContent"] = True
+            messages.append(message)
         tickets = _send_batch(messages)
         with _connect() as connection:
             for subscription, ticket in zip(batch_subscriptions, tickets):
@@ -191,7 +197,7 @@ def send_mobile_event(
     return sent
 
 
-def notify_forecast(forecast: dict[str, Any]) -> int:
+def notify_forecast(forecast: dict[str, Any], image_url: str | None = None) -> int:
     identity = forecast.get("updated_at") or forecast.get("id") or forecast.get("valid_time")
     return send_mobile_event(
         event_type="forecast",
@@ -199,6 +205,8 @@ def notify_forecast(forecast: dict[str, Any]) -> int:
         title=str(forecast.get("title") or "Show Me Fire Forecast"),
         body="Missouri's latest daily fire weather forecast is ready.",
         url="/forecasts",
+        extra_data={"forecastRevision": str(identity)},
+        image_url=image_url,
     )
 
 

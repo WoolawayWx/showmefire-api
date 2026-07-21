@@ -14,6 +14,20 @@ from services import mobile_content, mobile_push
 
 
 class MobileContentTests(unittest.TestCase):
+    def test_forecast_map_urls_are_versioned_with_the_forecast_revision(self):
+        forecast = {
+            "id": 42,
+            "title": "Daily Forecast",
+            "discussion": "Elevated fire danger.",
+            "valid_time": "2026-07-21T12:00:00Z",
+            "updated_at": "2026-07-21T11:45:00+00:00",
+        }
+        with patch.object(mobile_content, "get_latest_forecast", return_value=forecast):
+            content = mobile_content.build_mobile_content("https://api.example", "https://cdn.example/latest")
+
+        self.assertEqual(content["forecast"]["updatedAt"], forecast["updated_at"])
+        self.assertTrue(all("?v=2026-07-21T11%3A45%3A00%2B00%3A00" in item["url"] for item in content["forecast"]["maps"]))
+
     def test_county_mapping_uses_same_codes_and_fire_zones(self):
         fips = mobile_content.county_fips_for_alert({
             "geocode": {"SAME": ["029019"], "UGC": ["MOZ053"]},
@@ -112,6 +126,20 @@ class MobilePushTests(unittest.TestCase):
         sender.assert_called_once()
         with sqlite3.connect(self.db_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 1)
+
+    def test_forecast_notification_includes_revision_and_rich_image(self):
+        self.register()
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "ticket-image"}]) as sender:
+            sent = mobile_push.notify_forecast(
+                {"id": 42, "title": "Updated forecast", "updated_at": "2026-07-21T11:45:00Z"},
+                "https://api.example/images/mo-forecastfiredanger.png?v=42",
+            )
+
+        self.assertEqual(sent, 1)
+        message = sender.call_args.args[0][0]
+        self.assertEqual(message["data"]["forecastRevision"], "2026-07-21T11:45:00Z")
+        self.assertEqual(message["richContent"]["image"], "https://api.example/images/mo-forecastfiredanger.png?v=42")
+        self.assertTrue(message["mutableContent"])
 
     def test_fire_alerts_seed_without_sending_then_deliver_new_products(self):
         self.register()

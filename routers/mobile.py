@@ -45,7 +45,8 @@ class PushSubscriptionRequest(BaseModel):
 
 
 @router.get("/content")
-def get_content():
+def get_content(response: Response):
+    response.headers["Cache-Control"] = "no-store"
     api_base_url = os.getenv("PUBLIC_API_BASE_URL", "https://api.showmefire.org")
     cdn_base_url = os.getenv("PUBLIC_CDN_BASE_URL", "https://cdn.showmefire.org/latest")
     return build_mobile_content(api_base_url, cdn_base_url)
