@@ -53,8 +53,10 @@ app. Anonymous installations manage category and county preferences through
 Forecast completion, newly issued Red Flag Warnings and Fire Weather Watches,
 and newly activated SitReps fan out through Expo Push Service. The first NWS
 polling cycle seeds active products without notifying. APScheduler checks Expo
-delivery receipts every 15 minutes and disables tokens reported as
-`DeviceNotRegistered`.
+delivery receipts every 15 minutes and deletes subscriptions reported as
+`DeviceNotRegistered`. `DELETE` is idempotent and removes the anonymous
+subscription together with its tickets and receipts. Delivery records for
+active subscriptions are purged after seven days.
 
 Set `PUBLIC_API_BASE_URL` and `PUBLIC_CDN_BASE_URL` when the public hosts differ
 from production defaults. Set `EXPO_ACCESS_TOKEN` only when enhanced Expo push

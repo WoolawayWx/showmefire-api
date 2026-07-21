@@ -7,7 +7,7 @@ from fastapi import APIRouter, Response
 from pydantic import BaseModel, Field, field_validator
 
 from services.mobile_content import build_mobile_content, county_catalog
-from services.mobile_push import disable_subscription, upsert_subscription
+from services.mobile_push import delete_subscription, upsert_subscription
 
 router = APIRouter(prefix="/api/mobile", tags=["mobile"])
 EXPO_TOKEN_PATTERN = re.compile(r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
@@ -68,5 +68,5 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
 
 @router.delete("/push-subscriptions/{installation_id}", status_code=204)
 def delete_push_subscription(installation_id: UUID):
-    disable_subscription(str(installation_id))
+    delete_subscription(str(installation_id))
     return Response(status_code=204)

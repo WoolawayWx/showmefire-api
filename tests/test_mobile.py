@@ -5,10 +5,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from uuid import UUID
 
 from pydantic import ValidationError
 
 from core import database
+from routers import mobile as mobile_router
 from routers.mobile import PushSubscriptionRequest
 from services import mobile_content, mobile_push
 
@@ -105,13 +107,91 @@ class MobilePushTests(unittest.TestCase):
             county_fips=["29019"],
         )
 
-    def test_subscription_upsert_disable_and_recipient_filtering(self):
+    def test_subscription_upsert_delete_and_recipient_filtering(self):
         self.register()
         self.assertEqual(len(mobile_push._eligible_subscriptions("forecast")), 1)
         self.assertEqual(len(mobile_push._eligible_subscriptions("fire_weather", ["29019"])), 1)
         self.assertEqual(len(mobile_push._eligible_subscriptions("fire_weather", ["29001"])), 0)
-        mobile_push.disable_subscription("11111111-1111-4111-8111-111111111111")
+        mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
+        mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
         self.assertEqual(mobile_push._eligible_subscriptions("forecast"), [])
+
+    def test_subscription_with_no_enabled_categories_is_deleted(self):
+        self.register()
+        result = mobile_push.upsert_subscription(
+            installation_id="11111111-1111-4111-8111-111111111111",
+            expo_push_token="ExpoPushToken[11111111111141118111111111111111]",
+            platform="ios",
+            app_version="1.0.0",
+            forecast=False,
+            sitrep=False,
+            fire_weather=False,
+            county_fips=["29019"],
+        )
+
+        self.assertFalse(result["registered"])
+        self.assertEqual(mobile_push._eligible_subscriptions("forecast"), [])
+
+    def test_delete_endpoint_is_idempotent(self):
+        self.register()
+        installation_id = "11111111-1111-4111-8111-111111111111"
+
+        first = mobile_router.delete_push_subscription(UUID(installation_id))
+        second = mobile_router.delete_push_subscription(UUID(installation_id))
+
+        self.assertEqual((first.status_code, second.status_code), (204, 204))
+
+    def test_delete_subscription_removes_delivery_data_but_preserves_events(self):
+        self.register()
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                "INSERT INTO mobile_push_events (event_key, event_type) VALUES (?, ?)",
+                ("forecast:privacy-test", "forecast"),
+            )
+            connection.execute(
+                "INSERT INTO mobile_push_tickets (ticket_id, installation_id, event_key) VALUES (?, ?, ?)",
+                ("privacy-ticket", "11111111-1111-4111-8111-111111111111", "forecast:privacy-test"),
+            )
+            connection.execute(
+                "INSERT INTO mobile_push_receipts (ticket_id, status) VALUES (?, ?)",
+                ("privacy-ticket", "ok"),
+            )
+
+        mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
+
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_receipts").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_events").fetchone()[0], 1)
+
+    def test_delivery_record_cleanup_keeps_recent_records(self):
+        self.register()
+        with sqlite3.connect(self.db_path) as connection:
+            connection.executemany(
+                "INSERT INTO mobile_push_tickets (ticket_id, installation_id, event_key, created_at) VALUES (?, ?, ?, ?)",
+                [
+                    ("old-ticket", "11111111-1111-4111-8111-111111111111", "forecast:old", "2020-01-01 00:00:00"),
+                    ("recent-ticket", "11111111-1111-4111-8111-111111111111", "forecast:recent", "2099-01-01 00:00:00"),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO mobile_push_receipts (ticket_id, status) VALUES (?, ?)",
+                [("old-ticket", "ok"), ("recent-ticket", "ok")],
+            )
+
+        deleted = mobile_push.purge_delivery_records()
+
+        self.assertEqual(deleted, {"receipts": 1, "tickets": 1})
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT ticket_id FROM mobile_push_tickets").fetchall(),
+                [("recent-ticket",)],
+            )
+            self.assertEqual(
+                connection.execute("SELECT ticket_id FROM mobile_push_receipts").fetchall(),
+                [("recent-ticket",)],
+            )
 
     def test_event_delivery_is_deduplicated_and_stores_ticket(self):
         self.register()
@@ -126,6 +206,25 @@ class MobilePushTests(unittest.TestCase):
         sender.assert_called_once()
         with sqlite3.connect(self.db_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 1)
+
+    def test_immediate_device_not_registered_error_deletes_subscription(self):
+        self.register()
+        with patch.object(
+            mobile_push,
+            "_send_batch",
+            return_value=[{"status": "error", "details": {"error": "DeviceNotRegistered"}}],
+        ):
+            sent = mobile_push.send_mobile_event(
+                event_type="forecast",
+                event_key="forecast:unregistered",
+                title="Forecast",
+                body="Ready",
+                url="/forecasts",
+            )
+
+        self.assertEqual(sent, 0)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
 
     def test_forecast_notification_includes_revision_and_rich_image(self):
         self.register()
@@ -150,7 +249,7 @@ class MobilePushTests(unittest.TestCase):
             self.assertEqual(mobile_push.process_fire_weather_alerts([existing, new]), 1)
         sender.assert_called_once()
 
-    def test_device_not_registered_receipt_disables_token(self):
+    def test_device_not_registered_receipt_deletes_subscription_and_delivery_data(self):
         self.register()
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
@@ -177,13 +276,9 @@ class MobilePushTests(unittest.TestCase):
         with patch.object(mobile_push.httpx, "Client", FakeClient):
             self.assertEqual(mobile_push.check_push_receipts(), 1)
         with sqlite3.connect(self.db_path) as connection:
-            enabled = connection.execute(
-                "SELECT enabled FROM mobile_push_subscriptions WHERE installation_id = ?",
-                ("11111111-1111-4111-8111-111111111111",),
-            ).fetchone()[0]
-            receipt = connection.execute("SELECT error FROM mobile_push_receipts WHERE ticket_id = 'dead-ticket'").fetchone()[0]
-        self.assertEqual(enabled, 0)
-        self.assertEqual(receipt, "DeviceNotRegistered")
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_receipts").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

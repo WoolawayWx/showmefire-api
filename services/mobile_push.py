@@ -24,6 +24,23 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+def _delete_subscription_rows(connection: sqlite3.Connection, installation_id: str) -> None:
+    """Remove a subscription and all delivery data linked to its installation."""
+    connection.execute(
+        "DELETE FROM mobile_push_receipts WHERE ticket_id IN "
+        "(SELECT ticket_id FROM mobile_push_tickets WHERE installation_id = ?)",
+        (installation_id,),
+    )
+    connection.execute(
+        "DELETE FROM mobile_push_tickets WHERE installation_id = ?",
+        (installation_id,),
+    )
+    connection.execute(
+        "DELETE FROM mobile_push_subscriptions WHERE installation_id = ?",
+        (installation_id,),
+    )
+
+
 def upsert_subscription(
     *,
     installation_id: str,
@@ -37,10 +54,17 @@ def upsert_subscription(
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as connection:
-        connection.execute(
-            "DELETE FROM mobile_push_subscriptions WHERE expo_push_token = ? AND installation_id != ?",
+        if not (forecast or sitrep or fire_weather):
+            _delete_subscription_rows(connection, installation_id)
+            return {"registered": False, "updatedAt": now}
+
+        duplicate_installations = connection.execute(
+            "SELECT installation_id FROM mobile_push_subscriptions "
+            "WHERE expo_push_token = ? AND installation_id != ?",
             (expo_push_token, installation_id),
-        )
+        ).fetchall()
+        for duplicate in duplicate_installations:
+            _delete_subscription_rows(connection, duplicate["installation_id"])
         connection.execute(
             '''
             INSERT INTO mobile_push_subscriptions (
@@ -77,12 +101,28 @@ def upsert_subscription(
     return {"registered": True, "updatedAt": now}
 
 
-def disable_subscription(installation_id: str) -> None:
+def delete_subscription(installation_id: str) -> None:
     with _connect() as connection:
-        connection.execute(
-            "UPDATE mobile_push_subscriptions SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE installation_id = ?",
-            (installation_id,),
+        _delete_subscription_rows(connection, installation_id)
+
+
+def purge_delivery_records(retention_days: int = 7) -> dict[str, int]:
+    """Delete push-delivery bookkeeping older than the retention window."""
+    if retention_days < 1:
+        raise ValueError("retention_days must be at least 1")
+
+    modifier = f"-{retention_days} days"
+    with _connect() as connection:
+        receipt_cursor = connection.execute(
+            "DELETE FROM mobile_push_receipts WHERE ticket_id IN "
+            "(SELECT ticket_id FROM mobile_push_tickets WHERE created_at < datetime('now', ?))",
+            (modifier,),
         )
+        ticket_cursor = connection.execute(
+            "DELETE FROM mobile_push_tickets WHERE created_at < datetime('now', ?)",
+            (modifier,),
+        )
+    return {"receipts": receipt_cursor.rowcount, "tickets": ticket_cursor.rowcount}
 
 
 def record_event(event_key: str, event_type: str, payload: dict[str, Any]) -> bool:
@@ -190,10 +230,7 @@ def send_mobile_event(
                     )
                     sent += 1
                 elif (ticket.get("details") or {}).get("error") == "DeviceNotRegistered":
-                    connection.execute(
-                        "UPDATE mobile_push_subscriptions SET enabled = 0 WHERE installation_id = ?",
-                        (subscription["installation_id"],),
-                    )
+                    _delete_subscription_rows(connection, subscription["installation_id"])
     return sent
 
 
@@ -278,14 +315,22 @@ def check_push_receipts() -> int:
         for ticket_id, receipt in receipts.items():
             status = str(receipt.get("status") or "error")
             error = str((receipt.get("details") or {}).get("error") or receipt.get("message") or "") or None
-            connection.execute(
-                "INSERT OR REPLACE INTO mobile_push_receipts (ticket_id, status, error, checked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                (ticket_id, status, error),
-            )
             if error == "DeviceNotRegistered" and ticket_id in ticket_to_token:
-                connection.execute(
-                    "UPDATE mobile_push_subscriptions SET enabled = 0 WHERE expo_push_token = ?",
+                installation = connection.execute(
+                    "SELECT installation_id FROM mobile_push_subscriptions WHERE expo_push_token = ?",
                     (ticket_to_token[ticket_id],),
-                )
+                ).fetchone()
+                if installation:
+                    _delete_subscription_rows(connection, installation["installation_id"])
+            else:
+                ticket_exists = connection.execute(
+                    "SELECT 1 FROM mobile_push_tickets WHERE ticket_id = ?",
+                    (ticket_id,),
+                ).fetchone()
+                if ticket_exists:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO mobile_push_receipts (ticket_id, status, error, checked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                        (ticket_id, status, error),
+                    )
             checked += 1
     return checked
