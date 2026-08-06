@@ -18,6 +18,7 @@ from config import (
     TRAIN_FRACTION,
 )
 from utils import calculate_fire_danger_category, category_support, ensure_dirs
+from core.fire_danger import meters_per_second_to_knots
 
 
 def prepare_dataset(source_csv: str):
@@ -30,7 +31,7 @@ def prepare_dataset(source_csv: str):
         raise ValueError(f"Missing required columns for label creation: {missing}")
 
     df = df.copy()
-    df["wind_kts"] = df["wind_speed_ms"] * 1.94384
+    df["wind_kts"] = meters_per_second_to_knots(df["wind_speed_ms"])
     df[TARGET_CATEGORY_COL] = [
         calculate_fire_danger_category(fm, rh, wk)
         for fm, rh, wk in zip(df["target_fm"], df["rel_humidity"], df["wind_kts"])
@@ -83,6 +84,7 @@ def prepare_dataset(source_csv: str):
         "feature_columns": feature_cols,
         "target_score_col": TARGET_SCORE_COL,
         "target_category_col": TARGET_CATEGORY_COL,
+        "label_source": "synthetic_rule",
         "all_category_ids": ALL_CATEGORY_IDS,
         "class_distribution": {
             "full": category_support(model_df[TARGET_CATEGORY_COL]),

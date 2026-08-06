@@ -79,14 +79,23 @@ def import_release(model_type, tag, repo, bump="patch"):
             performance = meta.get("performance", {})
         performance = {**performance, "source_release_tag": tag}
         declarations = meta.get("assets") or {}
+        candidate_metadata = meta.get("model_metadata") or {
+            key: meta[key] for key in (
+                "feature_schema_version", "rule_spec_version", "training_window",
+                "data_match_policy", "validation_folds", "class_support",
+                "promotion_gates", "shadow_required", "shadow",
+            ) if key in meta
+        }
         if declarations:
             resolved = _verify_spatial_assets({path.name: path for path in model_files}, declarations)
             assets = {role: {"path": resolved[role], **{key: value for key, value in declaration.items() if key not in ("file", "filename", "sha256")}}
                       for role, declaration in declarations.items()}
-            version = register_trained_model(model_type=model_type, performance=performance, bump=bump, channel="beta", assets=assets)
+            version = register_trained_model(model_type=model_type, performance=performance, bump=bump,
+                                             channel="beta", assets=assets, metadata=candidate_metadata)
         else:
             if len(model_files) > 1: raise SystemExit(f"Expected exactly one model file asset, found {len(model_files)}")
-            version = register_trained_model(model_type=model_type, source_path=model_files[0], performance=performance, bump=bump, channel="beta")
+            version = register_trained_model(model_type=model_type, source_path=model_files[0], performance=performance,
+                                             bump=bump, channel="beta", metadata=candidate_metadata)
 
     print(f"\nImported release {tag!r} -> registered as {model_type} beta version {version} on this server.")
     print(f"Review it, then promote with: python pipelines/promote_model.py --model {model_type} --version {version}")

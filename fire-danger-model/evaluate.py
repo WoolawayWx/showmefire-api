@@ -35,6 +35,7 @@ from utils import (
     utc_timestamp,
     write_json,
 )
+from core.fire_danger import meters_per_second_to_knots
 
 
 def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
@@ -94,7 +95,7 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
     baseline_available = all(c in df_test.columns for c in ["target_fm", "rel_humidity", "wind_speed_ms"])
     baseline_pred_cat = None
     if baseline_available:
-        wind_kts = df_test["wind_speed_ms"] * 1.94384
+        wind_kts = meters_per_second_to_knots(df_test["wind_speed_ms"])
         baseline_pred_cat = np.array(
             [
                 calculate_fire_danger_category(fm, rh, wk)
@@ -102,29 +103,16 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
             ],
             dtype=int,
         )
+    if baseline_available:
+        baseline_macro_f1 = float(f1_score(y_test_cat, baseline_pred_cat, labels=ALL_CATEGORY_IDS,
+                                           average="macro", zero_division=0))
+        baseline_weighted_f1 = float(f1_score(y_test_cat, baseline_pred_cat, labels=ALL_CATEGORY_IDS,
+                                              average="weighted", zero_division=0))
+        baseline_cm = confusion_matrix(y_test_cat, baseline_pred_cat, labels=ALL_CATEGORY_IDS)
     else:
-        # Fallback for datasets without rule inputs.
-        baseline_pred_cat = y_test_cat.to_numpy(copy=True)
-
-    baseline_macro_f1 = float(
-        f1_score(
-            y_test_cat,
-            baseline_pred_cat,
-            labels=ALL_CATEGORY_IDS,
-            average="macro",
-            zero_division=0,
-        )
-    )
-    baseline_weighted_f1 = float(
-        f1_score(
-            y_test_cat,
-            baseline_pred_cat,
-            labels=ALL_CATEGORY_IDS,
-            average="weighted",
-            zero_division=0,
-        )
-    )
-    baseline_cm = confusion_matrix(y_test_cat, baseline_pred_cat, labels=ALL_CATEGORY_IDS)
+        baseline_macro_f1 = None
+        baseline_weighted_f1 = None
+        baseline_cm = None
 
     support_by_class = category_support(y_test_cat)
     support_gate_failures = {
@@ -134,7 +122,9 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
     }
     support_gate_pass = len(support_gate_failures) == 0
     primary_gate_pass = macro_f1 >= PRIMARY_GATE_MIN_MACRO_F1 and support_gate_pass
-    baseline_gate_pass = (macro_f1 + BASELINE_MAX_MACRO_F1_DEGRADATION) >= baseline_macro_f1
+    baseline_gate_pass = baseline_available and (
+        macro_f1 + BASELINE_MAX_MACRO_F1_DEGRADATION
+    ) >= baseline_macro_f1
     overall_gate_pass = primary_gate_pass and baseline_gate_pass
 
     category_metrics = {
@@ -159,16 +149,22 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
         },
         "confusion_matrix": cm.tolist(),
         "support_by_class": {str(k): int(v) for k, v in support_by_class.items()},
+        "unsupported_classes": [CATEGORY_LABELS[class_id] for class_id in ALL_CATEGORY_IDS
+                                if support_by_class[class_id] == 0],
+        "severe_performance_claimable": all(
+            support_by_class[class_id] >= MIN_HIGH_IMPACT_SUPPORT
+            for class_id in HIGH_IMPACT_CATEGORY_IDS
+        ),
     }
 
     baseline_metrics = {
         "available": baseline_available,
         "macro_f1": baseline_macro_f1,
         "weighted_f1": baseline_weighted_f1,
-        "confusion_matrix": baseline_cm.tolist(),
+        "confusion_matrix": baseline_cm.tolist() if baseline_available else None,
         "comparison": {
-            "model_minus_baseline_macro_f1": float(macro_f1 - baseline_macro_f1),
-            "model_minus_baseline_weighted_f1": float(weighted_f1 - baseline_weighted_f1),
+            "model_minus_baseline_macro_f1": float(macro_f1 - baseline_macro_f1) if baseline_available else None,
+            "model_minus_baseline_weighted_f1": float(weighted_f1 - baseline_weighted_f1) if baseline_available else None,
         },
     }
 
@@ -218,7 +214,7 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
         f.write(f"- Test Data: {test_data_path}\n")
         f.write(f"- Macro F1 (primary gate): {macro_f1:.4f}\n\n")
         f.write(f"- Weighted F1: {weighted_f1:.4f}\n")
-        f.write(f"- Baseline Macro F1: {baseline_macro_f1:.4f}\n")
+        f.write(f"- Baseline Macro F1: {baseline_macro_f1 if baseline_available else 'unavailable'}\n")
         f.write(f"- Overall Gate Pass: {overall_gate_pass}\n\n")
         f.write("## Regression Metrics\n")
         for k, v in regression_metrics.items():
@@ -226,6 +222,8 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
         f.write("\n## Class Support (test)\n")
         for class_id, class_name in enumerate(CATEGORY_LABELS):
             f.write(f"- {class_name}: {support_by_class[class_id]}\n")
+        if not category_metrics["severe_performance_claimable"]:
+            f.write("\nCritical/Extreme performance is not claimable because holdout support is insufficient.\n")
         f.write("\n## Gates\n")
         f.write(f"- Primary Macro F1 Gate: {primary_gate_pass} (>= {PRIMARY_GATE_MIN_MACRO_F1:.3f})\n")
         f.write(
@@ -258,7 +256,7 @@ def evaluate(model_path=None, model_meta_path=None, test_data_path=None):
     print("Standalone fire danger model evaluation complete")
     print(f"  report: {report_json_path}")
     print(f"  macro_f1: {macro_f1:.4f}")
-    print(f"  baseline macro_f1: {baseline_macro_f1:.4f}")
+    print(f"  baseline macro_f1: {baseline_macro_f1 if baseline_available else 'unavailable'}")
     print(f"  overall gate pass: {overall_gate_pass}")
     print(f"  confusion matrix plot: {cm_path}")
 

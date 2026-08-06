@@ -30,7 +30,6 @@ from pytz import timezone
 import pandas as pd
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from goes2go import GOES
 from rio_tiler.io import COGReader
 from rio_tiler.colormap import cmap
 from core.database import (
@@ -54,7 +53,9 @@ from core.security import (
     verify_token,
     ADMIN_EMAIL,
     ADMIN_PASSWORD_HASH,
-    ACCESS_TOKEN_EXPIRE_HOURS
+    ACCESS_TOKEN_EXPIRE_HOURS,
+    SECRET_KEY,
+    INSECURE_DEVELOPMENT_SECRET,
 )
 from core.scheduler import (
     create_scheduler,
@@ -72,7 +73,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -88,6 +89,19 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     run_scheduler = os.getenv("run_sch", "false").lower() == "true"
     scheduler_local = None
+
+    missing_security = []
+    if not ADMIN_EMAIL:
+        missing_security.append("ADMIN_EMAIL")
+    if not ADMIN_PASSWORD_HASH:
+        missing_security.append("ADMIN_PASSWORD_HASH")
+    if SECRET_KEY == INSECURE_DEVELOPMENT_SECRET:
+        missing_security.append("JWT_SECRET")
+    if missing_security:
+        message = f"Missing secure runtime configuration: {', '.join(missing_security)}"
+        if IS_PRODUCTION:
+            raise RuntimeError(message)
+        logger.warning("%s; development mode only", message)
 
     try:
         init_database()
@@ -145,6 +159,12 @@ class NoCacheStaticFiles(StaticFiles):
 
         return response
 
+# A fresh deployment may not have generated maps or reports yet. StaticFiles
+# validates directories at construction time, so create its writable roots
+# before mounting them instead of making API startup depend on old artifacts.
+for static_directory in (IMAGES_DIR, GIS_DIR, REPORTS_DIR, PUBLIC_DIR):
+    static_directory.mkdir(parents=True, exist_ok=True)
+
 # Use this instead of the default StaticFiles
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
@@ -160,6 +180,7 @@ app.include_router(discord_admin.router)
 app.include_router(afds.router)
 app.include_router(spatial_model.router)
 app.include_router(mobile.router)
+app.include_router(posts.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -1239,7 +1260,7 @@ async def get_model_formulas():
                 "wind_speed_ms - Wind speed in meters per second",
                 "hour - Hour of day (0-23)",
                 "month - Month of year (1-12)",
-                "emc_baseline - Equilibrium moisture content (Simard 1968: 0.03229 + 0.281073*RH - 0.000578*RH*Temp)",
+                "emc_baseline - Compatibility moisture baseline (RH / 5)",
                 "temp_mean_3h - 3-hour rolling mean temperature",
                 "rh_mean_3h - 3-hour rolling mean relative humidity",
                 "temp_mean_6h - 6-hour rolling mean temperature", 
@@ -1248,10 +1269,12 @@ async def get_model_formulas():
                 "precip_3h - 3-hour precipitation accumulation (mm)",
                 "precip_6h - 6-hour precipitation accumulation (mm)",
                 "precip_24h - 24-hour precipitation accumulation (mm)",
-                "hours_since_rain - Hours since last significant rain (>0.1mm)"
+                "hours_since_rain - Hours since last significant rain (>0.1mm)",
+                "hour_sin/hour_cos - Cyclical hour encoding (schema v2 candidates)",
+                "day_of_year_sin/day_of_year_cos - Cyclical seasonal encoding (schema v2 candidates)"
             ],
             "output": "Predicted 10-hour fuel moisture percentage (1-40%)",
-            "baseline_equation": "EMC = 0.03229 + (0.281073 × RH) - (0.000578 × RH × Temp)",
+            "baseline_equation": "Compatibility baseline = RH / 5",
             "fallback_estimate": "FM ≈ 3 + 0.25 × RH (clamped to 3-30%)"
         }
         
@@ -1267,12 +1290,12 @@ async def get_model_formulas():
                 {
                     "level": "Moderate", 
                     "score": 1,
-                    "condition": "9% ≤ FM < 15% AND RH < 50% AND Wind ≥ 10 kts"
+                    "condition": "FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)"
                 },
                 {
                     "level": "Elevated",
                     "score": 2, 
-                    "condition": "FM < 9% AND (RH < 45% OR Wind ≥ 10 kts)"
+                    "condition": "FM < 9% AND ((RH < 35% AND Wind ≥ 12 kts) OR (RH < 25% AND Wind ≥ 5 kts))"
                 },
                 {
                     "level": "Critical",
@@ -1282,7 +1305,7 @@ async def get_model_formulas():
                 {
                     "level": "Extreme",
                     "score": 4,
-                    "condition": "FM < 7% AND RH < 20% AND Wind ≥ 30 kts"
+                    "condition": "FM < 7% AND RH < 20% AND Wind ≥ 25 kts"
                 }
             ],
             "input_variables": {
@@ -1298,8 +1321,8 @@ async def get_model_formulas():
             "success": True,
             "fuel_moisture_model": fuel_moisture_formula,
             "fire_danger_model": fire_danger_formula,
-            "last_updated": "2024-01-28",
-            "version": "1.0"
+            "last_updated": "2026-08-04",
+            "version": "1.0.0"
         }
     except Exception as e:
         logger.error(f"Error retrieving model formulas: {e}")

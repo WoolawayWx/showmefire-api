@@ -9,8 +9,8 @@ whatever was being served.
     beta    -> the latest trained candidate, evaluated in isolation
     history -> capped trail of past stable/beta entries
 
-Nothing lands in `stable` except through promote() - register_trained_model()
-always writes to `beta` unless a caller explicitly asks otherwise.
+Nothing lands in `stable` except through promote(); freshly trained or imported
+artifacts must enter the beta channel.
 """
 import json
 import hashlib
@@ -25,6 +25,10 @@ CONFIG_PATH = MODELS_DIR / "config.json"
 VERSIONS_DIR = MODELS_DIR / "versions"
 
 MAX_HISTORY = 20
+REQUIRED_BETA_METADATA = {
+    "feature_schema_version", "rule_spec_version", "training_window",
+    "data_match_policy", "validation_folds", "class_support", "feature_columns",
+}
 
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
 
@@ -108,7 +112,8 @@ def next_version(model_type, bump="patch", beta=False):
     return f"{base}-beta.1"
 
 
-def register_trained_model(model_type, source_path=None, performance=None, bump="patch", channel="beta", assets=None):
+def register_trained_model(model_type, source_path=None, performance=None, bump="patch", channel="beta", assets=None,
+                           metadata=None):
     """Register a freshly trained model artifact under the given channel.
 
     Copies `source_path` into models/versions/ under an immutable, versioned
@@ -116,8 +121,8 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
     Defaults to the `beta` channel so a retrain never silently replaces what
     is currently being served.
     """
-    if channel not in ("beta", "stable"):
-        raise ValueError(f"Unknown channel: {channel!r}")
+    if channel != "beta":
+        raise ValueError("Fresh artifacts must enter the beta channel and pass promotion gates")
 
     version = next_version(model_type, bump=bump, beta=(channel == "beta"))
 
@@ -143,7 +148,10 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
         "file": str(versioned_path.relative_to(API_DIR)) if versioned_path else None,
         "performance": performance or {},
         ("trained_at" if channel == "beta" else "promoted_at"): now,
+        "metadata": metadata or {},
     }
+    if versioned_path:
+        record["sha256"] = _sha256(versioned_path)
     if asset_records:
         record["assets"] = asset_records
 
@@ -153,6 +161,54 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
 
     _save_config(config)
     return version
+
+
+def validate_promotion_candidate(model_type, candidate):
+    """Return promotion blockers without modifying registry state."""
+    blockers = []
+    metadata = candidate.get("metadata") or {}
+    if model_type in {"fuel_moisture", "fire_danger"}:
+        missing = sorted(REQUIRED_BETA_METADATA.difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+    precipitation_features = [name for name in metadata.get("feature_columns", [])
+                              if name.startswith("precip_") or name == "hours_since_rain"]
+    if model_type == "fuel_moisture" and precipitation_features:
+        from core.precipitation import PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION
+        if metadata.get("precipitation_contract_version") != PRECIPITATION_CONTRACT_VERSION:
+            blockers.append("precipitation contract version mismatch")
+        if metadata.get("precipitation_contract_sha256") != PRECIPITATION_CONTRACT_SHA256:
+            blockers.append("precipitation contract checksum mismatch")
+    artifact = API_DIR / candidate.get("file", "")
+    if not artifact.is_file():
+        blockers.append(f"artifact is missing: {artifact}")
+    elif candidate.get("sha256") and _sha256(artifact) != candidate["sha256"]:
+        blockers.append("artifact checksum mismatch")
+    gates = metadata.get("promotion_gates") or {}
+    failed = sorted(name for name, value in gates.items() if value is False)
+    if failed:
+        blockers.append(f"failed promotion gates: {', '.join(failed)}")
+    if model_type in {"fuel_moisture", "fire_danger"} and metadata.get("shadow_required", True):
+        shadow = metadata.get("shadow") or {}
+        if not shadow.get("passed"):
+            blockers.append("shadow validation has not passed")
+    if model_type == "fuel_moisture" and artifact.is_file() and metadata.get("feature_columns"):
+        try:
+            import pandas as pd
+            import xgboost as xgb
+            ranges = metadata.get("feature_ranges") or {}
+            row = {name: (float(ranges[name]["min"]) + float(ranges[name]["max"])) / 2
+                   if name in ranges else 0.0 for name in metadata["feature_columns"]}
+            booster = xgb.Booster(); booster.load_model(str(artifact))
+            if precipitation_features:
+                if booster.attr("precipitation_contract_version") != PRECIPITATION_CONTRACT_VERSION:
+                    blockers.append("artifact precipitation contract mismatch")
+            prediction = booster.predict(xgb.DMatrix(pd.DataFrame([row]), feature_names=metadata["feature_columns"]))
+            if len(prediction) != 1 or not float(prediction[0]) == float(prediction[0]):
+                blockers.append("candidate smoke inference returned an invalid prediction")
+        except Exception as exc:
+            blockers.append(f"candidate smoke inference failed: {exc}")
+    return blockers
 
 
 def promote(model_type, version=None):
@@ -172,6 +228,9 @@ def promote(model_type, version=None):
             f"Requested version {version!r} is not the current beta "
             f"({beta['version']!r}) for {model_type!r}"
         )
+    blockers = validate_promotion_candidate(model_type, beta)
+    if blockers:
+        raise ValueError("Candidate is not promotable: " + "; ".join(blockers))
 
     previous_stable = entry.get("stable")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -207,12 +266,63 @@ def promote(model_type, version=None):
     return promoted["version"]
 
 
+def rollback(model_type, version=None):
+    """Reactivate a prior stable artifact and synchronize legacy consumers."""
+    config = _load_config()
+    entry = _entry(model_type, config)
+    current = entry.get("stable")
+    candidates = [record for record in reversed(entry.get("history", []))
+                  if record.get("channel") == "stable" and record.get("file")]
+    if version:
+        candidates = [record for record in candidates if record.get("version") == version]
+    elif current:
+        candidates = [record for record in candidates if record.get("version") != current.get("version")]
+    if not candidates:
+        raise ValueError(f"No rollback target found for {model_type!r}")
+    target = {key: value for key, value in candidates[0].items()
+              if key not in {"channel", "recorded_at"}}
+    path = API_DIR / target["file"]
+    if not path.is_file():
+        raise FileNotFoundError(f"Rollback artifact missing: {path}")
+    if target.get("sha256") and _sha256(path) != target["sha256"]:
+        raise ValueError("Rollback artifact checksum mismatch")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if current:
+        entry.setdefault("history", []).append({**current, "channel": "stable", "recorded_at": now})
+    target["promoted_at"] = now
+    target["rollback_from"] = current.get("version") if current else None
+    entry["stable"] = target
+    entry["history"] = entry.get("history", [])[-MAX_HISTORY:]
+    _save_config(config)
+    legacy = _LEGACY_STATIC_FILENAMES.get(model_type)
+    if legacy:
+        shutil.copy2(path, MODELS_DIR / legacy)
+    return target["version"]
+
+
 def get_model_entry(model_type):
     """Return the full registry entry (stable/beta/history) for a model type."""
     return _load_config().get(model_type) or {}
 
 
-def load_active_model_path(model_type, channel="stable"):
+def update_beta_metadata(model_type, updates):
+    """Merge validation/shadow evidence into the current beta candidate."""
+    config = _load_config()
+    entry = _entry(model_type, config)
+    beta = entry.get("beta")
+    if not beta:
+        raise ValueError(f"No beta candidate registered for {model_type!r}")
+    metadata = beta.setdefault("metadata", {})
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(metadata.get(key), dict):
+            metadata[key].update(value)
+        else:
+            metadata[key] = value
+    _save_config(config)
+    return beta["version"]
+
+
+def load_active_model_path(model_type, channel="stable", auto_rollback=False):
     """Resolve the filesystem path serving code should load for `model_type`."""
     config = _load_config()
     entry = config.get(model_type) or {}
@@ -221,8 +331,14 @@ def load_active_model_path(model_type, channel="stable"):
         raise FileNotFoundError(f"No {channel!r} model registered for {model_type!r}")
 
     path = API_DIR / active["file"]
-    if not path.exists():
-        raise FileNotFoundError(f"Registered {channel} model file missing: {path}")
+    invalid = not path.exists()
+    if not invalid and active.get("sha256"):
+        invalid = _sha256(path) != active["sha256"]
+    if invalid and auto_rollback and channel == "stable":
+        rollback(model_type)
+        return load_active_model_path(model_type, channel, auto_rollback=False)
+    if invalid:
+        raise FileNotFoundError(f"Registered {channel} model file missing or invalid: {path}")
     return path
 
 

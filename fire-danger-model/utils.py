@@ -3,23 +3,17 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import sys
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from core.fire_danger import calculate_fire_danger, meters_per_second_to_knots
 
 from config import ALL_CATEGORY_IDS, DEFAULT_CATEGORY_THRESHOLDS
 
 
 def calculate_fire_danger_category(fm, rh, wind_kts):
-    """Mirror current rule-based fire danger categories in standalone tooling."""
-    if fm >= 15:
-        return 0
-    if fm < 7 and rh < 20 and wind_kts >= 25:
-        return 4
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return 3
-    if fm < 9 and ((rh < 35 and wind_kts >= 12) or (rh < 25 and wind_kts >= 5)):
-        return 2
-    if fm < 15 and (rh < 45 or wind_kts >= 10):
-        return 1
-    return 0
+    """Compatibility wrapper around the canonical operational rule."""
+    return calculate_fire_danger(fm, rh, wind_kts)
 
 
 def calibrate_category_thresholds(pred_scores, true_categories):

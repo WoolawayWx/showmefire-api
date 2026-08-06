@@ -6,6 +6,8 @@ Scope:
 - Trains and evaluates a standalone fire danger regression model.
 - Maps continuous predictions to categories with calibrated score thresholds.
 - Does not integrate with production forecast scripts, scheduler, or API routes.
+- Uses synthetic labels derived from the canonical rule and is advisory only;
+  its shadow output never drives public maps or alerts.
 
 ## Workflow
 

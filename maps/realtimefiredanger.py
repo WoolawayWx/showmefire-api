@@ -23,10 +23,14 @@ import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 from dotenv import load_dotenv
 import os
+import sys
 import time
 import logging
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger
 
 from realtime_geotiff import export_discrete_rgba_geotiff
 from station_danger_history import (
@@ -101,30 +105,7 @@ def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
     Returns: danger level (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
     """
     
-    # 1. IMMEDIATE EXIT: If fuels are wet, danger is Low regardless of weather
-    if fuel_moisture >= 15:
-        return 0  # Low
-    
-    # 2. EXTREME (Check the worst case first)
-    if fuel_moisture < 7 and relative_humidity < 20 and wind_speed_knots >= 25:
-        return 4  # Extreme
-    
-    # 3. CRITICAL
-    if fuel_moisture < 9 and relative_humidity < 25 and wind_speed_knots >= 15:
-        return 3  # Critical
-        
-    # 4. ELEVATED (The (AND) OR (AND) Logic)
-    # Scenario A: Dry & Breezy OR Scenario B: Very Dry & Light Wind
-    if fuel_moisture < 9:
-        if (relative_humidity < 35 and wind_speed_knots >= 12) or (relative_humidity < 25 and wind_speed_knots >= 5):
-            return 2  # Elevated
-        
-    # 5. MODERATE (If it didn't hit Elevated, check if it's generally dry/breezy)
-    if fuel_moisture < 15 and (relative_humidity < 45 or wind_speed_knots >= 10):
-        return 1  # Moderate
-        
-    # 6. DEFAULT TO LOW
-    return 0
+    return canonical_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots)
 
 def generate_basemap():
     SCRIPT_DIR = Path(__file__).resolve().parent
@@ -268,7 +249,7 @@ if rh_points and wind_points and fuel_points:
         fuel_grid = (influence_grid * measured_grid + (1 - influence_grid) * fuel_grid)
 
     # Calculate fire danger using NWCG standards
-    grid_values = np.zeros_like(rh_grid)
+    grid_values = np.full_like(rh_grid, np.nan, dtype=float)
     for i in range(grid_values.shape[0]):
         for j in range(grid_values.shape[1]):
             grid_values[i, j] = calculate_fire_danger(

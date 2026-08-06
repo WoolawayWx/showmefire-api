@@ -43,8 +43,15 @@ import io
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import get_db_path
+from core.precipitation import (PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION,
+                                decode_forecast_precipitation,
+                                get_precip_dataarray as canonical_precip_dataarray,
+                                normalize_to_mm)
 from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
+from models.features import LEGACY_FEATURES, validate_feature_contract
+from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
 
 # BASE_DIR still needed for the standalone experimental fire-danger model below,
@@ -57,15 +64,11 @@ FD_DEFAULT_CATEGORY_THRESHOLDS = [0.5, 1.5, 2.5, 3.5]
 
 # Load the production (stable) fuel-moisture model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
-FM_MODEL.load_model(str(load_active_model_path("fuel_moisture")))
+FM_MODEL.load_model(str(load_active_model_path("fuel_moisture", auto_rollback=True)))
 
 # The exact features the model expects
 # Extended features list for models trained with precipitation
-FEATURES = [
-    'temp_c', 'rel_humidity', 'wind_speed_ms', 'hour', 'month',
-    'emc_baseline', 'temp_mean_3h', 'rh_mean_3h', 'temp_mean_6h', 'rh_mean_6h',
-    'precip_1h', 'precip_3h', 'precip_6h', 'precip_24h', 'hours_since_rain'
-]
+FEATURES = list(FM_MODEL.feature_names or LEGACY_FEATURES)
 
 FD_MODEL = xgb.Booster()
 FD_MODEL_META = {}
@@ -237,7 +240,7 @@ def validate_and_convert_wind_speed(wind_values, expected_unit='ms', source='HRR
         wind_ms = wind_values * 0.44704  # mph to m/s
     
     # Convert to knots for fire danger calculations
-    wind_kts = wind_ms * 1.94384
+    wind_kts = meters_per_second_to_knots(wind_ms)
     
     return wind_ms, wind_kts
 
@@ -279,10 +282,10 @@ def validate_relative_humidity(rh_values, source='HRRR'):
 
 def get_precip_dataarray(dataset):
     """Return the first matching precipitation DataArray from known variable names."""
-    for var_name in ('tp', 'apcp', 'APCP', 'precipitation'):
-        if var_name in dataset:
-            return var_name, dataset[var_name]
-    return None, None
+    try:
+        return canonical_precip_dataarray(dataset)
+    except ValueError:
+        return None, None
 
 
 def convert_precip_to_mm(precip_values, units=None, source='HRRR', var_name='precip'):
@@ -294,65 +297,21 @@ def convert_precip_to_mm(precip_values, units=None, source='HRRR', var_name='pre
     - m (meters water equivalent)
     - in / inch / inches
     """
-    units_norm = (units or '').strip().lower()
-
-    # Remove spacing/symbol variants to simplify matching
-    compact = units_norm.replace(' ', '').replace('^', '').replace('*', '')
-
-    if not units_norm:
-        logger.warning(f"{source} {var_name}: missing precipitation units; assuming mm")
-        return precip_values
-
-    if any(token in compact for token in ('mm', 'kgm-2', 'kg/m2', 'kgm**-2', 'kgm-2s-1', 'kg/m^2')):
-        return precip_values
-
-    if compact in ('m', 'meter', 'meters', 'metre', 'metres') or units_norm in ('m', 'meter', 'meters', 'metre', 'metres'):
-        logger.info(f"{source} {var_name}: converting precipitation from meters to mm")
-        return precip_values * 1000.0
-
-    if any(token in compact for token in ('inch', 'inches')) or units_norm in ('in', 'inch', 'inches'):
-        logger.info(f"{source} {var_name}: converting precipitation from inches to mm")
-        return precip_values * 25.4
-
-    logger.warning(f"{source} {var_name}: unrecognized precipitation units '{units}'; assuming mm")
-    return precip_values
+    return normalize_to_mm(precip_values, units)
 
 
 def calculate_fire_danger(fm, rh, wind_kts):
     """
     Fire Danger Criteria based on ShowMeFire.org:
     Low: FM >= 15%
-    Moderate: FM 9-14% WITH (RH < 50% AND Wind >= 10 kts)
+    Moderate: FM < 15% WITH (RH < 45% OR Wind >= 10 kts)
     Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
     Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
-    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 30 kts)
+    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
     """
     
     
-    # 1. IMMEDIATE EXIT: If fuels are wet, danger is Low regardless of weather
-    if fm >= 15: 
-        return 0 
-    
-    # 2. EXTREME (Check the worst case first)
-    if fm < 7 and rh < 20 and wind_kts >= 25: # Dropped wind slightly to 25
-        return 4
-    
-    # 3. CRITICAL
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return 3
-        
-    # 4. ELEVATED (The (AND) OR (AND) Logic)
-    # Scenario A: Dry & Breezy OR Scenario B: Very Dry & Light Wind
-    if fm < 9: 
-        if (rh < 35 and wind_kts >= 12) or (rh < 25 and wind_kts >= 5):
-            return 2
-        
-    # 5. MODERATE (If it didn't hit Elevated, check if it's generally dry/breezy)
-    if fm < 15 and (rh < 45 or wind_kts >= 10):
-        return 1
-        
-    # 6. DEFAULT TO LOW
-    return 0
+    return canonical_fire_danger(fm, rh, wind_kts)
 
 
 def map_fire_danger_scores_to_categories(scores, thresholds=None):
@@ -368,18 +327,7 @@ def calculate_fire_danger_grid_rule_based(fm_grid, rh_grid, wind_kts_grid):
     rh = np.asarray(rh_grid, dtype=float)
     wind = np.asarray(wind_kts_grid, dtype=float)
 
-    risk = np.zeros(fm.shape, dtype=int)
-
-    moderate_mask = (fm < 15) & ((rh < 45) | (wind >= 10))
-    elevated_mask = (fm < 9) & (((rh < 35) & (wind >= 12)) | ((rh < 25) & (wind >= 5)))
-    critical_mask = (fm < 9) & (rh < 25) & (wind >= 15)
-    extreme_mask = (fm < 7) & (rh < 20) & (wind >= 25)
-
-    risk[moderate_mask] = 1
-    risk[elevated_mask] = 2
-    risk[critical_mask] = 3
-    risk[extreme_mask] = 4
-    return risk
+    return np.vectorize(canonical_fire_danger, otypes=[int])(fm, rh, wind)
 
 
 def is_collapsed_risk_distribution(risk_grid, dominance_threshold=0.97):
@@ -837,12 +785,14 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     has_precip = False
     precip_var_name = None
     precip_units = None
+    decoded_precip = None
     try:
-        precip_var_name, precip_da = get_precip_dataarray(ds_full)
-        if precip_da is not None:
+        decoded_precip = decode_forecast_precipitation(ds_full)
+        precip_var_name = decoded_precip.variable_name
+        precip_units = decoded_precip.source_units
+        if decoded_precip is not None:
             has_precip = True
-            precip_units = precip_da.attrs.get('units')
-            logger.info(f"Precipitation data found in HRRR dataset: var={precip_var_name}, units={precip_units}")
+            logger.info(f"Precipitation data found in HRRR dataset: var={precip_var_name}, units={precip_units}, kind={decoded_precip.accumulation_kind}")
     except Exception as e:
         logger.warning(f"Unable to inspect precipitation metadata: {e}")
     
@@ -998,16 +948,15 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             rh = np.clip(rh + RH_BIAS_CORRECTION_PCT, 0, 100)
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
+        precip_interval_mm = np.zeros_like(temp)
+        precip_interval_hours = 0.0
+        precip_reset_flag = False
         if has_precip:
             try:
-                if precip_var_name and precip_var_name in ds_hour:
-                    precip_raw = ds_hour[precip_var_name].values
-                    precip_mm = convert_precip_to_mm(
-                        precip_raw,
-                        units=precip_units,
-                        source='HRRR',
-                        var_name=precip_var_name,
-                    )
+                precip_mm = decoded_precip.cumulative_mm.sel(step=time_step).values
+                precip_interval_mm = decoded_precip.interval_mm.sel(step=time_step).values
+                precip_interval_hours = float(np.nanmedian(decoded_precip.interval_hours.sel(step=time_step).values))
+                precip_reset_flag = bool(np.any(decoded_precip.reset_flag.sel(step=time_step).values))
             except Exception as e:
                 logger.warning(f"Failed to normalize hourly precipitation: {e}")
         
@@ -1026,7 +975,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
-        fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history, swe_grid=swe_grid)
+        fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history,
+                                       precip_history, swe_grid=swe_grid, day_of_year=forecast_time.dayofyear)
         if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
             fm = spatial_prediction["p50"][i]
         
@@ -1082,7 +1032,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         # Update buffers for the next hour
         temp_history.append(temp)
         rh_history.append(rh)
-        precip_history.append(precip_mm)
+        model_precip = (precip_interval_mm if FM_MODEL.attr("precipitation_contract_version") == PRECIPITATION_CONTRACT_VERSION
+                        else precip_mm)
+        precip_history.append(model_precip)
 
         # Keep buffers at max 24 hours to allow for precip_24h calculation
         if len(temp_history) > 24:
@@ -1116,6 +1068,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_rh = float(rh[sy, sx])
                     val_ws = float(ws_fire_ms[sy, sx])
                     val_precip_mm = float(precip_mm[sy, sx])
+                    val_precip_interval_mm = float(precip_interval_mm[sy, sx])
                     val_precip_in = val_precip_mm / 25.4
                     val_fm = float(fm[sy, sx])
                     val_risk = int(risk[sy, sx])
@@ -1128,6 +1081,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         val_rh,
                         val_ws,
                         val_precip_mm,
+                        val_precip_interval_mm,
+                        precip_interval_hours,
                         val_fm
                     ))
                     
@@ -1147,6 +1102,13 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "wind_speed_ms": round(val_ws, 2),
                         "precip_in": round(val_precip_in, 3),
                         "precip_mm": round(val_precip_mm, 2),
+                        "precip_interval_mm": round(val_precip_interval_mm, 2),
+                        "precip_interval_hours": round(precip_interval_hours, 2),
+                        "precip_accumulation_kind": decoded_precip.accumulation_kind if decoded_precip else None,
+                        "precip_available": bool(decoded_precip),
+                        "precip_reset_flag": precip_reset_flag,
+                        "precipitation_contract_version": PRECIPITATION_CONTRACT_VERSION,
+                        "precipitation_contract_sha256": PRECIPITATION_CONTRACT_SHA256,
                         "fuel_moisture": round(val_fm, 1),
                         "fire_danger": val_risk
                     })
@@ -1156,8 +1118,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     conn = sqlite3.connect(db_path)
                     conn.executemany('''
                         INSERT OR REPLACE INTO station_forecasts 
-                        (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms, precip_mm, fuel_moisture)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms,
+                         precip_mm, precip_interval_mm, precip_interval_hours, fuel_moisture)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', forecast_rows)
                     conn.commit()
                     conn.close()
@@ -1191,7 +1154,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid
 
-def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None, swe_grid=None):
+def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None,
+                    swe_grid=None, day_of_year=None):
     """
     Predict fuel moisture across a grid using XGBoost model.
     
@@ -1233,7 +1197,8 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     rh_mean_6h = np.mean(curr_rh_stack[-6:], axis=0).flatten()
     
     # Standard Simard (1968) EMC calculation for the model baseline
-    emc_baseline = 0.03229 + (0.281073 * rh_flat) - (0.000578 * rh_flat * t_flat)
+    emc_baseline = rh_flat / 5.0
+    day_of_year = day_of_year or int((month - 1) * 365.25 / 12 + 15)
     
     df = pd.DataFrame({
         'temp_c': t_flat,
@@ -1247,6 +1212,10 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
         'temp_mean_6h': t_mean_6h,
         'rh_mean_6h': rh_mean_6h
     })
+    df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+    df['day_of_year_sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
+    df['day_of_year_cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
     
     if precip_hist is not None and len(precip_hist) > 0:
         curr_precip_stack = precip_hist
@@ -1297,10 +1266,10 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
             hours_since_rain[has_snow] = 0
 
             # 2. Treat SWE as available moisture/prec for the accumulation features
-            precip_24h = np.maximum(precip_24h, swe_inches)
-            precip_6h = np.maximum(precip_6h, swe_inches)
-            precip_3h = np.maximum(precip_3h, swe_inches)
-            precip_1h = np.maximum(precip_1h, swe_inches)
+            precip_24h = np.maximum(precip_24h, swe_flat)
+            precip_6h = np.maximum(precip_6h, swe_flat)
+            precip_3h = np.maximum(precip_3h, swe_flat)
+            precip_1h = np.maximum(precip_1h, swe_flat)
     
     df['precip_1h'] = precip_1h
     df['precip_3h'] = precip_3h
@@ -1309,8 +1278,10 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     df['hours_since_rain'] = hours_since_rain
     
     # 3. Convert to DMatrix and Predict
+    validate_feature_contract(df, {"feature_columns": FEATURES, "feature_schema_version": "1.0.0"})
     dmat = xgb.DMatrix(df[FEATURES])
     preds = FM_MODEL.predict(dmat)
+    preds = run_shadow(df, preds)
     
     # 4. Reshape back to the original 2D map
     preds_2d = preds.reshape(shape)
@@ -1401,10 +1372,10 @@ def predict_fire_danger_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=No
         has_snow = swe_inches > SNOW_THRESHOLD_IN
         if np.any(has_snow):
             hours_since_rain[has_snow] = 0
-            precip_24h = np.maximum(precip_24h, swe_inches)
-            precip_6h = np.maximum(precip_6h, swe_inches)
-            precip_3h = np.maximum(precip_3h, swe_inches)
-            precip_1h = np.maximum(precip_1h, swe_inches)
+            precip_24h = np.maximum(precip_24h, swe_flat)
+            precip_6h = np.maximum(precip_6h, swe_flat)
+            precip_3h = np.maximum(precip_3h, swe_flat)
+            precip_1h = np.maximum(precip_1h, swe_flat)
 
     df['precip_1h'] = precip_1h
     df['precip_3h'] = precip_3h
@@ -1624,18 +1595,13 @@ def generate_complete_forecast():
     # --- Extract and process precipitation data ---
     logger.info("Extracting precipitation data from HRRR...")
     try:
-        precip = None
-        precip_units = None
-        precip_var_name, precip_da = get_precip_dataarray(ds_full)
-        if precip_da is not None:
-            precip = precip_da.values
-            precip_units = precip_da.attrs.get('units')
-            logger.info(f"Found '{precip_var_name}' precipitation variable (units={precip_units})")
-        else:
-            logger.warning(f"No precipitation variable found. Available variables: {list(ds_full.data_vars)}")
+        map_precipitation = decode_forecast_precipitation(ds_full)
+        precip_var_name = map_precipitation.variable_name
+        precip_units = map_precipitation.source_units
+        logger.info(f"Found '{precip_var_name}' precipitation variable (units={precip_units})")
     except Exception as e:
         logger.error(f"Error extracting precipitation: {e}")
-        precip = None
+        map_precipitation = None
     
     # Calculate peak/min values FIRST (before cropping)
     combined_risk = np.stack(hourly_risks, axis=0)
@@ -1654,27 +1620,19 @@ def generate_complete_forecast():
     max_temp = np.nanmax(combined_temp, axis=0)
     
     # Apply smoothing
-    peak_risk_smooth = gaussian_filter(peak_risk.astype(float), sigma=1.5)
+    peak_valid = np.isfinite(peak_risk); peak_weight = gaussian_filter(peak_valid.astype(float), sigma=1.5)
+    peak_risk_smooth = np.where(peak_valid, gaussian_filter(np.nan_to_num(peak_risk), sigma=1.5) / np.maximum(peak_weight, 1e-9), np.nan)
     min_fuel_moisture_smooth = gaussian_filter(min_fuel_moisture, sigma=1.5)
     min_rh_smooth = gaussian_filter(min_rh, sigma=1.5)
     max_wind_smooth = gaussian_filter(max_wind, sigma=1.5)
     max_temp_smooth = gaussian_filter(max_temp, sigma=1.5)
     
     # Process precipitation if available
-    if precip is not None:
+    if map_precipitation is not None:
         logger.info("Processing precipitation data...")
-        # Sum total precipitation across all forecast hours
-        if precip.ndim == 3:
-            total_precip_raw = np.sum(precip, axis=0)  # Sum over time dimension
-        else:
-            total_precip_raw = precip
-
-        total_precip_mm = convert_precip_to_mm(
-            total_precip_raw,
-            units=precip_units,
-            source='HRRR',
-            var_name=precip_var_name or 'precip',
-        )
+        accumulation = map_precipitation.cumulative_mm
+        time_dimension = next((name for name in ('step', 'valid_time', 'time') if name in accumulation.dims), None)
+        total_precip_mm = (accumulation.isel({time_dimension: -1}) if time_dimension else accumulation).values
         
         # Convert from mm to inches for map display
         total_precip_inches = total_precip_mm / 25.4
@@ -1790,7 +1748,7 @@ def generate_complete_forecast():
         "Critical:"
         "  FM < 9% WITH (RH < 25% AND Wind >= 15 kts)\n\n"
         "Extreme:"
-        "  FM < 7% WITH (RH < 20% AND Wind >= 30 kts)\n\n"
+        "  FM < 7% WITH (RH < 20% AND Wind >= 25 kts)\n\n"
         "Data Source: HRRR Model Forecast | Show Me Fire's Danger Model (BETA)\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
@@ -2067,7 +2025,7 @@ def generate_complete_forecast():
             cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
             cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
             cbar.set_ticks(rain_levels)
-            cbar.set_ticklabels([f'{x:.2f}"' if x < 1 else f'{x:.1f}"' for x in rain_levels])
+            cbar.set_ticklabels([f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in rain_levels])
             
             ax.set_anchor('W')
             plt.subplots_adjust(left=0.05)
@@ -2380,10 +2338,10 @@ def generate_complete_forecast():
                         "Peak Fire Danger Forecast (10:00–21:00 CT)\n\n"
                         "Fire Danger Criteria:\n"
                         "Low: FM ≥ 15% (Fuels adequately moist)\n"
-                        "Moderate: FM 9-14% with RH < 60% or Wind ≥ 6 kts\n"
+                        "Moderate: FM < 15% with RH < 45% or Wind ≥ 10 kts\n"
                         "Elevated: FM < 9% with RH < 45% or Wind ≥ 10 kts\n"
                         "Critical: FM < 9% with RH < 25% & Wind ≥ 15 kts\n"
-                        "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
+                        "Extreme: FM < 7% with RH < 20% & Wind ≥ 25 kts\n\n"
                         "Data Source: HRRR Model Forecast | ML Model | Observations\n"
                         "For More Info, Visit ShowMeFire.org", 
                         RUN_DATE, SCRIPT_DIR
@@ -2561,7 +2519,7 @@ def generate_complete_forecast():
                         cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
                         cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
                         cbar.set_ticks(rain_levels)
-                        cbar.set_ticklabels([f'{x:.2f}"' if x < 1 else f'{x:.1f}"' for x in rain_levels])
+                        cbar.set_ticklabels([f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in rain_levels])
                         ax.set_anchor('W')
                         plt.subplots_adjust(left=0.05)
                         
@@ -2971,13 +2929,15 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         
         # Calculate fire danger
         print(f"  Calculating fire danger levels...")
-        risk = np.zeros_like(rh, dtype=int)
+        risk = np.full_like(rh, np.nan, dtype=float)
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
         if APPLY_HOURLY_RISK_SMOOTHING:
-            smoothed_risk = gaussian_filter(risk.astype(float), sigma=HOURLY_RISK_SMOOTHING_SIGMA)
-            risk = np.clip(np.rint(smoothed_risk), 0, 4).astype(int)
+            valid_risk = np.isfinite(risk)
+            weight = gaussian_filter(valid_risk.astype(float), sigma=HOURLY_RISK_SMOOTHING_SIGMA)
+            smoothed_risk = gaussian_filter(np.nan_to_num(risk), sigma=HOURLY_RISK_SMOOTHING_SIGMA) / np.maximum(weight, 1e-9)
+            risk = np.where(valid_risk, np.clip(np.rint(smoothed_risk), 0, 4), np.nan)
 
         hourly_risks.append(risk)
         

@@ -14,6 +14,7 @@ import logging
 # Add project root to path (api/)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger
 
 # Configure logging
 logging.basicConfig(
@@ -168,38 +169,12 @@ def calculate_fire_danger(fm, rh, wind_kts):
     """
     Fire Danger Criteria based on ShowMeFire.org:
     Low: FM >= 15%
-    Moderate: FM 9-14% WITH (RH < 50% AND Wind >= 10 kts)
-    Elevated: FM < 9% WITH (RH < 45% OR Wind >= 10 kts)
+    Moderate: FM < 15% WITH (RH < 45% OR Wind >= 10 kts)
+    Elevated: FM < 9% WITH the canonical dry/breezy combinations
     Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
-    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 30 kts)
+    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
     """
-    # Safety check for None/NaN
-    if pd.isna(fm) or pd.isna(rh) or pd.isna(wind_kts):
-        return None
-
-    # LOW (Fuels are too wet to carry fire effectively)
-    if fm >= 15: 
-        return 0 
-    
-    # 5. EXTREME (The most restrictive)
-    if fm < 7 and rh < 20 and wind_kts >= 30:
-        return 4
-    
-    # 4. CRITICAL (High)
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return 3
-        
-    # 3. ELEVATED
-    if fm < 9 and (rh < 45 or wind_kts >= 10):
-        return 2
-        
-    # 2. MODERATE
-    # Change to AND logic: FM must be low AND weather must be active
-    if (9 <= fm < 15) and (rh < 50 and wind_kts >= 10):
-        return 1
-        
-    # 1. LOW (Default if FM is high or conditions aren't met)
-    return 0
+    return canonical_fire_danger(fm, rh, wind_kts, missing_category=None)
 
 def parse_date(date_str):
     """

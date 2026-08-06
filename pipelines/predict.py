@@ -8,12 +8,15 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import get_db_path
+from core.fire_danger import CATEGORY_LABELS, calculate_fire_danger, meters_per_second_to_knots
+from models.features import build_causal_features, validate_feature_contract
 from models.versioning import load_active_model_path
+from services.model_shadow import run_shadow
 
 def get_danger_info(row):
     fm = row['predicted_fuel_moisture']
     rh = row['rel_humidity']
-    wind = row['wind_speed_ms'] * 2.237  # Convert to mph
+    wind = meters_per_second_to_knots(row['wind_speed_ms'])
     
     # ANSI Color Codes for terminal output
     RED = '\033[91m'
@@ -23,16 +26,11 @@ def get_danger_info(row):
     GREEN = '\033[92m'
     RESET = '\033[0m'
 
-    if fm < 5 or rh < 20 or wind > 25:
-        return f"{RED}EXTREME{RESET}"
-    elif fm <= 7 or rh <= 30 or wind > 20:
-        return f"{ORANGE}HIGH (CRITICAL){RESET}"
-    elif fm <= 10 or rh <= 35 or wind > 15:
-        return f"{YELLOW}ELEVATED{RESET}"
-    elif fm <= 15 or rh <= 45 or wind > 10:
-        return f"{BLUE}MODERATE{RESET}"
-    else:
-        return f"{GREEN}LOW{RESET}"
+    category = calculate_fire_danger(fm, rh, wind)
+    colors = {0: GREEN, 1: BLUE, 2: YELLOW, 3: ORANGE, 4: RED}
+    if category is None:
+        return "UNAVAILABLE"
+    return f"{colors[category]}{CATEGORY_LABELS[category].upper()}{RESET}"
 
 def run_live_prediction():
     # 1. Load the trained (stable) model - see models/versioning.py
@@ -65,58 +63,25 @@ def run_live_prediction():
         print("⚠️ No weather data found in database for prediction.")
         return
 
-    # 3. Feature Engineering (Match the training format exactly)
-    df['obs_time'] = pd.to_datetime(df['snapshot_date'])
-    df['hour'] = df['obs_time'].dt.hour
-    df['month'] = df['obs_time'].dt.month
-    df['emc_baseline'] = df['rel_humidity'] / 5.0
-    
-    # Calculate lags (rolling means)
-    df = df.sort_values(['station_id', 'obs_time'])
-    for window in [3, 6]:
-        df[f'temp_mean_{window}h'] = df.groupby('station_id')['temp_c'].transform(lambda x: x.rolling(window, min_periods=1).mean())
-        df[f'rh_mean_{window}h'] = df.groupby('station_id')['rel_humidity'].transform(lambda x: x.rolling(window, min_periods=1).mean())
-    
-    # Add precipitation features if precip_mm column exists
-    if 'precip_mm' in df.columns:
-        # Rolling precipitation sums
-        for window in [1, 3, 6, 24]:
-            df[f'precip_{window}h'] = df.groupby('station_id')['precip_mm'].transform(
-                lambda x: x.rolling(window, min_periods=1).sum()
-            )
-        
-        # Hours since last measurable rain (>0.1mm)
-        def hours_since_rain(group):
-            result = []
-            hours_count = 0
-            for precip in group:
-                if precip > 0.1:
-                    hours_count = 0
-                else:
-                    hours_count += 1
-                result.append(hours_count)
-            return pd.Series(result, index=group.index)
-        
-        df['hours_since_rain'] = df.groupby('station_id')['precip_mm'].transform(hours_since_rain)
+    # 3. Feature Engineering (shared with training and strictly causal)
+    df['obs_time'] = pd.to_datetime(df['snapshot_date'], utc=True)
+    df = build_causal_features(df)
 
     # 4. Filter for only the absolute latest timestamp to show current conditions
     latest_time = df['obs_time'].max()
     current_conditions = df[df['obs_time'] == latest_time].copy()
 
     # 5. Predict
-    features = [
-        'temp_c', 'rel_humidity', 'wind_speed_ms',
-        'hour', 'month', 'emc_baseline', 
-        'temp_mean_3h', 'rh_mean_3h', 'temp_mean_6h', 'rh_mean_6h'
-    ]
+    features = list(model.get_booster().feature_names or [])
+    if not features:
+        raise ValueError("Active fuel-moisture model has no stored feature contract")
+    validate_feature_contract(
+        current_conditions,
+        {"feature_columns": features, "feature_schema_version": "1.0.0"},
+    )
     
-    # Add precipitation features if they exist
-    precip_features = ['precip_1h', 'precip_3h', 'precip_6h', 'precip_24h', 'hours_since_rain']
-    for feat in precip_features:
-        if feat in current_conditions.columns:
-            features.append(feat)
-    
-    current_conditions['predicted_fuel_moisture'] = model.predict(current_conditions[features])
+    stable_predictions = model.predict(current_conditions[features])
+    current_conditions['predicted_fuel_moisture'] = run_shadow(current_conditions, stable_predictions)
 
     # Apply danger level classification
     current_conditions['danger_level'] = current_conditions.apply(get_danger_info, axis=1)

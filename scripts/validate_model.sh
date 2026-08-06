@@ -60,6 +60,9 @@ echo "[Step 3/4] Updating rolling history..."
 echo "   - Tracking 7-day and 30-day trends"
 python3 "$SCRIPT_DIR/update_validation_history.py" --input "$CSV_FILE"
 
+# Enforce seven-day post-promotion guardrails. This is a no-op outside the window.
+python3 "$SCRIPT_DIR/monitor_model_rollout.py"
+
 # 4. Archive Results
 echo ""
 echo "[Step 4/4] Archiving results to $DATE_STAMP folder..."

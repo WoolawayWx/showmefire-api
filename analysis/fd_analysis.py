@@ -14,6 +14,7 @@ from rasterio.plot import show
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import numpy as np
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger
 from pathlib import Path
 import requests
 from scipy.interpolate import griddata, Rbf  # Add this import at the top if not present
@@ -168,30 +169,8 @@ def calculate_fire_danger_vector(fm, rh, wind_kts):
 
     Returns integer array with values 0 (Low) .. 4 (Extreme).
     """
-    fm = np.array(fm)
-    rh = np.array(rh)
-    wind = np.array(wind_kts)
-
-    risk = np.zeros(fm.shape, dtype=int)
-
-    # EXTREME (4)
-    mask_extreme = (fm < 7) & (rh < 20) & (wind >= 30)
-    risk[mask_extreme] = 4
-
-    # CRITICAL (3)
-    mask_critical = (fm < 9) & (rh < 25) & (wind >= 15)
-    risk[mask_critical & ~mask_extreme] = 3
-
-    # ELEVATED (2)
-    mask_elev = (fm < 9) & ((rh < 45) | (wind >= 10))
-    risk[mask_elev & ~(mask_extreme | mask_critical)] = 2
-
-    # MODERATE (1)
-    mask_mod = (fm >= 9) & (fm < 15) & (rh < 50) & (wind >= 10)
-    risk[mask_mod & ~(mask_extreme | mask_critical | mask_elev)] = 1
-
-    # LOW (0) is default
-    return risk
+    return np.array([canonical_fire_danger(f, r, w) for f, r, w in
+                     zip(np.ravel(fm), np.ravel(rh), np.ravel(wind_kts))]).reshape(np.shape(fm))
 
 
 def calculate_fire_danger(fm, rh, wind_kts):

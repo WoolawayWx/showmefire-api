@@ -1,7 +1,10 @@
 from pathlib import Path
+import sys
 
 BASE_DIR = Path(__file__).resolve().parent
 API_DIR = BASE_DIR.parent
+sys.path.append(str(API_DIR))
+from core.fire_danger import CATEGORY_LABELS, CATEGORY_IDS, HIGH_IMPACT_CATEGORY_IDS
 
 SOURCE_DATA_PATH = API_DIR / "data" / "final_training_data.csv"
 OUTPUT_DATA_DIR = BASE_DIR / "data"
@@ -41,9 +44,9 @@ FEATURE_CANDIDATES = [
 TARGET_SCORE_COL = "fire_danger_score"
 TARGET_CATEGORY_COL = "fire_danger_category"
 
-CATEGORY_LABELS = ["Low", "Moderate", "Elevated", "Critical", "Extreme"]
-ALL_CATEGORY_IDS = [0, 1, 2, 3, 4]
-HIGH_IMPACT_CATEGORY_IDS = [2, 3, 4]
+ALL_CATEGORY_IDS = list(CATEGORY_IDS)
+CATEGORY_LABELS = list(CATEGORY_LABELS)
+HIGH_IMPACT_CATEGORY_IDS = list(HIGH_IMPACT_CATEGORY_IDS)
 
 # Minimum support expected for elevated-risk classes in the test split.
 MIN_HIGH_IMPACT_SUPPORT = 25

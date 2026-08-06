@@ -72,8 +72,14 @@ def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_secret_override TEXT DEFAULT ''")
 
 def get_db_path():
-    # 1. Prioritize the Docker container path if it exists
-    if os.path.exists('/app/data/showmefire.db'):
+    # Honor the documented container/local override even before the database
+    # file exists. This keeps first-start initialization on the mounted volume.
+    configured_data_dir = os.getenv("DATA_DIR", "").strip()
+    if configured_data_dir:
+        return Path(configured_data_dir).expanduser().resolve() / "showmefire.db"
+
+    # Preserve compatibility with older containers that did not set DATA_DIR.
+    if os.path.isdir('/app/data'):
         return Path('/app/data/showmefire.db')
 
     # 2. Fallback: Calculate path relative to this file (works for local dev)
@@ -82,6 +88,7 @@ def get_db_path():
     
 def init_database():
     db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     
     # FORCED MIGRATION: These will run once and fail silently if already there
@@ -133,6 +140,8 @@ def init_database():
             rel_humidity REAL,
             wind_speed_ms REAL,
             precip_mm REAL,
+            precip_interval_mm REAL,
+            precip_interval_hours REAL,
             extraction_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (snapshot_id) REFERENCES snapshots (id)
         )
@@ -161,6 +170,8 @@ def init_database():
             rel_humidity REAL,
             wind_speed_ms REAL,
             precip_mm REAL,
+            precip_interval_mm REAL,
+            precip_interval_hours REAL,
             fuel_moisture REAL,
             UNIQUE(station_id, valid_time, forecast_run_time)
         )
@@ -191,6 +202,14 @@ def init_database():
     try: cursor.execute('ALTER TABLE observations ADD COLUMN wind_speed_ms REAL')
     except: pass
     try: cursor.execute('ALTER TABLE observations ADD COLUMN precip_accum_1h_mm REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE station_forecasts ADD COLUMN precip_interval_mm REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE station_forecasts ADD COLUMN precip_interval_hours REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE weather_features ADD COLUMN precip_interval_mm REAL')
+    except: pass
+    try: cursor.execute('ALTER TABLE weather_features ADD COLUMN precip_interval_hours REAL')
     except: pass
 
     # 7. Banner Configuration (Operational settings)
@@ -356,7 +375,41 @@ def init_database():
             FOREIGN KEY (ticket_id) REFERENCES mobile_push_tickets(ticket_id)
         )
     ''')
-    
+
+    # 15. Staff discussion posts and comments
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            author_name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            tag TEXT NOT NULL,
+            FOREIGN KEY (post_id) REFERENCES posts(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_tags_post_id ON post_tags(post_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            author_name TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (post_id) REFERENCES posts(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_comments_post_id ON post_comments(post_id)')
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {db_path}")
@@ -635,15 +688,18 @@ def save_hrrr_features(snapshot_id, features, station_id):
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO weather_features 
-                (snapshot_id, station_id, temp_c, rel_humidity, wind_speed_ms, precip_mm)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (snapshot_id, station_id, temp_c, rel_humidity, wind_speed_ms, precip_mm,
+                 precip_interval_mm, precip_interval_hours)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 snapshot_id, 
                 station_id,
                 features['temp_c'], 
                 features['rel_humidity'], 
                 features['wind_speed_ms'], 
-                features['precip_mm']
+                features['precip_mm'],
+                features.get('precip_interval_mm'),
+                features.get('precip_interval_hours')
             ))
             conn.commit()
     except Exception as e:
@@ -844,15 +900,17 @@ def get_briefing_config() -> Dict:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
-        FROM briefings
-        WHERE id = 1
-    ''')
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else {}
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, title, file_path, is_active, expires_at, created_at, updated_at
+            FROM briefings
+            WHERE id = 1
+        ''')
+        row = cursor.fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
 
 
 def create_briefing(
@@ -1035,5 +1093,205 @@ def get_afds_by_office(office: str, limit: int = 10, since: Optional[str] = None
 
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# --- Discussion posts helpers ---
+
+def _post_row_extras(cursor: sqlite3.Cursor, post_id: int) -> Dict:
+    cursor.execute('SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag', (post_id,))
+    tags = [row[0] for row in cursor.fetchall()]
+    cursor.execute('SELECT COUNT(*) FROM post_comments WHERE post_id = ?', (post_id,))
+    comment_count = cursor.fetchone()[0]
+    return {"tags": tags, "comment_count": comment_count}
+
+
+def create_post(title: str, body: str, author_name: str, tags: List[str]) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO posts (title, body, author_name)
+            VALUES (?, ?, ?)
+        ''', (title, body, author_name))
+        post_id = cursor.lastrowid
+        for tag in tags:
+            cursor.execute('INSERT INTO post_tags (post_id, tag) VALUES (?, ?)', (post_id, tag))
+        conn.commit()
+
+        cursor.execute('''
+            SELECT id, title, body, author_name, created_at, updated_at
+            FROM posts WHERE id = ?
+        ''', (post_id,))
+        row = cursor.fetchone()
+        post = dict(row)
+        post.update(_post_row_extras(cursor, post_id))
+        return post
+    finally:
+        conn.close()
+
+
+def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+
+        if tag:
+            cursor.execute('''
+                SELECT id, title, body, author_name, created_at, updated_at
+                FROM posts
+                WHERE id IN (SELECT post_id FROM post_tags WHERE tag = ?)
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            ''', (tag, safe_limit, safe_offset))
+        else:
+            cursor.execute('''
+                SELECT id, title, body, author_name, created_at, updated_at
+                FROM posts
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            ''', (safe_limit, safe_offset))
+
+        rows = cursor.fetchall()
+        posts = []
+        for row in rows:
+            post = dict(row)
+            post.update(_post_row_extras(cursor, post["id"]))
+            posts.append(post)
+        return posts
+    finally:
+        conn.close()
+
+
+def list_post_tags() -> List[str]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT DISTINCT tag FROM post_tags ORDER BY tag')
+        return [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_post(post_id: int) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id, title, body, author_name, created_at, updated_at
+            FROM posts WHERE id = ?
+        ''', (post_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        post = dict(row)
+        post.update(_post_row_extras(cursor, post_id))
+        cursor.execute('''
+            SELECT id, post_id, author_name, body, created_at
+            FROM post_comments
+            WHERE post_id = ?
+            ORDER BY created_at ASC
+        ''', (post_id,))
+        post["comments"] = [dict(comment_row) for comment_row in cursor.fetchall()]
+        return post
+    finally:
+        conn.close()
+
+
+def update_post(
+    post_id: int,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    tags: Optional[List[str]] = None
+) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id FROM posts WHERE id = ?', (post_id,))
+        if not cursor.fetchone():
+            return None
+
+        cursor.execute('''
+            UPDATE posts
+            SET title = COALESCE(?, title),
+                body = COALESCE(?, body),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (title, body, post_id))
+
+        if tags is not None:
+            cursor.execute('DELETE FROM post_tags WHERE post_id = ?', (post_id,))
+            for tag in tags:
+                cursor.execute('INSERT INTO post_tags (post_id, tag) VALUES (?, ?)', (post_id, tag))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return get_post(post_id)
+
+
+def delete_post(post_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM post_comments WHERE post_id = ?', (post_id,))
+        cursor.execute('DELETE FROM post_tags WHERE post_id = ?', (post_id,))
+        cursor.execute('DELETE FROM posts WHERE id = ?', (post_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def create_comment(post_id: int, author_name: str, body: str) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id FROM posts WHERE id = ?', (post_id,))
+        if not cursor.fetchone():
+            return None
+
+        cursor.execute('''
+            INSERT INTO post_comments (post_id, author_name, body)
+            VALUES (?, ?, ?)
+        ''', (post_id, author_name, body))
+        comment_id = cursor.lastrowid
+        conn.commit()
+
+        cursor.execute('''
+            SELECT id, post_id, author_name, body, created_at
+            FROM post_comments WHERE id = ?
+        ''', (comment_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def delete_comment(post_id: int, comment_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM post_comments WHERE id = ? AND post_id = ?', (comment_id, post_id))
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()

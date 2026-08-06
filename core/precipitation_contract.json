@@ -1,0 +1,8 @@
+{
+  "version": "precipitation-v1",
+  "canonical_unit": "mm",
+  "variable_names": ["tp", "apcp", "APCP", "precipitation"],
+  "accumulated_variable_names": ["tp", "apcp", "APCP"],
+  "unknown_units": "reject",
+  "negative_accumulation_change": "zero_interval_and_flag"
+}

@@ -31,19 +31,18 @@ import sys
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.versioning import load_active_model_path
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger
+from models.features import LEGACY_FEATURES, validate_feature_contract
+from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
 
 # Load the production (stable) model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
-FM_MODEL.load_model(str(load_active_model_path("fuel_moisture")))
+FM_MODEL.load_model(str(load_active_model_path("fuel_moisture", auto_rollback=True)))
 
 # The exact features the model expects
 # Extended features list for models trained with precipitation
-FEATURES = [
-    'temp_c', 'rel_humidity', 'wind_speed_ms', 'hour', 'month',
-    'emc_baseline', 'temp_mean_3h', 'rh_mean_3h', 'temp_mean_6h', 'rh_mean_6h',
-    'precip_1h', 'precip_3h', 'precip_6h', 'precip_24h', 'hours_since_rain'
-]
+FEATURES = list(FM_MODEL.feature_names or LEGACY_FEATURES)
 
 # Base features list (for models without precipitation)
 # Use this if you haven't retrained with precipitation yet
@@ -88,34 +87,12 @@ def calculate_fire_danger(fm, rh, wind_kts):
     """
     Fire Danger Criteria based on ShowMeFire.org:
     Low: FM >= 15%
-    Moderate: FM 9-14% WITH (RH < 50% AND Wind >= 10 kts)
-    Elevated: FM < 9% WITH (RH < 45% OR Wind >= 10 kts)
+    Moderate: FM < 15% WITH (RH < 45% OR Wind >= 10 kts)
+    Elevated: FM < 9% WITH the canonical dry/breezy combinations
     Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
-    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 30 kts)
+    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
     """
-    # LOW (Fuels are too wet to carry fire effectively)
-    if fm >= 15: 
-        return 0 
-    
-    # 5. EXTREME (The most restrictive)
-    if fm < 7 and rh < 20 and wind_kts >= 30:
-        return 4
-    
-    # 4. CRITICAL (High)
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return 3
-        
-    # 3. ELEVATED
-    if fm < 9 and (rh < 45 or wind_kts >= 10):
-        return 2
-        
-    # 2. MODERATE
-    # Change to AND logic: FM must be low AND weather must be active
-    if (9 <= fm < 15) and (rh < 50 and wind_kts >= 10):
-        return 1
-        
-    # 1. LOW (Default if FM is high or conditions aren't met)
-    return 0
+    return canonical_fire_danger(fm, rh, wind_kts)
 
 
 def estimate_fuel_moisture(relative_humidity, air_temp=None):
@@ -380,7 +357,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
-        fm = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history, precip_history)
+        fm = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history,
+                             precip_history, day_of_year=forecast_time.dayofyear)
         if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
             fm = spatial_prediction["p50"][i]
         
@@ -402,7 +380,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
         hourly_fm.append(fm)
         
         # Calculate fire danger # Import your existing function
-        risk = np.zeros_like(rh, dtype=int)
+        risk = np.full_like(rh, np.nan, dtype=float)
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])
@@ -416,7 +394,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000'):
     
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
 
-def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None):
+def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None,
+                    day_of_year=None):
     # 1. Flatten the grids into 1D arrays
     shape = temp_grid.shape
     t_flat = temp_grid.flatten()
@@ -440,7 +419,8 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     rh_mean_6h = np.mean(curr_rh_stack[-6:], axis=0).flatten()
     
     # Standard Simard (1968) EMC calculation for the model baseline
-    emc_baseline = 0.03229 + (0.281073 * rh_flat) - (0.000578 * rh_flat * t_flat)
+    emc_baseline = rh_flat / 5.0
+    day_of_year = day_of_year or int((month - 1) * 365.25 / 12 + 15)
     
     df = pd.DataFrame({
         'temp_c': t_flat,
@@ -454,6 +434,10 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
         'temp_mean_6h': t_mean_6h,
         'rh_mean_6h': rh_mean_6h
     })
+    df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+    df['day_of_year_sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
+    df['day_of_year_cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
     
     # Add precipitation features (always, to match FEATURES list)
     if precip_hist is not None and len(precip_hist) > 0:
@@ -488,8 +472,10 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     df['hours_since_rain'] = hours_since_rain
     
     # 3. Convert to DMatrix and Predict
+    validate_feature_contract(df, {"feature_columns": FEATURES, "feature_schema_version": "1.0.0"})
     dmat = xgb.DMatrix(df[FEATURES])
     preds = FM_MODEL.predict(dmat)
+    preds = run_shadow(df, preds)
     
     # 4. Reshape back to the original 2D map
     return preds.reshape(shape)
@@ -688,7 +674,8 @@ def generate_complete_forecast():
     max_temp = np.nanmax(combined_temp, axis=0)
     
     # Apply smoothing
-    peak_risk_smooth = gaussian_filter(peak_risk.astype(float), sigma=1.5)
+    peak_valid = np.isfinite(peak_risk); peak_weight = gaussian_filter(peak_valid.astype(float), sigma=1.5)
+    peak_risk_smooth = np.where(peak_valid, gaussian_filter(np.nan_to_num(peak_risk), sigma=1.5) / np.maximum(peak_weight, 1e-9), np.nan)
     min_fuel_moisture_smooth = gaussian_filter(min_fuel_moisture, sigma=1.5)
     min_rh_smooth = gaussian_filter(min_rh, sigma=1.5)
     max_wind_smooth = gaussian_filter(max_wind, sigma=1.5)
@@ -801,10 +788,10 @@ def generate_complete_forecast():
         "Peak Fire Danger Forecast (10:00–21:00 CT)\n\n"
         "Fire Danger Criteria:\n"
         "Low: FM ≥ 15% (Fuels adequately moist)\n"
-        "Moderate: FM 9-14% with RH < 60% or Wind ≥ 6 kts\n"
+        "Moderate: FM < 15% with RH < 45% or Wind ≥ 10 kts\n"
         "Elevated: FM < 9% with RH < 45% or Wind ≥ 10 kts\n"
         "Critical: FM < 9% with RH < 25% & Wind ≥ 15 kts\n"
-        "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
+        "Extreme: FM < 7% with RH < 20% & Wind ≥ 25 kts\n\n"
         "Data Source: HRRR Model Forecast | ML Model | Observations\n"
         "For More Info, Visit ShowMeFire.org",
         RUN_DATE, SCRIPT_DIR
@@ -1484,7 +1471,7 @@ def process_forecast_with_ml_model(ds_full, lon, lat, port='8000', ml_model_path
         
         # Calculate fire danger
         print(f"  Calculating fire danger levels...")
-        risk = np.zeros_like(rh, dtype=int)
+        risk = np.full_like(rh, np.nan, dtype=float)
         for ii in range(rh.shape[0]):
             for jj in range(rh.shape[1]):
                 risk[ii, jj] = calculate_fire_danger(fm[ii, jj], rh[ii, jj], ws_kts[ii, jj])

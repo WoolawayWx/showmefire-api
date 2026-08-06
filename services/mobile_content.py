@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -13,11 +14,13 @@ from core.database import get_briefing_config, get_latest_forecast
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ACTIVE_ALERTS_PATH = PROJECT_ROOT / "gis" / "active.json"
 FIRE_ZONES_PATH = PROJECT_ROOT / "gis" / "MOFireWxZones.geojson"
+ZONE_COUNTY_PATH = PROJECT_ROOT / "core" / "mo_zone_county.json"
 COUNTIES_SHP_PATH = PROJECT_ROOT / "maps" / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
 OPSBRIEF_DIR = PROJECT_ROOT / "files" / "opsbrief"
 FIRE_EVENTS = {"Red Flag Warning", "Fire Weather Watch"}
 PUBLIC_API_BASE_URL = "https://api.showmefire.org"
 PUBLIC_CDN_BASE_URL = "https://cdn.showmefire.org/latest"
+logger = logging.getLogger(__name__)
 
 FORECAST_MAPS = [
     ("fire-danger", "Peak Fire Danger", "mo-forecastfiredanger.png"),
@@ -48,12 +51,16 @@ def county_catalog() -> list[dict[str, str]]:
 
 @lru_cache(maxsize=1)
 def _zone_to_county_fips() -> dict[str, str]:
+    try:
+        bundled = json.loads(ZONE_COUNTY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        bundled = {}
     name_to_fips = {_normalized_name(item["name"]): item["fips"] for item in county_catalog()}
     try:
         zones = json.loads(FIRE_ZONES_PATH.read_text())
     except (OSError, json.JSONDecodeError):
-        return {}
-    result: dict[str, str] = {}
+        return {str(key).zfill(3): str(value) for key, value in bundled.items()}
+    result: dict[str, str] = {str(key).zfill(3): str(value) for key, value in bundled.items()}
     for feature in zones.get("features", []):
         props = feature.get("properties") or {}
         zone = str(props.get("ZONE") or "").zfill(3)
@@ -129,7 +136,11 @@ def active_fire_weather_alerts(
 
 
 def _active_opsbrief(api_base_url: str) -> dict[str, Any]:
-    config = get_briefing_config() or {}
+    try:
+        config = get_briefing_config() or {}
+    except Exception as exc:
+        logger.warning("Ops brief unavailable; returning inactive state: %s", exc)
+        config = {}
     file_name = Path(str(config.get("file_path") or "")).name
     active = bool(config.get("is_active")) and bool(file_name) and (OPSBRIEF_DIR / file_name).exists()
     expires = _parse_time(config.get("expires_at"))

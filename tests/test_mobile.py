@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -143,7 +144,7 @@ class MobilePushTests(unittest.TestCase):
 
     def test_delete_subscription_removes_delivery_data_but_preserves_events(self):
         self.register()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "INSERT INTO mobile_push_events (event_key, event_type) VALUES (?, ?)",
                 ("forecast:privacy-test", "forecast"),
@@ -159,7 +160,7 @@ class MobilePushTests(unittest.TestCase):
 
         mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
 
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_receipts").fetchone()[0], 0)
@@ -167,7 +168,7 @@ class MobilePushTests(unittest.TestCase):
 
     def test_delivery_record_cleanup_keeps_recent_records(self):
         self.register()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.executemany(
                 "INSERT INTO mobile_push_tickets (ticket_id, installation_id, event_key, created_at) VALUES (?, ?, ?, ?)",
                 [
@@ -183,7 +184,7 @@ class MobilePushTests(unittest.TestCase):
         deleted = mobile_push.purge_delivery_records()
 
         self.assertEqual(deleted, {"receipts": 1, "tickets": 1})
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(
                 connection.execute("SELECT ticket_id FROM mobile_push_tickets").fetchall(),
                 [("recent-ticket",)],
@@ -204,7 +205,7 @@ class MobilePushTests(unittest.TestCase):
             )
         self.assertEqual((first, second), (1, 0))
         sender.assert_called_once()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 1)
 
     def test_immediate_device_not_registered_error_deletes_subscription(self):
@@ -223,7 +224,7 @@ class MobilePushTests(unittest.TestCase):
             )
 
         self.assertEqual(sent, 0)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
 
     def test_forecast_notification_includes_revision_and_rich_image(self):
@@ -251,7 +252,7 @@ class MobilePushTests(unittest.TestCase):
 
     def test_device_not_registered_receipt_deletes_subscription_and_delivery_data(self):
         self.register()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "INSERT INTO mobile_push_tickets (ticket_id, installation_id, event_key, created_at) VALUES (?, ?, ?, ?)",
                 ("dead-ticket", "11111111-1111-4111-8111-111111111111", "forecast:old", "2020-01-01 00:00:00"),
@@ -275,7 +276,7 @@ class MobilePushTests(unittest.TestCase):
 
         with patch.object(mobile_push.httpx, "Client", FakeClient):
             self.assertEqual(mobile_push.check_push_receipts(), 1)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_subscriptions").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_tickets").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM mobile_push_receipts").fetchone()[0], 0)

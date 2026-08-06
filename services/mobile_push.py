@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import quote
@@ -18,10 +19,18 @@ EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
 EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "").strip()
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect():
     connection = sqlite3.connect(get_db_path())
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _delete_subscription_rows(connection: sqlite3.Connection, installation_id: str) -> None:

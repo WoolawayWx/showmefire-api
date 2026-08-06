@@ -2,6 +2,7 @@
 firedangermodel.py
 
 Fire Danger Prediction Model - Aligned with Missouri AOP Guidance
+- QUARANTINED: unsupported advisory experiment; never authoritative or production.
 - Uses NWS Elevated Fire Weather Matrix criteria
 - Predicts fire danger based on fuel moisture, RH, and wind thresholds
 - Trains ML model to predict criteria-based danger scores
@@ -38,7 +39,7 @@ import cairosvg
 from io import BytesIO
 
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 import warnings
@@ -46,6 +47,8 @@ warnings.filterwarnings('ignore')
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.versioning import register_trained_model
+from core.fire_danger import RULE_SPEC_VERSION, calculate_fire_danger, miles_per_hour_to_knots
+from models.features import FEATURE_SCHEMA_VERSION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,10 +123,10 @@ def add_text_and_logo(fig, ax, title, subtitle, date_str, project_dir):
              "Fire Danger Criteria (aligns with MO AOP guidance)\n"
              "\n"
              "Low: FM ≥ 15% (Fuels adequately moist)\n"
-             "Moderate: FM 10-14% with RH < 60% or Wind ≥ 6 kts\n"
-             "Elevated: FM < 10% with RH < 45% or Wind ≥ 10 kts\n"
+             "Moderate: FM < 15% with RH < 45% or Wind ≥ 10 kts\n"
+             "Elevated: FM < 9% with the canonical dry/breezy combinations\n"
              "Critical: FM < 10% with RH < 25% & Wind ≥ 15 kts\n"
-             "Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts\n\n"
+             "Extreme: FM < 7% with RH < 20% & Wind ≥ 25 kts\n\n"
              "Criteria represent potential for fire ignition and spread.\n\n"
              "Data Source: HRRR Weather Model\n"
              "For More Info, Visit ShowMeFire.org",
@@ -664,10 +667,10 @@ def calculate_fire_danger_score(df: pd.DataFrame) -> pd.Series:
     
     Criteria (aligned with NWS Elevated Fire Weather Matrix):
     - Low: FM ≥ 15%
-    - Moderate: FM 10-14% with RH < 60% or Wind ≥ 6 kts
-    - Elevated: FM < 10% with RH < 45% or Wind ≥ 10 kts
-    - Critical: FM < 10% with RH < 25% & Wind ≥ 15 kts
-    - Extreme: FM < 7% with RH < 20% & Wind ≥ 30 kts
+    - Moderate: FM < 15% with RH < 45% or Wind ≥ 10 kts
+    - Elevated: FM < 9% with the canonical dry/breezy combinations
+    - Critical: FM < 9% with RH < 25% & Wind ≥ 15 kts
+    - Extreme: FM < 7% with RH < 20% & Wind ≥ 25 kts
     
     Returns: Fire danger score (0-100 scale)
     """
@@ -681,42 +684,32 @@ def calculate_fire_danger_score(df: pd.DataFrame) -> pd.Series:
     score = pd.Series(0.0, index=df.index)
     
     # Convert wind from mph to knots for consistency with criteria (1 mph = 0.868976 knots)
-    wind_kts = wind * 0.868976
+    wind_kts = miles_per_hour_to_knots(wind)
     
     # Apply Missouri AOP criteria
     
     # LOW (0-20 points): FM ≥ 15%
-    low_mask = (fm >= 15)
+    categories = pd.Series(
+        [calculate_fire_danger(f, r, w) for f, r, w in zip(fm, rh, wind_kts)],
+        index=df.index,
+    )
+    low_mask = categories == 0
     score[low_mask] = 10  # Base low danger score
     
-    # MODERATE (20-40 points): FM 10-14% with RH < 60% or Wind ≥ 6 kts
-    moderate_mask = (
-        (fm >= 10) & (fm < 15) & 
-        ((rh < 60) | (wind_kts >= 6))
-    )
+    # MODERATE (20-40 points): canonical category 1
+    moderate_mask = categories == 1
     score[moderate_mask] = 30
     
     # ELEVATED (40-60 points): FM < 10% with RH < 45% or Wind ≥ 10 kts
-    elevated_mask = (
-        (fm < 10) & 
-        ((rh < 45) | (wind_kts >= 10))
-    )
+    elevated_mask = categories == 2
     score[elevated_mask] = 50
     
     # CRITICAL (60-80 points): FM < 10% with RH < 25% AND Wind ≥ 15 kts
-    critical_mask = (
-        (fm < 10) & 
-        (rh < 25) & 
-        (wind_kts >= 15)
-    )
+    critical_mask = categories == 3
     score[critical_mask] = 70
     
-    # EXTREME (80-100 points): FM < 7% with RH < 20% AND Wind ≥ 30 kts
-    extreme_mask = (
-        (fm < 7) & 
-        (rh < 20) & 
-        (wind_kts >= 30)
-    )
+    # EXTREME (80-100 points): canonical category 4
+    extreme_mask = categories == 4
     score[extreme_mask] = 90
     
     # Add gradients within each category based on how extreme conditions are
@@ -832,7 +825,11 @@ def train_fire_danger_model(X: pd.DataFrame, y: pd.Series, model_type: str = "ra
     """Train end-to-end fire danger prediction model."""
     logger.info(f"Training {model_type} fire danger model (Missouri AOP aligned)...")
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    cutoff = max(1, int(len(X) * 0.8))
+    X_train, X_test = X.iloc[:cutoff], X.iloc[cutoff:]
+    y_train, y_test = y.iloc[:cutoff], y.iloc[cutoff:]
+    if X_test.empty:
+        raise ValueError("Not enough time-ordered data for a final holdout")
     
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -874,7 +871,9 @@ def train_fire_danger_model(X: pd.DataFrame, y: pd.Series, model_type: str = "ra
         'r2': r2_score(y_test, y_test_pred)
     }
     
-    cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=5, scoring='neg_mean_absolute_error')
+    split_count = min(5, max(2, len(X_train) // 25))
+    cv_scores = cross_val_score(model, X_train, y_train, cv=TimeSeriesSplit(n_splits=split_count),
+                                scoring='neg_mean_absolute_error')
     cv_mae = -cv_scores.mean()
     
     feature_importance = pd.DataFrame({
@@ -897,6 +896,7 @@ def train_fire_danger_model(X: pd.DataFrame, y: pd.Series, model_type: str = "ra
         'cv_mae': cv_mae,
         'feature_importance': feature_importance,
         'feature_names': list(X.columns),
+        'y_train': y_train,
         'y_test': y_test,
         'y_test_pred': y_test_pred
     }
@@ -1021,6 +1021,8 @@ def train_and_save_fire_danger_model(archive_dir: str = "archive/raw_data",
     if df.empty:
         logger.error("No data available!")
         return None
+    if 'timestamp' in df.columns:
+        df = df.sort_values('timestamp', kind='stable')
     
     # 2. Prepare training data
     X, y = prepare_fire_danger_training_data(df)
@@ -1055,6 +1057,26 @@ def train_and_save_fire_danger_model(archive_dir: str = "archive/raw_data",
         performance=performance_metrics,
         bump="patch",
         channel="beta",
+        metadata={
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_columns": model_dict.get("feature_names", []),
+            "rule_spec_version": RULE_SPEC_VERSION,
+            "training_window": {
+                "start": str(df["timestamp"].min()) if "timestamp" in df else None,
+                "end": str(df["timestamp"].max()) if "timestamp" in df else None,
+            },
+            "data_match_policy": {"source": "archived_station_and_hrrr"},
+            "validation_folds": [{"cv_mae": float(model_dict.get("cv_mae", 0))}],
+            "class_support": {
+                str(int(key)): int(value) for key, value in
+                categorize_fire_danger(pd.Series(model_dict.get("y_test", []))).value_counts().to_dict().items()
+            },
+            "label_source": "synthetic_rule",
+            "advisory_only": True,
+            "promotion_gates": {"independent_labels_available": False},
+            "shadow_required": True,
+            "shadow": {"passed": False},
+        },
     )
     logger.info(f"Registered fire_danger model as beta version {version}")
     logger.info(f"Promote it with: python pipelines/promote_model.py --model fire_danger --version {version}")
@@ -1079,6 +1101,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Fire Danger ML Model Training and Mapping (Missouri AOP Aligned)')
+    parser.add_argument('--allow-experimental', action='store_true', help='Acknowledge this unsupported advisory workflow')
     parser.add_argument('--train', action='store_true', help='Train fire danger model')
     parser.add_argument('--generate-map', action='store_true', help='Generate fire danger map from model')
     parser.add_argument('--forecast-data', type=str, help='Path to forecast data JSON file')
@@ -1089,6 +1112,8 @@ if __name__ == "__main__":
     parser.add_argument('--with-hrrr', action='store_true', help='Include HRRR data in training (requires significant RAM)')
 
     args = parser.parse_args()
+    if not args.allow_experimental:
+        parser.error("This direct-danger workflow is quarantined; pass --allow-experimental to run it explicitly")
 
     if args.train:
         train_and_save_fire_danger_model(

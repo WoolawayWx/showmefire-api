@@ -65,8 +65,8 @@ image_configs = {
         "instruction": "Read the EXACT percentage numbers on the left legend (likely ranges from 10-100%). Cool colors = high RH (moist), warm colors = low RH (dry). RH below 20% is VERY rare."
     },
     "mo-forecastrainfall": {
-        "param": "Total Precipitation (inches)",
-        "instruction": "Read the map and compare to the EXACT measurements on the left legend in inches. Use the legend numbers exactly as shown: white means little to no rain, light blue means light rainfall, and darker blue means higher rainfall totals."
+        "param": "Total Precipitation (inches and millimeters)",
+        "instruction": "Read the map and compare to the exact dual-unit measurements on the left legend. Report inches first and the equivalent millimeters in parentheses; white means little to no rain, light blue means light rainfall, and darker blue means higher rainfall totals."
     },
     "mo-forecastswe": {
         "param": "Snow Water Equivalent (inches)",

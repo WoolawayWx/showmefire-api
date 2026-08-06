@@ -26,6 +26,8 @@ from utils import (
     utc_timestamp,
     write_json,
 )
+from core.fire_danger import RULE_SPEC_VERSION
+from models.features import FEATURE_SCHEMA_VERSION, feature_ranges
 
 
 def train_model(n_estimators=300, learning_rate=0.05, max_depth=5):
@@ -121,10 +123,15 @@ def train_model(n_estimators=300, learning_rate=0.05, max_depth=5):
 
     model_meta = {
         "model_type": "xgboost_regressor",
+        "advisory_only": True,
+        "label_source": "synthetic_rule",
+        "rule_spec_version": RULE_SPEC_VERSION,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "created_utc": ts,
         "versioned_model_path": str(versioned_model_path),
         "latest_model_path": str(LATEST_MODEL_PATH),
         "feature_columns": feature_cols,
+        "feature_ranges": feature_ranges(train_df, feature_cols),
         "target_score_col": TARGET_SCORE_COL,
         "target_category_col": TARGET_CATEGORY_COL,
         "category_thresholds": category_thresholds,

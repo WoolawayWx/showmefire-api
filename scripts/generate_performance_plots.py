@@ -11,6 +11,8 @@ script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent
 reports_dir = project_root / 'reports'
 plots_dir = reports_dir / 'plots'
+sys.path.append(str(project_root))
+from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
 
 import seaborn as sns
 
@@ -22,30 +24,7 @@ def calculate_fire_danger(fm, rh, wind_ms):
     if pd.isna(fm) or pd.isna(rh) or pd.isna(wind_ms):
         return np.nan
         
-    wind_kts = wind_ms * 1.94384
-    
-    # LOW
-    if fm >= 15: 
-        return 0 
-    
-    # EXTREME
-    if fm < 7 and rh < 20 and wind_kts >= 30:
-        return 4
-    
-    # CRITICAL
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return 3
-        
-    # ELEVATED
-    if fm < 9 and (rh < 45 or wind_kts >= 10):
-        return 2
-        
-    # MODERATE
-    if (9 <= fm < 15) and (rh < 50 and wind_kts >= 10):
-        return 1
-        
-    # LOW default
-    return 0
+    return canonical_fire_danger(fm, rh, meters_per_second_to_knots(wind_ms))
 
 def generate_plots(csv_path, plots_dir: Path):
     print(f"Reading data from {csv_path}...")

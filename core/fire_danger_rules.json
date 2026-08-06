@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "wind_unit": "knots",
+  "categories": ["Low", "Moderate", "Elevated", "Critical", "Extreme"],
+  "thresholds": {
+    "low_fm": 15.0,
+    "moderate_rh": 45.0,
+    "moderate_wind": 10.0,
+    "elevated_fm": 9.0,
+    "elevated_rh": 35.0,
+    "elevated_wind": 12.0,
+    "elevated_very_dry_rh": 25.0,
+    "elevated_very_dry_wind": 5.0,
+    "critical_rh": 25.0,
+    "critical_wind": 15.0,
+    "extreme_fm": 7.0,
+    "extreme_rh": 20.0,
+    "extreme_wind": 25.0
+  }
+}

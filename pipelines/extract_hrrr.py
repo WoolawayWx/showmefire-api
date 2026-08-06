@@ -10,6 +10,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.database import get_unprocessed_snapshots, save_hrrr_features, get_all_stations, mark_snapshot_processed, set_hrrr_filename
+from core.precipitation import decode_forecast_precipitation
 
 logger = logging.getLogger(__name__)
 
@@ -28,29 +29,28 @@ def get_nearest_indices(ds, lat, lon):
     return int(obj['x']), int(obj['y'])
 
 def extract_at_indices(ds, x, y):
-    # Use isel(step=0) to ignore the clock entirely and just grab the first available slice
-    point = ds.isel(x=x, y=y, step=0)
+    leads = np.asarray(ds.step.values)
+    lead_hours = leads / np.timedelta64(1, 'h') if np.issubdtype(leads.dtype, np.timedelta64) else leads.astype(float)
+    eligible = np.flatnonzero(lead_hours >= 4)
+    lead_index = int(eligible[0]) if len(eligible) else 0
+    point = ds.isel(x=x, y=y, step=lead_index)
     
     u = float(point['u10'].values)
     v = float(point['v10'].values)
     
-    # Extract precipitation if available
-    precip_mm = 0.0
-    try:
-        if 'apcp' in ds:
-            precip_mm = float(point['apcp'].values)
-        elif 'APCP' in ds:
-            precip_mm = float(point['APCP'].values)
-        elif 'tp' in ds:
-            precip_mm = float(point['tp'].values)
-    except Exception as e:
-        logger.warning(f"Could not extract precipitation: {e}")
+    precipitation = decode_forecast_precipitation(ds)
+    selector = dict(x=x, y=y, step=lead_index)
+    precip_mm = float(precipitation.cumulative_mm.isel(**selector).values)
+    precip_interval_mm = float(precipitation.interval_mm.isel(**selector).values)
+    precip_interval_hours = float(precipitation.interval_hours.isel(**selector).values)
     
     return {
         "temp_c": float(point['t2m'].values) - 273.15,
         "rel_humidity": float(point['r2'].values),
         "wind_speed_ms": (u**2 + v**2)**0.5,
-        "precip_mm": precip_mm
+        "precip_mm": precip_mm,
+        "precip_interval_mm": precip_interval_mm,
+        "precip_interval_hours": precip_interval_hours,
     }
 
 def run_miner():
@@ -82,7 +82,7 @@ def run_miner():
             continue
 
         try:
-            with xr.open_dataset(nc_path, engine='netcdf4', drop_variables=['step']) as ds:
+            with xr.open_dataset(nc_path, engine='netcdf4', decode_timedelta=True) as ds:
                 if station_indices is None:
                     logger.info("Calibrating station grid indices...")
                     station_indices = {

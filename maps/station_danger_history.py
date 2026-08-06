@@ -6,7 +6,11 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List
 
 import numpy as np
+import sys
 from zoneinfo import ZoneInfo
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from core.fire_danger import CATEGORY_LABELS, calculate_fire_danger, miles_per_hour_to_knots
 
 try:
     from core.config import REPORTS_DIR
@@ -36,7 +40,7 @@ CLASS_VALUE_TO_LABEL = {
 
 def mph_to_kts(mph_value):
     try:
-        return float(mph_value) * 0.868976
+        return miles_per_hour_to_knots(float(mph_value))
     except (TypeError, ValueError):
         return None
 
@@ -53,15 +57,8 @@ def calculate_station_fire_danger_label(fm_value, rh_value, wind_mph_value):
     if wind_kts is None:
         return None
 
-    if fm < 7 and rh < 20 and wind_kts >= 30:
-        return "Extreme"
-    if fm < 9 and rh < 25 and wind_kts >= 15:
-        return "Very High"
-    if fm < 9 and (rh < 45 or wind_kts >= 10):
-        return "High"
-    if 9 <= fm < 15 and (rh < 50 and wind_kts >= 10):
-        return "Moderate"
-    return "Low"
+    value = calculate_fire_danger(fm, rh, wind_kts)
+    return CATEGORY_LABELS[value] if value is not None else None
 
 
 def _empty_counts() -> Dict[str, int]:
