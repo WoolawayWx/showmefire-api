@@ -14,6 +14,7 @@ from services.archive_bundler import run_end_of_day_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
+from services.v5_verification import verify_pending as verify_v5_shadow
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,14 @@ async def capture_latest_rtma():
             logger.error("RTMA capture succeeded but retention cleanup failed: %s", cleanup_error, exc_info=True)
     except Exception as e:
         logger.error("RTMA capture failed: %s", e, exc_info=True)
+
+
+async def verify_v5_shadow_observations():
+    """Attach mature observations without blocking the API event loop."""
+    try:
+        await asyncio.to_thread(verify_v5_shadow)
+    except Exception as error:
+        logger.error("V5 shadow verification failed: %s", error, exc_info=True)
 
 def create_scheduler():
     central_tz = timezone('America/Chicago')
@@ -106,6 +115,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=23,
         minute=45,
         id='end_of_day_archive'
+    )
+
+    scheduler.add_job(
+        verify_v5_shadow_observations,
+        'interval',
+        hours=3,
+        id='verify_v5_shadow',
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.start()

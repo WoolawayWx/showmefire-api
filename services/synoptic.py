@@ -523,31 +523,34 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
         for station in data["STATION"]:
             obs = station.get("OBSERVATIONS", {})
             
-            # Extract fuel moisture values - check for both possible key formats
-            fm_value = None
-            obs_time = None
-            
-            # Try different key formats that Synoptic API might use
-            for key in ["fuel_moisture_value_1", "fuel_moisture_set_1", "fuel_moisture"]:
-                if key in obs:
-                    fm_data = obs[key]
-                    if isinstance(fm_data, dict):
-                        fm_value = fm_data.get("value")
-                    elif isinstance(fm_data, list) and len(fm_data) > 0:
-                        fm_value = fm_data[0]
-                    elif isinstance(fm_data, (int, float)):
-                        fm_value = fm_data
-                    
-                    if fm_value is not None:
-                        break
-            
-            # Get observation time
-            if obs.get("date_time"):
-                date_time = obs["date_time"]
-                if isinstance(date_time, list) and len(date_time) > 0:
-                    obs_time = date_time[0]
-                else:
-                    obs_time = date_time
+            def series(*names):
+                for name in names:
+                    value = obs.get(name)
+                    if isinstance(value, dict): value = value.get("value")
+                    if value is not None: return value if isinstance(value, list) else [value]
+                return []
+
+            times = series("date_time")
+            fuel = series("fuel_moisture_value_1", "fuel_moisture_set_1", "fuel_moisture")
+            humidity = series("relative_humidity_set_1", "relative_humidity")
+            wind = series("wind_speed_set_1", "wind_speed")
+            candidates = []
+            for index, value in enumerate(times):
+                if index >= len(fuel) or fuel[index] is None: continue
+                try:
+                    stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    age = (target_time - stamp).total_seconds()
+                    if 0 <= age <= 3600:
+                        candidates.append((age, index, stamp))
+                except (TypeError, ValueError): continue
+            if candidates:
+                _, selected_index, selected_time = min(candidates)
+                fm_value = fuel[selected_index]
+                obs_time = selected_time.isoformat()
+                rh_value = humidity[selected_index] if selected_index < len(humidity) else None
+                wind_value = wind[selected_index] if selected_index < len(wind) else None
+            else:
+                fm_value = obs_time = rh_value = wind_value = None
             
             # Only include stations that have fuel moisture data
             if fm_value is not None and fm_value > 0:
@@ -561,9 +564,9 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
                     "network": station.get("MNET_SHORTNAME"),
                     "observation_time": obs_time,
                     "observations": {
-                        "fuel_moisture": {
-                            "value": fm_value
-                        }
+                        "fuel_moisture": {"value": fm_value},
+                        "relative_humidity": {"value": rh_value},
+                        "wind_speed_ms": {"value": float(wind_value) * 0.44704 if wind_value is not None else None},
                     }
                 }
                 stations_with_fm.append(station_info)

@@ -56,6 +56,8 @@ from core.fire_danger import calculate_fire_danger as canonical_fire_danger, met
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
+from services.v5_scorer import initialization_rows as v5_initialization_rows
+from services.v5_shadow import score_and_record as run_v5_shadow
 
 # Load the production (stable) model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
@@ -349,7 +351,7 @@ def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_D
     except (ImportError, FileNotFoundError):
         pass
 
-def get_current_fuel_moisture_field(port='8000', target_date=None):
+def get_current_fuel_moisture_field(port='8000', target_date=None, include_metadata=False):
     logger.info(f"Getting current fuel moisture field from RAWS at 7 AM CT (port={port})")
     """
     Get observed fuel moisture from RAWS stations near 7 AM Central Time.
@@ -381,6 +383,7 @@ def get_current_fuel_moisture_field(port='8000', target_date=None):
         stations = data.get('data', {}).get('stations', [])
         
         fuel_points = []
+        station_records = []
         for station in stations:
             obs = station.get('observations', {})
             fm_data = obs.get('fuel_moisture')
@@ -398,11 +401,18 @@ def get_current_fuel_moisture_field(port='8000', target_date=None):
                     station['latitude'], 
                     fm_value
                 ))
+                station_records.append({
+                    "station_id": str(station.get("stid") or station.get("station_id") or ""),
+                    "longitude": float(station["longitude"]), "latitude": float(station["latitude"]),
+                    "initial_fm": float(fm_value), "observation_time": station.get("observation_time"),
+                    "initial_rh": (obs.get("relative_humidity") or {}).get("value") if isinstance(obs.get("relative_humidity"), dict) else obs.get("relative_humidity"),
+                    "initial_wind_ms": (obs.get("wind_speed_ms") or {}).get("value") if isinstance(obs.get("wind_speed_ms"), dict) else obs.get("wind_speed_ms"),
+                })
         
         if len(fuel_points) >= 3:
             target_time = data.get('data', {}).get('target_time_formatted', '7 AM CT')
             logger.info(f"Found {len(fuel_points)} RAWS stations with fuel moisture data at {target_time}")
-            return fuel_points
+            return (fuel_points, station_records) if include_metadata else fuel_points
         else:
             logger.warning(f"Only {len(fuel_points)} RAWS stations available with fuel moisture, using default")
             return None
@@ -638,7 +648,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
     """
     # Get current fuel moisture observations
-    fuel_points = get_current_fuel_moisture_field(port)
+    fuel_result = get_current_fuel_moisture_field(port, include_metadata=True)
+    fuel_points, initial_station_records = fuel_result if fuel_result else (None, [])
     
     # Create grid meshes for interpolation
     if lon.ndim == 1 and lat.ndim == 1:
@@ -849,6 +860,13 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
        "run_date": run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%dT%H:%M:%SZ'),
        "stations": {}
     }
+    v5_rows, v5_stable = [], []
+    try:
+        v5_initial = {str(item["station_id"]): item for item in v5_initialization_rows(base_time, initial_station_records)
+                      if item.get("station_id")}
+    except Exception as error:
+        logger.info("V5 shadow initialization unavailable; stable forecast continues: %s", error)
+        v5_initial = {}
     
     for i, time_step in enumerate(ds_full.step):
         ds_hour = ds_full.sel(step=time_step)
@@ -982,6 +1000,25 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_fm = float(fm[sy, sx])
                     val_risk = int(risk[sy, sx])
 
+                    initial_record = v5_initial.get(str(st['station_id']))
+                    if initial_record and 4 <= hours_ahead <= 15:
+                        v5_rows.append({
+                            "run_id": base_time.strftime('%Y%m%d_%H'), "station_id": str(st['station_id']),
+                            "valid_time": forecast_time.isoformat(), "initial_fm": initial_record["initial_fm"],
+                            "initial_age_hours": initial_record["initial_age_hours"], "lead_hour": hours_ahead,
+                            "rtma_temp_c": initial_record["rtma_temp_c"], "rtma_rh": initial_record["rtma_rh"],
+                            "rtma_wind_ms": initial_record["rtma_wind_ms"], "hrrr_temp_c": val_t,
+                            "hrrr_rh": val_rh, "hrrr_wind_ms": float(ws_ms[sy, sx]),
+                            "hrrr_precip_mm": val_precip_mm, "hrrr_precip_accum_mm": val_precip_mm,
+                            "hrrr_precip_increment_mm": val_precip_interval_mm,
+                            "precip_interval_hours": precip_interval_hours,
+                            "precip_reset_flag": float(precip_reset_flag),
+                            "precip_partial_window_flag": float(precip_interval_hours != 1.0),
+                            "precip_available": float(decoded_precip is not None),
+                            "lat": float(st.get('lat')), "lon": float(st.get('lon')),
+                        })
+                        v5_stable.append(val_fm)
+
                     forecast_rows.append((
                         st['station_id'],
                         valid_time_str,
@@ -1042,6 +1079,10 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
         elif i % 3 == 0:
             print(f"Hour {i}: FM range {np.nanmin(fm):.1f}-{np.nanmax(fm):.1f}%")
+
+    # V5 is strictly failure-isolated: it records evidence but never changes these public arrays.
+    if v5_rows:
+        run_v5_shadow(base_time.strftime('%Y%m%d_%H'), v5_rows, v5_stable)
 
     # Save standalone JSON station history
     # MODIFIED: Removed "and json_output_data['stations']" so file is created even if station list is empty
