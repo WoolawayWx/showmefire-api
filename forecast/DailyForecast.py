@@ -58,6 +58,7 @@ from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
 from services.v5_scorer import initialization_rows as v5_initialization_rows
 from services.v5_shadow import score_and_record as run_v5_shadow
+from services.v5_shadow import record_skipped_run as record_v5_skipped_run
 
 # Load the production (stable) model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
@@ -1083,6 +1084,11 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     # V5 is strictly failure-isolated: it records evidence but never changes these public arrays.
     if v5_rows:
         run_v5_shadow(base_time.strftime('%Y%m%d_%H'), v5_rows, v5_stable)
+    else:
+        record_v5_skipped_run(
+            f"no eligible V5 station rows: initial_records={len(initial_station_records)} "
+            f"aligned_initial={len(v5_initial)} station_indices={len(station_indices)}"
+        )
 
     # Save standalone JSON station history
     # MODIFIED: Removed "and json_output_data['stations']" so file is created even if station list is empty

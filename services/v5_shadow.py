@@ -26,6 +26,7 @@ def _requested(): return os.getenv(ENABLED_ENV, "false").strip().lower() in {"1"
 
 def _initial_state():
     state = {"configured": _configured(), "enabled": _configured() and _requested(), "healthy": True,
+             "auto_disabled": False,
              "consecutive_failures": 0, "last_error": None, "last_success": None,
              "runs": 0, "successful_runs": 0, "public_forecast_failures": 0,
              "fallback_rows": 0, "unavailable": 0, "latency_ms": None,
@@ -37,7 +38,7 @@ def _initial_state():
     except Exception:
         pass
     state["configured"] = _configured()
-    state["enabled"] = bool(state["enabled"] and _configured() and _requested())
+    state["enabled"] = bool(_configured() and _requested() and not state.get("auto_disabled", False))
     return state
 
 
@@ -54,9 +55,23 @@ def _persist_state():
 
 
 def diagnostics():
+    # Forecasts run under cron in a separate Python process. Reload its
+    # persisted counters so the long-running API process does not report the
+    # startup snapshot forever.
+    try:
+        if STATE_PATH.exists():
+            stored = json.loads(STATE_PATH.read_text())
+            for key in _state:
+                if key in stored:
+                    _state[key] = stored[key]
+    except Exception as error:
+        _state["healthy"] = False
+        _state["last_error"] = f"unable to read shadow state: {error}"
+    # DailyForecast loads .env after importing this module. Re-evaluate the
+    # requested state now instead of preserving the import-time value.
+    _state["configured"] = _configured()
+    _state["enabled"] = bool(_configured() and _requested() and not _state.get("auto_disabled", False))
     result = dict(_state)
-    result["configured"] = _configured()
-    result["enabled"] = bool(_state["enabled"] and _requested() and _configured())
     return result
 def _sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -124,7 +139,8 @@ def record_predictions(run_id, row_keys, stable_fm, base_fm, v5_fm, intervals,
     except Exception as error:
         _state["runs"] += 1; _state["consecutive_failures"] += 1; _state["last_error"] = str(error)
         _state["healthy"] = False
-        if _state["consecutive_failures"] >= MAX_FAILURES: _state["enabled"] = False
+        if _state["consecutive_failures"] >= MAX_FAILURES:
+            _state["enabled"] = False; _state["auto_disabled"] = True
         _persist_state()
         return False
 
@@ -157,6 +173,18 @@ def score_and_record(run_id, rows, stable_fm, *, bundle_dir=None, evidence_root=
             feature_freshness_minutes=float(frame.initial_age_hours.max()), latency_ms=result["latency_ms"])
     except Exception as error:
         _state["runs"] += 1; _state["consecutive_failures"] += 1; _state["last_error"] = str(error); _state["healthy"] = False
-        if _state["consecutive_failures"] >= MAX_FAILURES: _state["enabled"] = False
+        if _state["consecutive_failures"] >= MAX_FAILURES:
+            _state["enabled"] = False; _state["auto_disabled"] = True
         _persist_state()
         return False
+
+
+def record_skipped_run(reason):
+    """Make an enabled shadow attempt with no scoreable rows observable."""
+    if not diagnostics()["enabled"]: return False
+    _state["runs"] += 1; _state["consecutive_failures"] += 1
+    _state["last_error"] = str(reason); _state["healthy"] = False
+    if _state["consecutive_failures"] >= MAX_FAILURES:
+        _state["enabled"] = False; _state["auto_disabled"] = True
+    _persist_state()
+    return False
