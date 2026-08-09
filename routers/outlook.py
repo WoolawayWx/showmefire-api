@@ -22,7 +22,7 @@ async def get_published_outlook(day: int = 2):
 
 
 @router.get("/api/admin/outlook/draft")
-async def get_outlook_draft(token: str, day: int = 2):
+async def get_outlook_draft(token: Optional[str] = None, day: int = 2):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -31,7 +31,7 @@ async def get_outlook_draft(token: str, day: int = 2):
 
 
 @router.post("/api/admin/outlook/draft")
-async def save_outlook_draft(payload: OutlookSaveRequest, token: str, day: int = 2):
+async def save_outlook_draft(payload: OutlookSaveRequest, token: Optional[str] = None, day: int = 2):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -46,7 +46,7 @@ async def save_outlook_draft(payload: OutlookSaveRequest, token: str, day: int =
 
 
 @router.post("/api/admin/outlook/publish")
-async def publish_outlook(token: str, day: int = 2):
+async def publish_outlook(token: Optional[str] = None, day: int = 2):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -61,7 +61,7 @@ async def publish_outlook(token: str, day: int = 2):
 
 
 @router.delete("/api/admin/outlook/draft")
-async def delete_outlook_draft(token: str, day: int = 2):
+async def delete_outlook_draft(token: Optional[str] = None, day: int = 2):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -74,7 +74,7 @@ async def delete_outlook_draft(token: str, day: int = 2):
 
 
 @router.get("/api/admin/outlook/status")
-async def get_outlook_status(token: str, day: int = 2):
+async def get_outlook_status(token: Optional[str] = None, day: int = 2):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -83,7 +83,7 @@ async def get_outlook_status(token: str, day: int = 2):
 
 
 @router.post("/api/admin/outlook/generate-graphic")
-async def generate_outlook_graphic(token: str, day: int = 2, valid_date: Optional[str] = None, issue_time: Optional[str] = None):
+async def generate_outlook_graphic(token: Optional[str] = None, day: int = 2, valid_date: Optional[str] = None, issue_time: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")

@@ -73,7 +73,7 @@ class DiscordTestEventRequest(BaseModel):
         return normalized
 
 
-def _require_admin(token: str) -> str:
+def _require_admin(token: Optional[str] = None) -> str:
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -214,7 +214,7 @@ def _fetch_discord_servers() -> dict:
 
 
 @router.get("/api/admin/discord/config")
-async def get_discord_config(token: str):
+async def get_discord_config(token: Optional[str] = None):
     _require_admin(token)
     settings = get_discord_admin_settings()
 
@@ -246,7 +246,7 @@ async def get_discord_config(token: str):
 
 
 @router.post("/api/admin/discord/config")
-async def update_discord_config(payload: DiscordConfigUpdateRequest, token: str):
+async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Optional[str] = None):
     email = _require_admin(token)
 
     if payload.channel_id is not None and payload.channel_name is not None:
@@ -332,7 +332,7 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, token: str)
 
 
 @router.get("/api/admin/discord/status")
-async def get_discord_status(token: str):
+async def get_discord_status(token: Optional[str] = None):
     _require_admin(token)
     settings = get_discord_admin_settings()
     health = _fetch_discord_health()
@@ -370,7 +370,7 @@ async def get_discord_status(token: str):
 
 
 @router.get("/api/admin/discord/servers")
-async def get_discord_servers(token: str):
+async def get_discord_servers(token: Optional[str] = None):
     _require_admin(token)
     payload = _fetch_discord_servers()
     return {
@@ -382,7 +382,7 @@ async def get_discord_servers(token: str):
 
 
 @router.post("/api/admin/discord/test-event")
-async def send_discord_test_event(payload: DiscordTestEventRequest, token: str):
+async def send_discord_test_event(payload: DiscordTestEventRequest, token: Optional[str] = None):
     email = _require_admin(token)
     now_dt = datetime.now(timezone.utc)
     last_sent = _TEST_EVENT_LAST_SENT_AT.get(email)

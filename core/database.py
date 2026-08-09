@@ -4,6 +4,8 @@ SQLite Database - core/database.py
 import sqlite3
 import logging
 import os
+import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
@@ -100,7 +102,11 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
             revised_at TIMESTAMP,
             parent_event_id INTEGER,
             reporter_contact TEXT NOT NULL DEFAULT '',
+            reporter_name TEXT NOT NULL DEFAULT '',
+            reporter_org TEXT NOT NULL DEFAULT '',
+            address_text TEXT NOT NULL DEFAULT '',
             submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            upload_token_hash TEXT NOT NULL DEFAULT '',
             consent_version TEXT NOT NULL DEFAULT '',
             captcha_verdict TEXT NOT NULL DEFAULT '',
             moderated_by TEXT NOT NULL DEFAULT '',
@@ -165,6 +171,18 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_event_media_event ON fire_event_media(event_id)')
+
+    # Migrate databases created before the fire-report enhancement.
+    cursor.execute("PRAGMA table_info(fire_events)")
+    columns = {row[1] for row in cursor.fetchall()}
+    for name, definition in (
+        ("reporter_name", "TEXT NOT NULL DEFAULT ''"),
+        ("reporter_org", "TEXT NOT NULL DEFAULT ''"),
+        ("address_text", "TEXT NOT NULL DEFAULT ''"),
+        ("upload_token_hash", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in columns:
+            cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {name} {definition}")
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -501,11 +519,53 @@ def init_database():
             title TEXT NOT NULL,
             body TEXT NOT NULL,
             author_name TEXT NOT NULL,
+            slug TEXT,
+            excerpt TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'published',
+            category TEXT NOT NULL DEFAULT 'Field Notes',
+            cover_image TEXT,
+            seo_title TEXT,
+            seo_description TEXT,
+            body_format TEXT NOT NULL DEFAULT 'plain',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(posts)")
+    post_columns = {row[1] for row in cursor.fetchall()}
+    post_migrations = {
+        "slug": "TEXT",
+        "excerpt": "TEXT NOT NULL DEFAULT ''",
+        "status": "TEXT NOT NULL DEFAULT 'published'",
+        "category": "TEXT NOT NULL DEFAULT 'Field Notes'",
+        "cover_image": "TEXT",
+        "seo_title": "TEXT",
+        "seo_description": "TEXT",
+        "body_format": "TEXT NOT NULL DEFAULT 'plain'",
+    }
+    for column, definition in post_migrations.items():
+        if column not in post_columns:
+            cursor.execute(f"ALTER TABLE posts ADD COLUMN {column} {definition}")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("INSERT OR IGNORE INTO post_categories (name) VALUES ('Field Notes')")
+    cursor.execute("SELECT id, title, slug FROM posts WHERE slug IS NULL OR slug = ''")
+    for post_id, title, existing_slug in cursor.fetchall():
+        base = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode().lower()).strip("-") or f"post-{post_id}"
+        slug = base
+        suffix = 2
+        while cursor.execute("SELECT 1 FROM posts WHERE slug = ? AND id != ?", (slug, post_id)).fetchone():
+            slug = f"{base}-{suffix}"
+            suffix += 1
+        cursor.execute("UPDATE posts SET slug = ?, excerpt = COALESCE(NULLIF(excerpt, ''), substr(body, 1, 220)) WHERE id = ?", (slug, post_id))
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_slug ON posts(slug)")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_status_category ON posts(status, category, created_at DESC)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS post_tags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1223,6 +1283,16 @@ def get_afds_by_office(office: str, limit: int = 10, since: Optional[str] = None
 
 # --- Discussion posts helpers ---
 
+def _normalize_post_tags(tags: Iterable[str]) -> List[str]:
+    normalized = []
+    for raw in tags or []:
+        tag = re.sub(r"\s+", "-", str(raw or "").strip().lower())
+        tag = re.sub(r"[^a-z0-9_-]", "", tag)
+        if tag and tag not in normalized:
+            normalized.append(tag)
+    return normalized
+
+
 def _post_row_extras(cursor: sqlite3.Cursor, post_id: int) -> Dict:
     cursor.execute('SELECT tag FROM post_tags WHERE post_id = ? ORDER BY tag', (post_id,))
     tags = [row[0] for row in cursor.fetchall()]
@@ -1231,23 +1301,40 @@ def _post_row_extras(cursor: sqlite3.Cursor, post_id: int) -> Dict:
     return {"tags": tags, "comment_count": comment_count}
 
 
-def create_post(title: str, body: str, author_name: str, tags: List[str]) -> Dict:
+def _post_slug(title: str, post_id: int, cursor: sqlite3.Cursor) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode().lower()).strip("-") or f"post-{post_id}"
+    slug, suffix = base, 2
+    while cursor.execute("SELECT 1 FROM posts WHERE slug = ? AND id != ?", (slug, post_id)).fetchone():
+        slug = f"{base}-{suffix}"
+        suffix += 1
+    return slug
+
+
+def create_post(title: str, body: str, author_name: str, tags: List[str], excerpt: str = "",
+                status: str = "published", category: str = "Field Notes", cover_image: Optional[str] = None,
+                seo_title: Optional[str] = None, seo_description: Optional[str] = None,
+                body_format: str = "plain") -> Dict:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO posts (title, body, author_name)
-            VALUES (?, ?, ?)
-        ''', (title, body, author_name))
+            INSERT INTO posts (title, body, author_name, excerpt, status, category, cover_image,
+                              seo_title, seo_description, body_format)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title, body, author_name, excerpt or body[:220], status, category or "Field Notes",
+              cover_image, seo_title, seo_description, body_format))
         post_id = cursor.lastrowid
-        for tag in tags:
+        cursor.execute("UPDATE posts SET slug = ? WHERE id = ?", (_post_slug(title, post_id, cursor), post_id))
+        cursor.execute("INSERT OR IGNORE INTO post_categories (name) VALUES (?)", (category or "Field Notes",))
+        for tag in _normalize_post_tags(tags):
             cursor.execute('INSERT INTO post_tags (post_id, tag) VALUES (?, ?)', (post_id, tag))
         conn.commit()
 
         cursor.execute('''
-            SELECT id, title, body, author_name, created_at, updated_at
+            SELECT id, title, body, author_name, slug, excerpt, status, category, cover_image,
+                   seo_title, seo_description, body_format, created_at, updated_at
             FROM posts WHERE id = ?
         ''', (post_id,))
         row = cursor.fetchone()
@@ -1258,7 +1345,8 @@ def create_post(title: str, body: str, author_name: str, tags: List[str]) -> Dic
         conn.close()
 
 
-def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
+def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0,
+               category: Optional[str] = None, status: Optional[str] = "published") -> List[Dict]:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1267,22 +1355,25 @@ def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0) -> L
         safe_limit = max(1, min(limit, 200))
         safe_offset = max(0, offset)
 
+        clauses, params = [], []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
         if tag:
-            cursor.execute('''
-                SELECT id, title, body, author_name, created_at, updated_at
+            clauses.append("id IN (SELECT post_id FROM post_tags WHERE tag = ?)")
+            params.append(tag)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor.execute(f'''
+                SELECT id, title, body, author_name, slug, excerpt, status, category, cover_image,
+                       seo_title, seo_description, body_format, created_at, updated_at
                 FROM posts
-                WHERE id IN (SELECT post_id FROM post_tags WHERE tag = ?)
+                {where}
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
-            ''', (tag, safe_limit, safe_offset))
-        else:
-            cursor.execute('''
-                SELECT id, title, body, author_name, created_at, updated_at
-                FROM posts
-                ORDER BY created_at DESC
-                LIMIT ? OFFSET ?
-            ''', (safe_limit, safe_offset))
-
+            ''', (*params, safe_limit, safe_offset))
         rows = cursor.fetchall()
         posts = []
         for row in rows:
@@ -1305,16 +1396,42 @@ def list_post_tags() -> List[str]:
         conn.close()
 
 
-def get_post(post_id: int) -> Optional[Dict]:
+def list_post_categories() -> List[str]:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM post_categories ORDER BY name")
+        return [row[0] for row in cursor.fetchall()]
+
+
+def create_post_category(name: str) -> str:
+    value = str(name or "").strip()
+    if not value:
+        raise ValueError("category name is required")
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.execute("INSERT OR IGNORE INTO post_categories (name) VALUES (?)", (value,))
+        conn.commit()
+    return value
+
+
+def get_post(post_id: int, slug: Optional[str] = None) -> Optional[Dict]:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute('''
-            SELECT id, title, body, author_name, created_at, updated_at
-            FROM posts WHERE id = ?
-        ''', (post_id,))
+        if slug is not None:
+            cursor.execute('''
+                SELECT id, title, body, author_name, slug, excerpt, status, category, cover_image,
+                       seo_title, seo_description, body_format, created_at, updated_at
+                FROM posts WHERE slug = ?
+            ''', (slug,))
+        else:
+            cursor.execute('''
+                SELECT id, title, body, author_name, slug, excerpt, status, category, cover_image,
+                       seo_title, seo_description, body_format, created_at, updated_at
+                FROM posts WHERE id = ?
+            ''', (post_id,))
         row = cursor.fetchone()
         if not row:
             return None
@@ -1337,7 +1454,12 @@ def update_post(
     post_id: int,
     title: Optional[str] = None,
     body: Optional[str] = None,
-    tags: Optional[List[str]] = None
+    tags: Optional[List[str]] = None,
+    author_name: Optional[str] = None,
+    excerpt: Optional[str] = None, status: Optional[str] = None, category: Optional[str] = None,
+    cover_image: Optional[str] = None, seo_title: Optional[str] = None,
+    seo_description: Optional[str] = None, body_format: Optional[str] = None,
+    slug: Optional[str] = None
 ) -> Optional[Dict]:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -1351,14 +1473,25 @@ def update_post(
             UPDATE posts
             SET title = COALESCE(?, title),
                 body = COALESCE(?, body),
+                author_name = COALESCE(?, author_name),
+                excerpt = COALESCE(?, excerpt),
+                status = COALESCE(?, status),
+                category = COALESCE(?, category),
+                cover_image = COALESCE(?, cover_image),
+                seo_title = COALESCE(?, seo_title),
+                seo_description = COALESCE(?, seo_description),
+                body_format = COALESCE(?, body_format),
+                slug = COALESCE(?, slug),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ''', (title, body, post_id))
+        ''', (title, body, author_name, excerpt, status, category, cover_image, seo_title, seo_description, body_format, slug, post_id))
 
         if tags is not None:
             cursor.execute('DELETE FROM post_tags WHERE post_id = ?', (post_id,))
-            for tag in tags:
+            for tag in _normalize_post_tags(tags):
                 cursor.execute('INSERT INTO post_tags (post_id, tag) VALUES (?, ?)', (post_id, tag))
+        if category:
+            cursor.execute("INSERT OR IGNORE INTO post_categories (name) VALUES (?)", (category,))
 
         conn.commit()
     finally:
@@ -1439,6 +1572,7 @@ _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
     "official_source_system",
     "label_revision", "revised_at", "parent_event_id",
     "reporter_contact", "submitter_ip_hash",
+    "reporter_name", "reporter_org", "address_text",
     "consent_version", "captcha_verdict",
     "moderated_by", "moderated_at", "pii_purged_at",
     "first_seen_at", "last_seen_at",
@@ -1505,6 +1639,10 @@ def create_fire_report(
     submitter_ip_hash: str,
     consent_version: str,
     captcha_verdict: str,
+    reporter_name: str = "",
+    reporter_org: str = "",
+    address_text: str = "",
+    upload_token_hash: str = "",
     county_fips: Optional[str] = None,
     county_name: Optional[str] = None,
     occurred_at_tz_offset_minutes: Optional[int] = None,
@@ -1521,13 +1659,15 @@ def create_fire_report(
                 latitude, longitude, county_fips, county_name,
                 occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
                 acres, acres_is_estimate, description, out_of_ordinary,
-                reporter_contact, submitter_ip_hash, consent_version, captcha_verdict
-            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reporter_contact, reporter_name, reporter_org, address_text,
+                submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
             acres, 1 if acres_is_estimate else 0, description, out_of_ordinary,
-            reporter_contact, submitter_ip_hash, consent_version, captcha_verdict,
+            reporter_contact, reporter_name, reporter_org, address_text,
+            submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict,
         ))
         event_id = cursor.lastrowid
         _set_fire_event_fuels(cursor, event_id, fuel_types)
@@ -1616,6 +1756,7 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
         columns = _ADMIN_EVENT_COLUMNS if admin else _PUBLIC_EVENT_COLUMNS
         event = _fetch_fire_event_row(cursor, event_id, columns)
         if event and admin:
+            event["media"] = get_fire_event_media(event_id)
             cursor.execute('''
                 SELECT id, event_id, action, actor, from_status, to_status, from_tier, to_tier,
                        reason, changed_fields_json, created_at
@@ -1625,6 +1766,71 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
         return event
     finally:
         conn.close()
+
+
+def count_fire_event_media(event_id: int) -> int:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fire_event_media WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        return int(row[0] if row else 0)
+
+
+def get_fire_upload_token_hash(event_id: int) -> Optional[str]:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT upload_token_hash FROM fire_events WHERE id = ?", (event_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+
+def add_fire_event_media(
+    event_id: int,
+    stored_filename: str,
+    original_filename: str,
+    content_type: str,
+    size_bytes: int,
+    sha256: str,
+) -> Dict:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO fire_event_media
+                (event_id, stored_filename, original_filename, content_type, size_bytes, sha256)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, stored_filename, original_filename, content_type, size_bytes, sha256),
+        )
+        conn.commit()
+        row = cursor.execute(
+            """
+            SELECT id, event_id, stored_filename, original_filename, content_type,
+                   size_bytes, sha256, review_state, created_at
+            FROM fire_event_media WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+        return dict(row)
+
+
+def get_fire_event_media(event_id: int) -> List[Dict]:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, event_id, stored_filename, original_filename, content_type,
+                   size_bytes, sha256, review_state, created_at
+            FROM fire_event_media WHERE event_id = ? ORDER BY created_at, id
+            """,
+            (event_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def list_fire_events(
@@ -1795,6 +2001,9 @@ def update_fire_event(event_id: int, actor: str, edit_reason: str, **fields) -> 
                 verification_tier = COALESCE(?, verification_tier),
                 official_source_ref = COALESCE(?, official_source_ref),
                 cause_category = COALESCE(?, cause_category),
+                reporter_name = COALESCE(?, reporter_name),
+                reporter_org = COALESCE(?, reporter_org),
+                address_text = COALESCE(?, address_text),
                 revised_at = CURRENT_TIMESTAMP,
                 label_revision = label_revision + 1,
                 updated_at = CURRENT_TIMESTAMP
@@ -1803,7 +2012,8 @@ def update_fire_event(event_id: int, actor: str, edit_reason: str, **fields) -> 
             fields.get("latitude"), fields.get("longitude"), fields.get("acres"),
             fields.get("description"), fields.get("out_of_ordinary"),
             fields.get("verification_tier"), fields.get("official_source_ref"),
-            fields.get("cause_category"), event_id,
+            fields.get("cause_category"), fields.get("reporter_name"),
+            fields.get("reporter_org"), fields.get("address_text"), event_id,
         ))
         if fuel_types is not None:
             _set_fire_event_fuels(cursor, event_id, fuel_types)
@@ -1987,11 +2197,14 @@ def purge_fire_submission_pii(older_than_days: int = 90) -> int:
     try:
         cursor.execute('''
             UPDATE fire_events
-            SET reporter_contact = '', submitter_ip_hash = '', pii_purged_at = CURRENT_TIMESTAMP
+            SET reporter_contact = '', reporter_name = '', reporter_org = '',
+                address_text = '', submitter_ip_hash = '', upload_token_hash = '',
+                pii_purged_at = CURRENT_TIMESTAMP
             WHERE moderated_at IS NOT NULL
               AND moderated_at <= datetime('now', ? || ' days')
               AND pii_purged_at IS NULL
-              AND (reporter_contact != '' OR submitter_ip_hash != '')
+              AND (reporter_contact != '' OR reporter_name != '' OR reporter_org != ''
+                   OR address_text != '' OR submitter_ip_hash != '' OR upload_token_hash != '')
         ''', (f"-{max(0, older_than_days)}",))
         purged = cursor.rowcount
         conn.commit()

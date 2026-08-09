@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
 from services.synoptic import (
@@ -50,7 +50,17 @@ import sqlite3
 from core.security import (
     verify_password,
     create_access_token,
+    create_refresh_token,
     verify_token,
+    set_request_token,
+    reset_request_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    ACCESS_COOKIE_NAME,
+    REFRESH_COOKIE_NAME,
+    AUTH_COOKIE_SECURE,
+    AUTH_COOKIE_SAMESITE,
+    AUTH_COOKIE_DOMAIN,
     ADMIN_EMAIL,
     ADMIN_PASSWORD_HASH,
     ACCESS_TOKEN_EXPIRE_HOURS,
@@ -208,6 +218,37 @@ class LoginRequest(BaseModel):
     email:str
     password:str
 
+def _set_auth_cookie(response: Response, name: str, value: str, max_age: int) -> None:
+    response.set_cookie(
+        key=name,
+        value=value,
+        max_age=max_age,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
+        domain=AUTH_COOKIE_DOMAIN,
+        path="/",
+    )
+
+def _clear_auth_cookie(response: Response, name: str) -> None:
+    response.delete_cookie(
+        key=name,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite=AUTH_COOKIE_SAMESITE,
+        domain=AUTH_COOKIE_DOMAIN,
+        path="/",
+    )
+
+@app.middleware("http")
+async def admin_cookie_context(request: Request, call_next):
+    """Make the access cookie available to legacy verify_token callers."""
+    context = set_request_token(request.cookies.get(ACCESS_COOKIE_NAME))
+    try:
+        return await call_next(request)
+    finally:
+        reset_request_token(context)
+
 
 class DevProjectCreate(BaseModel):
     name: str
@@ -336,25 +377,27 @@ def list_gis():
     return JSONResponse(content={"files": files})
 
 @app.post("/api/admin/login")
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, response: Response):
     logger.info(f"Login attempt from: {data.email}")
     
     # Verify email and password
     if data.email != ADMIN_EMAIL:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not verify_password(data.password, ADMIN_PASSWORD_HASH):
+    if not ADMIN_PASSWORD_HASH or not verify_password(data.password, ADMIN_PASSWORD_HASH):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     # Create JWT token
     access_token = create_access_token(
         data={"sub": data.email},
-        expires_delta=timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    
+    refresh_token = create_refresh_token(data={"sub": data.email})
+    _set_auth_cookie(response, ACCESS_COOKIE_NAME, access_token, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    _set_auth_cookie(response, REFRESH_COOKIE_NAME, refresh_token, REFRESH_TOKEN_EXPIRE_DAYS * 86400)
+
     return {
         "success": True,
-        "token": access_token,
         "message": "Login successful"
     }
 
@@ -362,13 +405,32 @@ class TokenVerify(BaseModel):
     token: str
 
 @app.post("/api/admin/verify")
-async def verify_admin_token(data: TokenVerify):
+async def verify_admin_token(data: Optional[TokenVerify] = None):
     """Verify if a token is still valid"""
-    email = verify_token(data.token)
+    email = verify_token(data.token if data else None)
     if email:
         return {"valid": True, "email": email}
     else:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+@app.post("/api/admin/refresh")
+async def refresh_admin_token(request: Request, response: Response):
+    """Rotate the access cookie using a valid refresh cookie."""
+    email = verify_token(request.cookies.get(REFRESH_COOKIE_NAME), expected_type="refresh")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    access_token = create_access_token(
+        data={"sub": email},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    _set_auth_cookie(response, ACCESS_COOKIE_NAME, access_token, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    return {"success": True, "message": "Token refreshed"}
+
+@app.post("/api/admin/logout")
+async def logout_admin(response: Response):
+    _clear_auth_cookie(response, ACCESS_COOKIE_NAME)
+    _clear_auth_cookie(response, REFRESH_COOKIE_NAME)
+    return {"success": True, "message": "Logged out"}
 
 @app.get("/api/banner")
 async def get_banner_public():
@@ -377,7 +439,7 @@ async def get_banner_public():
     return load_banner_config()
 
 @app.get("/api/admin/banner")
-async def get_banner_admin(token: str):
+async def get_banner_admin(token: Optional[str] = None):
     """Get banner data (admin only)"""
     email = verify_token(token)
     if not email:
@@ -385,7 +447,7 @@ async def get_banner_admin(token: str):
     return load_banner_config()
 
 @app.post("/api/admin/banner")
-async def update_banner(banner: BannerData, token: str):
+async def update_banner(banner: BannerData, token: Optional[str] = None):
     """Update banner (admin only)"""
     email = verify_token(token)
     if not email:
@@ -396,7 +458,7 @@ async def update_banner(banner: BannerData, token: str):
 
 
 @app.get("/api/admin/ignored_stations")
-def admin_list_ignored(token: str):
+def admin_list_ignored(token: Optional[str] = None):
     """List ignored stations (admin only)"""
     email = verify_token(token)
     if not email:
@@ -417,7 +479,7 @@ def admin_list_ignored(token: str):
 
 
 @app.post("/api/admin/ignored_stations")
-def admin_add_ignored(payload: dict, token: str):
+def admin_add_ignored(payload: dict, token: Optional[str] = None):
     """Add an ignored station. Payload: { stid: 'MBGM7', reason: '...' }"""
     email = verify_token(token)
     if not email:
@@ -448,7 +510,7 @@ def admin_add_ignored(payload: dict, token: str):
 
 
 @app.delete("/api/admin/ignored_stations/{stid}")
-def admin_remove_ignored(stid: str, token: str):
+def admin_remove_ignored(stid: str, token: Optional[str] = None):
     """Remove an ignored station by STID"""
     email = verify_token(token)
     if not email:
@@ -486,7 +548,7 @@ def api_get_website_version():
 
 
 @app.post('/api/admin/website/version')
-def admin_set_website_version(payload: dict, token: str):
+def admin_set_website_version(payload: dict, token: Optional[str] = None):
     """Admin-only: set website version. Payload: { version: '1.2.3' }"""
     email = verify_token(token)
     if not email:
@@ -520,7 +582,7 @@ def get_public_projects():
 
 
 @app.get('/api/admin/projects')
-def admin_list_projects(token: str):
+def admin_list_projects(token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -528,7 +590,7 @@ def admin_list_projects(token: str):
 
 
 @app.post('/api/admin/projects')
-def admin_create_project(payload: DevProjectCreate, token: str):
+def admin_create_project(payload: DevProjectCreate, token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -548,7 +610,7 @@ def admin_create_project(payload: DevProjectCreate, token: str):
 
 
 @app.put('/api/admin/projects/{project_id}')
-def admin_update_project(project_id: int, payload: DevProjectUpdate, token: str):
+def admin_update_project(project_id: int, payload: DevProjectUpdate, token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -570,7 +632,7 @@ def admin_update_project(project_id: int, payload: DevProjectUpdate, token: str)
 
 
 @app.delete('/api/admin/projects/{project_id}')
-def admin_delete_project(project_id: int, token: str):
+def admin_delete_project(project_id: int, token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -581,7 +643,7 @@ def admin_delete_project(project_id: int, token: str):
 
 
 @app.get("/api/admin/opsbrief/files")
-def admin_list_opsbrief_files(token: str):
+def admin_list_opsbrief_files(token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -599,7 +661,7 @@ def admin_list_opsbrief_files(token: str):
 
 
 @app.post("/api/admin/opsbrief/upload")
-async def admin_upload_opsbrief(token: str, upload: UploadFile = File(...)):
+async def admin_upload_opsbrief(token: Optional[str] = None, upload: UploadFile = File(...)):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -624,7 +686,7 @@ async def admin_upload_opsbrief(token: str, upload: UploadFile = File(...)):
 
 
 @app.delete("/api/admin/opsbrief/files/{filename}")
-def admin_delete_opsbrief_file(filename: str, token: str):
+def admin_delete_opsbrief_file(filename: str, token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -642,7 +704,7 @@ def admin_delete_opsbrief_file(filename: str, token: str):
 
 
 @app.get("/api/admin/opsbrief/config")
-def admin_get_opsbrief_config(token: str):
+def admin_get_opsbrief_config(token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -652,7 +714,7 @@ def admin_get_opsbrief_config(token: str):
 
 
 @app.post("/api/admin/opsbrief/config")
-def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, token: str):
+def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, token: Optional[str] = None):
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1051,7 +1113,7 @@ def api_latest_forecast():
     return forecast
 
 @app.get("/api/admin/reports/list")
-async def list_reports(token: str):
+async def list_reports(token: Optional[str] = None):
     """List all reports (files and folders) in the reports directory (Admin/Logged-in only)"""
     email = verify_token(token)
     if not email:
@@ -1059,7 +1121,7 @@ async def list_reports(token: str):
     return list_files(str(REPORTS_DIR))
 
 @app.get("/api/admin/reports/list/{path:path}")
-async def list_reports_in_path(path: str, token: str):
+async def list_reports_in_path(path: str, token: Optional[str] = None):
     """List contents of a specific folder within reports directory"""
     email = verify_token(token)
     if not email:
@@ -1067,7 +1129,7 @@ async def list_reports_in_path(path: str, token: str):
     return list_files(str(REPORTS_DIR), path)
 
 @app.get("/api/admin/reports/view/{filepath:path}")
-async def view_report(filepath: str, token: str):
+async def view_report(filepath: str, token: Optional[str] = None):
     """Serve a specific report file securely from reports directory"""
     email = verify_token(token)
     if not email:
@@ -1075,7 +1137,7 @@ async def view_report(filepath: str, token: str):
     return view_file(str(REPORTS_DIR), filepath, email)
 
 @app.get("/api/admin/logs/list")
-async def list_logs(token: str):
+async def list_logs(token: Optional[str] = None):
     """List all logs (files and folders) in the logs directory (Admin/Logged-in only)"""
     email = verify_token(token)
     if not email:
@@ -1083,7 +1145,7 @@ async def list_logs(token: str):
     return list_files(str(LOGS_DIR))
 
 @app.get("/api/admin/logs/list/{path:path}")
-async def list_logs_in_path(path: str, token: str):
+async def list_logs_in_path(path: str, token: Optional[str] = None):
     """List contents of a specific folder within logs directory"""
     email = verify_token(token)
     if not email:
@@ -1091,7 +1153,7 @@ async def list_logs_in_path(path: str, token: str):
     return list_files(str(LOGS_DIR), path)
 
 @app.get("/api/admin/logs/view/{filepath:path}")
-async def view_log(filepath: str, token: str):
+async def view_log(filepath: str, token: Optional[str] = None):
     """Serve a specific log file securely from logs directory"""
     email = verify_token(token)
     if not email:

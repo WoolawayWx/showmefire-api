@@ -23,8 +23,8 @@ class PostsTests(unittest.TestCase):
         self.database_patch.stop()
         self.temporary.cleanup()
 
-    def create_post(self, title="Red flag conditions", body="Elevated winds statewide.", author_name="Jane - Boone County FPD", tags=None):
-        payload = posts_router.PostCreate(title=title, body=body, author_name=author_name, tags=tags or ["boone-county"])
+    def create_post(self, title="Red flag conditions", body="Elevated winds statewide.", author_name="Jane - Boone County FPD", tags=None, **kwargs):
+        payload = posts_router.PostCreate(title=title, body=body, author_name=author_name, tags=tags or ["boone-county"], **kwargs)
         result = posts_router.admin_create_post(payload, self.token)
         return result["post"]
 
@@ -33,6 +33,7 @@ class PostsTests(unittest.TestCase):
         self.assertEqual(post["title"], "Red flag conditions")
         self.assertEqual(post["tags"], ["boone-county"])
         self.assertEqual(post["comment_count"], 0)
+        self.assertEqual(post["slug"], "red-flag-conditions")
 
     def test_list_posts_orders_newest_first_and_reports_available_tags(self):
         self.create_post(title="First", tags=["boone-county"])
@@ -148,6 +149,14 @@ class PostsTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             posts_router.admin_list_posts("not-a-real-token")
         self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_drafts_are_hidden_from_public_and_categories_filter(self):
+        self.create_post(title="Private note", category="Operations", status="draft")
+        public = posts_router.public_list_posts()
+        self.assertEqual(public["posts"], [])
+        self.assertIn("Operations", public["available_categories"])
+        published = self.create_post(title="Published note", category="Operations")
+        self.assertEqual(posts_router.public_get_post(published["slug"])["post"]["id"], published["id"])
 
 
 if __name__ == "__main__":

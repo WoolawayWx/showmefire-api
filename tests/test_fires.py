@@ -1,4 +1,6 @@
 import tempfile
+import asyncio
+from io import BytesIO
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -6,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi import UploadFile
 from pydantic import ValidationError
 
 from core import database
@@ -125,6 +128,18 @@ class FireReportValidationTests(unittest.TestCase):
         report = fires_router.FireReportCreate(**_valid_payload(reporter_contact="chief@example.com"))
         self.assertEqual(report.reporter_contact, "chief@example.com")
 
+    def test_accepts_optional_reporter_and_address_fields(self):
+        report = fires_router.FireReportCreate(**_valid_payload(
+            reporter_name="Jane Doe",
+            reporter_org="County Dispatch",
+            address_text="123 Main Street, Columbia, MO",
+        ))
+        self.assertEqual(report.reporter_org, "County Dispatch")
+
+    def test_rejects_line_breaks_in_reporter_fields(self):
+        with self.assertRaises(ValidationError):
+            fires_router.FireReportCreate(**_valid_payload(reporter_name="Jane\nDoe"))
+
 
 class FireReportModerationValidationTests(unittest.TestCase):
     def test_official_source_confirmed_requires_ref(self):
@@ -179,6 +194,26 @@ class FiresRouterTests(unittest.TestCase):
         self.submit()
         listing = fires_router.list_public_fire_events(SimpleNamespace(headers={}))
         self.assertEqual(listing["count"], 0)
+
+    def test_media_upload_rejects_wrong_mime_and_accepts_valid_png(self):
+        result = self.submit()
+        report = result["report"]
+        bad = UploadFile(filename="not-image.png", file=BytesIO(b"not an image"))
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(fires_router.upload_fire_report_media(
+                report["id"], report["upload_token"], bad
+            ))
+        self.assertEqual(ctx.exception.status_code, 415)
+
+        png = UploadFile(
+            filename="fire.png",
+            file=BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32),
+        )
+        uploaded = asyncio.run(fires_router.upload_fire_report_media(
+            report["id"], report["upload_token"], png
+        ))
+        self.assertEqual(uploaded["media"]["content_type"], "image/png")
+        self.assertEqual(len(database.get_fire_event(report["id"], admin=True)["media"]), 1)
 
     def test_point_outside_counties_but_in_bbox_still_succeeds_with_null_county(self):
         # A point inside the MO bbox but over open water / no polygon match.
@@ -303,7 +338,10 @@ class FiresRouterTests(unittest.TestCase):
         listing = fires_router.list_public_fire_events(SimpleNamespace(headers={}))
         self.assertEqual(listing["count"], 1)
         public_event = listing["events"][0]
-        for leaked_key in ("reporter_contact", "submitter_ip_hash", "captcha_verdict"):
+        for leaked_key in (
+            "reporter_contact", "reporter_name", "reporter_org", "address_text",
+            "submitter_ip_hash", "captcha_verdict", "upload_token_hash",
+        ):
             self.assertNotIn(leaked_key, public_event)
 
     def test_geojson_shape_matches_existing_satellite_feed_contract(self):

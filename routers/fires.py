@@ -14,23 +14,33 @@ changes.
 """
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
+import secrets
+import shutil
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, File, FileResponse, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core.database import (
     add_ip_to_blocklist,
+    add_fire_event_media,
     consume_fire_submission_quota,
+    count_fire_event_media,
     create_fire_report,
     delete_fire_event,
     export_fire_labels,
     get_fire_event,
+    get_fire_upload_token_hash,
     is_ip_blocked,
     list_fire_events,
     list_nearby_fire_events,
@@ -68,9 +78,14 @@ FIRE_LABEL_ADMIN_REVIEWED_WEIGHT = float(os.getenv("FIRE_LABEL_ADMIN_REVIEWED_WE
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CONTACT_RE = re.compile(r"^[A-Za-z0-9@._%+\-\s()]{5,120}$")
+_NAME_RE = re.compile(r"^[^\r\n]{1,120}$")
+MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+MAX_MEDIA_BYTES = 10 * 1024 * 1024
+MAX_MEDIA_COUNT = 5
+MEDIA_DIR = Path(os.getenv("FIRE_MEDIA_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "fire-media")))
 
 
-def _require_admin(token: str) -> str:
+def _require_admin(token: Optional[str] = None) -> str:
     email = verify_token(token)
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -102,6 +117,22 @@ def _clean_text(value: Optional[str], *, required: bool, field: str) -> str:
     return text
 
 
+def _reverse_geocode(latitude: float, longitude: float) -> str:
+    """Best-effort address label; never blocks or rejects a report."""
+    try:
+        query = urllib.parse.urlencode({"lat": latitude, "lon": longitude, "format": "json", "zoom": 18})
+        request = urllib.request.Request(
+            f"https://nominatim.openstreetmap.org/reverse?{query}",
+            headers={"User-Agent": "ShowMeFire/1.0 fire-report-address"},
+        )
+        with urllib.request.urlopen(request, timeout=0.75) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return _clean_text(data.get("display_name"), required=False, field="address_text")[:500]
+    except Exception:
+        logger.info("Reverse geocoding unavailable", exc_info=False)
+        return ""
+
+
 class FireReportCreate(BaseModel):
     latitude: float = Field(ge=MO_LAT_MIN, le=MO_LAT_MAX)
     longitude: float = Field(ge=MO_LON_MIN, le=MO_LON_MAX)
@@ -113,6 +144,9 @@ class FireReportCreate(BaseModel):
     description: str = Field(min_length=20, max_length=4000)
     out_of_ordinary: str = Field(default="", max_length=2000)
     reporter_contact: str = Field(default="", max_length=120)
+    reporter_name: str = Field(default="", max_length=120)
+    reporter_org: str = Field(default="", max_length=120)
+    address_text: str = Field(default="", max_length=500)
     consent_acknowledged: bool
     turnstile_token: str = Field(min_length=1, max_length=4096)
     website: str = Field(default="", max_length=200)  # honeypot; must stay empty
@@ -157,6 +191,14 @@ class FireReportCreate(BaseModel):
         text = _clean_text(value, required=False, field="reporter_contact")
         if text and not _CONTACT_RE.fullmatch(text):
             raise ValueError("reporter_contact must be an email or phone number")
+        return text
+
+    @field_validator("reporter_name", "reporter_org", "address_text")
+    @classmethod
+    def _clean_reporter_fields(cls, value: str) -> str:
+        text = _clean_text(value, required=False, field="reporter details")
+        if text and not _NAME_RE.fullmatch(text):
+            raise ValueError("reporter details contain invalid line breaks")
         return text
 
     @field_validator("occurred_at")
@@ -221,6 +263,9 @@ class FireEventUpdate(BaseModel):
     verification_tier: Optional[Literal[VERIFICATION_TIERS]] = None
     official_source_ref: Optional[str] = Field(default=None, max_length=500)
     cause_category: Optional[str] = None
+    reporter_name: Optional[str] = Field(default=None, max_length=120)
+    reporter_org: Optional[str] = Field(default=None, max_length=120)
+    address_text: Optional[str] = Field(default=None, max_length=500)
     redact_reporter_contact: bool = False
     edit_reason: str = Field(min_length=3, max_length=500)
 
@@ -323,6 +368,8 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         raise HTTPException(status_code=403, detail="Captcha verification failed. Please try again.")
 
     county_fips, county_name = county_for_point(payload.latitude, payload.longitude)
+    upload_token = secrets.token_urlsafe(32)
+    address_text = payload.address_text or _reverse_geocode(payload.latitude, payload.longitude)
 
     event = create_fire_report(
         latitude=payload.latitude,
@@ -335,7 +382,11 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         description=payload.description,
         out_of_ordinary=payload.out_of_ordinary,
         reporter_contact=payload.reporter_contact,
+        reporter_name=payload.reporter_name,
+        reporter_org=payload.reporter_org,
+        address_text=address_text,
         submitter_ip_hash=ip_hash,
+        upload_token_hash=hashlib.sha256(upload_token.encode()).hexdigest(),
         consent_version=CONSENT_VERSION,
         captcha_verdict=verdict,
         county_fips=county_fips,
@@ -349,8 +400,73 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
             "status": event["status"],
             "submitted_at": event["created_at"],
             "county_name": event.get("county_name"),
+            "upload_token": upload_token,
         },
     }
+
+
+@router.post("/api/fires/reports/{event_id}/media", status_code=201)
+async def upload_fire_report_media(
+    event_id: int,
+    upload_token: str,
+    media: UploadFile = File(...),
+):
+    """Attach media during the private, post-submission upload step."""
+    if not upload_token or len(upload_token) > 256:
+        raise HTTPException(status_code=403, detail="Invalid upload token")
+    event = get_fire_event(event_id, admin=True)
+    if not event or event.get("status") != "pending" or event.get("source") != "user_submission":
+        raise HTTPException(status_code=404, detail="Report not found")
+    expected = get_fire_upload_token_hash(event_id) or ""
+    supplied = hashlib.sha256(upload_token.encode()).hexdigest()
+    if not expected or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=403, detail="Invalid upload token")
+    if count_fire_event_media(event_id) >= MAX_MEDIA_COUNT:
+        raise HTTPException(status_code=413, detail=f"Maximum of {MAX_MEDIA_COUNT} media files allowed")
+
+    content_type = (media.content_type or "").lower().split(";")[0].strip()
+    if content_type not in MEDIA_TYPES:
+        raise HTTPException(status_code=415, detail="Only JPEG, PNG, and WebP images are allowed")
+    filename = Path(media.filename or "upload").name[:180]
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+
+    content = await media.read(MAX_MEDIA_BYTES + 1)
+    if len(content) > MAX_MEDIA_BYTES:
+        raise HTTPException(status_code=413, detail="Media file exceeds 10 MB")
+    signatures = {
+        "image/jpeg": content[:3] == b"\xff\xd8\xff",
+        "image/png": content[:8] == b"\x89PNG\r\n\x1a\n",
+        "image/webp": content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+    }
+    if not signatures.get(content_type, False):
+        raise HTTPException(status_code=415, detail="File content does not match its MIME type")
+
+    digest = hashlib.sha256(content).hexdigest()
+    stored_name = f"{event_id}-{secrets.token_hex(16)}{MEDIA_TYPES[content_type]}"
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    target = MEDIA_DIR / stored_name
+    target.write_bytes(content)
+    try:
+        record = add_fire_event_media(event_id, stored_name, filename, content_type, len(content), digest)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    return {"success": True, "media": {k: v for k, v in record.items() if k != "sha256"}}
+
+
+@router.get("/api/admin/fires/reports/{event_id}/media/{media_id}")
+def admin_get_fire_report_media(event_id: int, media_id: int, token: Optional[str] = None):
+    """Serve report media only to authenticated administrators."""
+    _require_admin(token)
+    event = get_fire_event(event_id, admin=True)
+    item = next((row for row in (event or {}).get("media", []) if row["id"] == media_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found")
+    target = MEDIA_DIR / Path(item["stored_filename"]).name
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Media file unavailable")
+    return FileResponse(target, media_type=item["content_type"], filename=item["original_filename"])
 
 
 # --- Public: read ---
@@ -421,7 +537,7 @@ def get_public_fire_event(event_id: int, response: Response):
 
 @router.get("/api/admin/fires/reports")
 def admin_list_fire_reports(
-    token: str,
+    token: Optional[str] = None,
     status: Optional[str] = "pending",
     source: Optional[str] = None,
     limit: int = 50,
@@ -434,7 +550,7 @@ def admin_list_fire_reports(
 
 
 @router.get("/api/admin/fires/reports/{event_id}")
-def admin_get_fire_report(event_id: int, token: str):
+def admin_get_fire_report(event_id: int, token: Optional[str] = None):
     """Fire report detail, including moderation history and contact info (admin only)"""
     _require_admin(token)
     event = get_fire_event(event_id, admin=True)
@@ -445,7 +561,7 @@ def admin_get_fire_report(event_id: int, token: str):
 
 
 @router.post("/api/admin/fires/reports/{event_id}/approve")
-def admin_approve_fire_report(event_id: int, payload: FireReportModeration, token: str):
+def admin_approve_fire_report(event_id: int, payload: FireReportModeration, token: Optional[str] = None):
     """Approve a pending fire report and assign its verification tier (admin only)"""
     actor = _require_admin(token)
     result = set_fire_event_status(
@@ -461,7 +577,7 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, toke
 
 
 @router.post("/api/admin/fires/reports/{event_id}/reject")
-def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token: str):
+def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token: Optional[str] = None):
     """Reject a pending fire report (admin only)"""
     actor = _require_admin(token)
     result = set_fire_event_status(event_id, to_status="rejected", actor=actor, reason=payload.reason)
@@ -473,7 +589,7 @@ def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token:
 
 
 @router.put("/api/admin/fires/events/{event_id}")
-def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: str):
+def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: Optional[str] = None):
     """Edit a fire event; every edit requires a reason (admin only)"""
     actor = _require_admin(token)
     fields = payload.model_dump(exclude={"edit_reason"}, exclude_none=True)
@@ -484,7 +600,7 @@ def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: str)
 
 
 @router.delete("/api/admin/fires/events/{event_id}")
-def admin_delete_fire_event(event_id: int, token: str, reason: str = ""):
+def admin_delete_fire_event(event_id: int, token: Optional[str] = None, reason: str = ""):
     """Soft-delete a fire event; moderation history is retained (admin only)"""
     actor = _require_admin(token)
     deleted = delete_fire_event(event_id, actor=actor, reason=reason)
@@ -494,7 +610,7 @@ def admin_delete_fire_event(event_id: int, token: str, reason: str = ""):
 
 
 @router.get("/api/admin/fires/labels")
-def admin_export_fire_labels(token: str, min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
+def admin_export_fire_labels(token: Optional[str] = None, min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
     """Fire events eligible as model training labels (admin only)"""
     _require_admin(token)
     if min_tier not in VERIFICATION_TIERS:
@@ -509,7 +625,7 @@ def admin_export_fire_labels(token: str, min_tier: str = "admin_reviewed", since
 
 
 @router.post("/api/admin/fires/blocklist")
-def admin_add_to_blocklist(payload: BlocklistCreate, token: str):
+def admin_add_to_blocklist(payload: BlocklistCreate, token: Optional[str] = None):
     """Block an IP hash from submitting further reports (admin only)"""
     actor = _require_admin(token)
     add_ip_to_blocklist(payload.ip_hash, payload.reason, actor)
