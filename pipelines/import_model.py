@@ -27,12 +27,39 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.versioning import register_trained_model
 
+# gbm is deliberately absent: the risk-fusion guard can legitimately set
+# weight=0 (GLM-only ships with no gbm.json at all - see v5_guard.py's
+# exact-incumbent-fallback pattern this mirrors).
+REQUIRED_RISK_FUSION_ASSET_ROLES = {
+    "glm", "guard", "calibration", "effort", "county_cells", "parity_vector",
+    "contract", "evaluation",
+}
+
 
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""): digest.update(block)
     return digest.hexdigest()
+
+
+def _verify_generic_multiasset(files, declarations, required_roles):
+    """
+    Generic multi-asset verification: every required role present, every
+    declared file exists and matches its recorded sha256. No model-specific
+    smoke test - model_type-specific checks (e.g. the ONNX/grid checks for
+    fuel_moisture_spatial) get their own verifier instead of overloading
+    this one.
+    """
+    if missing := required_roles - set(declarations):
+        raise SystemExit(f"Release assets missing required roles: {sorted(missing)}")
+    resolved = {}
+    for role, declaration in declarations.items():
+        path = files.get(declaration["filename"])
+        if not path or _sha256(path) != declaration["sha256"]:
+            raise SystemExit(f"Missing or invalid release asset: {role}")
+        resolved[role] = path
+    return resolved
 
 
 def _verify_spatial_assets(files, declarations):
@@ -87,7 +114,13 @@ def import_release(model_type, tag, repo, bump="patch"):
             ) if key in meta
         }
         if declarations:
-            resolved = _verify_spatial_assets({path.name: path for path in model_files}, declarations)
+            files_by_name = {path.name: path for path in model_files}
+            if model_type == "fuel_moisture_spatial":
+                resolved = _verify_spatial_assets(files_by_name, declarations)
+            elif model_type == "fire_risk_fusion":
+                resolved = _verify_generic_multiasset(files_by_name, declarations, REQUIRED_RISK_FUSION_ASSET_ROLES)
+            else:
+                resolved = _verify_generic_multiasset(files_by_name, declarations, set(declarations))
             assets = {role: {"path": resolved[role], **{key: value for key, value in declaration.items() if key not in ("file", "filename", "sha256")}}
                       for role, declaration in declarations.items()}
             version = register_trained_model(model_type=model_type, performance=performance, bump=bump,
@@ -103,7 +136,8 @@ def import_release(model_type, tag, repo, bump="patch"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Import a model from a GitHub release into this server's registry as a beta candidate")
-    parser.add_argument("--model", required=True, choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial"])
+    parser.add_argument("--model", required=True,
+                         choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion"])
     parser.add_argument("--tag", required=True, help="Release tag to import, e.g. fuel_moisture-v1.5.0-beta.1")
     parser.add_argument("--repo", default=None, help="owner/repo (defaults to SMF_GITHUB_REPO env var)")
     parser.add_argument("--bump", choices=["major", "minor", "patch"], default="patch",

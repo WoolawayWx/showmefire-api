@@ -1,0 +1,48 @@
+{
+  "schema": "contract-mirrors-1",
+  "description": "Byte-identical artifact pairs that must never drift between the api and model-training repos. Run scripts/verify_contract_mirrors.py from a workspace checkout that has both repos side by side - this cannot run inside the deployed API container, which only has api/ (see api/Dockerfile: COPY . . from build context api/).",
+  "pairs": [
+    {
+      "name": "fire_danger_rules",
+      "api_path": "core/fire_danger_rules.json",
+      "training_path": "rules/fire_danger_rules.json",
+      "sha256": "6c6cd8e4711ec9968c858380e70678871643b146d73b8324266e818eb0c4f48a",
+      "invalidates": [
+        "fuel_moisture_station_guarded",
+        "fuel_moisture_station_summer_guarded",
+        "fuel_moisture_spatial",
+        "fire_risk_fusion"
+      ]
+    },
+    {
+      "name": "precipitation_contract",
+      "api_path": "core/precipitation_contract.json",
+      "training_path": "spatial/precipitation_contract.json",
+      "sha256": "48392f7d83f7c2110b91e50b44ecb4efad4d665fb2bdd48e6737ca2a6e0bb180",
+      "invalidates": [
+        "fuel_moisture_station_guarded",
+        "fuel_moisture_station_summer_guarded",
+        "fuel_moisture_spatial",
+        "fire_risk_fusion"
+      ]
+    },
+    {
+      "name": "rule_uncertainty",
+      "api_path": "services/rule_uncertainty.py",
+      "training_path": "risk_fusion/rule_uncertainty.py",
+      "sha256": "0585cce02d5d7e7165ec222f09af7bd66fa4007fe8d6bff59bbe2cd3a64e679b",
+      "invalidates": [
+        "fire_risk_fusion"
+      ]
+    },
+    {
+      "name": "risk_fusion_features",
+      "api_path": "core/risk_fusion_features.py",
+      "training_path": "risk_fusion/features.py",
+      "sha256": "22913f66f29348de670aa4d8b86428f01a158652e8cc89467801c4b633a45cc1",
+      "invalidates": [
+        "fire_risk_fusion"
+      ]
+    }
+  ]
+}

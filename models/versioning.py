@@ -30,6 +30,19 @@ REQUIRED_BETA_METADATA = {
     "data_match_policy", "validation_folds", "class_support", "feature_columns",
 }
 
+# fire_risk_fusion is a separate model family from the fuel_moisture lineage
+# (V2-V5): different target (independent fire-occurrence labels, not target_fm),
+# different unit of analysis (county-day), and a v1 that is advisory-only by
+# design - see model-training/risk_fusion/risk_fusion_contract.py. This
+# metadata set is checked IN ADDITION TO REQUIRED_BETA_METADATA.
+REQUIRED_RISK_FUSION_METADATA = {
+    "label_manifest_sha256", "label_min_tier", "label_rows_by_tier",
+    "cause_filter", "count_family", "model_family",
+    "offset_definition_sha256", "feature_module_sha256",
+    "policy_version", "policy_sha256", "guard_active_row_fraction",
+    "advisory_only",
+}
+
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
 
 # Static filenames older/ad-hoc scripts still hardcode. promote() keeps these
@@ -167,10 +180,28 @@ def validate_promotion_candidate(model_type, candidate):
     """Return promotion blockers without modifying registry state."""
     blockers = []
     metadata = candidate.get("metadata") or {}
+    if model_type == "fire_risk_fusion":
+        from core.fire_danger import RULE_SPEC_SHA256, RULE_SPEC_VERSION
     if model_type in {"fuel_moisture", "fire_danger"}:
         missing = sorted(REQUIRED_BETA_METADATA.difference(metadata))
         if missing:
             blockers.append(f"missing metadata: {', '.join(missing)}")
+    if model_type == "fire_risk_fusion":
+        missing = sorted(REQUIRED_BETA_METADATA.union(REQUIRED_RISK_FUSION_METADATA).difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+        # v1 authorizes advisory publication only (see risk-fusion-promotion-policy-v1).
+        # A candidate must be structurally unpromotable to a serving path -
+        # this is not a gate that can be satisfied later, it is a hard v1 boundary.
+        if metadata.get("advisory_only") is not True:
+            blockers.append("fire_risk_fusion candidates must have advisory_only=True in v1")
+        if metadata.get("rule_spec_version") != RULE_SPEC_VERSION:
+            blockers.append("rule spec version mismatch")
+        if metadata.get("rule_spec_sha256") != RULE_SPEC_SHA256:
+            blockers.append("rule spec checksum mismatch")
+        weight = metadata.get("guard_active_row_fraction")
+        if metadata.get("model_family") != "glm" and (weight is None or float(weight) < 0.10):
+            blockers.append("guard_active_row_fraction must be >= 0.10 unless model_family == 'glm'")
     precipitation_features = [name for name in metadata.get("feature_columns", [])
                               if name.startswith("precip_") or name == "hours_since_rain"]
     if model_type == "fuel_moisture" and precipitation_features:
