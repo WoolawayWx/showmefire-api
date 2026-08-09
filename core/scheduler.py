@@ -15,6 +15,9 @@ from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complet
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
+from services.fire_ingest import ingest_detection_files
+from core.database import expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows
+from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,39 @@ async def verify_v5_shadow_observations():
         await asyncio.to_thread(verify_v5_shadow)
     except Exception as error:
         logger.error("V5 shadow verification failed: %s", error, exc_info=True)
+
+
+async def ingest_fire_detections_job():
+    """
+    Backfill the fire_events store from the existing detection GeoJSON
+    files. A separate job from the fetch jobs that write those files -
+    a store failure here must never affect the file pipeline that
+    /fires/satdet and the mobile app depend on.
+    """
+    try:
+        await asyncio.to_thread(ingest_detection_files)
+    except Exception as error:
+        logger.error("Fire detection ingest failed: %s", error, exc_info=True)
+
+
+async def purge_spatial_fm_uncertainty_cache_job():
+    """Delete spatial FM uncertainty cache files older than the retention window."""
+    try:
+        removed = await asyncio.to_thread(purge_spatial_fm_uncertainty_cache)
+        logger.info("Spatial FM uncertainty cache purge: removed=%s", removed)
+    except Exception as error:
+        logger.error("Spatial FM uncertainty cache purge failed: %s", error, exc_info=True)
+
+
+async def purge_fire_report_pii_job():
+    """Expire stale pending reports, then purge PII past the retention window."""
+    try:
+        expired = await asyncio.to_thread(expire_unmoderated_fire_reports)
+        purged = await asyncio.to_thread(purge_fire_submission_pii)
+        await asyncio.to_thread(purge_fire_throttle_rows)
+        logger.info("Fire report PII purge: expired=%s purged=%s", expired, purged)
+    except Exception as error:
+        logger.error("Fire report PII purge failed: %s", error, exc_info=True)
 
 def create_scheduler():
     central_tz = timezone('America/Chicago')
@@ -124,6 +160,32 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         id='verify_v5_shadow',
         max_instances=1,
         coalesce=True,
+    )
+
+    scheduler.add_job(
+        ingest_fire_detections_job,
+        'cron',
+        minute='3,8,13,18,23,28,33,38,43,48,53,58',
+        hour='10-22',
+        id='ingest_fire_detections',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        purge_fire_report_pii_job,
+        'cron',
+        hour=2,
+        minute=45,
+        id='purge_fire_report_pii',
+    )
+
+    scheduler.add_job(
+        purge_spatial_fm_uncertainty_cache_job,
+        'cron',
+        hour=3,
+        minute=15,
+        id='purge_spatial_fm_uncertainty_cache',
     )
 
     scheduler.start()

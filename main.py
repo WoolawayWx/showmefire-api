@@ -73,7 +73,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, fires
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -97,6 +97,8 @@ async def lifespan(app: FastAPI):
         missing_security.append("ADMIN_PASSWORD_HASH")
     if SECRET_KEY == INSECURE_DEVELOPMENT_SECRET:
         missing_security.append("JWT_SECRET")
+    if not os.getenv("TURNSTILE_SECRET_KEY", "").strip():
+        missing_security.append("TURNSTILE_SECRET_KEY")
     if missing_security:
         message = f"Missing secure runtime configuration: {', '.join(missing_security)}"
         if IS_PRODUCTION:
@@ -181,6 +183,7 @@ app.include_router(afds.router)
 app.include_router(spatial_model.router)
 app.include_router(mobile.router)
 app.include_router(posts.router)
+app.include_router(fires.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

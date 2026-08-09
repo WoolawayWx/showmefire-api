@@ -71,6 +71,124 @@ def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
     if "event_secret_override" not in columns:
         cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_secret_override TEXT DEFAULT ''")
 
+def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            external_id TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            verification_tier TEXT NOT NULL DEFAULT 'unverified',
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            county_fips TEXT,
+            county_name TEXT,
+            occurred_at TEXT NOT NULL,
+            occurred_at_precision TEXT NOT NULL DEFAULT 'minute',
+            occurred_at_tz_offset_minutes INTEGER,
+            acres REAL,
+            acres_is_estimate INTEGER NOT NULL DEFAULT 1,
+            cause_category TEXT NOT NULL DEFAULT 'unknown',
+            description TEXT NOT NULL DEFAULT '',
+            out_of_ordinary TEXT NOT NULL DEFAULT '',
+            frp REAL,
+            confidence TEXT,
+            satellite TEXT,
+            official_source_system TEXT NOT NULL DEFAULT '',
+            official_source_ref TEXT NOT NULL DEFAULT '',
+            label_revision INTEGER NOT NULL DEFAULT 1,
+            revised_at TIMESTAMP,
+            parent_event_id INTEGER,
+            reporter_contact TEXT NOT NULL DEFAULT '',
+            submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            consent_version TEXT NOT NULL DEFAULT '',
+            captcha_verdict TEXT NOT NULL DEFAULT '',
+            moderated_by TEXT NOT NULL DEFAULT '',
+            moderated_at TIMESTAMP,
+            pii_purged_at TIMESTAMP,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_fire_events_source_external ON fire_events(source, external_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_status_occurred ON fire_events(status, occurred_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_bbox ON fire_events(latitude, longitude)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_tier_occurred ON fire_events(verification_tier, occurred_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_county ON fire_events(county_fips)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_source_status ON fire_events(source, status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_purge ON fire_events(moderated_at)')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_event_fuels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            fuel_type TEXT NOT NULL,
+            FOREIGN KEY (event_id) REFERENCES fire_events(id)
+        )
+    ''')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_fire_event_fuels_unique ON fire_event_fuels(event_id, fuel_type)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_event_fuels_type ON fire_event_fuels(fuel_type)')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_event_moderation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            from_status TEXT NOT NULL DEFAULT '',
+            to_status TEXT NOT NULL DEFAULT '',
+            from_tier TEXT NOT NULL DEFAULT '',
+            to_tier TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            changed_fields_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (event_id) REFERENCES fire_events(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_moderation_event ON fire_event_moderation(event_id, created_at)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_moderation_actor ON fire_event_moderation(actor, created_at)')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_event_media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            stored_filename TEXT NOT NULL UNIQUE,
+            original_filename TEXT NOT NULL DEFAULT '',
+            content_type TEXT NOT NULL DEFAULT '',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT NOT NULL DEFAULT '',
+            review_state TEXT NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (event_id) REFERENCES fire_events(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_event_media_event ON fire_event_media(event_id)')
+
+
+def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_submission_throttle (
+            bucket_key TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (bucket_key, window_kind, window_start)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_throttle_updated ON fire_submission_throttle(updated_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_submission_blocklist (
+            ip_hash TEXT PRIMARY KEY,
+            reason TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
 def get_db_path():
     # Honor the documented container/local override even before the database
     # file exists. This keeps first-start initialization on the mounted volume.
@@ -409,6 +527,12 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_comments_post_id ON post_comments(post_id)')
+
+    # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
+    _ensure_fire_event_tables(cursor)
+
+    # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
+    _ensure_fire_abuse_tables(cursor)
 
     conn.commit()
     conn.close()
@@ -1293,5 +1417,625 @@ def delete_comment(post_id: int, comment_id: int) -> bool:
         cursor.execute('DELETE FROM post_comments WHERE id = ? AND post_id = ?', (comment_id, post_id))
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+# --- Fire event store helpers ---
+
+_PUBLIC_EVENT_COLUMNS = (
+    "id", "source", "external_id", "status", "verification_tier",
+    "latitude", "longitude", "county_fips", "county_name",
+    "occurred_at", "occurred_at_precision",
+    "acres", "acres_is_estimate", "cause_category",
+    "description", "out_of_ordinary",
+    "frp", "confidence", "satellite",
+    "official_source_ref",
+    "created_at", "updated_at",
+)
+
+_ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
+    "occurred_at_tz_offset_minutes",
+    "official_source_system",
+    "label_revision", "revised_at", "parent_event_id",
+    "reporter_contact", "submitter_ip_hash",
+    "consent_version", "captcha_verdict",
+    "moderated_by", "moderated_at", "pii_purged_at",
+    "first_seen_at", "last_seen_at",
+)
+
+
+def _fire_event_fuels(cursor: sqlite3.Cursor, event_id: int) -> List[str]:
+    cursor.execute('SELECT fuel_type FROM fire_event_fuels WHERE event_id = ? ORDER BY fuel_type', (event_id,))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _set_fire_event_fuels(cursor: sqlite3.Cursor, event_id: int, fuel_types: Iterable[str]) -> None:
+    cursor.execute('DELETE FROM fire_event_fuels WHERE event_id = ?', (event_id,))
+    for fuel_type in fuel_types:
+        cursor.execute(
+            'INSERT OR IGNORE INTO fire_event_fuels (event_id, fuel_type) VALUES (?, ?)',
+            (event_id, fuel_type),
+        )
+
+
+def _fetch_fire_event_row(cursor: sqlite3.Cursor, event_id: int, columns) -> Optional[Dict]:
+    cursor.execute(f'SELECT {", ".join(columns)} FROM fire_events WHERE id = ?', (event_id,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    event = dict(row)
+    event["fuel_types"] = _fire_event_fuels(cursor, event_id)
+    return event
+
+
+def record_fire_moderation(
+    cursor: sqlite3.Cursor,
+    event_id: int,
+    action: str,
+    actor: str = "",
+    from_status: str = "",
+    to_status: str = "",
+    from_tier: str = "",
+    to_tier: str = "",
+    reason: str = "",
+    changed_fields: Optional[Dict] = None,
+) -> None:
+    """Append-only audit row. Caller owns the transaction/commit."""
+    import json as _json
+    cursor.execute('''
+        INSERT INTO fire_event_moderation
+            (event_id, action, actor, from_status, to_status, from_tier, to_tier, reason, changed_fields_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (event_id, action, actor, from_status, to_status, from_tier, to_tier, reason,
+          _json.dumps(changed_fields or {})))
+
+
+def create_fire_report(
+    latitude: float,
+    longitude: float,
+    occurred_at: str,
+    occurred_at_precision: str,
+    acres: float,
+    acres_is_estimate: bool,
+    fuel_types: List[str],
+    description: str,
+    out_of_ordinary: str,
+    reporter_contact: str,
+    submitter_ip_hash: str,
+    consent_version: str,
+    captcha_verdict: str,
+    county_fips: Optional[str] = None,
+    county_name: Optional[str] = None,
+    occurred_at_tz_offset_minutes: Optional[int] = None,
+) -> Dict:
+    """Insert a public, anonymous fire report as status='pending'."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO fire_events (
+                source, status, verification_tier,
+                latitude, longitude, county_fips, county_name,
+                occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
+                acres, acres_is_estimate, description, out_of_ordinary,
+                reporter_contact, submitter_ip_hash, consent_version, captcha_verdict
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            latitude, longitude, county_fips, county_name,
+            occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
+            acres, 1 if acres_is_estimate else 0, description, out_of_ordinary,
+            reporter_contact, submitter_ip_hash, consent_version, captcha_verdict,
+        ))
+        event_id = cursor.lastrowid
+        _set_fire_event_fuels(cursor, event_id, fuel_types)
+        record_fire_moderation(cursor, event_id, action="submitted", to_status="pending", to_tier="unverified")
+        conn.commit()
+        return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
+    finally:
+        conn.close()
+
+
+def upsert_detection_event(
+    source: str,
+    external_id: str,
+    latitude: float,
+    longitude: float,
+    occurred_at: str,
+    county_fips: Optional[str] = None,
+    county_name: Optional[str] = None,
+    frp: Optional[float] = None,
+    confidence: Optional[str] = None,
+    satellite: Optional[str] = None,
+    occurred_at_precision: str = "minute",
+    verification_tier: str = "unverified",
+    cause_category: Optional[str] = None,
+    acres: Optional[float] = None,
+    official_source_system: Optional[str] = None,
+    official_source_ref: Optional[str] = None,
+) -> Dict:
+    """
+    Idempotent upsert for a non-submission fire record (satellite/NGFS
+    detections at verification_tier='unverified', or an already-vetted
+    official dataset like USFS FPA-FOD at verification_tier=
+    'official_source_confirmed'). Always lands as status='approved'.
+
+    The ON CONFLICT clause deliberately never touches latitude/longitude/
+    occurred_at/verification_tier/cause_category/acres, so an admin
+    correction (or, for an official import, a source data correction on
+    re-ingest) survives the next ingest cycle rather than being silently
+    overwritten - same guarantee the satellite/NGFS callers already rely on.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
+        existing = cursor.fetchone()
+        is_new = existing is None
+
+        cursor.execute('''
+            INSERT INTO fire_events (
+                source, external_id, status, verification_tier,
+                latitude, longitude, county_fips, county_name,
+                occurred_at, occurred_at_precision, frp, confidence, satellite,
+                cause_category, acres, official_source_system, official_source_ref,
+                first_seen_at, last_seen_at
+            ) VALUES (?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(source, external_id) DO UPDATE SET
+                last_seen_at = CURRENT_TIMESTAMP,
+                frp = COALESCE(excluded.frp, fire_events.frp),
+                confidence = COALESCE(excluded.confidence, fire_events.confidence),
+                satellite = COALESCE(excluded.satellite, fire_events.satellite),
+                updated_at = CURRENT_TIMESTAMP
+        ''', (
+            source, external_id, verification_tier, latitude, longitude, county_fips, county_name,
+            occurred_at, occurred_at_precision, frp, confidence, satellite,
+            cause_category or "unknown", acres, official_source_system or "", official_source_ref or "",
+        ))
+        cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
+        event_id = cursor.fetchone()[0]
+        if is_new:
+            record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
+                                    to_status="approved", to_tier=verification_tier)
+        conn.commit()
+        return {"event_id": event_id, "inserted": is_new, "updated": not is_new}
+    finally:
+        conn.close()
+
+
+def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        columns = _ADMIN_EVENT_COLUMNS if admin else _PUBLIC_EVENT_COLUMNS
+        event = _fetch_fire_event_row(cursor, event_id, columns)
+        if event and admin:
+            cursor.execute('''
+                SELECT id, event_id, action, actor, from_status, to_status, from_tier, to_tier,
+                       reason, changed_fields_json, created_at
+                FROM fire_event_moderation WHERE event_id = ? ORDER BY created_at ASC
+            ''', (event_id,))
+            event["moderation"] = [dict(row) for row in cursor.fetchall()]
+        return event
+    finally:
+        conn.close()
+
+
+def list_fire_events(
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    verification_tier: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    bbox: Optional[tuple] = None,
+    limit: int = 200,
+    offset: int = 0,
+    admin: bool = False,
+) -> List[Dict]:
+    """
+    List fire events. Public callers must pass status='approved' (the
+    router enforces this); admin callers may omit it to see everything.
+    bbox is (min_lon, min_lat, max_lon, max_lat).
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+        columns = _ADMIN_EVENT_COLUMNS if admin else _PUBLIC_EVENT_COLUMNS
+
+        clauses = []
+        params: List = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        if verification_tier:
+            clauses.append("verification_tier = ?")
+            params.append(verification_tier)
+        if county_fips:
+            clauses.append("county_fips = ?")
+            params.append(county_fips)
+        if since:
+            clauses.append("occurred_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("occurred_at <= ?")
+            params.append(until)
+        if bbox:
+            min_lon, min_lat, max_lon, max_lat = bbox
+            clauses.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+            params.extend([min_lat, max_lat, min_lon, max_lon])
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor.execute(f'''
+            SELECT {", ".join(columns)} FROM fire_events
+            {where}
+            ORDER BY occurred_at DESC
+            LIMIT ? OFFSET ?
+        ''', (*params, safe_limit, safe_offset))
+
+        events = []
+        for row in cursor.fetchall():
+            event = dict(row)
+            event["fuel_types"] = _fire_event_fuels(cursor, event["id"])
+            events.append(event)
+        return events
+    finally:
+        conn.close()
+
+
+def list_nearby_fire_events(latitude: float, longitude: float, radius_km: float, hours: float) -> List[Dict]:
+    """Duplicate-report hint for the admin detail page: other reports near this point/time."""
+    from core.geo import degree_box, haversine_km
+
+    min_lat, max_lat, min_lon, max_lon = degree_box(latitude, longitude, radius_km)
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id, latitude, longitude, occurred_at, status, verification_tier, source
+            FROM fire_events
+            WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+              AND status != 'deleted'
+        ''', (min_lat, max_lat, min_lon, max_lon))
+        nearby = []
+        for row in cursor.fetchall():
+            distance = haversine_km(latitude, longitude, row["latitude"], row["longitude"])
+            if distance <= radius_km:
+                event = dict(row)
+                event["distance_km"] = round(distance, 3)
+                nearby.append(event)
+        return nearby
+    finally:
+        conn.close()
+
+
+def set_fire_event_status(
+    event_id: int,
+    to_status: str,
+    actor: str,
+    to_tier: Optional[str] = None,
+    official_source_ref: Optional[str] = None,
+    reason: str = "",
+) -> Optional[Dict]:
+    """Approve/reject a pending report. Refuses (returns a sentinel) if not currently pending."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT status, verification_tier FROM fire_events WHERE id = ?', (event_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        if row["status"] != "pending":
+            return {"already_moderated": True, "status": row["status"]}
+
+        from_status, from_tier = row["status"], row["verification_tier"]
+        new_tier = to_tier or from_tier
+        cursor.execute('''
+            UPDATE fire_events
+            SET status = ?, verification_tier = ?, official_source_ref = COALESCE(?, official_source_ref),
+                moderated_by = ?, moderated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (to_status, new_tier, official_source_ref, actor, event_id))
+        action = "approved" if to_status == "approved" else "rejected"
+        record_fire_moderation(cursor, event_id, action=action, actor=actor,
+                                from_status=from_status, to_status=to_status,
+                                from_tier=from_tier, to_tier=new_tier, reason=reason)
+        conn.commit()
+        return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
+    finally:
+        conn.close()
+
+
+def update_fire_event(event_id: int, actor: str, edit_reason: str, **fields) -> Optional[Dict]:
+    """
+    Edit an event. `fields` may include latitude, longitude, acres,
+    fuel_types, description, out_of_ordinary, verification_tier,
+    official_source_ref, redact_reporter_contact, cause_category.
+    None values leave the column untouched (COALESCE), matching update_post.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT status, verification_tier FROM fire_events WHERE id = ?', (event_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        from_tier = row["verification_tier"]
+
+        fuel_types = fields.pop("fuel_types", None)
+        redact_contact = fields.pop("redact_reporter_contact", False)
+        to_tier = fields.get("verification_tier")
+
+        cursor.execute('''
+            UPDATE fire_events
+            SET latitude = COALESCE(?, latitude),
+                longitude = COALESCE(?, longitude),
+                acres = COALESCE(?, acres),
+                description = COALESCE(?, description),
+                out_of_ordinary = COALESCE(?, out_of_ordinary),
+                verification_tier = COALESCE(?, verification_tier),
+                official_source_ref = COALESCE(?, official_source_ref),
+                cause_category = COALESCE(?, cause_category),
+                revised_at = CURRENT_TIMESTAMP,
+                label_revision = label_revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (
+            fields.get("latitude"), fields.get("longitude"), fields.get("acres"),
+            fields.get("description"), fields.get("out_of_ordinary"),
+            fields.get("verification_tier"), fields.get("official_source_ref"),
+            fields.get("cause_category"), event_id,
+        ))
+        if fuel_types is not None:
+            _set_fire_event_fuels(cursor, event_id, fuel_types)
+        if redact_contact:
+            cursor.execute("UPDATE fire_events SET reporter_contact = '' WHERE id = ?", (event_id,))
+
+        changed = {k: v for k, v in {**fields, "fuel_types": fuel_types}.items() if v is not None}
+        record_fire_moderation(cursor, event_id, action="edited", actor=actor,
+                                from_tier=from_tier, to_tier=to_tier or from_tier,
+                                reason=edit_reason, changed_fields=changed)
+        conn.commit()
+        return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
+    finally:
+        conn.close()
+
+
+def delete_fire_event(event_id: int, actor: str, reason: str = "") -> bool:
+    """
+    Soft delete: status='deleted'. fire_event_moderation is retained on
+    purpose - it is the audit trail, and the resulting orphan reference is
+    intentional (there is no FK enforcement in SQLite here, so nothing
+    breaks, but document this in the runbook).
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT status FROM fire_events WHERE id = ?', (event_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        from_status = row[0]
+        cursor.execute("UPDATE fire_events SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (event_id,))
+        cursor.execute('DELETE FROM fire_event_fuels WHERE event_id = ?', (event_id,))
+        record_fire_moderation(cursor, event_id, action="deleted", actor=actor,
+                                from_status=from_status, to_status="deleted", reason=reason)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def export_fire_labels(
+    min_tier: str = "admin_reviewed",
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = 100000,
+) -> List[Dict]:
+    """
+    Fire events eligible as model labels, newest first. No PII columns in
+    the select list by construction - this export is safe to ship off-box.
+    """
+    from core.fire_events import TIER_RANK
+
+    allowed = [tier for tier, rank in TIER_RANK.items() if rank >= TIER_RANK[min_tier]]
+    placeholders = ",".join("?" for _ in allowed)
+
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        params: List = list(allowed)
+        clauses = [f"e.verification_tier IN ({placeholders})"]
+        if since:
+            clauses.append("e.occurred_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("e.occurred_at <= ?")
+            params.append(until)
+        where = " AND ".join(clauses)
+
+        cursor.execute(f'''
+            SELECT e.id AS event_id, e.source, e.verification_tier,
+                   e.latitude, e.longitude, e.county_fips, e.county_name,
+                   e.occurred_at, e.occurred_at_precision, e.occurred_at_tz_offset_minutes,
+                   e.cause_category, e.official_source_system,
+                   e.acres, e.acres_is_estimate,
+                   e.frp, e.confidence, e.satellite,
+                   e.label_revision, e.revised_at,
+                   GROUP_CONCAT(f.fuel_type) AS fuel_types,
+                   e.created_at, e.updated_at
+            FROM fire_events e
+            LEFT JOIN fire_event_fuels f ON f.event_id = e.id
+            WHERE e.status = 'approved' AND {where}
+            GROUP BY e.id
+            ORDER BY e.occurred_at DESC
+            LIMIT ?
+        ''', (*params, max(1, limit)))
+
+        rows = []
+        for row in cursor.fetchall():
+            event = dict(row)
+            event["fuel_types"] = event["fuel_types"].split(",") if event["fuel_types"] else []
+            rows.append(event)
+        return rows
+    finally:
+        conn.close()
+
+
+def consume_fire_submission_quota(bucket_key: str, now: datetime, per_hour_limit: int, per_day_limit: int) -> Dict:
+    """
+    Atomically charge one submission against the hour and day windows for a
+    bucket. The only function in this codebase where two concurrent
+    requests race on the same row, hence the manual BEGIN IMMEDIATE
+    transaction rather than the usual autocommit pattern.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        hour_key = now.strftime('%Y-%m-%dT%H')
+        day_key = now.strftime('%Y-%m-%d')
+        windows = (('hour', hour_key, per_hour_limit), ('day', day_key, per_day_limit))
+
+        for kind, window_start, limit in windows:
+            cursor.execute('''
+                SELECT hits FROM fire_submission_throttle
+                WHERE bucket_key = ? AND window_kind = ? AND window_start = ?
+            ''', (bucket_key, kind, window_start))
+            row = cursor.fetchone()
+            if row and row[0] >= limit:
+                cursor.execute('ROLLBACK')
+                if kind == 'hour':
+                    retry_after = 3600 - (now.minute * 60 + now.second)
+                else:
+                    retry_after = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+                return {"allowed": False, "window": kind, "retry_after": max(1, retry_after)}
+
+        for kind, window_start, _limit in windows:
+            cursor.execute('''
+                INSERT INTO fire_submission_throttle (bucket_key, window_kind, window_start, hits, updated_at)
+                VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(bucket_key, window_kind, window_start)
+                DO UPDATE SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP
+            ''', (bucket_key, kind, window_start))
+        cursor.execute('COMMIT')
+        return {"allowed": True, "window": "", "retry_after": 0}
+    except Exception:
+        try:
+            cursor.execute('ROLLBACK')
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def is_ip_blocked(ip_hash: str) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT 1 FROM fire_submission_blocklist WHERE ip_hash = ?', (ip_hash,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def add_ip_to_blocklist(ip_hash: str, reason: str, created_by: str) -> None:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO fire_submission_blocklist (ip_hash, reason, created_by)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ip_hash) DO UPDATE SET reason = excluded.reason, created_by = excluded.created_by
+        ''', (ip_hash, reason, created_by))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def purge_fire_submission_pii(older_than_days: int = 90) -> int:
+    """Clear reporter_contact/submitter_ip_hash on reports moderated more than N days ago."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE fire_events
+            SET reporter_contact = '', submitter_ip_hash = '', pii_purged_at = CURRENT_TIMESTAMP
+            WHERE moderated_at IS NOT NULL
+              AND moderated_at <= datetime('now', ? || ' days')
+              AND pii_purged_at IS NULL
+              AND (reporter_contact != '' OR submitter_ip_hash != '')
+        ''', (f"-{max(0, older_than_days)}",))
+        purged = cursor.rowcount
+        conn.commit()
+        return purged
+    finally:
+        conn.close()
+
+
+def expire_unmoderated_fire_reports(older_than_days: int = 30) -> int:
+    """Auto-reject reports still pending after N days - an unbounded pending queue is an unbounded PII store."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id FROM fire_events
+            WHERE status = 'pending' AND created_at <= datetime('now', ? || ' days')
+        ''', (f"-{max(0, older_than_days)}",))
+        ids = [row[0] for row in cursor.fetchall()]
+        for event_id in ids:
+            cursor.execute('''
+                UPDATE fire_events SET status = 'rejected', moderated_by = 'system:auto-expire',
+                       moderated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (event_id,))
+            record_fire_moderation(cursor, event_id, action="rejected", actor="system:auto-expire",
+                                    from_status="pending", to_status="rejected",
+                                    reason="expired-unmoderated")
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def purge_fire_throttle_rows(older_than_hours: int = 48) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            DELETE FROM fire_submission_throttle WHERE updated_at <= datetime('now', ? || ' hours')
+        ''', (f"-{max(0, older_than_hours)}",))
+        purged = cursor.rowcount
+        conn.commit()
+        return purged
     finally:
         conn.close()

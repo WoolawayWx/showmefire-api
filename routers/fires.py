@@ -1,0 +1,516 @@
+"""
+Public fire reporting and the unified fire-event store.
+
+POST /api/fires/reports is the only unauthenticated write path in this
+API. It requires a Cloudflare Turnstile token, enforces per-IP and global
+rate limits, and stores every submission as status='pending' - nothing is
+publicly readable or label-eligible until an administrator approves it.
+
+GET /api/fires/events and /api/fires/events.geojson return approved
+events only. The GeoJSON properties intentionally match the uppercase
+shape already served by /fires/satdet so existing map clients
+(website/app/components/FireDetections.vue, detectionPopup.vue) need no
+changes.
+"""
+import hashlib
+import hmac
+import logging
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from typing import List, Literal, Optional
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from core.database import (
+    add_ip_to_blocklist,
+    consume_fire_submission_quota,
+    create_fire_report,
+    delete_fire_event,
+    export_fire_labels,
+    get_fire_event,
+    is_ip_blocked,
+    list_fire_events,
+    list_nearby_fire_events,
+    set_fire_event_status,
+    update_fire_event,
+)
+from core.fire_events import FUEL_TYPES, MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN, VERIFICATION_TIERS
+from core.security import SECRET_KEY, verify_token
+from services.county_lookup import county_for_point
+from services.turnstile import verify_turnstile
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["fires"])
+
+MAX_REPORT_AGE_DAYS = int(os.getenv("FIRE_REPORT_MAX_AGE_DAYS", "14"))
+FUTURE_SKEW_MINUTES = 10
+CONSENT_VERSION = "2026-08-fire-report-v1"
+CENTRAL = ZoneInfo("America/Chicago")
+
+# Defaults to distrusting proxy headers everywhere, including production:
+# trusting CF-Connecting-IP/X-Forwarded-For is only safe once the origin is
+# firewalled to Cloudflare's IP ranges, and that hasn't been confirmed for
+# this deployment (api.showmefire.org's origin was directly reachable by IP
+# in an August 2026 check, bypassing Cloudflare entirely - a directly
+# reachable origin lets an attacker forge either header to spoof any source
+# IP for rate-limiting/blocklisting). Set TRUST_PROXY_HEADERS=true once the
+# firewall restriction is in place and verified.
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
+
+FIRE_REPORT_LIMIT_PER_HOUR = int(os.getenv("FIRE_REPORT_LIMIT_PER_HOUR", "3"))
+FIRE_REPORT_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_LIMIT_PER_DAY", "10"))
+FIRE_REPORT_GLOBAL_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_GLOBAL_LIMIT_PER_DAY", "300"))
+FIRE_LABEL_ADMIN_REVIEWED_WEIGHT = float(os.getenv("FIRE_LABEL_ADMIN_REVIEWED_WEIGHT", "0.3"))
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTACT_RE = re.compile(r"^[A-Za-z0-9@._%+\-\s()]{5,120}$")
+
+
+def _require_admin(token: str) -> str:
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return email
+
+
+def _client_ip(request: Request) -> str:
+    """Resolve the visitor IP from Cloudflare/proxy headers."""
+    if TRUST_PROXY_HEADERS:
+        cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+        if cf_ip:
+            return cf_ip
+        forwarded = (request.headers.get("x-forwarded-for") or "").split(",")
+        if forwarded and forwarded[0].strip():
+            return forwarded[0].strip()
+    return (request.client.host if request.client else "") or "unknown"
+
+
+def _ip_bucket_key(ip: str) -> str:
+    """HMAC the client IP so no raw address is ever persisted."""
+    secret = os.getenv("FIRE_REPORT_IP_SALT", "").strip() or SECRET_KEY
+    return hmac.new(secret.encode(), ip.encode(), hashlib.sha256).hexdigest()
+
+
+def _clean_text(value: Optional[str], *, required: bool, field: str) -> str:
+    text = _CONTROL_CHARS.sub("", str(value or "")).strip()
+    if required and not text:
+        raise ValueError(f"{field} must not be empty")
+    return text
+
+
+class FireReportCreate(BaseModel):
+    latitude: float = Field(ge=MO_LAT_MIN, le=MO_LAT_MAX)
+    longitude: float = Field(ge=MO_LON_MIN, le=MO_LON_MAX)
+    occurred_at: str = Field(min_length=8, max_length=40)
+    occurred_at_precision: Literal["minute", "hour", "day"] = "minute"
+    acres: float = Field(gt=0, le=100000)
+    acres_is_estimate: bool = True
+    fuel_types: List[str] = Field(min_length=1, max_length=6)
+    description: str = Field(min_length=20, max_length=4000)
+    out_of_ordinary: str = Field(default="", max_length=2000)
+    reporter_contact: str = Field(default="", max_length=120)
+    consent_acknowledged: bool
+    turnstile_token: str = Field(min_length=1, max_length=4096)
+    website: str = Field(default="", max_length=200)  # honeypot; must stay empty
+
+    @field_validator("fuel_types", mode="before")
+    @classmethod
+    def _normalize_fuels(cls, value):
+        seen, out = set(), []
+        for raw in value or []:
+            item = str(raw or "").strip().lower()
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    @field_validator("fuel_types")
+    @classmethod
+    def _validate_fuels(cls, value: List[str]) -> List[str]:
+        unknown = [item for item in value if item not in FUEL_TYPES]
+        if unknown:
+            raise ValueError(f"unknown fuel type(s): {', '.join(unknown)}")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _clean_description(cls, value: str) -> str:
+        text = _clean_text(value, required=True, field="description")
+        if len(text) < 20:
+            raise ValueError("description must be at least 20 characters")
+        if text.count("http") > 3:
+            raise ValueError("description contains too many links")
+        return text
+
+    @field_validator("out_of_ordinary")
+    @classmethod
+    def _clean_out_of_ordinary(cls, value: str) -> str:
+        return _clean_text(value, required=False, field="out_of_ordinary")
+
+    @field_validator("reporter_contact")
+    @classmethod
+    def _clean_contact(cls, value: str) -> str:
+        text = _clean_text(value, required=False, field="reporter_contact")
+        if text and not _CONTACT_RE.fullmatch(text):
+            raise ValueError("reporter_contact must be an email or phone number")
+        return text
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _normalize_occurred_at(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("occurred_at must be ISO 8601") from exc
+        if parsed.tzinfo is None:
+            # Naive input is read as America/Chicago: a Missouri reporter
+            # typing "14:30" means local time, and the whole scheduler
+            # already runs on Central.
+            parsed = parsed.replace(tzinfo=CENTRAL)
+        parsed = parsed.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(minutes=FUTURE_SKEW_MINUTES):
+            raise ValueError("occurred_at must not be in the future")
+        if parsed < now - timedelta(days=MAX_REPORT_AGE_DAYS):
+            raise ValueError(f"occurred_at must be within the last {MAX_REPORT_AGE_DAYS} days")
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @field_validator("consent_acknowledged")
+    @classmethod
+    def _require_consent(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("consent_acknowledged must be true")
+        return value
+
+    @field_validator("website")
+    @classmethod
+    def _reject_honeypot(cls, value: str) -> str:
+        if str(value or "").strip():
+            raise ValueError("invalid submission")
+        return ""
+
+
+class FireReportModeration(BaseModel):
+    verification_tier: Literal["admin_reviewed", "official_source_confirmed"] = "admin_reviewed"
+    official_source_ref: str = Field(default="", max_length=500)
+    moderator_note: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def _require_ref_for_official(self):
+        if self.verification_tier == "official_source_confirmed" and not self.official_source_ref.strip():
+            raise ValueError("official_source_ref is required for official_source_confirmed")
+        return self
+
+
+class FireReportRejection(BaseModel):
+    reason: str = Field(min_length=3, max_length=1000)
+
+
+class FireEventUpdate(BaseModel):
+    latitude: Optional[float] = Field(default=None, ge=MO_LAT_MIN, le=MO_LAT_MAX)
+    longitude: Optional[float] = Field(default=None, ge=MO_LON_MIN, le=MO_LON_MAX)
+    acres: Optional[float] = Field(default=None, gt=0, le=100000)
+    fuel_types: Optional[List[str]] = None
+    description: Optional[str] = Field(default=None, max_length=4000)
+    out_of_ordinary: Optional[str] = Field(default=None, max_length=2000)
+    verification_tier: Optional[Literal[VERIFICATION_TIERS]] = None
+    official_source_ref: Optional[str] = Field(default=None, max_length=500)
+    cause_category: Optional[str] = None
+    redact_reporter_contact: bool = False
+    edit_reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("fuel_types")
+    @classmethod
+    def _validate_fuels(cls, value):
+        if value is None:
+            return None
+        unknown = [item for item in value if item not in FUEL_TYPES]
+        if unknown:
+            raise ValueError(f"unknown fuel type(s): {', '.join(unknown)}")
+        return value
+
+
+class BlocklistCreate(BaseModel):
+    ip_hash: str = Field(min_length=8, max_length=128)
+    reason: str = Field(default="", max_length=500)
+
+
+def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
+    if not bbox:
+        return None
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(part) for part in bbox.split(","))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="bbox must be minlon,minlat,maxlon,maxlat")
+    if min_lon > max_lon or min_lat > max_lat:
+        raise HTTPException(status_code=400, detail="bbox min values must not exceed max values")
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
+def _confidence_for_tier(tier: str) -> str:
+    return {"official_source_confirmed": "high", "admin_reviewed": "nominal"}.get(tier, "low")
+
+
+def _event_to_geojson_feature(event: dict) -> dict:
+    tier = event.get("verification_tier", "unverified")
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [event["longitude"], event["latitude"]]},
+        "properties": {
+            "SOURCE": "SHOWMEFIRE_STORE",
+            "TYPENAME": event.get("source", "unknown"),
+            "SOURCE_ID": event.get("external_id") or f"smf-event-{event['id']}",
+            "EVENT_ID": event["id"],
+            "LATITUDE": event["latitude"],
+            "LONGITUDE": event["longitude"],
+            "COUNTY": event.get("county_name"),
+            "STATE": "Missouri",
+            "COUNTRY": "United States",
+            "ACQ_DATE_TIME": event.get("occurred_at"),
+            "FRP": event.get("frp"),
+            "BRIGHT_T7": None,
+            "CONFIDENCE": _confidence_for_tier(tier),
+            "SATELLITE": event.get("satellite"),
+            "TYPE_DESCRIPTION": "Public fire report" if event.get("source") == "user_submission" else "Fire detection",
+            "FUEL": ", ".join(event.get("fuel_types") or []),
+            "LAND_COVER": "Unknown",
+            "VERIFICATION_TIER": tier,
+            "ACRES": event.get("acres"),
+            "DESCRIPTION": event.get("description"),
+            "OUT_OF_ORDINARY": event.get("out_of_ordinary"),
+        },
+    }
+
+
+# --- Public: submit ---
+
+@router.post("/api/fires/reports", status_code=201)
+def submit_fire_report(payload: FireReportCreate, request: Request):
+    """Submit an anonymous fire report for moderation (public endpoint)"""
+    client_ip = _client_ip(request)
+    ip_hash = _ip_bucket_key(client_ip)
+
+    if is_ip_blocked(ip_hash):
+        raise HTTPException(status_code=403, detail="Submission not allowed from this network")
+
+    quota = consume_fire_submission_quota(
+        ip_hash, datetime.now(timezone.utc), FIRE_REPORT_LIMIT_PER_HOUR, FIRE_REPORT_LIMIT_PER_DAY
+    )
+    if not quota["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many fire reports from this network. Please try again later.",
+            headers={"Retry-After": str(quota["retry_after"])},
+        )
+
+    global_quota = consume_fire_submission_quota(
+        "__global__", datetime.now(timezone.utc), 10**9, FIRE_REPORT_GLOBAL_LIMIT_PER_DAY
+    )
+    if not global_quota["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many fire reports right now. Please try again later.",
+            headers={"Retry-After": str(global_quota["retry_after"])},
+        )
+
+    success, verdict = verify_turnstile(payload.turnstile_token, client_ip)
+    if not success:
+        raise HTTPException(status_code=403, detail="Captcha verification failed. Please try again.")
+
+    county_fips, county_name = county_for_point(payload.latitude, payload.longitude)
+
+    event = create_fire_report(
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        occurred_at=payload.occurred_at,
+        occurred_at_precision=payload.occurred_at_precision,
+        acres=payload.acres,
+        acres_is_estimate=payload.acres_is_estimate,
+        fuel_types=payload.fuel_types,
+        description=payload.description,
+        out_of_ordinary=payload.out_of_ordinary,
+        reporter_contact=payload.reporter_contact,
+        submitter_ip_hash=ip_hash,
+        consent_version=CONSENT_VERSION,
+        captcha_verdict=verdict,
+        county_fips=county_fips,
+        county_name=county_name,
+    )
+
+    return {
+        "success": True,
+        "report": {
+            "id": event["id"],
+            "status": event["status"],
+            "submitted_at": event["created_at"],
+            "county_name": event.get("county_name"),
+        },
+    }
+
+
+# --- Public: read ---
+
+@router.get("/api/fires/events")
+def list_public_fire_events(
+    response: Response,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    source: Optional[str] = None,
+    verification_tier: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    bbox: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """Approved fire events (public endpoint)"""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    events = list_fire_events(
+        status="approved", source=source, verification_tier=verification_tier,
+        county_fips=county_fips, since=since, until=until,
+        bbox=_parse_bbox(bbox), limit=limit, offset=offset,
+    )
+    return {"success": True, "events": events, "count": len(events)}
+
+
+@router.get("/api/fires/events.geojson")
+def list_public_fire_events_geojson(
+    response: Response,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    source: Optional[str] = None,
+    verification_tier: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    bbox: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """Approved fire events as GeoJSON (public endpoint)"""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    events = list_fire_events(
+        status="approved", source=source, verification_tier=verification_tier,
+        county_fips=county_fips, since=since, until=until,
+        bbox=_parse_bbox(bbox), limit=limit, offset=offset,
+    )
+    return {
+        "type": "FeatureCollection",
+        "features": [_event_to_geojson_feature(event) for event in events],
+        "metadata": {
+            "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "feature_count": len(events),
+            "source": "fire_events store",
+        },
+    }
+
+
+@router.get("/api/fires/events/{event_id}")
+def get_public_fire_event(event_id: int, response: Response):
+    """A single approved fire event (public endpoint)"""
+    event = get_fire_event(event_id, admin=False)
+    if not event or event.get("status") != "approved":
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return {"success": True, "event": event}
+
+
+# --- Admin: moderation ---
+
+@router.get("/api/admin/fires/reports")
+def admin_list_fire_reports(
+    token: str,
+    status: Optional[str] = "pending",
+    source: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List fire reports for moderation (admin only)"""
+    _require_admin(token)
+    events = list_fire_events(status=status, source=source, limit=limit, offset=offset, admin=True)
+    return {"success": True, "reports": events, "count": len(events)}
+
+
+@router.get("/api/admin/fires/reports/{event_id}")
+def admin_get_fire_report(event_id: int, token: str):
+    """Fire report detail, including moderation history and contact info (admin only)"""
+    _require_admin(token)
+    event = get_fire_event(event_id, admin=True)
+    if not event:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    event["nearby_reports"] = list_nearby_fire_events(event["latitude"], event["longitude"], radius_km=2.0, hours=6.0)
+    return {"success": True, "report": event}
+
+
+@router.post("/api/admin/fires/reports/{event_id}/approve")
+def admin_approve_fire_report(event_id: int, payload: FireReportModeration, token: str):
+    """Approve a pending fire report and assign its verification tier (admin only)"""
+    actor = _require_admin(token)
+    result = set_fire_event_status(
+        event_id, to_status="approved", actor=actor,
+        to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref,
+        reason=payload.moderator_note,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    if result.get("already_moderated"):
+        raise HTTPException(status_code=409, detail="Report already moderated")
+    return {"success": True, "report": result}
+
+
+@router.post("/api/admin/fires/reports/{event_id}/reject")
+def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token: str):
+    """Reject a pending fire report (admin only)"""
+    actor = _require_admin(token)
+    result = set_fire_event_status(event_id, to_status="rejected", actor=actor, reason=payload.reason)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    if result.get("already_moderated"):
+        raise HTTPException(status_code=409, detail="Report already moderated")
+    return {"success": True, "report": result}
+
+
+@router.put("/api/admin/fires/events/{event_id}")
+def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: str):
+    """Edit a fire event; every edit requires a reason (admin only)"""
+    actor = _require_admin(token)
+    fields = payload.model_dump(exclude={"edit_reason"}, exclude_none=True)
+    event = update_fire_event(event_id, actor=actor, edit_reason=payload.edit_reason, **fields)
+    if not event:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    return {"success": True, "event": event}
+
+
+@router.delete("/api/admin/fires/events/{event_id}")
+def admin_delete_fire_event(event_id: int, token: str, reason: str = ""):
+    """Soft-delete a fire event; moderation history is retained (admin only)"""
+    actor = _require_admin(token)
+    deleted = delete_fire_event(event_id, actor=actor, reason=reason)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    return {"success": True}
+
+
+@router.get("/api/admin/fires/labels")
+def admin_export_fire_labels(token: str, min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
+    """Fire events eligible as model training labels (admin only)"""
+    _require_admin(token)
+    if min_tier not in VERIFICATION_TIERS:
+        raise HTTPException(status_code=400, detail=f"min_tier must be one of {VERIFICATION_TIERS}")
+    rows = export_fire_labels(min_tier=min_tier, since=since, until=until)
+    for row in rows:
+        row["label_weight"] = {
+            "official_source_confirmed": 1.0,
+            "admin_reviewed": FIRE_LABEL_ADMIN_REVIEWED_WEIGHT,
+        }.get(row["verification_tier"], 0.0)
+    return {"success": True, "labels": rows, "count": len(rows)}
+
+
+@router.post("/api/admin/fires/blocklist")
+def admin_add_to_blocklist(payload: BlocklistCreate, token: str):
+    """Block an IP hash from submitting further reports (admin only)"""
+    actor = _require_admin(token)
+    add_ip_to_blocklist(payload.ip_hash, payload.reason, actor)
+    return {"success": True}

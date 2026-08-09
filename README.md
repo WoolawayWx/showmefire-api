@@ -61,3 +61,41 @@ active subscriptions are purged after seven days.
 Set `PUBLIC_API_BASE_URL` and `PUBLIC_CDN_BASE_URL` when the public hosts differ
 from production defaults. Set `EXPO_ACCESS_TOKEN` only when enhanced Expo push
 security is enabled; never expose it to the mobile client.
+
+## Public fire reports and the fire-event store
+
+`fire_events` is the unified store for fire observations from every source:
+anonymous public reports, FIRMS/VIIRS and MODIS thermal anomalies, NGFS
+events, and official confirmations. Each row carries a `source` discriminator
+and a `verification_tier` (`unverified`, `admin_reviewed`,
+`official_source_confirmed`). Only `official_source_confirmed` rows are
+primary model labels; `admin_reviewed` rows form a down-weighted auxiliary
+set, and `unverified` rows - including every satellite detection - are never
+labels.
+
+`POST /api/fires/reports` is the only unauthenticated write path in this
+API. It requires a Cloudflare Turnstile token, enforces per-IP and global
+rate limits, and stores every submission as `status='pending'`. Nothing is
+publicly readable or label-eligible until an administrator approves it.
+`GET /api/fires/events` and `GET /api/fires/events.geojson` return approved
+events only; the GeoJSON properties intentionally match the uppercase shape
+served by `/fires/satdet` so existing map clients need no changes. The
+file-backed `/fires/satdet`, `/fires/detections/advanced`,
+`/api/fires/missouri`, and `/api/fires/missouri/geojson` endpoints are
+unchanged and remain the live feed.
+
+Moderation runs through `/api/admin/fires/reports` (list, approve, reject)
+and `/api/admin/fires/events/{id}` (edit, delete). Every state change appends
+to `fire_event_moderation`, which is append-only. Training labels are
+exported with `python scripts/export_fire_labels.py`, which writes a CSV and
+a checksummed manifest to `data/fire_labels/`. Backfill and re-ingest of the
+detection files is `python scripts/backfill_fire_detections.py --dry-run`.
+
+Environment variables: `TURNSTILE_SECRET_KEY` (required in production; the
+API refuses to start without it), `FIRE_REPORT_IP_SALT`,
+`TRUST_PROXY_HEADERS`, `FIRE_REPORT_LIMIT_PER_HOUR`,
+`FIRE_REPORT_LIMIT_PER_DAY`, `FIRE_REPORT_GLOBAL_LIMIT_PER_DAY`,
+`FIRE_REPORT_MAX_AGE_DAYS`, `FIRE_LABEL_ADMIN_REVIEWED_WEIGHT`.
+
+See [`docs/fire_report_moderation_runbook.md`](docs/fire_report_moderation_runbook.md)
+for the operator playbook.
