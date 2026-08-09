@@ -93,6 +93,37 @@ class CommentCreate(BaseModel):
         return stripped
 
 
+@router.get("/api/posts")
+def public_list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0):
+    """Return published discussion posts for the public blog."""
+    try:
+        safe_limit = min(max(limit, 1), 50)
+        safe_offset = max(offset, 0)
+        return {
+            "posts": list_posts(tag=tag, limit=safe_limit, offset=safe_offset),
+            "available_tags": list_post_tags(),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list public posts: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load posts")
+
+
+@router.get("/api/posts/{post_id}")
+def public_get_post(post_id: int):
+    """Return one public discussion post."""
+    try:
+        post = get_post(post_id)
+    except Exception as e:
+        logger.error(f"Failed to get public post {post_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load post")
+
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    post.pop("comments", None)
+    return {"post": post}
+
+
 @router.get("/api/admin/posts")
 def admin_list_posts(token: str, tag: Optional[str] = None, limit: int = 50, offset: int = 0):
     _require_admin(token)

@@ -52,6 +52,19 @@ class PostsTests(unittest.TestCase):
 
         self.assertEqual([p["title"] for p in result["posts"]], ["Second"])
 
+    def test_public_list_and_detail_do_not_require_admin_token(self):
+        post = self.create_post()
+
+        listing = posts_router.public_list_posts()
+        self.assertEqual([p["id"] for p in listing["posts"]], [post["id"]])
+
+        posts_router.admin_create_comment(
+            post["id"], posts_router.CommentCreate(author_name="Mark", body="A comment"), self.token
+        )
+        detail = posts_router.public_get_post(post["id"])
+        self.assertEqual(detail["post"]["title"], post["title"])
+        self.assertNotIn("comments", detail["post"])
+
     def test_get_post_includes_ordered_comments(self):
         post = self.create_post()
         posts_router.admin_create_comment(
