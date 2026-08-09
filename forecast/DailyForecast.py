@@ -53,6 +53,7 @@ from core.precipitation import (
 from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
+from core.domain import crop as crop_to_missouri
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
@@ -670,7 +671,18 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     # Spatial ONNX is optional and self-validating. None means keep XGBoost.
     spatial_prediction = try_predict_spatial_fm(ds_full, fuel_points, run_date)
-    
+
+    # Read-only side effect: cache the p10/p90/confidence quantiles this run
+    # already computed but the public path discards. Never touches
+    # spatial_prediction or anything derived from it below - see
+    # services/spatial_fm_uncertainty_cache.py for why this is safe to call
+    # unconditionally.
+    try:
+        from services.spatial_fm_uncertainty_cache import persist as _persist_spatial_fm_uncertainty
+        _persist_spatial_fm_uncertainty(spatial_prediction, run_date)
+    except Exception as _cache_exc:
+        logger.warning("Spatial FM uncertainty caching failed (non-fatal): %s", _cache_exc)
+
     # --- FETCH SWE DATA ---
     # Define extent same as map generation: (-95.8, -89.1, 35.8, 40.8)
     swe_bbox = (-95.8, 35.8, -89.1, 40.8) # MinX, MinY, MaxX, MaxY
@@ -1373,19 +1385,42 @@ def generate_complete_forecast():
         except Exception as e:
             logger.warning(f"Could not download precipitation data: {e}")
             ds_full = ds_rh_temp.merge(ds_wind, compat='override')
+
+        # Wind gust: additive-only, best-effort. Not required and not used
+        # by anything on the public forecast path yet - it exists so
+        # risk-fusion feature aggregation has it when needed. A failure
+        # here must never affect fm/fire-danger output.
+        try:
+            ds_gust = FH.xarray(":GUST:surface:")
+            if isinstance(ds_gust, list):
+                ds_gust = ds_gust[0]
+            ds_full = ds_full.merge(ds_gust, compat='override')
+            logger.info("Successfully downloaded wind gust data")
+        except Exception as e:
+            logger.info(f"Wind gust unavailable for this run (non-fatal): {e}")
         
         # Save to cache for future use
         try:
             print(f"Saving to cache: {cache_file}")
             ds_full.load()
-            
+
+            # Crop to Missouri before writing: Herbie/FastHerbie returns the
+            # full CONUS grid, and everything downstream (the mo_bounds crop
+            # a few lines below, every consumer after it) only ever uses a
+            # Missouri-sized subset anyway - writing the full grid to disk
+            # was pure waste (~488MB vs ~25MB) and the cause of an unrelated
+            # cache-collision incident when archived elsewhere. The buffered
+            # box here is a strict superset of mo_bounds, so this changes
+            # nothing about what process_forecast_with_observations receives.
+            ds_full = crop_to_missouri(ds_full)
+
             # Remove problematic encoding attributes
             for var in ds_full.variables:
                 if 'dtype' in ds_full[var].attrs:
                     del ds_full[var].attrs['dtype']
                 if 'source' in ds_full[var].attrs:
                     del ds_full[var].attrs['source']
-            
+
             ds_full.to_netcdf(cache_file, engine='netcdf4')
             print(f"Cache saved successfully to {cache_file}")
             print(f"Cache file size: {cache_file.stat().st_size / 1024 / 1024:.1f} MB")
@@ -1462,7 +1497,22 @@ def generate_complete_forecast():
     hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid = process_forecast_with_observations(
         ds_full, lon, lat, port=port, run_date=RUN_DATE
     )
-    
+
+    # fire_risk_fusion Phase-A shadow: read-only, additive, never touches
+    # the arrays above or anything derived from them below. See
+    # services/risk_fusion_hook.py for the grid-shape guard that makes
+    # this a no-op (recorded as a skipped run, not silently wrong) until
+    # county_cells.json is rebuilt against this repo's own HRRR crop.
+    try:
+        from services.risk_fusion_hook import run_shadow_for_forecast
+        run_shadow_for_forecast(
+            hourly_fm, hourly_rh, hourly_ws,
+            run_id=pd.Timestamp(RUN_DATE).strftime('%Y%m%d_%H'),
+            valid_local_date=pd.Timestamp(RUN_DATE).strftime('%Y-%m-%d'),
+        )
+    except Exception as _risk_fusion_exc:
+        logger.warning("risk_fusion shadow hook failed (non-fatal): %s", _risk_fusion_exc)
+
     # --- Extract and process precipitation data ---
     logger.info("Extracting precipitation data from HRRR...")
     try:

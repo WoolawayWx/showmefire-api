@@ -50,6 +50,7 @@ from core.precipitation import (PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CON
 from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
+from core.domain import crop as crop_to_missouri
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
@@ -1507,14 +1508,24 @@ def generate_complete_forecast():
         try:
             print(f"Saving to cache: {cache_file}")
             ds_full.load()
-            
+
+            # Crop to Missouri before writing: Herbie/FastHerbie returns the
+            # full CONUS grid, and everything downstream (the mo_bounds crop
+            # a few lines below, every consumer after it) only ever uses a
+            # Missouri-sized subset anyway - writing the full grid to disk
+            # was pure waste (~488MB vs ~25MB) and the cause of an unrelated
+            # cache-collision incident when archived elsewhere. The buffered
+            # box here is a strict superset of mo_bounds, so this changes
+            # nothing about what process_forecast_with_observations receives.
+            ds_full = crop_to_missouri(ds_full)
+
             # Remove problematic encoding attributes
             for var in ds_full.variables:
                 if 'dtype' in ds_full[var].attrs:
                     del ds_full[var].attrs['dtype']
                 if 'source' in ds_full[var].attrs:
                     del ds_full[var].attrs['source']
-            
+
             ds_full.to_netcdf(cache_file, engine='netcdf4')
             print(f"Cache saved successfully to {cache_file}")
             print(f"Cache file size: {cache_file.stat().st_size / 1024 / 1024:.1f} MB")
