@@ -28,7 +28,8 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, FileResponse, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core.database import (
