@@ -34,6 +34,7 @@ Dockerfile.dev
 data_archive/*
 data_archive_day/*
 files/opsbrief/*.pdf
+files/post-media/*
 daily_station_summary.json
 daily_station_summary.json
 fire-danger-model/reports

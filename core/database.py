@@ -587,6 +587,21 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_comments_post_id ON post_comments(post_id)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_media (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL UNIQUE,
+            original_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            public_url TEXT NOT NULL,
+            cdn_url TEXT,
+            sha256 TEXT NOT NULL,
+            uploaded_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_post_media_created ON post_media(created_at DESC)')
 
     # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
     _ensure_fire_event_tables(cursor)
@@ -1550,6 +1565,52 @@ def delete_comment(post_id: int, comment_id: int) -> bool:
         cursor.execute('DELETE FROM post_comments WHERE id = ? AND post_id = ?', (comment_id, post_id))
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def create_post_media_record(
+    filename: str,
+    original_name: str,
+    content_type: str,
+    size_bytes: int,
+    public_url: str,
+    cdn_url: Optional[str],
+    sha256: str,
+    uploaded_by: Optional[str] = None,
+) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO post_media (filename, original_name, content_type, size_bytes, public_url, cdn_url, sha256, uploaded_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (filename, original_name, content_type, size_bytes, public_url, cdn_url, sha256, uploaded_by))
+        media_id = cursor.lastrowid
+        conn.commit()
+        cursor.execute('SELECT * FROM post_media WHERE id = ?', (media_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def list_post_media_records(limit: int = 100, offset: int = 0) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+        cursor.execute('''
+            SELECT id, filename, original_name, content_type, size_bytes, public_url, cdn_url, uploaded_by, created_at
+            FROM post_media
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        ''', (safe_limit, safe_offset))
+        return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
