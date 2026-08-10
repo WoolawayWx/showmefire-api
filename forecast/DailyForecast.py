@@ -54,6 +54,7 @@ from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
 from core.domain import crop as crop_to_missouri
+from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
@@ -1870,11 +1871,8 @@ def generate_complete_forecast():
     
     # ========== MAP 5: MAXIMUM TEMPERATURE ==========
     logger.info("Generating maximum temperature map...")
-    # Define temperature levels and colors in Fahrenheit
-    temp_cmap = plt.cm.turbo  # Or try: plt.cm.RdYlBu_r, plt.cm.jet, plt.cm.plasma
-
-    # Smooth gradient from 0°F to 90°F
-    temp_levels_f = np.linspace(0, 90, 50)
+    # Use the shared WSI temperature palette and its full Fahrenheit range.
+    temp_cmap, temp_levels_f = load_wsi_temperature_palette()
 
     # Convert max_temp_smooth from C to F for plotting
     max_temp_smooth_f = max_temp_smooth * 9/5 + 32
@@ -1892,8 +1890,8 @@ def generate_complete_forecast():
     add_boundaries(ax, data_crs, PROJECT_DIR)
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
-    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
+    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)', extend='both')
+    cbar.set_ticks(temp_levels_f)
     
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
@@ -2387,8 +2385,7 @@ def generate_complete_forecast():
                     # 5. Maximum Temperature
                     fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
                     max_temp_smooth_f = reg_temp * 9/5 + 32
-                    temp_cmap = plt.cm.turbo
-                    temp_levels_f = np.linspace(0, 90, 50)
+                    temp_cmap, temp_levels_f = load_wsi_temperature_palette()
                     cs = ax.contourf(lon, lat, max_temp_smooth_f, transform=data_crs, levels=temp_levels_f, cmap=temp_cmap, alpha=0.7, zorder=7, antialiased=True)
                     contour_levels = np.arange(10, 90, 10)
                     ax.contour(lon, lat, max_temp_smooth_f, transform=data_crs, levels=contour_levels, colors='black', linewidths=0.3, alpha=0.2, zorder=8)
@@ -2396,8 +2393,8 @@ def generate_complete_forecast():
                     add_region_overlay(ax, reg_extent)
                     
                     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-                    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
-                    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
+                    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)', extend='both')
+                    cbar.set_ticks(temp_levels_f)
                     ax.set_anchor('W')
                     plt.subplots_adjust(left=0.05)
                     

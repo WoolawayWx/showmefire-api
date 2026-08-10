@@ -32,6 +32,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.versioning import load_active_model_path
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger
+from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
@@ -966,10 +967,8 @@ def generate_complete_forecast():
     # ========== MAP 5: MAXIMUM TEMPERATURE ==========
     logger.info("Generating maximum temperature map...")
     # Define temperature levels and colors in Fahrenheit
-    temp_cmap = plt.cm.turbo  # Or try: plt.cm.RdYlBu_r, plt.cm.jet, plt.cm.plasma
-
-    # Smooth gradient from 0°F to 90°F
-    temp_levels_f = np.linspace(0, 90, 50)
+    # Use the shared WSI temperature palette and its full Fahrenheit range.
+    temp_cmap, temp_levels_f = load_wsi_temperature_palette()
 
     # Convert max_temp_smooth from C to F for plotting
     max_temp_smooth_f = max_temp_smooth * 9/5 + 32
@@ -987,8 +986,8 @@ def generate_complete_forecast():
     add_boundaries(ax, data_crs, PROJECT_DIR)
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)')
-    cbar.set_ticks([0, 10, 20, 32, 50, 70, 90])
+    cbar = plt.colorbar(cs, cax=cax, label='Temperature (°F)', extend='both')
+    cbar.set_ticks(temp_levels_f)
     
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
