@@ -657,8 +657,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     1. Current actual fuel moisture (from RAWS)
     2. Time lag in fuel response
     3. Temperature effects on drying/wetting rates
-    
-    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks
+
+    Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, hourly_precip, swe_grid
     """
     # Get current fuel moisture observations
     fuel_result = get_current_fuel_moisture_field(port, include_metadata=True)
@@ -734,14 +734,15 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 swe_grid_for_map = None
     else:
         swe_grid = None
-    
+
     # Process each forecast hour
     hourly_fm = []
     hourly_rh = []
     hourly_ws = []
     hourly_temp = []
+    hourly_precip = []
     hourly_risks = []
-    
+
     # Buffers for rolling means
     temp_history = []
     rh_history = []
@@ -972,7 +973,8 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         hourly_temp.append(temp)
         hourly_ws.append(ws_kts)
         hourly_fm.append(fm)
-        
+        hourly_precip.append(precip_interval_mm.copy())
+
         # Calculate fire danger
         # Apply snow mask: areas with snow get LOW fire danger regardless of conditions
         risk = np.full_like(rh, np.nan, dtype=float)
@@ -1131,7 +1133,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         except Exception as e:
              logger.error(f"Failed to save station forecast history JSON: {e}")
 
-    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid
+    return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, hourly_precip, swe_grid
 
 def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None,
                     swe_grid=None, day_of_year=None):
@@ -1505,24 +1507,38 @@ def generate_complete_forecast():
     # Try to get the current fuel moisture field (RAWS obs)
 
     # Continue with forecast using ML model
-    hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid = process_forecast_with_observations(
+    hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, hourly_precip, swe_grid = process_forecast_with_observations(
         ds_full, lon, lat, port=port, run_date=RUN_DATE
     )
 
-    # fire_risk_fusion Phase-A shadow: read-only, additive, never touches
+    # fire_risk_fusion shadow scoring: read-only, additive, never touches
     # the arrays above or anything derived from them below. See
     # services/risk_fusion_hook.py for the grid-shape guard that makes
     # this a no-op (recorded as a skipped run, not silently wrong) until
     # county_cells.json is rebuilt against this repo's own HRRR crop.
+    _risk_fusion_run_id = pd.Timestamp(RUN_DATE).strftime('%Y%m%d_%H')
+    _risk_fusion_valid_date = pd.Timestamp(RUN_DATE).strftime('%Y-%m-%d')
     try:
+        # Phase A: zero-label rule-Monte-Carlo category probabilities.
         from services.risk_fusion_hook import run_shadow_for_forecast
         run_shadow_for_forecast(
             hourly_fm, hourly_rh, hourly_ws,
-            run_id=pd.Timestamp(RUN_DATE).strftime('%Y%m%d_%H'),
-            valid_local_date=pd.Timestamp(RUN_DATE).strftime('%Y-%m-%d'),
+            run_id=_risk_fusion_run_id,
+            valid_local_date=_risk_fusion_valid_date,
         )
     except Exception as _risk_fusion_exc:
-        logger.warning("risk_fusion shadow hook failed (non-fatal): %s", _risk_fusion_exc)
+        logger.warning("risk_fusion Phase A shadow hook failed (non-fatal): %s", _risk_fusion_exc)
+    try:
+        # Phase B: the real learned fire_risk_fusion GLM, shadow-only via
+        # SMF_RISK_FUSION_GLM_BUNDLE - see services/risk_fusion_glm_shadow.py.
+        from services.risk_fusion_hook import run_glm_shadow_for_forecast
+        run_glm_shadow_for_forecast(
+            hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_precip,
+            run_id=_risk_fusion_run_id,
+            valid_local_date=_risk_fusion_valid_date,
+        )
+    except Exception as _risk_fusion_glm_exc:
+        logger.warning("risk_fusion Phase B GLM shadow hook failed (non-fatal): %s", _risk_fusion_glm_exc)
 
     # --- Extract and process precipitation data ---
     logger.info("Extracting precipitation data from HRRR...")
