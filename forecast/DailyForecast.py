@@ -52,7 +52,12 @@ from core.precipitation import (
 )
 from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
-from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
+from core.fire_danger import (
+    calculate_fire_danger as canonical_fire_danger,
+    meters_per_second_to_knots,
+    seasonal_dampening_adjustment,
+)
+from services.seasonal_fuel_state import current_gdd_accum
 from core.domain import crop as crop_to_missouri
 from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
@@ -272,10 +277,15 @@ def calculate_fire_danger(fm, rh, wind_kts):
     Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
     Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
     Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
+
+    Additionally softens marginal Elevated/Critical/Extreme cells by one
+    tier during presumed green-up (see core.fire_danger.seasonal_dampening_
+    adjustment) - the underlying rule above is untouched; the adjustment is
+    applied here only, so callers that need the pure canonical rule (e.g.
+    services/rule_uncertainty.py) are unaffected.
     """
-    
-    
-    return canonical_fire_danger(fm, rh, wind_kts)
+    category = canonical_fire_danger(fm, rh, wind_kts)
+    return seasonal_dampening_adjustment(category, fm, rh, wind_kts, current_gdd_accum())
 
 
 def estimate_fuel_moisture(relative_humidity, air_temp=None):

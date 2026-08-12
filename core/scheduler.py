@@ -18,6 +18,7 @@ from services.v5_verification import verify_pending as verify_v5_shadow
 from services.fire_ingest import ingest_detection_files
 from core.database import expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
+from services.seasonal_fuel_state import update_daily_gdd
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,18 @@ async def purge_fire_report_pii_job():
     except Exception as error:
         logger.error("Fire report PII purge failed: %s", error, exc_info=True)
 
+async def update_seasonal_fuel_state_job():
+    """Advance the GDD accumulator before end-of-day archiving removes today's raw_data JSON."""
+    try:
+        state = await asyncio.to_thread(update_daily_gdd)
+        logger.info(
+            "Seasonal fuel state updated: gdd_accum_since_mar1=%.1f last_updated_date=%s",
+            state.get("gdd_accum_since_mar1", 0.0), state.get("last_updated_date"),
+        )
+    except Exception as error:
+        logger.error("Seasonal fuel state update failed: %s", error, exc_info=True)
+
+
 def create_scheduler():
     central_tz = timezone('America/Chicago')
     return AsyncIOScheduler(timezone=central_tz)
@@ -141,6 +154,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         'cron',
         minute=50,
         id='capture_rtma',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        update_seasonal_fuel_state_job,
+        'cron',
+        hour=23,
+        minute=30,
+        id='update_seasonal_fuel_state',
         max_instances=1,
         coalesce=True,
     )
