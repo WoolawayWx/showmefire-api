@@ -83,7 +83,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -195,6 +195,7 @@ app.include_router(mobile.router)
 app.include_router(posts.router)
 app.include_router(post_media.router)
 app.include_router(fires.router)
+app.include_router(verification.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

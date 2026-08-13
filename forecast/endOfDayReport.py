@@ -15,6 +15,7 @@ import logging
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger
+from core.fire_danger import CATEGORY_LABELS
 
 # Configure logging
 logging.basicConfig(
@@ -327,6 +328,18 @@ def calculate_metrics(merged_df, variable_map):
         print(f"{metric_name}: MAE={round(mae, 4)}, RMSE={round(rmse, 4)}, Bias={round(bias, 4)}, Count={len(valid)}, Correlation={round(corr, 4)}")
     return metrics
 
+def calculate_confusion_matrix(merged_df, pred_col='pred_fire_danger', obs_col='obs_fire_danger'):
+    """Category confusion matrix: observed (rows) vs predicted (cols), Low..Extreme."""
+    valid = merged_df.dropna(subset=[pred_col, obs_col]).copy()
+    if valid.empty:
+        return None
+    valid[pred_col] = valid[pred_col].round().astype(int).clip(0, len(CATEGORY_LABELS) - 1)
+    valid[obs_col] = valid[obs_col].round().astype(int).clip(0, len(CATEGORY_LABELS) - 1)
+    matrix = pd.crosstab(valid[obs_col], valid[pred_col]).reindex(
+        index=range(len(CATEGORY_LABELS)), columns=range(len(CATEGORY_LABELS)), fill_value=0
+    )
+    return {'labels': list(CATEGORY_LABELS), 'matrix': matrix.values.tolist()}
+
 def generate_plots(merged_df, variable_map, report_date, report_suffix=""):
     """
     Generates scatter plots for Predicted vs Observed values.
@@ -585,7 +598,8 @@ def main():
     }
     
     results = calculate_metrics(merged, variable_map)
-    
+    confusion = calculate_confusion_matrix(merged)
+
     # 6. Output Report
     report_date = datetime.now().strftime("%Y-%m-%d")
     report = {
@@ -596,6 +610,7 @@ def main():
         'forecast_source': fc_file.name,
         'observation_source': raw_file.name,
         'metrics': results,
+        'confusion_matrix': confusion,
         'stations_count': merged['stidnunique'] if 'stidnunique' in dir(merged) else merged['stid'].nunique(),
         'record_count': len(merged)
     }

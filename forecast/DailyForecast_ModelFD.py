@@ -99,9 +99,6 @@ def env_float(name, default):
 
 
 # Forecast tuning knobs (override via .env when needed)
-APPLY_HRRR_BIAS_CORRECTION = env_bool('APPLY_HRRR_BIAS_CORRECTION', True)
-TEMP_BIAS_CORRECTION_C = env_float('TEMP_BIAS_CORRECTION_C', 1.2)
-RH_BIAS_CORRECTION_PCT = env_float('RH_BIAS_CORRECTION_PCT', -4.0)
 
 # Keep separate wind treatment for ML input vs fire-behavior thresholds.
 # The ML model feature expects wind_speed_ms; preserve raw 10m m/s for model input.
@@ -933,10 +930,6 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         temp_raw = ds_hour['t2m'].values
         temp = validate_and_convert_temperature(temp_raw, expected_unit='kelvin', source='HRRR')
 
-        # Optional static HRRR bias correction (calibrated from verification reports).
-        if APPLY_HRRR_BIAS_CORRECTION:
-            temp = temp + TEMP_BIAS_CORRECTION_C
-
         # Wind components and magnitude - validate units and return both m/s and knots
         u = ds_hour['u10'].values
         v = ds_hour['v10'].values
@@ -945,9 +938,6 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         ws_fire_ms = ws_ms * HRRR_FIRE_WIND_REDUCTION_FACTOR
         ws_kts = ws_fire_ms * 1.94384
 
-        # Optional static RH correction after unit normalization.
-        if APPLY_HRRR_BIAS_CORRECTION:
-            rh = np.clip(rh + RH_BIAS_CORRECTION_PCT, 0, 100)
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
         precip_interval_mm = np.zeros_like(temp)

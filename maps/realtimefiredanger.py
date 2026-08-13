@@ -39,6 +39,7 @@ from station_danger_history import (
     append_fire_danger_snapshot,
     export_fire_danger_daily_csv,
 )
+from observed_peak_history import update_observed_peak_grid
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -302,6 +303,17 @@ if rh_points and wind_points and fuel_points:
     )
     if not geotiff_ok:
         print("Warning: Failed to export realtime fire danger GeoTIFF")
+
+    try:
+        peak_status = update_observed_peak_grid(
+            grid_values=grid_values,
+            lon_mesh=grid_lon_mesh,
+            lat_mesh=grid_lat_mesh,
+            run_time_utc=datetime.now(timezone.utc),
+        )
+        print(f"Observed peak grid updated: {peak_status}")
+    except Exception as e:
+        print(f"Warning: Failed to update observed peak fire danger grid: {e}")
 
     cs = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
