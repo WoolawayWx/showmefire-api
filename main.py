@@ -24,7 +24,9 @@ from services.rss import generate_rss_feed
 from maps.station_danger_history import (
     get_recent_fire_danger_history,
     normalize_fire_danger_counts,
+    CLASS_VALUE_TO_LABEL,
 )
+from maps.observed_peak_history import STATE_FILE as OBSERVED_PEAK_STATE_FILE
 from pathlib import Path
 from pytz import timezone
 import pandas as pd
@@ -887,6 +889,52 @@ def get_station_fire_danger_counts():
         'total_mo_stations': latest_snapshot.get('total_mo_stations'),
         'classified_mo_stations': latest_snapshot.get('classified_mo_stations'),
         'unclassified_mo_stations': latest_snapshot.get('unclassified_mo_stations'),
+    }
+
+
+@app.get('/api/fire-danger/peak-today')
+def get_fire_danger_peak_today():
+    """Return the highest fire-danger class reached anywhere in MO today.
+
+    Cheap: reads the small observed-peak state.json (kept up to date by
+    realtimefiredanger.py's update_observed_peak_grid) rather than the
+    raster itself. Never raises for missing/stale data -- the frontend
+    badge should simply hide itself when `available` is false.
+    """
+    today_local = datetime.now(timezone('America/Chicago')).strftime('%Y-%m-%d')
+
+    last_update = None
+    status_path = Path(__file__).resolve().parent / 'status.json'
+    if status_path.exists():
+        try:
+            with open(status_path, 'r') as f:
+                last_update = (json.load(f).get('RealtimeFireDanger') or {}).get('last_update')
+        except (json.JSONDecodeError, OSError):
+            last_update = None
+
+    if not OBSERVED_PEAK_STATE_FILE.exists():
+        return {'available': False, 'reason': 'no observed peak data yet', 'last_update': last_update}
+
+    try:
+        with open(OBSERVED_PEAK_STATE_FILE, 'r', encoding='utf-8') as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {'available': False, 'reason': 'observed peak state unreadable', 'last_update': last_update}
+
+    if state.get('date_local') != today_local:
+        return {'available': False, 'reason': 'observed peak data is not from today', 'last_update': last_update}
+
+    peak_class = state.get('peak_class')
+    if peak_class is None:
+        return {'available': False, 'reason': 'no classified pixels yet today', 'last_update': last_update}
+
+    return {
+        'available': True,
+        'date_local': state.get('date_local'),
+        'peak_class': peak_class,
+        'peak_label': CLASS_VALUE_TO_LABEL.get(int(peak_class)),
+        'peak_reached_at_utc': state.get('peak_reached_at_utc'),
+        'last_update': last_update,
     }
 
 

@@ -155,6 +155,13 @@ def _upload_daily_archive_to_cdn(archive_path: Path, date_local: str) -> None:
         print(f"Warning: Failed to upload observed peak archive to CDN: {e}")
 
 
+def _peak_class_from_grid(grid: np.ndarray) -> int | None:
+    finite = np.asarray(grid, dtype=float)
+    if not np.isfinite(finite).any():
+        return None
+    return int(np.nanmax(finite))
+
+
 def update_observed_peak_grid(
     grid_values: np.ndarray,
     lon_mesh: np.ndarray,
@@ -163,11 +170,16 @@ def update_observed_peak_grid(
 ) -> Dict[str, Any]:
     """Fold this run's grid into the running max for today; archive on day rollover.
 
+    Also tracks the single highest class reached anywhere in the grid today
+    and when it was first reached, so a lightweight "today's peak" summary
+    can be read from state.json without touching the raster.
+
     Returns a status dict: {"date_local", "rolled_over", "archived_path",
-    "today_path", "shape"}.
+    "today_path", "shape", "peak_class", "peak_reached_at_utc"}.
     """
     run_time_utc = (run_time_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     today_local = run_time_utc.astimezone(CHICAGO_TZ).strftime("%Y-%m-%d")
+    run_time_iso = run_time_utc.isoformat().replace("+00:00", "Z")
 
     metadata = _grid_metadata(grid_values, lon_mesh, lat_mesh)
     state = _load_state()
@@ -192,11 +204,24 @@ def update_observed_peak_grid(
                 _upload_daily_archive_to_cdn(archive_path, state["date_local"])
         running_grid = np.asarray(grid_values, dtype=float).copy()
         rolled_over = True
+        peak_class = _peak_class_from_grid(running_grid)
+        peak_reached_at_utc = run_time_iso if peak_class is not None else None
     else:
         running_grid = np.fmax(running_grid, np.asarray(grid_values, dtype=float))
+        peak_class = _peak_class_from_grid(running_grid)
+        previous_peak_class = state.get("peak_class")
+        if peak_class is not None and (previous_peak_class is None or peak_class > previous_peak_class):
+            peak_reached_at_utc = run_time_iso
+        else:
+            peak_reached_at_utc = state.get("peak_reached_at_utc")
 
     _save_running_grid(running_grid)
-    _save_state({"date_local": today_local, **metadata})
+    _save_state({
+        "date_local": today_local,
+        "peak_class": peak_class,
+        "peak_reached_at_utc": peak_reached_at_utc,
+        **metadata,
+    })
     _export_tif(
         running_grid, lon_mesh, lat_mesh, TODAY_TIF,
         description=f"Missouri observed peak fire danger classes (RGBA) - {today_local} (in progress)",
@@ -208,4 +233,6 @@ def update_observed_peak_grid(
         "archived_path": archived_path,
         "today_path": str(TODAY_TIF),
         "shape": metadata["shape"],
+        "peak_class": peak_class,
+        "peak_reached_at_utc": peak_reached_at_utc,
     }
