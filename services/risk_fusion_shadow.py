@@ -8,12 +8,11 @@ fire-occurrence labels and no trained bundle, unlike V5's shadow harness
 (services/v5_shadow.py), which this module otherwise mirrors structurally
 (kill switches, persisted state, immutable evidence files).
 
-Phase B - the learned ignition_* half, which DOES need a trained GLM/GBM
-bundle - is blocked on label accumulation (see the plan's staging) and is
-not implemented here. When it exists, it gets its own
-validate_bundle()-style guard mirroring v5_shadow.validate_bundle,
-including the parity-vector check described in the project plan; Phase A
-below has no bundle to validate, only the rule-MC parity self-check.
+Phase B - the learned half, scoring the actual trained fire_risk_fusion
+GLM - now lives in its own module, services/risk_fusion_glm_shadow.py,
+rather than here: it has its own bundle-loading and contract-hash guard
+mirroring v5_shadow.validate_bundle. Phase A below has no bundle to
+validate, only the rule-MC parity self-check.
 
 Every public function catches its own exceptions and never raises into
 the caller - a bug here must never affect forecast generation, matching
