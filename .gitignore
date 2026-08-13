@@ -41,3 +41,4 @@ fire-danger-model/reports
 fire-danger-model/data/
 plots/
 .docker-test-data/
+fire-media/*

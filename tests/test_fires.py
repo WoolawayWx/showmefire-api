@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from fastapi import UploadFile
 from pydantic import ValidationError
+from starlette.datastructures import Headers
 
 from core import database
 from core.security import create_access_token
@@ -33,7 +34,8 @@ def _valid_payload(**overrides):
         fuel_types=["grass", "brush"],
         description="Grass fire along the fence line, spreading slowly toward the road.",
         out_of_ordinary="",
-        reporter_contact="",
+        reporter_contact="chief@example.com",
+        reporter_name="Jane Doe",
         consent_acknowledged=True,
         turnstile_token="test-token",
         website="",
@@ -124,9 +126,17 @@ class FireReportValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             fires_router.FireReportCreate(**_valid_payload(reporter_contact="!!!"))
 
+    def test_rejects_missing_reporter_contact(self):
+        with self.assertRaises(ValidationError):
+            fires_router.FireReportCreate(**_valid_payload(reporter_contact=""))
+
     def test_accepts_email_reporter_contact(self):
         report = fires_router.FireReportCreate(**_valid_payload(reporter_contact="chief@example.com"))
         self.assertEqual(report.reporter_contact, "chief@example.com")
+
+    def test_rejects_missing_reporter_name(self):
+        with self.assertRaises(ValidationError):
+            fires_router.FireReportCreate(**_valid_payload(reporter_name=""))
 
     def test_accepts_optional_reporter_and_address_fields(self):
         report = fires_router.FireReportCreate(**_valid_payload(
@@ -172,7 +182,15 @@ class FiresRouterTests(unittest.TestCase):
         self.trust_proxy_patch = patch.object(fires_router, "TRUST_PROXY_HEADERS", True)
         self.trust_proxy_patch.start()
 
+        # submit_fire_report falls back to a real Nominatim reverse-geocode call
+        # whenever address_text is blank (the default in _valid_payload) - mock
+        # it so the suite never depends on network access or burns the shared
+        # public rate-limit budget that the real address-lookup flow also uses.
+        self.reverse_geocode_patch = patch.object(fires_router, "_reverse_geocode", return_value="")
+        self.reverse_geocode_patch.start()
+
     def tearDown(self):
+        self.reverse_geocode_patch.stop()
         self.trust_proxy_patch.stop()
         self.turnstile_patch.stop()
         self.database_patch.stop()
@@ -182,6 +200,55 @@ class FiresRouterTests(unittest.TestCase):
         payload = fires_router.FireReportCreate(**_valid_payload(**overrides))
         request = _FakeRequest(host=ip)
         return fires_router.submit_fire_report(payload, request)
+
+    def geocode(self, address="123 Main St, Columbia, MO", ip="203.0.113.9"):
+        payload = fires_router.AddressGeocodeRequest(address=address)
+        request = _FakeRequest(host=ip)
+        return fires_router.geocode_fire_report_address(payload, request)
+
+    # --- geocode handler ---
+
+    def test_geocode_returns_approximate_point_in_bounds(self):
+        with patch.object(fires_router, "_forward_geocode", return_value={
+            "latitude": 38.9517, "longitude": -92.3341, "display_name": "Columbia, Boone County, Missouri",
+        }):
+            result = self.geocode()
+        self.assertEqual(result["location"]["latitude"], 38.9517)
+        self.assertEqual(result["location"]["display_name"], "Columbia, Boone County, Missouri")
+
+    def test_geocode_returns_404_when_address_not_found(self):
+        with patch.object(fires_router, "_forward_geocode", return_value=None):
+            with self.assertRaises(HTTPException) as ctx:
+                self.geocode()
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_geocode_returns_503_when_lookup_service_is_unavailable(self):
+        with patch.object(fires_router, "_forward_geocode", side_effect=fires_router._GeocodeUnavailable()):
+            with self.assertRaises(HTTPException) as ctx:
+                self.geocode()
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_geocode_blocklisted_ip_gets_403_before_lookup(self):
+        ip_hash = fires_router._ip_bucket_key("203.0.113.9")
+        database.add_ip_to_blocklist(ip_hash, "abuse", "staff@showmefire.org")
+        with patch.object(fires_router, "_forward_geocode") as mock_geocode:
+            with self.assertRaises(HTTPException) as ctx:
+                self.geocode(ip="203.0.113.9")
+            mock_geocode.assert_not_called()
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_geocode_is_throttled_independently_of_report_submission(self):
+        with patch.object(fires_router, "_forward_geocode", return_value={
+            "latitude": 38.9517, "longitude": -92.3341, "display_name": "Columbia, MO",
+        }):
+            for _ in range(fires_router.FIRE_GEOCODE_LIMIT_PER_HOUR):
+                self.geocode()
+            with self.assertRaises(HTTPException) as ctx:
+                self.geocode()
+        self.assertEqual(ctx.exception.status_code, 429)
+        # Submitting a report uses a separate quota bucket, unaffected by geocode throttling.
+        result = self.submit()
+        self.assertEqual(result["report"]["status"], "pending")
 
     # --- submit handler ---
 
@@ -214,6 +281,80 @@ class FiresRouterTests(unittest.TestCase):
         ))
         self.assertEqual(uploaded["media"]["content_type"], "image/png")
         self.assertEqual(len(database.get_fire_event(report["id"], admin=True)["media"]), 1)
+
+    def test_document_upload_accepts_pdf_and_is_admin_only(self):
+        result = self.submit()
+        report = result["report"]
+        pdf = UploadFile(
+            filename="incident-report.pdf",
+            file=BytesIO(b"%PDF-1.4\n" + b"\x00" * 32),
+            headers=Headers({"content-type": "application/pdf"}),
+        )
+        uploaded = asyncio.run(fires_router.upload_fire_report_document(
+            report["id"], report["upload_token"], pdf
+        ))
+        self.assertEqual(uploaded["document"]["content_type"], "application/pdf")
+        self.assertEqual(uploaded["document"]["kind"], "document")
+
+        admin_event = database.get_fire_event(report["id"], admin=True)
+        self.assertEqual(len(admin_event["media"]), 1)
+
+        listing = fires_router.list_public_fire_events(SimpleNamespace(headers={}))
+        self.assertEqual(listing["count"], 0)  # still pending, but also: media never appears publicly
+
+    def test_document_upload_rejects_wrong_mime(self):
+        result = self.submit()
+        report = result["report"]
+        bad = UploadFile(
+            filename="notes.txt",
+            file=BytesIO(b"just some notes"),
+            headers=Headers({"content-type": "text/plain"}),
+        )
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(fires_router.upload_fire_report_document(
+                report["id"], report["upload_token"], bad
+            ))
+        self.assertEqual(ctx.exception.status_code, 415)
+
+    def test_document_upload_enforces_single_file_cap(self):
+        result = self.submit()
+        report = result["report"]
+
+        def _upload():
+            pdf = UploadFile(
+                filename="incident-report.pdf",
+                file=BytesIO(b"%PDF-1.4\n" + b"\x00" * 32),
+                headers=Headers({"content-type": "application/pdf"}),
+            )
+            return asyncio.run(fires_router.upload_fire_report_document(
+                report["id"], report["upload_token"], pdf
+            ))
+
+        _upload()
+        with self.assertRaises(HTTPException) as ctx:
+            _upload()
+        self.assertEqual(ctx.exception.status_code, 413)
+
+    def test_document_upload_does_not_count_against_photo_cap(self):
+        result = self.submit()
+        report = result["report"]
+        pdf = UploadFile(
+            filename="incident-report.pdf",
+            file=BytesIO(b"%PDF-1.4\n" + b"\x00" * 32),
+            headers=Headers({"content-type": "application/pdf"}),
+        )
+        asyncio.run(fires_router.upload_fire_report_document(
+            report["id"], report["upload_token"], pdf
+        ))
+        png = UploadFile(
+            filename="fire.png",
+            file=BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32),
+            headers=Headers({"content-type": "image/png"}),
+        )
+        uploaded = asyncio.run(fires_router.upload_fire_report_media(
+            report["id"], report["upload_token"], png
+        ))
+        self.assertEqual(uploaded["media"]["kind"], "photo")
 
     def test_point_outside_counties_but_in_bbox_still_succeeds_with_null_county(self):
         # A point inside the MO bbox but over open water / no polygon match.

@@ -21,11 +21,12 @@ import re
 import secrets
 import shutil
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
@@ -76,13 +77,17 @@ FIRE_REPORT_LIMIT_PER_HOUR = int(os.getenv("FIRE_REPORT_LIMIT_PER_HOUR", "3"))
 FIRE_REPORT_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_LIMIT_PER_DAY", "10"))
 FIRE_REPORT_GLOBAL_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_GLOBAL_LIMIT_PER_DAY", "300"))
 FIRE_LABEL_ADMIN_REVIEWED_WEIGHT = float(os.getenv("FIRE_LABEL_ADMIN_REVIEWED_WEIGHT", "0.3"))
+FIRE_GEOCODE_LIMIT_PER_HOUR = int(os.getenv("FIRE_GEOCODE_LIMIT_PER_HOUR", "20"))
+FIRE_GEOCODE_LIMIT_PER_DAY = int(os.getenv("FIRE_GEOCODE_LIMIT_PER_DAY", "60"))
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CONTACT_RE = re.compile(r"^[A-Za-z0-9@._%+\-\s()]{5,120}$")
 _NAME_RE = re.compile(r"^[^\r\n]{1,120}$")
 MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+DOCUMENT_TYPES = {**MEDIA_TYPES, "application/pdf": ".pdf"}
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_MEDIA_COUNT = 5
+MAX_DOCUMENT_COUNT = 1
 MEDIA_DIR = Path(os.getenv("FIRE_MEDIA_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "fire-media")))
 
 
@@ -134,6 +139,66 @@ def _reverse_geocode(latitude: float, longitude: float) -> str:
         return ""
 
 
+class _GeocodeUnavailable(Exception):
+    """Nominatim rejected/failed the request (rate limit, timeout, 5xx) - distinct
+    from a clean "no results", so the caller can tell a reporter to retry
+    shortly instead of telling them their address doesn't exist."""
+
+
+def _forward_geocode(address: str) -> Optional[Dict]:
+    """
+    Best-effort address -> point lookup for the "I don't know the exact
+    coordinates" reporting flow. Returns an approximate point bounded to
+    Missouri, or None when Nominatim genuinely has no match/only an
+    out-of-state one. Raises _GeocodeUnavailable when the lookup itself
+    failed (rate limited, timed out, 5xx) so the caller doesn't conflate
+    "temporarily can't check" with "not a real address". Coordinates from
+    this are always approximate; staff correct them via FireEventUpdate
+    during review like any other report field.
+    """
+    try:
+        query = urllib.parse.urlencode({
+            "q": address,
+            "format": "json",
+            "limit": 1,
+            "countrycodes": "us",
+            "viewbox": f"{MO_LON_MIN},{MO_LAT_MAX},{MO_LON_MAX},{MO_LAT_MIN}",
+            "bounded": 1,
+        })
+        request = urllib.request.Request(
+            f"https://nominatim.openstreetmap.org/search?{query}",
+            headers={"User-Agent": "ShowMeFire/1.0 fire-report-address"},
+        )
+        with urllib.request.urlopen(request, timeout=3.0) as response:
+            results = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 503):
+            raise _GeocodeUnavailable() from exc
+        logger.info("Forward geocoding unavailable", exc_info=False)
+        return None
+    except urllib.error.URLError:
+        raise _GeocodeUnavailable()
+    except Exception:
+        logger.info("Forward geocoding unavailable", exc_info=False)
+        return None
+
+    if not results:
+        return None
+    latitude = float(results[0]["lat"])
+    longitude = float(results[0]["lon"])
+    if not (MO_LAT_MIN <= latitude <= MO_LAT_MAX and MO_LON_MIN <= longitude <= MO_LON_MAX):
+        return None
+    return {
+        "latitude": round(latitude, 4),
+        "longitude": round(longitude, 4),
+        "display_name": _clean_text(results[0].get("display_name"), required=False, field="address_text")[:500],
+    }
+
+
+class AddressGeocodeRequest(BaseModel):
+    address: str = Field(min_length=3, max_length=300)
+
+
 class FireReportCreate(BaseModel):
     latitude: float = Field(ge=MO_LAT_MIN, le=MO_LAT_MAX)
     longitude: float = Field(ge=MO_LON_MIN, le=MO_LON_MAX)
@@ -144,8 +209,8 @@ class FireReportCreate(BaseModel):
     fuel_types: List[str] = Field(min_length=1, max_length=6)
     description: str = Field(min_length=20, max_length=4000)
     out_of_ordinary: str = Field(default="", max_length=2000)
-    reporter_contact: str = Field(default="", max_length=120)
-    reporter_name: str = Field(default="", max_length=120)
+    reporter_contact: str = Field(min_length=1, max_length=120)
+    reporter_name: str = Field(min_length=1, max_length=120)
     reporter_org: str = Field(default="", max_length=120)
     address_text: str = Field(default="", max_length=500)
     consent_acknowledged: bool
@@ -189,12 +254,20 @@ class FireReportCreate(BaseModel):
     @field_validator("reporter_contact")
     @classmethod
     def _clean_contact(cls, value: str) -> str:
-        text = _clean_text(value, required=False, field="reporter_contact")
-        if text and not _CONTACT_RE.fullmatch(text):
+        text = _clean_text(value, required=True, field="reporter_contact")
+        if not _CONTACT_RE.fullmatch(text):
             raise ValueError("reporter_contact must be an email or phone number")
         return text
 
-    @field_validator("reporter_name", "reporter_org", "address_text")
+    @field_validator("reporter_name")
+    @classmethod
+    def _clean_reporter_name(cls, value: str) -> str:
+        text = _clean_text(value, required=True, field="reporter_name")
+        if not _NAME_RE.fullmatch(text):
+            raise ValueError("reporter_name contains invalid line breaks")
+        return text
+
+    @field_validator("reporter_org", "address_text")
     @classmethod
     def _clean_reporter_fields(cls, value: str) -> str:
         text = _clean_text(value, required=False, field="reporter details")
@@ -333,6 +406,48 @@ def _event_to_geojson_feature(event: dict) -> dict:
     }
 
 
+# --- Public: geocode ---
+
+@router.post("/api/fires/geocode")
+def geocode_fire_report_address(payload: AddressGeocodeRequest, request: Request):
+    """
+    Best-effort address -> point lookup for reporters who don't know exact
+    coordinates. Returns an approximate point for the frontend to place on
+    the map for the reporter to confirm/adjust before submitting; staff can
+    still correct it during moderation review like any other report field.
+    """
+    client_ip = _client_ip(request)
+    ip_hash = _ip_bucket_key(client_ip)
+
+    if is_ip_blocked(ip_hash):
+        raise HTTPException(status_code=403, detail="Not allowed from this network")
+
+    quota = consume_fire_submission_quota(
+        f"geocode:{ip_hash}", datetime.now(timezone.utc), FIRE_GEOCODE_LIMIT_PER_HOUR, FIRE_GEOCODE_LIMIT_PER_DAY
+    )
+    if not quota["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many address lookups. Please try again shortly.",
+            headers={"Retry-After": str(quota["retry_after"])},
+        )
+
+    address = _clean_text(payload.address, required=True, field="address")
+    try:
+        result = _forward_geocode(address)
+    except _GeocodeUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Location lookup is busy right now. Please try again in a moment, or place the pin on the map directly.",
+        )
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail="Couldn't find that address in Missouri. Try adding more detail, or place the point on the map instead.",
+        )
+    return {"success": True, "location": result}
+
+
 # --- Public: submit ---
 
 @router.post("/api/fires/reports", status_code=201)
@@ -406,13 +521,33 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
     }
 
 
-@router.post("/api/fires/reports/{event_id}/media", status_code=201)
-async def upload_fire_report_media(
+def _matches_file_signature(content_type: str, content: bytes) -> bool:
+    signatures = {
+        "image/jpeg": content[:3] == b"\xff\xd8\xff",
+        "image/png": content[:8] == b"\x89PNG\r\n\x1a\n",
+        "image/webp": content[:4] == b"RIFF" and content[8:12] == b"WEBP",
+        "application/pdf": content[:5] == b"%PDF-",
+    }
+    return signatures.get(content_type, False)
+
+
+async def _save_fire_report_upload(
     event_id: int,
     upload_token: str,
-    media: UploadFile = File(...),
-):
-    """Attach media during the private, post-submission upload step."""
+    media: UploadFile,
+    *,
+    kind: str,
+    allowed_types: Dict[str, str],
+    max_count: int,
+    max_count_message: str,
+    type_error_message: str,
+) -> Dict:
+    """Shared validate-and-store logic for the post-submission upload step.
+
+    Photos (kind="photo") and department-report documents (kind="document")
+    share fire_event_media but are counted and capped independently, and
+    documents must stay admin-only - see get_fire_event(admin=...) gating.
+    """
     if not upload_token or len(upload_token) > 256:
         raise HTTPException(status_code=403, detail="Invalid upload token")
     event = get_fire_event(event_id, admin=True)
@@ -422,38 +557,69 @@ async def upload_fire_report_media(
     supplied = hashlib.sha256(upload_token.encode()).hexdigest()
     if not expected or not hmac.compare_digest(expected, supplied):
         raise HTTPException(status_code=403, detail="Invalid upload token")
-    if count_fire_event_media(event_id) >= MAX_MEDIA_COUNT:
-        raise HTTPException(status_code=413, detail=f"Maximum of {MAX_MEDIA_COUNT} media files allowed")
+    if count_fire_event_media(event_id, kind=kind) >= max_count:
+        raise HTTPException(status_code=413, detail=max_count_message)
 
     content_type = (media.content_type or "").lower().split(";")[0].strip()
-    if content_type not in MEDIA_TYPES:
-        raise HTTPException(status_code=415, detail="Only JPEG, PNG, and WebP images are allowed")
+    if content_type not in allowed_types:
+        raise HTTPException(status_code=415, detail=type_error_message)
     filename = Path(media.filename or "upload").name[:180]
     if not filename:
         raise HTTPException(status_code=400, detail="filename required")
 
     content = await media.read(MAX_MEDIA_BYTES + 1)
     if len(content) > MAX_MEDIA_BYTES:
-        raise HTTPException(status_code=413, detail="Media file exceeds 10 MB")
-    signatures = {
-        "image/jpeg": content[:3] == b"\xff\xd8\xff",
-        "image/png": content[:8] == b"\x89PNG\r\n\x1a\n",
-        "image/webp": content[:4] == b"RIFF" and content[8:12] == b"WEBP",
-    }
-    if not signatures.get(content_type, False):
+        raise HTTPException(status_code=413, detail="File exceeds 10 MB")
+    if not _matches_file_signature(content_type, content):
         raise HTTPException(status_code=415, detail="File content does not match its MIME type")
 
     digest = hashlib.sha256(content).hexdigest()
-    stored_name = f"{event_id}-{secrets.token_hex(16)}{MEDIA_TYPES[content_type]}"
+    stored_name = f"{event_id}-{secrets.token_hex(16)}{allowed_types[content_type]}"
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     target = MEDIA_DIR / stored_name
     target.write_bytes(content)
     try:
-        record = add_fire_event_media(event_id, stored_name, filename, content_type, len(content), digest)
+        record = add_fire_event_media(event_id, stored_name, filename, content_type, len(content), digest, kind=kind)
     except Exception:
         target.unlink(missing_ok=True)
         raise
-    return {"success": True, "media": {k: v for k, v in record.items() if k != "sha256"}}
+    return {k: v for k, v in record.items() if k != "sha256"}
+
+
+@router.post("/api/fires/reports/{event_id}/media", status_code=201)
+async def upload_fire_report_media(
+    event_id: int,
+    upload_token: str,
+    media: UploadFile = File(...),
+):
+    """Attach a photo during the private, post-submission upload step."""
+    record = await _save_fire_report_upload(
+        event_id, upload_token, media,
+        kind="photo",
+        allowed_types=MEDIA_TYPES,
+        max_count=MAX_MEDIA_COUNT,
+        max_count_message=f"Maximum of {MAX_MEDIA_COUNT} media files allowed",
+        type_error_message="Only JPEG, PNG, and WebP images are allowed",
+    )
+    return {"success": True, "media": record}
+
+
+@router.post("/api/fires/reports/{event_id}/document", status_code=201)
+async def upload_fire_report_document(
+    event_id: int,
+    upload_token: str,
+    media: UploadFile = File(...),
+):
+    """Attach an optional department report (PDF or image) - admin-review only, never public."""
+    record = await _save_fire_report_upload(
+        event_id, upload_token, media,
+        kind="document",
+        allowed_types=DOCUMENT_TYPES,
+        max_count=MAX_DOCUMENT_COUNT,
+        max_count_message=f"Maximum of {MAX_DOCUMENT_COUNT} department report file allowed",
+        type_error_message="Only PDF, JPEG, PNG, or WebP files are allowed",
+    )
+    return {"success": True, "document": record}
 
 
 @router.get("/api/admin/fires/reports/{event_id}/media/{media_id}")

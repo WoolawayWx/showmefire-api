@@ -166,6 +166,7 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
             size_bytes INTEGER NOT NULL DEFAULT 0,
             sha256 TEXT NOT NULL DEFAULT '',
             review_state TEXT NOT NULL DEFAULT 'pending',
+            kind TEXT NOT NULL DEFAULT 'photo',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (event_id) REFERENCES fire_events(id)
         )
@@ -183,6 +184,12 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     ):
         if name not in columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {name} {definition}")
+
+    # Migrate fire_event_media tables created before department-report uploads.
+    cursor.execute("PRAGMA table_info(fire_event_media)")
+    media_columns = {row[1] for row in cursor.fetchall()}
+    if "kind" not in media_columns:
+        cursor.execute("ALTER TABLE fire_event_media ADD COLUMN kind TEXT NOT NULL DEFAULT 'photo'")
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -1722,7 +1729,7 @@ def create_fire_report(
                 acres, acres_is_estimate, description, out_of_ordinary,
                 reporter_contact, reporter_name, reporter_org, address_text,
                 submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict
-            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
@@ -1829,12 +1836,17 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
         conn.close()
 
 
-def count_fire_event_media(event_id: int) -> int:
+def count_fire_event_media(event_id: int, kind: Optional[str] = None) -> int:
     db_path = get_db_path()
     with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM fire_event_media WHERE event_id = ?", (event_id,)
-        ).fetchone()
+        if kind is None:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM fire_event_media WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM fire_event_media WHERE event_id = ? AND kind = ?", (event_id, kind)
+            ).fetchone()
         return int(row[0] if row else 0)
 
 
@@ -1854,6 +1866,7 @@ def add_fire_event_media(
     content_type: str,
     size_bytes: int,
     sha256: str,
+    kind: str = "photo",
 ) -> Dict:
     db_path = get_db_path()
     with sqlite3.connect(db_path) as conn:
@@ -1862,16 +1875,16 @@ def add_fire_event_media(
         cursor.execute(
             """
             INSERT INTO fire_event_media
-                (event_id, stored_filename, original_filename, content_type, size_bytes, sha256)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (event_id, stored_filename, original_filename, content_type, size_bytes, sha256, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (event_id, stored_filename, original_filename, content_type, size_bytes, sha256),
+            (event_id, stored_filename, original_filename, content_type, size_bytes, sha256, kind),
         )
         conn.commit()
         row = cursor.execute(
             """
             SELECT id, event_id, stored_filename, original_filename, content_type,
-                   size_bytes, sha256, review_state, created_at
+                   size_bytes, sha256, review_state, kind, created_at
             FROM fire_event_media WHERE id = ?
             """,
             (cursor.lastrowid,),
@@ -1886,7 +1899,7 @@ def get_fire_event_media(event_id: int) -> List[Dict]:
         rows = conn.execute(
             """
             SELECT id, event_id, stored_filename, original_filename, content_type,
-                   size_bytes, sha256, review_state, created_at
+                   size_bytes, sha256, review_state, kind, created_at
             FROM fire_event_media WHERE event_id = ? ORDER BY created_at, id
             """,
             (event_id,),
