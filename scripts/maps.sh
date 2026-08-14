@@ -9,8 +9,23 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1
 
-# Activate the virtual environment
-source ./venv/bin/activate
+# Detect correct Python executable (same convention as forecasts.sh / forecast_RRFS.sh).
+# Cron does not inherit the Docker image's VIRTUAL_ENV/PATH, and in production the
+# venv lives at /opt/venv, not $PROJECT_DIR/venv - so `source ./venv/bin/activate`
+# silently fails there and every script below would run against a bare system
+# python with none of the required packages installed.
+if [ -f "/opt/venv/bin/python" ]; then
+    PYTHON="/opt/venv/bin/python" # Docker production
+elif [ -f "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON="$PROJECT_DIR/venv/bin/python" # Local development
+else
+    PYTHON="python" # System fallback
+fi
+
+if ! "$PYTHON" --version > /dev/null 2>&1; then
+    echo "ERROR: Python not found or not working at $PYTHON"
+    exit 1
+fi
 
 # Ensure project-root imports like core.* and maps.* resolve in script mode.
 export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
@@ -27,7 +42,7 @@ for script in ./maps/*.py; do
     fi
 
     echo "Running $script..."
-    if ! python "$script"; then
+    if ! "$PYTHON" "$script"; then
         echo "[ERROR] Failed: $script"
         failed_scripts+=("$script")
     fi
@@ -40,14 +55,11 @@ if [[ "$UPLOAD_FORECAST_VALUE" == "false" || "$UPLOAD_FORECAST_VALUE" == "0" || 
     echo "CDN upload disabled (uploadForecast=false)"
 else
     echo "Uploading to CDN..."
-    python scripts/upload_cdn.py
+    "$PYTHON" scripts/upload_cdn.py
 fi
 
 echo "Generating RSS feed..."
-python -m services.rss --add-summary
-
-# Deactivate the virtual environment
-deactivate
+"$PYTHON" -m services.rss --add-summary
 
 if (( ${#failed_scripts[@]} > 0 )); then
     echo ""

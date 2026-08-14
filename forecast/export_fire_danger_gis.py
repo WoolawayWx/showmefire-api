@@ -19,9 +19,11 @@ Usage inside generate_complete_forecast():
 
 import json
 import logging
+import shutil
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import rasterio
 from rasterio.transform import from_bounds
@@ -46,6 +48,43 @@ DANGER_LEVELS = {
 }
 
 NODATA_UINT8 = 255   # sentinel for NaN / outside-Missouri cells
+
+CHICAGO_TZ = ZoneInfo("America/Chicago")
+
+
+def forecast_peak_local_date(run_date=None) -> str:
+    """Local (America/Chicago) calendar date this forecast run belongs to.
+
+    Used to key the forecast-peak archive so it lines up with the same
+    local date used by observed_peak_history.py and endOfDayReport.py.
+    """
+    if run_date is None:
+        run_time_utc = datetime.now(timezone.utc)
+    elif run_date.tzinfo is None:
+        run_time_utc = run_date.replace(tzinfo=timezone.utc)
+    else:
+        run_time_utc = run_date.astimezone(timezone.utc)
+    return run_time_utc.astimezone(CHICAGO_TZ).strftime("%Y-%m-%d")
+
+
+def archive_forecast_peak_tif(tif_path: Path, out_dir: Path, run_date=None) -> Path | None:
+    """Copy the just-written peak_fire_danger.tif into a per-date archive.
+
+    Mirrors gis/observed_peak/archive/{date}.tif so verification can compare
+    a given date's forecast peak against that same date's observed peak,
+    instead of always reading whatever the current live tif happens to be.
+    Last forecast run of the local day wins (overwrites earlier runs).
+    """
+    try:
+        date_local = forecast_peak_local_date(run_date)
+        archive_dir = Path(out_dir) / "forecast_peak" / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"{date_local}.tif"
+        shutil.copy2(tif_path, archive_path)
+        return archive_path
+    except Exception as e:
+        logger.error(f"Failed to archive forecast peak GeoTIFF: {e}", exc_info=True)
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -407,6 +446,8 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     tif_path = out_dir / 'peak_fire_danger.tif'
     ok = export_geotiff(peak_risk_smooth, lon, lat, tif_path, run_date)
     results['geotiff'] = tif_path if ok else None
+    if ok:
+        results['geotiff_archive'] = archive_forecast_peak_tif(tif_path, out_dir, run_date)
 
     # ── GeoJSON polygons ──────────────────────────────────────────────────────
     poly_path = out_dir / 'peak_fire_danger_polygons.geojson'

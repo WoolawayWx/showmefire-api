@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from core.config import GIS_DIR, REPORTS_DIR
+from core.config import GIS_DIR, IMAGES_DIR, REPORTS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,18 @@ def _load_history() -> List[Dict[str, Any]]:
 
 def _observed_peak_tif_path(date: str) -> Path:
     return Path(GIS_DIR) / "observed_peak" / "archive" / f"{date}.tif"
+
+
+def _forecast_peak_tif_path(date: str) -> Path:
+    return Path(GIS_DIR) / "forecast_peak" / "archive" / f"{date}.tif"
+
+
+def _observed_peak_png_path(date: str) -> Path:
+    return Path(IMAGES_DIR) / "observed_peak" / "archive" / f"{date}.png"
+
+
+def _forecast_peak_png_path(date: str) -> Path:
+    return Path(IMAGES_DIR) / "forecast_peak" / "archive" / f"{date}.png"
 
 
 def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:
@@ -82,8 +94,10 @@ async def get_verification_report(date: str):
         logger.error("Failed to read validation summary for %s: %s", date, exc)
         raise HTTPException(status_code=500, detail="Failed to read validation report") from exc
 
-    observed_peak_path = _observed_peak_tif_path(date)
-    forecast_peak_path = Path(GIS_DIR) / "peak_fire_danger.tif"
+    observed_peak_tif_path = _observed_peak_tif_path(date)
+    forecast_peak_tif_path = _forecast_peak_tif_path(date)
+    observed_peak_png_path = _observed_peak_png_path(date)
+    forecast_peak_png_path = _forecast_peak_png_path(date)
 
     return {
         "date": summary.get("date", date),
@@ -93,9 +107,17 @@ async def get_verification_report(date: str):
         "metrics": summary.get("metrics", {}),
         "confusion_matrix": summary.get("confusion_matrix"),
         "gis": {
-            "forecast_peak_tif": "peak_fire_danger.tif" if forecast_peak_path.exists() else None,
+            "forecast_peak_tif": (
+                f"forecast_peak/archive/{date}.tif" if forecast_peak_tif_path.exists() else None
+            ),
             "observed_peak_tif": (
-                f"observed_peak/archive/{date}.tif" if observed_peak_path.exists() else None
+                f"observed_peak/archive/{date}.tif" if observed_peak_tif_path.exists() else None
+            ),
+            "forecast_peak_png": (
+                f"forecast_peak/archive/{date}.png" if forecast_peak_png_path.exists() else None
+            ),
+            "observed_peak_png": (
+                f"observed_peak/archive/{date}.png" if observed_peak_png_path.exists() else None
             ),
         },
     }

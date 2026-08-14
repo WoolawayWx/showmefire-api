@@ -31,8 +31,6 @@ import psutil
 import xgboost as xgb
 import sys
 import rasterio
-from rasterio.transform import from_bounds
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 import sqlite3
 import tarfile
 import gzip
@@ -57,6 +55,7 @@ from core.fire_danger import calculate_fire_danger as canonical_fire_danger, met
 from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.model_shadow import run_shadow
+from export_fire_danger_gis import export_all_gis_formats
 
 # Load the production (stable) model once - see models/versioning.py
 FM_MODEL = xgb.Booster()
@@ -1494,109 +1493,12 @@ def generate_complete_forecast():
     del fig, ax, cs, cax, cbar
     gc.collect()
     
-    logger.info("Exporting peak fire danger as GeoTIFF...")
-    try:
-        geotiff_path = PROJECT_DIR / 'gis/peak_fire_danger.tif'
-        geotiff_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Get data dimensions
-        rows, cols = peak_risk_smooth.shape
-        
-        # Calculate bounds
-        lon_min, lon_max = float(lon.min()), float(lon.max())
-        lat_min, lat_max = float(lat.min()), float(lat.max())
-        
-        # Create source transform in EPSG:4326
-        src_transform = from_bounds(lon_min, lat_min, lon_max, lat_max, cols, rows)
-        src_crs = "EPSG:4326"
-        dst_crs = "EPSG:3857"  # Web Mercator for MapLibre
-        
-        # Bin smoothed values into discrete fire danger categories before export
-        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
-        risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
-        risk_binned = np.clip(risk_binned, 0, 4)
-        risk_binned = np.where(np.isnan(peak_risk_smooth), 255, risk_binned).astype(np.uint8)  # 255 = nodata
-
-        # Flip so row 0 is north (match geospatial convention)
-        data_flipped = np.flipud(risk_binned)
-
-        # Reproject to Web Mercator to align with web maps
-        dst_transform, dst_width, dst_height = calculate_default_transform(
-            src_crs, dst_crs, cols, rows,
-            left=lon_min, bottom=lat_min, right=lon_max, top=lat_max
-        )
-
-        risk_3857 = np.full((dst_height, dst_width), 255, dtype=np.uint8)
-        reproject(
-            source=data_flipped,
-            destination=risk_3857,
-            src_transform=src_transform,
-            src_crs=src_crs,
-            dst_transform=dst_transform,
-            dst_crs=dst_crs,
-            resampling=Resampling.nearest,
-            src_nodata=255,
-            dst_nodata=255
-        )
-        
-        # Create RGBA bands in destination grid
-        rgba_data = np.zeros((4, dst_height, dst_width), dtype=np.uint8)
-        
-        # Define color map matching your visualization
-        # (R, G, B, A) values 0-255
-        color_map = {
-            0: (144, 238, 144, 255),  # Low - light green
-            1: (255, 255, 153, 255),  # Moderate - yellow
-            2: (255, 165, 0, 255),    # Elevated - orange
-            3: (255, 69, 0, 255),     # Critical - red-orange
-            4: (139, 0, 0, 255)       # Extreme - dark red
-        }
-        
-        # Apply colors to each pixel based on fire danger value (leave nodata transparent)
-        for value, (r, g, b, a) in color_map.items():
-            mask = risk_3857 == value
-            rgba_data[0][mask] = r  # Red channel
-            rgba_data[1][mask] = g  # Green channel
-            rgba_data[2][mask] = b  # Blue channel
-            rgba_data[3][mask] = a  # Alpha channel
-        
-        # Write RGBA GeoTIFF using rasterio
-        with rasterio.open(
-            geotiff_path,
-            'w',
-            driver='GTiff',
-            height=dst_height,
-            width=dst_width,
-            count=4,  # 4 bands for RGBA
-            dtype=rasterio.uint8,  # 0-255 color values
-            crs=dst_crs,
-            transform=dst_transform,
-            compress='lzw',
-            tiled=True,
-            photometric='RGB'  # Specify RGB interpretation
-        ) as dst:
-            # Write the RGBA bands
-            dst.write(rgba_data)
-            
-            # Set metadata
-            dst.update_tags(
-                DESCRIPTION='Peak Fire Danger Forecast for Missouri (RGBA)',
-                MODEL_RUN=RUN_DATE.strftime('%Y-%m-%d %HZ'),
-                VALID_TIME=(RUN_DATE + pd.Timedelta(hours=4)).strftime('%Y-%m-%d'),
-                COLOR_INTERPRETATION='Red, Green, Blue, Alpha',
-                LEGEND='Low=Light Green, Moderate=Yellow, Elevated=Orange, Critical=Red-Orange, Extreme=Dark Red',
-                SOURCE='HRRR Model + ML Model + RAWS Observations'
-            )
-            
-            # Set color interpretation for each band
-            dst.set_band_description(1, 'Red')
-            dst.set_band_description(2, 'Green')
-            dst.set_band_description(3, 'Blue')
-            dst.set_band_description(4, 'Alpha')
-        
-        logger.info(f"RGBA GeoTIFF saved to {geotiff_path}")
-    except Exception as e:
-        logger.error(f"Failed to export GeoTIFF: {e}")
+    logger.info("Exporting peak fire danger in all GIS formats...")
+    gis_files = export_all_gis_formats(
+        peak_risk_smooth, lon, lat,
+        run_date=RUN_DATE,
+        out_dir=PROJECT_DIR / 'gis'
+    )
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     logger.info("Generating minimum fuel moisture map...")

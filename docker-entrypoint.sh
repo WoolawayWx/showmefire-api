@@ -7,6 +7,12 @@ DATA_DIR="${DATA_DIR:-/app/data}"
 mkdir -p "$DATA_DIR"
 chmod 755 "$DATA_DIR" || true
 
+# logs/ is excluded from the build context (.dockerignore), so it won't exist
+# in a fresh image. Cron jobs redirect stdout/stderr into /app/logs/*.log -
+# if the directory is missing, that redirect fails before the job even runs.
+mkdir -p /app/logs
+chmod 755 /app/logs || true
+
 # Initialize the sqlite DB (idempotent)
 python3 - <<'PY'
 try:

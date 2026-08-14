@@ -1,3 +1,4 @@
+import shutil
 import cartopy.crs as ccrs
 import pandas as pd
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -314,6 +315,20 @@ if rh_points and wind_points and fuel_points:
         )
         print(f"Observed peak grid updated: {peak_status}")
         peak_running_grid = load_today_running_grid()
+
+        # Day rollover: the PNG still on disk from the previous run is that
+        # finished day's final rendered peak - archive it before this run's
+        # savefig overwrites it with today's (fresh, just-reset) grid.
+        if peak_status.get('archived_path'):
+            try:
+                prev_png = Path('images/mo-observedpeakfiredanger.png')
+                if prev_png.exists():
+                    archive_date = Path(peak_status['archived_path']).stem
+                    png_archive_dir = Path('images/observed_peak/archive')
+                    png_archive_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(prev_png, png_archive_dir / f'{archive_date}.png')
+            except Exception as e:
+                print(f"Warning: Failed to archive observed peak PNG: {e}")
     except Exception as e:
         print(f"Warning: Failed to update observed peak fire danger grid: {e}")
 

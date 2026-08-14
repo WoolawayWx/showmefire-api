@@ -50,7 +50,7 @@ from core.precipitation import (
     get_precip_dataarray as canonical_precip_dataarray,
     normalize_to_mm,
 )
-from export_fire_danger_gis import export_all_gis_formats
+from export_fire_danger_gis import export_all_gis_formats, forecast_peak_local_date
 from models.versioning import load_active_model_path
 from core.fire_danger import (
     calculate_fire_danger as canonical_fire_danger,
@@ -1690,18 +1690,27 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastfiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    forecast_png_path = PROJECT_DIR / 'images/mo-forecastfiredanger.png'
+    fig.savefig(forecast_png_path, dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
-    
+
+    try:
+        png_archive_dir = PROJECT_DIR / 'images' / 'forecast_peak' / 'archive'
+        png_archive_dir.mkdir(parents=True, exist_ok=True)
+        date_local = forecast_peak_local_date(RUN_DATE)
+        shutil.copy2(forecast_png_path, png_archive_dir / f'{date_local}.png')
+    except Exception as e:
+        logger.error(f"Failed to archive forecast peak PNG: {e}")
+
     logger.info("Exporting peak fire danger in all GIS formats...")
     gis_files = export_all_gis_formats(
         peak_risk_smooth, lon, lat,
         run_date=RUN_DATE,
         out_dir=PROJECT_DIR / 'gis'
     )
-    
+
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
     logger.info("Generating minimum fuel moisture map...")
 

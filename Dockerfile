@@ -56,6 +56,11 @@ RUN echo "TZ=America/Chicago" > /etc/cron.d/createemptymaps \
     && echo "" >> /etc/cron.d/createemptymaps \
     && chmod 0644 /etc/cron.d/createemptymaps
 
+RUN echo "TZ=UTC" > /etc/cron.d/maps \
+    && echo "*/15 * * * * root /bin/bash /app/scripts/maps.sh >> /app/logs/maps.log 2>&1" >> /etc/cron.d/maps \
+    && echo "" >> /etc/cron.d/maps \
+    && chmod 0644 /etc/cron.d/maps
+
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
