@@ -27,7 +27,7 @@ except ModuleNotFoundError:
     GIS_DIR = PROJECT_DIR / "gis"
     sys.path.append(str(PROJECT_DIR))
 
-from realtime_geotiff import export_discrete_rgba_geotiff
+from maps.realtime_geotiff import export_discrete_rgba_geotiff
 
 try:
     from scripts.upload_cdn import upload_to_cdn
