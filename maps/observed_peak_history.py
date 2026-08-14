@@ -162,6 +162,15 @@ def _peak_class_from_grid(grid: np.ndarray) -> int | None:
     return int(np.nanmax(finite))
 
 
+def load_today_running_grid() -> np.ndarray | None:
+    """Return today's in-progress running-max grid, if any.
+
+    Used by realtimefiredanger.py right after update_observed_peak_grid() to
+    render a styled PNG of the same array already folded/saved to disk here.
+    """
+    return _load_running_grid()
+
+
 def update_observed_peak_grid(
     grid_values: np.ndarray,
     lon_mesh: np.ndarray,

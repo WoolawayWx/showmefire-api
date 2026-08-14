@@ -94,7 +94,8 @@ def generate_image_timeline(hours=12, cdn_base_url='https://cdn.showmefire.org',
         'realtimefiredanger': 'mo-realtimefiredanger.png',
         'fuelmoisture': 'mo-fuelmoisture.png',
         'rh': 'mo-rh.png',
-        'windfilmap': 'mo-windfilmap.png'
+        'windfilmap': 'mo-windfilmap.png',
+        'observedpeakfiredanger': 'mo-observedpeakfiredanger.png'
     }
     
     timeline = {
@@ -339,6 +340,7 @@ if __name__ == "__main__":
         PROJECT_ROOT / "images" / "mo-rh.png",
         PROJECT_ROOT / "images" / "mo-realtimefiredanger.png",
         PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
+        PROJECT_ROOT / "images" / "mo-observedpeakfiredanger.png",
     ]
     upload_quarter_hour_files(files_to_upload=quarter_hour_files, path_prefix=test_prefix)
     

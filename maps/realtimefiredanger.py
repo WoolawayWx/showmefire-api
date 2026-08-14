@@ -39,7 +39,7 @@ from station_danger_history import (
     append_fire_danger_snapshot,
     export_fire_danger_daily_csv,
 )
-from observed_peak_history import update_observed_peak_grid
+from observed_peak_history import update_observed_peak_grid, load_today_running_grid
 
 def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
     lon_min = center_lon - zoom_width / 2
@@ -167,6 +167,7 @@ port = os.getenv('PORT', '8000')
 response = requests.get(f'http://localhost:{port}/stations/raws')
 raws_stations = response.json()['stations']
 station_danger_summary = empty_station_fire_danger_summary(raws_stations)
+peak_running_grid = None
 
 # Use all stations for RH and wind, but only RAWS for fuel moisture
 response_all = requests.get(f'http://localhost:{port}/stations')
@@ -312,6 +313,7 @@ if rh_points and wind_points and fuel_points:
             run_time_utc=datetime.now(timezone.utc),
         )
         print(f"Observed peak grid updated: {peak_status}")
+        peak_running_grid = load_today_running_grid()
     except Exception as e:
         print(f"Warning: Failed to update observed peak fire danger grid: {e}")
 
@@ -405,6 +407,72 @@ if image is not None:
     ax.add_artist(ab)
 
 fig.savefig('images/mo-realtimefiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+
+if peak_running_grid is not None:
+    try:
+        peak_fig, peak_ax, peak_data_crs, peak_map_crs, peak_mapdpi = generate_basemap()
+
+        peak_cs = peak_ax.contourf(
+            grid_lon_mesh, grid_lat_mesh, peak_running_grid, transform=peak_data_crs,
+            levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True
+        )
+        peak_cax = peak_fig.add_axes([0.02, 0.08, 0.02, 0.6])
+        peak_cbar = plt.colorbar(peak_cs, cax=peak_cax, label='Fire Danger Level')
+        peak_cbar.set_ticks([0, 1, 2, 3, 4])
+        peak_cbar.set_ticklabels(labels)
+
+        peak_counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
+        if peak_counties.crs != peak_data_crs.proj4_init:
+            peak_counties = peak_counties.to_crs(peak_data_crs.proj4_init)
+        peak_ax.add_geometries(peak_counties.geometry, crs=peak_data_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+
+        peak_border = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
+        if peak_border.crs != peak_data_crs.proj4_init:
+            peak_border = peak_border.to_crs(peak_data_crs.proj4_init)
+        peak_ax.add_geometries(peak_border.geometry, crs=peak_data_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+
+        peak_ax.set_anchor('W')
+        peak_fig.subplots_adjust(left=0.05)
+
+        peak_fig.text(
+            0.99, 0.97, "Missouri Peak Fire Danger (Today)",
+            fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans'
+        )
+        peak_fig.text(
+            0.99, 0.90,
+            "Worst fire danger class reached at each location so far today | "
+            "As of: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
+            fontsize=16, ha='right', va='top', fontname='Montserrat'
+        )
+        peak_fig.text(
+            0.99, 0.62,
+            "Fire Danger Criteria:\n"
+            "\n"
+            "Low: FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+            "Moderate: FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+            "Elevated: FM < 9% AND\n"
+            "  (RH < 35% & Wind ≥ 12 kts) OR (RH < 25% & Wind ≥ 5 kts)\n\n"
+            "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
+            "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
+            "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
+            "For More Info, Visit ShowMeFire.org",
+            fontsize=10, ha='right', va='top', linespacing=1.6, fontname='Montserrat'
+        )
+        peak_fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
+
+        if image is not None:
+            peak_imagebox = OffsetImage(image, zoom=0.03)
+            peak_ab = AnnotationBbox(
+                peak_imagebox, (0.99, 0.01), frameon=False,
+                xycoords='figure fraction', box_alignment=(1, 0)
+            )
+            peak_ax.add_artist(peak_ab)
+
+        peak_fig.savefig('images/mo-observedpeakfiredanger.png', dpi=peak_mapdpi, bbox_inches=None, pad_inches=0)
+        plt.close(peak_fig)
+        print("Peak fire danger (today) map updated")
+    except Exception as e:
+        print(f"Warning: Failed to render peak fire danger PNG: {e}")
 
 runtime_sec = time.time() - start_time
 
