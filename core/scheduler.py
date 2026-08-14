@@ -15,6 +15,7 @@ from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complet
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
+from services.drift_monitor import run_drift_check
 from services.fire_ingest import ingest_detection_files
 from core.database import expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
@@ -68,6 +69,14 @@ async def verify_v5_shadow_observations():
         await asyncio.to_thread(verify_v5_shadow)
     except Exception as error:
         logger.error("V5 shadow verification failed: %s", error, exc_info=True)
+
+
+async def run_drift_check_job():
+    """Evaluate feature/prediction drift across shadow-tracked model types."""
+    try:
+        await asyncio.to_thread(run_drift_check)
+    except Exception as error:
+        logger.error("Drift check failed: %s", error, exc_info=True)
 
 
 async def ingest_fire_detections_job():
@@ -209,6 +218,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=3,
         minute=15,
         id='purge_spatial_fm_uncertainty_cache',
+    )
+
+    scheduler.add_job(
+        run_drift_check_job,
+        'cron',
+        hour=4,
+        minute=0,
+        id='drift_check',
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.start()

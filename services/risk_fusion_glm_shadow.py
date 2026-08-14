@@ -82,6 +82,12 @@ BUNDLE_ASSET_FILENAMES = {
     "county_reference": "county_reference.json",
 }
 
+# Optional - deliberately NOT in BUNDLE_ASSET_FILENAMES's required-role
+# check in load_bundle(). A bundle saved before uncertainty fitting existed
+# (model-training/risk_fusion/model_bundle.py) simply won't have this file;
+# its absence must degrade to "no interval available", never fail the load.
+UNCERTAINTY_ASSET_FILENAME = "glm_uncertainty.json"
+
 
 def month_dummies(month: int) -> Dict[str, float]:
     """month_2..month_12 indicators for one calendar month (1-12). January is the implicit reference level."""
@@ -111,6 +117,7 @@ def _initial_state() -> dict:
         "counties_scored": 0,
         "county_days_recorded": 0,
         "bundle_checksum": None,
+        "uncertainty_available": False,
         "advisory_published": False,
         "public_path_unchanged": True,
     }
@@ -192,7 +199,9 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     bundle_checksum = hashlib.sha256(
         "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
     ).hexdigest()
-    return {**assets, "bundle_checksum": bundle_checksum}
+    uncertainty_path = directory / UNCERTAINTY_ASSET_FILENAME
+    uncertainty = json.loads(uncertainty_path.read_text(encoding="utf-8")) if uncertainty_path.exists() else None
+    return {**assets, "bundle_checksum": bundle_checksum, "uncertainty": uncertainty}
 
 
 def _standardized_dot(fit: Dict, feature_values: Dict[str, float]) -> float:
@@ -215,6 +224,14 @@ def _log_effort_scaled(county_fips: str, effort_bundle: Dict, county_reference: 
     return float(effort_bundle["effort_exponent"]) * log_effort
 
 
+def _calendar_month(calendar_row: Dict) -> int:
+    """January is the implicit reference level (no month_1 dummy column - see MONTH_DUMMY_COLUMNS)."""
+    for column in MONTH_DUMMY_COLUMNS:
+        if float(calendar_row.get(column, 0.0)) > 0:
+            return int(column.split("_")[1])
+    return 1
+
+
 def score_county_day(bundle: Dict, county_fips: str, calendar_row: Dict, weather_row: Dict) -> Dict:
     """Expected fire count (lam) and P(>=1 fire) for one county-day - same math as model_bundle.score()."""
     climatology_features = {column: float(calendar_row.get(column, 0.0)) for column in MONTH_DUMMY_COLUMNS}
@@ -222,7 +239,14 @@ def score_county_day(bundle: Dict, county_fips: str, calendar_row: Dict, weather
     base_eta = _standardized_dot(bundle["climatology"], climatology_features) + log_effort_scaled
     residual_features = {**weather_row, "is_weekend": float(bool(calendar_row.get("is_weekend", False)))}
     lam = float(np.exp(_standardized_dot(bundle["residual"], residual_features) + base_eta))
-    return {"lam": lam, "p_ge1_fire": float(1.0 - np.exp(-lam))}
+    result = {"lam": lam, "p_ge1_fire": float(1.0 - np.exp(-lam))}
+    uncertainty = bundle.get("uncertainty")
+    if uncertainty is not None:
+        month = str(_calendar_month(calendar_row))
+        half_width = uncertainty.get("regimes", {}).get(month, {}).get("half_width", uncertainty["global"])
+        result["lam_lo"] = max(lam - half_width, 0.0)
+        result["lam_hi"] = lam + half_width
+    return result
 
 
 def score_glm_for_forecast(
@@ -259,6 +283,9 @@ def score_glm_for_forecast(
             "lam": [scored[fips]["lam"] for fips in county_fips],
             "p_ge1_fire": [scored[fips]["p_ge1_fire"] for fips in county_fips],
         }
+        if bundle.get("uncertainty") is not None:
+            record["lam_lo"] = [scored[fips].get("lam_lo") for fips in county_fips]
+            record["lam_hi"] = [scored[fips].get("lam_hi") for fips in county_fips]
         root = Path(evidence_root or EVIDENCE_ROOT)
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"{run_id}.glm_score.json"
@@ -272,6 +299,7 @@ def score_glm_for_forecast(
             runs=_state["runs"] + 1, successful_runs=_state.get("successful_runs", 0) + 1,
             counties_scored=n, county_days_recorded=_state.get("county_days_recorded", 0) + n,
             bundle_checksum=bundle["bundle_checksum"],
+            uncertainty_available=bundle.get("uncertainty") is not None,
         )
         _persist_state()
         return True

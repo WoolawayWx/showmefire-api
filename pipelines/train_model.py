@@ -17,6 +17,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from core.fire_danger import RULE_SPEC_VERSION, calculate_fire_danger, meters_per_second_to_knots
 from core.precipitation import PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION
 from models.features import DEFAULT_FEATURES, FEATURE_SCHEMA_VERSION, LEGACY_FEATURES, feature_ranges
+from models.fm_uncertainty import fit_uncertainty
 from models.versioning import load_active_model_path, register_trained_model
 
 
@@ -110,8 +111,16 @@ def train_fuel_moisture_model(channel="beta", bump="patch"):
     if any(name.startswith("precip_") or name == "hours_since_rain" for name in features):
         model.get_booster().set_attr(precipitation_contract_version=PRECIPITATION_CONTRACT_VERSION,
                                      precipitation_contract_sha256=PRECIPITATION_CONTRACT_SHA256)
-    scratch = Path("models") / f".scratch_fuel_moisture_{datetime.now():%Y%m%d_%H%M%S}.json"
+    # Regime = calendar month: same out-of-time holdout used for promotion
+    # metrics above, bucketed by "month" (already a feature column) since
+    # this flat training frame has no rain-based regime columns to reuse
+    # from spatial/v5_guard.py's scheme.
+    uncertainty = fit_uncertainty(holdout["target_fm"], prediction, holdout["month"])
+    stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+    scratch = Path("models") / f".scratch_fuel_moisture_{stamp}.json"
+    scratch_uncertainty = Path("models") / f".scratch_fuel_moisture_{stamp}_uncertainty.json"
     scratch.parent.mkdir(exist_ok=True); model.save_model(scratch)
+    scratch_uncertainty.write_text(json.dumps(uncertainty, indent=2))
     match_meta_path = Path("data/training_set_mo_meta.json")
     match_meta = json.loads(match_meta_path.read_text()) if match_meta_path.exists() else {}
     support = {str(key): int(value) for key, value in pd.Series(
@@ -152,9 +161,13 @@ def train_fuel_moisture_model(channel="beta", bump="patch"):
         "shadow": {"passed": False},
     }
     try:
-        version = register_trained_model("fuel_moisture", scratch, candidate_metrics, bump, channel, metadata=metadata)
+        version = register_trained_model(
+            "fuel_moisture", performance=candidate_metrics, bump=bump, channel=channel, metadata=metadata,
+            assets={"model": scratch, "uncertainty": scratch_uncertainty},
+        )
     finally:
         scratch.unlink(missing_ok=True)
+        scratch_uncertainty.unlink(missing_ok=True)
     print(f"Registered fuel_moisture {version} in {channel}; holdout MAE={candidate_metrics['mae']:.3f}")
     return version
 

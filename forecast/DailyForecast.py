@@ -51,7 +51,8 @@ from core.precipitation import (
     normalize_to_mm,
 )
 from export_fire_danger_gis import export_all_gis_formats, forecast_peak_local_date
-from models.versioning import load_active_model_path
+from models.versioning import load_active_assets, load_active_model_path
+from models.fm_uncertainty import intervals as fm_uncertainty_intervals
 from core.fire_danger import (
     calculate_fire_danger as canonical_fire_danger,
     meters_per_second_to_knots,
@@ -74,6 +75,16 @@ FM_MODEL.load_model(str(load_active_model_path("fuel_moisture", auto_rollback=Tr
 # The exact features the model expects
 # Extended features list for models trained with precipitation
 FEATURES = list(FM_MODEL.feature_names or LEGACY_FEATURES)
+
+# Calibrated prediction interval, if the currently-serving stable model was
+# registered with one (see api/pipelines/train_model.py). Older stable
+# models registered before uncertainty.json existed simply won't have this
+# asset - that must not block forecast generation, so a missing/invalid
+# asset degrades to "no interval available" rather than raising.
+try:
+    FM_UNCERTAINTY = json.loads(load_active_assets("fuel_moisture")["uncertainty"]["path"].read_text())
+except Exception:
+    FM_UNCERTAINTY = None
 
 
 def env_bool(name, default=False):
@@ -940,10 +951,14 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
-        fm, snow_mask = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history,
+        fm, snow_mask, fm_interval = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history,
                                        precip_history, swe_grid=swe_grid, day_of_year=forecast_time.dayofyear)
         if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
             fm = spatial_prediction["p50"][i]
+            # The spatial model's own uncertainty band (not the XGBoost
+            # uncertainty.json interval) applies once it overrides fm - see
+            # services/spatial_fm.py for its p10/p90 output.
+            fm_interval = None
         
         # Update buffers for the next hour
         temp_history.append(temp)
@@ -1144,6 +1159,8 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     Returns:
         preds_2d: Predicted fuel moisture grid (%)
         snow_mask: Boolean mask indicating snow-covered areas
+        fm_interval: (lo_2d, hi_2d) calibrated prediction interval grids, or
+            None if the serving stable model has no uncertainty.json asset
     """
     # 1. Flatten the grids into 1D arrays
     shape = temp_grid.shape
@@ -1277,7 +1294,17 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     except Exception:
         logger.exception("Failed to create snow mask")
 
-    return preds_2d, snow_mask
+    # Calibrated prediction interval (empirical quantile half-width, bucketed
+    # by month) - None when the serving stable model predates uncertainty.json.
+    fm_interval = None
+    if FM_UNCERTAINTY is not None:
+        try:
+            bounds = fm_uncertainty_intervals(preds, month, FM_UNCERTAINTY)
+            fm_interval = (bounds[:, 0].reshape(shape), bounds[:, 2].reshape(shape))
+        except Exception:
+            logger.exception("Failed to compute fuel-moisture prediction interval")
+
+    return preds_2d, snow_mask, fm_interval
 
 def generate_complete_forecast():
     logger.info("Starting complete fire weather forecast generation.")

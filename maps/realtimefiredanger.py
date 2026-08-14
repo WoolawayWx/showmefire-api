@@ -455,7 +455,7 @@ if peak_running_grid is not None:
         )
         peak_fig.text(
             0.99, 0.90,
-            "Worst fire danger class reached at each location so far today | "
+            "Worst fire danger class reached at each location so far today\n"
             "As of: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
             fontsize=16, ha='right', va='top', fontname='Montserrat'
         )

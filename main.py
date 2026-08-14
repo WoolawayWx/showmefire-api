@@ -21,6 +21,7 @@ from starlette.responses import Response
 from datetime import datetime, timedelta
 from typing import Optional
 from services.rss import generate_rss_feed
+from services import fm_explain
 from maps.station_danger_history import (
     get_recent_fire_danger_history,
     normalize_fire_danger_counts,
@@ -1432,12 +1433,21 @@ async def get_model_formulas():
             "evaluation_order": "Extreme → Critical → Elevated → Moderate → Low (most restrictive first)"
         }
         
+        try:
+            fuel_moisture_formula["feature_importance"] = fm_explain.global_importance()
+        except Exception as importance_error:
+            # The static prose above (thresholds, category definitions) is
+            # genuine policy, not model-derived - it must still be served
+            # even if the live importance lookup fails for some reason.
+            logger.error(f"Error computing live feature importance: {importance_error}")
+            fuel_moisture_formula["feature_importance"] = None
+
         return {
             "success": True,
             "fuel_moisture_model": fuel_moisture_formula,
             "fire_danger_model": fire_danger_formula,
-            "last_updated": "2026-08-04",
-            "version": "1.0.0"
+            "last_updated": "2026-08-14",
+            "version": "1.1.0"
         }
     except Exception as e:
         logger.error(f"Error retrieving model formulas: {e}")
