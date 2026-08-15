@@ -214,6 +214,39 @@ def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
     ''')
 
 
+def _ensure_feedback_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '{}',
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new',
+            submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback(status, created_at DESC)')
+
+    # A submission throttle table of its own - kept separate from
+    # fire_submission_throttle (core/database.py's _ensure_fire_abuse_tables)
+    # so feedback and fire-report rate limits never share the same buckets.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS feedback_submission_throttle (
+            bucket_key TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (bucket_key, window_kind, window_start)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_feedback_throttle_updated ON feedback_submission_throttle(updated_at)')
+
+
 def get_db_path():
     # Honor the documented container/local override even before the database
     # file exists. This keeps first-start initialization on the mounted volume.
@@ -615,6 +648,9 @@ def init_database():
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)
+
+    # 18. Public feedback form + its own submission throttle
+    _ensure_feedback_tables(cursor)
 
     conn.commit()
     conn.close()
@@ -2320,6 +2356,133 @@ def purge_fire_throttle_rows(older_than_hours: int = 48) -> int:
     try:
         cursor.execute('''
             DELETE FROM fire_submission_throttle WHERE updated_at <= datetime('now', ? || ' hours')
+        ''', (f"-{max(0, older_than_hours)}",))
+        purged = cursor.rowcount
+        conn.commit()
+        return purged
+    finally:
+        conn.close()
+
+
+def _feedback_row_to_dict(row: sqlite3.Row) -> Dict:
+    import json as _json
+    data = dict(row)
+    try:
+        data["details"] = _json.loads(data.get("details") or "{}")
+    except (TypeError, ValueError):
+        data["details"] = {}
+    return data
+
+
+def create_feedback_submission(*, name: str, email: str, category: str, details: Dict, message: str,
+                               submitter_ip_hash: str) -> Dict:
+    """Insert a public feedback submission as status='new'."""
+    import json as _json
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO feedback (name, email, category, details, message, status, submitter_ip_hash)
+            VALUES (?, ?, ?, ?, ?, 'new', ?)
+        ''', (name, email, category, _json.dumps(details), message, submitter_ip_hash))
+        conn.commit()
+        cursor.execute('SELECT * FROM feedback WHERE id = ?', (cursor.lastrowid,))
+        return _feedback_row_to_dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def list_feedback(status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute('''
+                SELECT * FROM feedback WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
+            ''', (status, limit, offset))
+        else:
+            cursor.execute('SELECT * FROM feedback ORDER BY created_at DESC LIMIT ? OFFSET ?', (limit, offset))
+        return [_feedback_row_to_dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def update_feedback_status(feedback_id: int, status: str) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE feedback SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+        ''', (status, feedback_id))
+        if cursor.rowcount == 0:
+            conn.commit()
+            return None
+        conn.commit()
+        cursor.execute('SELECT * FROM feedback WHERE id = ?', (feedback_id,))
+        row = cursor.fetchone()
+        return _feedback_row_to_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def consume_feedback_submission_quota(bucket_key: str, now: datetime, per_hour_limit: int, per_day_limit: int) -> Dict:
+    """Same atomic per-hour/per-day charge as consume_fire_submission_quota, against feedback's own
+    throttle table - see _ensure_feedback_tables for why these aren't shared."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        hour_key = now.strftime('%Y-%m-%dT%H')
+        day_key = now.strftime('%Y-%m-%d')
+        windows = (('hour', hour_key, per_hour_limit), ('day', day_key, per_day_limit))
+
+        for kind, window_start, limit in windows:
+            cursor.execute('''
+                SELECT hits FROM feedback_submission_throttle
+                WHERE bucket_key = ? AND window_kind = ? AND window_start = ?
+            ''', (bucket_key, kind, window_start))
+            row = cursor.fetchone()
+            if row and row[0] >= limit:
+                cursor.execute('ROLLBACK')
+                if kind == 'hour':
+                    retry_after = 3600 - (now.minute * 60 + now.second)
+                else:
+                    retry_after = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+                return {"allowed": False, "window": kind, "retry_after": max(1, retry_after)}
+
+        for kind, window_start, _limit in windows:
+            cursor.execute('''
+                INSERT INTO feedback_submission_throttle (bucket_key, window_kind, window_start, hits, updated_at)
+                VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(bucket_key, window_kind, window_start)
+                DO UPDATE SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP
+            ''', (bucket_key, kind, window_start))
+        cursor.execute('COMMIT')
+        return {"allowed": True, "window": "", "retry_after": 0}
+    except Exception:
+        try:
+            cursor.execute('ROLLBACK')
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            DELETE FROM feedback_submission_throttle WHERE updated_at <= datetime('now', ? || ' hours')
         ''', (f"-{max(0, older_than_hours)}",))
         purged = cursor.rowcount
         conn.commit()

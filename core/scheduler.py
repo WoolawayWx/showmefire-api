@@ -17,7 +17,10 @@ from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
 from services.drift_monitor import run_drift_check
 from services.fire_ingest import ingest_detection_files
-from core.database import expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows
+from core.database import (
+    expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows,
+    purge_feedback_throttle_rows,
+)
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.seasonal_fuel_state import update_daily_gdd
 
@@ -110,6 +113,15 @@ async def purge_fire_report_pii_job():
         logger.info("Fire report PII purge: expired=%s purged=%s", expired, purged)
     except Exception as error:
         logger.error("Fire report PII purge failed: %s", error, exc_info=True)
+
+async def purge_feedback_throttle_job():
+    """Delete feedback rate-limit rows past the retention window - same cadence/pattern as fire reports'."""
+    try:
+        purged = await asyncio.to_thread(purge_feedback_throttle_rows)
+        logger.info("Feedback throttle purge: purged=%s", purged)
+    except Exception as error:
+        logger.error("Feedback throttle purge failed: %s", error, exc_info=True)
+
 
 async def update_seasonal_fuel_state_job():
     """Advance the GDD accumulator before end-of-day archiving removes today's raw_data JSON."""
@@ -210,6 +222,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=2,
         minute=45,
         id='purge_fire_report_pii',
+    )
+
+    scheduler.add_job(
+        purge_feedback_throttle_job,
+        'cron',
+        hour=2,
+        minute=50,
+        id='purge_feedback_throttle',
     )
 
     scheduler.add_job(
