@@ -474,7 +474,7 @@ def generate_history_plots(df, report_date, report_suffix=""):
             if len(df) >= window:
                 rolling = df[metric].rolling(window=window).mean()
                 if not rolling.dropna().empty:
-                    sns.lineplot(data=rolling, x=rolling.index, y=rolling, color=colors[i], label=f'{window}-Day Avg')
+                    sns.lineplot(x=rolling.index, y=rolling.values, color=colors[i], label=f'{window}-Day Avg')
         
         var_name = metric.replace('_', ' ')
         plt.title(f"Historical {var_name}")
