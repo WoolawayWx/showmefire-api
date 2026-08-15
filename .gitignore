@@ -16,6 +16,7 @@ models/*
 !models/versioning.py
 !models/migrate_config.py
 !models/features.py
+!models/fm_uncertainty.py
 !models/README.md
 reports/*
 archive/*
