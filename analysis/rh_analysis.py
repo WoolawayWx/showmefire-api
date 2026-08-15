@@ -476,14 +476,14 @@ def main(preferred_date=None, out_png='analysis/images/mo-rh.png'):
             except Exception:
                 title_date = None
         if title_date is None:
-            title_date = pd.Timestamp.now().strftime('%Y-%m-%d')
+            title_date = pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d')
         ax.set_title(f"Observed Minimum Relative Humidity — {title_date}", fontsize=18, fontweight='bold', pad=12)
     except Exception:
         pass
     fig.savefig(out_png, dpi=mapdpi, bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     runtime_sec = time.time() - start_time
-    print(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+    print(f"RH% Filtered Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
     print(f"Script runtime: {runtime_sec:.2f} seconds")
 
 

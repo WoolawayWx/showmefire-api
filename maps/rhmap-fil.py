@@ -259,7 +259,7 @@ fig.text(
 )
 fig.text(
     0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
+    "Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
     fontsize=16,
     ha='right',
     va='top',
@@ -288,7 +288,7 @@ fig.savefig('images/mo-rh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 runtime_sec = time.time() - start_time
 
 
-print(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+print(f"RH% Filtered Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
 print(f"Script runtime: {runtime_sec:.2f} seconds")
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
@@ -300,7 +300,7 @@ if not logger.handlers:
     handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
-logger.info(f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+logger.info(f"RH% Filtered Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
 logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
 plt.close(fig)
@@ -316,11 +316,11 @@ else:
     status = {}
 
 status['HumidityFiltered'] = {
-    'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
     'status': 'updated',
     'runtime_sec': round(runtime_sec, 2),
     'log': [
-        f"RH% Filtered Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
+        f"RH% Filtered Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}",
         f"Script runtime: {runtime_sec:.2f} seconds"
     ]
 }

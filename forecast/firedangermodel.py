@@ -1213,8 +1213,8 @@ if __name__ == "__main__":
         
         # Generate map
         project_dir = Path(__file__).resolve().parent.parent
-        model_run = datetime.now()
-        valid_time = datetime.now()
+        model_run = pd.Timestamp.now(tz='America/Chicago')
+        valid_time = pd.Timestamp.now(tz='America/Chicago')
         
         generate_fire_danger_map(
             fire_danger_grid=fire_danger_grid,

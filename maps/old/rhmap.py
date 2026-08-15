@@ -264,7 +264,7 @@ fig.text(
 )
 fig.text(
     0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
+    "Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
     fontsize=16,
     ha='right',
     va='top',
@@ -298,7 +298,7 @@ if image is not None:
 fig.savefig('images/rh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
 
-print(f"RH% Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+print(f"RH% Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
 
 # filepath: /Users/cade/Development/Show Me Fire/api-server/showmefire-api/maps/rhmap-fil.py
 
@@ -349,7 +349,7 @@ else:
 
 # Update the status for this map (change 'rh_map' to the appropriate key)
 status['Humidity'] = {
-    'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
     'status': 'updated'
 }
 

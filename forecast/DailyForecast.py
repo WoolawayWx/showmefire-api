@@ -2530,7 +2530,7 @@ def generate_complete_forecast():
 
     # Log results
     logging.basicConfig(filename='logs/forecastfiredanger.log', level=logging.INFO)
-    logging.info(f"All forecast maps updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+    logging.info(f"All forecast maps updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
     logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
     # Update status file
@@ -2545,13 +2545,13 @@ def generate_complete_forecast():
         status = {}
 
     status['ForecastFireDanger'] = {
-        'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+        'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
         'model_run': RUN_DATE.strftime('%Y-%m-%d %HZ'),
         'status': 'updated',
         'runtime_sec': round(runtime_sec, 2),
         'maps_generated': all_generated_maps,
         'log': [
-            f"All forecast maps updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}",
+            f"All forecast maps updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}",
             f"Script runtime: {runtime_sec:.2f} seconds"
         ]
     }

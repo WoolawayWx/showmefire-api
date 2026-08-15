@@ -230,7 +230,7 @@ fig.text(
 )
 fig.text(
     0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')),
+    "Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
     fontsize=16,
     ha='right',
     va='top',
@@ -258,7 +258,7 @@ fig.savefig('images/mo-windmap.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
 
 
-print(f"Wind Map updated at {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT')}")
+print(f"Wind Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
 
 plt.close(fig)
 
@@ -276,7 +276,7 @@ else:
 
 # Update the status for this map (change 'rh_map' to the appropriate key)
 status['Wind'] = {
-    'last_update': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
     'status': 'updated'
 }
 
