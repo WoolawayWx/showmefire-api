@@ -221,7 +221,6 @@ async def fetch_raws_stations_multi_state(states=None):
         "token": SYNOPTIC_API_TOKEN,
         "state": ",".join(states),
         "units": "english",
-        "within": "70",
         "status": "active",
         "network": "2"  # Includes RAWS (network 1)
     }
