@@ -16,6 +16,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger
 from core.fire_danger import CATEGORY_LABELS
+from core.ignored_stations import get_ignored_stations
+from core import observation_qc
 
 # Configure logging
 logging.basicConfig(
@@ -163,6 +165,9 @@ def fahrenheit_to_celsius(f):
 def mph_to_ms(mph):
     return mph * 0.44704
 
+def knots_to_ms(knots):
+    return knots * 0.514444
+
 def ms_to_kts(ms):
     return ms * 1.94384
 
@@ -228,14 +233,25 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
     Rounds timestamps to nearest hour for comparison.
     """
     records = []
-    
+
+    wind_units = raw_data.get('UNITS', {}).get('wind_speed')
+    if wind_units and wind_units.lower() not in ('knots', 'mph', 'm/s', 'meters/second'):
+        logger.warning(
+            f"Unrecognized wind_speed units '{wind_units}' in raw data; "
+            "verify the observed-wind conversion is still correct."
+        )
+
     # Handle both list and dict structures for stations
     stations = raw_data.get('STATION', [])
     if isinstance(stations, dict):
         stations = [stations]
-        
+
+    ignored = get_ignored_stations()
+
     for station in stations:
         stid = station.get('STID')
+        if stid in ignored:
+            continue
         obs = station.get('OBSERVATIONS', {})
         times = obs.get('date_time', [])
         temps = obs.get('air_temp_set_1', []) or obs.get('air_temp', [])
@@ -254,7 +270,7 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
                         temp_val = fahrenheit_to_celsius(temp_val)
                     wind_val = winds[i] if i < len(winds) and winds[i] is not None else None
                     if wind_val is not None:
-                        wind_val = mph_to_ms(wind_val)
+                        wind_val = knots_to_ms(wind_val)
                     rh_val = rhs[i] if i < len(rhs) and rhs[i] is not None else None
                     fm_val = fms[i] if i < len(fms) and fms[i] is not None else None
                     records.append({
@@ -268,18 +284,20 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
             except (ValueError, IndexError, TypeError):
                 continue
     df = pd.DataFrame(records)
+    qc_exclusions = []
     if not df.empty:
-        df = df.groupby(['stid', 'timestamp']).mean().reset_index()
+        df = df.groupby(['stid', 'timestamp']).mean(numeric_only=True).reset_index()
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         df['timestamp'] = df['timestamp'].dt.round('h')
+        df, qc_exclusions = observation_qc.apply_qc(df)
         df['obs_fire_danger'] = df.apply(
             lambda row: calculate_fire_danger(
-                row['obs_fm'], 
-                row['obs_rh'], 
-                ms_to_kts(row['obs_wind'])
+                row['obs_fm'],
+                row['obs_rh'],
+                ms_to_kts(row['obs_wind']) if pd.notna(row['obs_wind']) else None
             ), axis=1
         )
-    return df
+    return df, qc_exclusions
 # --- New function to merge and align forecast and observation data ---
 def merge_forecast_and_obs(forecast_df, obs_df):
     """
@@ -326,6 +344,45 @@ def calculate_metrics(merged_df, variable_map):
             'correlation': round(corr, 4)
         }
         print(f"{metric_name}: MAE={round(mae, 4)}, RMSE={round(rmse, 4)}, Bias={round(bias, 4)}, Count={len(valid)}, Correlation={round(corr, 4)}")
+    return metrics
+
+def calculate_categorical_metrics(merged_df, pred_col, obs_col, labels=CATEGORY_LABELS):
+    """Metrics appropriate for an ordinal category code (0=Low..N=Extreme), not a
+    continuous physical quantity. Pearson correlation and RMSE are omitted: they read
+    as physical-magnitude stats but are not meaningful on a handful of ordinal classes.
+    The `mae`/`mean_absolute_category_error` and `bias` keys measure category-step
+    distance, which IS a legitimate ordinal stat, and are kept (mae duplicated under
+    the legacy key for existing consumers).
+    """
+    valid = merged_df.dropna(subset=[pred_col, obs_col]).copy()
+    if valid.empty:
+        print(f"{pred_col}/{obs_col}: No valid data for comparison")
+        return {'mae': None, 'bias': None, 'count': 0, 'exact_match_rate': None,
+                'within_one_category_rate': None, 'metric_type': 'categorical'}
+
+    y_true = pd.to_numeric(valid[obs_col], errors='coerce').round().astype(int).clip(0, len(labels) - 1)
+    y_pred = pd.to_numeric(valid[pred_col], errors='coerce').round().astype(int).clip(0, len(labels) - 1)
+    diff = y_pred - y_true
+
+    mean_abs_category_error = float(np.mean(np.abs(diff)))
+    bias = float(np.mean(diff))
+    exact_match_rate = float(np.mean(diff == 0))
+    within_one_category_rate = float(np.mean(np.abs(diff) <= 1))
+
+    metrics = {
+        'mae': round(mean_abs_category_error, 4),
+        'mean_absolute_category_error': round(mean_abs_category_error, 4),
+        'bias': round(bias, 4),
+        'count': len(valid),
+        'exact_match_rate': round(exact_match_rate, 4),
+        'within_one_category_rate': round(within_one_category_rate, 4),
+        'metric_type': 'categorical',
+    }
+    print(
+        f"Fire Danger Index: ExactMatch={metrics['exact_match_rate']}, "
+        f"WithinOne={metrics['within_one_category_rate']}, "
+        f"MeanCategoryError={metrics['mae']}, Bias={metrics['bias']}, Count={metrics['count']}"
+    )
     return metrics
 
 def calculate_confusion_matrix(merged_df, pred_col='pred_fire_danger', obs_col='obs_fire_danger'):
@@ -568,7 +625,9 @@ def main():
     fc_df = get_forecast_dataframe(forecast_data, start_search, end_search)
     
     logger.info("Processing observation data...")
-    obs_df = get_observation_dataframe(raw_data, start_search, end_search)
+    obs_df, qc_exclusions = get_observation_dataframe(raw_data, start_search, end_search)
+    if qc_exclusions:
+        logger.warning(f"QC excluded {len(qc_exclusions)} station/variable reading(s): {qc_exclusions}")
     
     if fc_df.empty:
         logger.warning("Forecast DataFrame is empty (no relevant timestamps).")
@@ -589,15 +648,22 @@ def main():
     logger.info(f"Found {len(merged)} overlapping records for validation.")
     
     # 5. Calculate Metrics
-    variable_map = {
+    continuous_variable_map = {
         'Temperature (C)': ('pred_temp', 'obs_temp'),
         'Relative Humidity (%)': ('pred_rh', 'obs_rh'),
         'Wind Speed (m/s)': ('pred_wind', 'obs_wind'),
         'Fuel Moisture (%)': ('pred_fm', 'obs_fm'),
-        'Fire Danger Index': ('pred_fire_danger', 'obs_fire_danger')
     }
-    
-    results = calculate_metrics(merged, variable_map)
+    # Kept alongside continuous_variable_map (rather than replacing it) so
+    # generate_plots(), which iterates variable_map, still produces the FDI scatter.
+    variable_map = dict(continuous_variable_map, **{
+        'Fire Danger Index': ('pred_fire_danger', 'obs_fire_danger')
+    })
+
+    results = calculate_metrics(merged, continuous_variable_map)
+    results['Fire Danger Index'] = calculate_categorical_metrics(
+        merged, 'pred_fire_danger', 'obs_fire_danger'
+    )
     confusion = calculate_confusion_matrix(merged)
 
     # 6. Output Report
@@ -612,7 +678,8 @@ def main():
         'metrics': results,
         'confusion_matrix': confusion,
         'stations_count': merged['stidnunique'] if 'stidnunique' in dir(merged) else merged['stid'].nunique(),
-        'record_count': len(merged)
+        'record_count': len(merged),
+        'qc_exclusions': qc_exclusions,
     }
     
     # Generate Plots
@@ -639,7 +706,8 @@ def main():
     
     for var, m in results.items():
         if m['count'] > 0:
-            print(f"{var:<25} | {m['mae']:<10} | {m['rmse']:<10} | {m['bias']:<10}")
+            rmse_display = m.get('rmse', 'n/a (categorical)')
+            print(f"{var:<25} | {m['mae']:<10} | {str(rmse_display):<10} | {m['bias']:<10}")
         else:
             print(f"{var:<25} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10}")
     

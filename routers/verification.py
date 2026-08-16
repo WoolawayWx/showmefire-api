@@ -61,6 +61,11 @@ def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:
     return value if isinstance(value, (int, float)) else None
 
 
+def _fire_danger_accuracy(entry: Dict[str, Any]) -> Optional[float]:
+    value = entry.get("metrics", {}).get("Fire Danger Index", {}).get("exact_match_rate")
+    return value if isinstance(value, (int, float)) else None
+
+
 @router.get("/history")
 async def get_verification_history(limit: int = 90):
     history = _load_history()
@@ -74,6 +79,7 @@ async def get_verification_history(limit: int = 90):
         row = {"date": date, "record_count": entry.get("record_count", 0)}
         for field, label in _METRIC_FIELD_MAP.items():
             row[field] = _mae_for(entry, label)
+        row["fire_danger_accuracy"] = _fire_danger_accuracy(entry)
         row["has_confusion_matrix"] = bool(entry.get("confusion_matrix"))
         row["has_observed_peak"] = _observed_peak_tif_path(date).exists()
         dates.append(row)
