@@ -209,6 +209,28 @@ def restore_from_r2_if_needed(date, final_path):
         logger.warning(f"{date}: failed to restore existing archive from R2 ({R2_BUCKET}/{key}): {e}")
 
 
+def restore_and_unpack_date(date_compact):
+    """Pull {date}.zip back from R2 (if not already local) and unpack it into
+    cache/hrrr, archive/forecasts, archive/raw_data - used by verification
+    reruns for a past date whose source files have already been archived off
+    local disk by the nightly end-of-day pass. Returns True if the zip ended
+    up present (restored or already local) and was unpacked, False otherwise.
+
+    Calls unpack_archive_zip.unpack_zip() with this module's own OUTPUT_DIR
+    path explicitly, rather than relying on that module's default
+    ARCHIVE_ZIPS_DIR (data/archive_zips) - the two modules target different
+    directories and nothing today bridges them.
+    """
+    final_path = OUTPUT_DIR / f"{date_compact}.zip"
+    restore_from_r2_if_needed(date_compact, final_path)
+    if not final_path.exists():
+        return False
+
+    from pipelines.unpack_archive_zip import unpack_zip
+    unpack_zip(final_path)
+    return True
+
+
 def upload_and_remove_local(date, zip_path):
     """Push the finished zip to R2 and delete the local copy. Leaves the zip
     on disk (rather than losing data) if credentials are missing or the

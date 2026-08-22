@@ -15,7 +15,7 @@ import logging
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger
-from core.fire_danger import CATEGORY_LABELS
+from core.fire_danger import CATEGORY_LABELS, RULE_SPEC
 from core.ignored_stations import get_ignored_stations
 from core import observation_qc
 
@@ -33,6 +33,16 @@ REPORTS_DIR = Path(BASE_DIR) / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 PLOTS_DIR = REPORTS_DIR / "plots"
 PLOTS_DIR.mkdir(exist_ok=True)
+
+# Radius used by the neighborhood/regional verification metric: a prediction
+# counts as regionally corroborated if a station within this many miles
+# observed a category within one step of it, even if the exact station
+# missed. 45mi was picked by checking actual inter-station spacing across the
+# live 18-station network (median/mean nearest-neighbor distance ~37-38mi):
+# at 30mi, 11/18 stations have zero neighbors (mean 0.44 neighbors); at 45mi,
+# only 3/18 are isolated (mean 1.56 neighbors) - override via env var if the
+# station network changes materially.
+NEIGHBORHOOD_RADIUS_MILES = float(os.getenv("VERIFICATION_NEIGHBORHOOD_RADIUS_MILES", "45"))
 
 
 def _to_float_or_none(value):
@@ -159,6 +169,34 @@ def find_matching_files(forecast_dir, raw_dir, forecast_glob_pattern="station_fo
         
     return fc_data, fc_file, raw_data, raw_file
 
+def find_files_for_date(forecast_dir, raw_dir, target_date_str, forecast_glob_pattern="station_forecasts_*.json"):
+    """Like find_matching_files, but targets a specific YYYYMMDD date instead
+    of always taking the latest files - used for rerunning verification for a
+    past date. Kept separate from find_matching_files so the no-`--date` cron
+    path's "latest by sort" behavior is untouched and easy to verify.
+    Returns (forecast_data, forecast_file, raw_data, raw_file), any of which
+    may be None if no match is found for that date.
+    """
+    if not forecast_dir.exists() or not raw_dir.exists():
+        return None, None, None, None
+
+    fc_files = [f for f in forecast_dir.glob(forecast_glob_pattern) if extract_date_token(f.name) == target_date_str]
+    raw_files = [f for f in raw_dir.glob("raw_data_*.json") if extract_date_token(f.name) == target_date_str]
+
+    if not fc_files or not raw_files:
+        return None, None, None, None
+
+    fc_file = sorted(fc_files)[-1]
+    raw_file = sorted(raw_files)[-1]
+    logger.info(f"Found files for {target_date_str}: {fc_file.name} + {raw_file.name}")
+
+    with open(fc_file, 'r') as f:
+        fc_data = json.load(f)
+    with open(raw_file, 'r') as f:
+        raw_data = json.load(f)
+
+    return fc_data, fc_file, raw_data, raw_file
+
 def fahrenheit_to_celsius(f):
     return (f - 32) * 5.0/9.0
 
@@ -181,6 +219,60 @@ def calculate_fire_danger(fm, rh, wind_kts):
     Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
     """
     return canonical_fire_danger(fm, rh, wind_kts, missing_category=None)
+
+# Reuses the same monotonic wind-speed rungs that already drive fire-danger
+# classification (fire_danger_rules.json), skipping the compound
+# elevated_very_dry_wind threshold (an OR-condition with very-low RH, not a
+# simple ladder rung) - so a wind category score stays diagnostically tied
+# to the bands that actually matter for danger classification, rather than
+# an arbitrary new set of breakpoints.
+_WIND_THRESHOLDS_KTS = RULE_SPEC["thresholds"]
+_WIND_CATEGORY_LADDER = [
+    _WIND_THRESHOLDS_KTS["moderate_wind"],
+    _WIND_THRESHOLDS_KTS["elevated_wind"],
+    _WIND_THRESHOLDS_KTS["critical_wind"],
+    _WIND_THRESHOLDS_KTS["extreme_wind"],
+]
+
+def wind_speed_ms_to_category(wind_ms):
+    """Bucket a wind speed (m/s) into the same Low..Extreme ladder used for
+    fire-danger categories, using knots thresholds from fire_danger_rules.json."""
+    if wind_ms is None or pd.isna(wind_ms):
+        return None
+    wind_kts = ms_to_kts(wind_ms)
+    category = 0
+    for threshold in _WIND_CATEGORY_LADDER:
+        if wind_kts >= threshold:
+            category += 1
+    return category
+
+def haversine_miles(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two lat/lon points, in miles."""
+    if any(v is None or pd.isna(v) for v in (lat1, lon1, lat2, lon2)):
+        return None
+    earth_radius_miles = 3958.8
+    lat1_r, lon1_r, lat2_r, lon2_r = map(np.radians, (lat1, lon1, lat2, lon2))
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1_r) * np.cos(lat2_r) * np.sin(dlon / 2) ** 2
+    return 2 * earth_radius_miles * np.arcsin(np.sqrt(a))
+
+def build_station_neighbors(station_coords, radius_miles=NEIGHBORHOOD_RADIUS_MILES):
+    """For each station, the list of OTHER stations within radius_miles (haversine)."""
+    neighbors = {}
+    stids = list(station_coords.keys())
+    for stid_a in stids:
+        lat_a, lon_a = station_coords[stid_a]
+        nearby = []
+        for stid_b in stids:
+            if stid_b == stid_a:
+                continue
+            lat_b, lon_b = station_coords[stid_b]
+            distance = haversine_miles(lat_a, lon_a, lat_b, lon_b)
+            if distance is not None and distance <= radius_miles:
+                nearby.append(stid_b)
+        neighbors[stid_a] = nearby
+    return neighbors
 
 def parse_date(date_str):
     """
@@ -247,11 +339,18 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
         stations = [stations]
 
     ignored = get_ignored_stations()
+    station_coords = {}
 
     for station in stations:
         stid = station.get('STID')
         if stid in ignored:
             continue
+        try:
+            lat = float(station.get('LATITUDE'))
+            lon = float(station.get('LONGITUDE'))
+            station_coords[stid] = (lat, lon)
+        except (TypeError, ValueError):
+            pass
         obs = station.get('OBSERVATIONS', {})
         times = obs.get('date_time', [])
         temps = obs.get('air_temp_set_1', []) or obs.get('air_temp', [])
@@ -297,7 +396,7 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
                 ms_to_kts(row['obs_wind']) if pd.notna(row['obs_wind']) else None
             ), axis=1
         )
-    return df, qc_exclusions
+    return df, qc_exclusions, station_coords
 # --- New function to merge and align forecast and observation data ---
 def merge_forecast_and_obs(forecast_df, obs_df):
     """
@@ -396,6 +495,53 @@ def calculate_confusion_matrix(merged_df, pred_col='pred_fire_danger', obs_col='
         index=range(len(CATEGORY_LABELS)), columns=range(len(CATEGORY_LABELS)), fill_value=0
     )
     return {'labels': list(CATEGORY_LABELS), 'matrix': matrix.values.tolist()}
+
+def calculate_neighborhood_metrics(merged_df, pred_col, obs_col, neighbors, labels=CATEGORY_LABELS,
+                                    radius_miles=NEIGHBORHOOD_RADIUS_MILES):
+    """Regional accuracy: a prediction is a 'hit' if the station itself OR any
+    station within radius_miles observed a category within one step of the
+    predicted category, at the same hour. Reported alongside (not instead of)
+    the strict per-station exact/within-one rates for direct comparison.
+    """
+    valid = merged_df.dropna(subset=[pred_col, obs_col]).copy()
+    if valid.empty:
+        return {'metric_type': 'neighborhood', 'radius_miles': radius_miles, 'neighborhood_hit_rate': None,
+                'strict_exact_match_rate': None, 'strict_within_one_rate': None,
+                'mean_neighbor_count': None, 'count': 0}
+
+    valid[pred_col] = pd.to_numeric(valid[pred_col], errors='coerce').round().astype(int).clip(0, len(labels) - 1)
+    valid[obs_col] = pd.to_numeric(valid[obs_col], errors='coerce').round().astype(int).clip(0, len(labels) - 1)
+
+    # Index observed categories by (stid, timestamp) once, for fast neighbor lookups.
+    obs_by_station_time = valid.set_index(['stid', 'timestamp'])[obs_col].to_dict()
+
+    def is_hit(row):
+        candidates = [row['stid']] + list(neighbors.get(row['stid'], []))
+        for candidate_stid in candidates:
+            observed = obs_by_station_time.get((candidate_stid, row['timestamp']))
+            if observed is not None and abs(observed - row[pred_col]) <= 1:
+                return True
+        return False
+
+    hits = valid.apply(is_hit, axis=1)
+    diff = valid[pred_col] - valid[obs_col]
+    neighbor_counts = valid['stid'].map(lambda stid: len(neighbors.get(stid, [])))
+
+    metrics = {
+        'metric_type': 'neighborhood',
+        'radius_miles': radius_miles,
+        'neighborhood_hit_rate': round(float(hits.mean()), 4),
+        'strict_exact_match_rate': round(float(np.mean(diff == 0)), 4),
+        'strict_within_one_rate': round(float(np.mean(np.abs(diff) <= 1)), 4),
+        'mean_neighbor_count': round(float(neighbor_counts.mean()), 2),
+        'count': len(valid),
+    }
+    print(
+        f"{pred_col}/{obs_col} neighborhood ({radius_miles}mi): HitRate={metrics['neighborhood_hit_rate']}, "
+        f"StrictExact={metrics['strict_exact_match_rate']}, StrictWithinOne={metrics['strict_within_one_rate']}, "
+        f"AvgNeighbors={metrics['mean_neighbor_count']}"
+    )
+    return metrics
 
 def generate_plots(merged_df, variable_map, report_date, report_suffix=""):
     """
@@ -583,6 +729,13 @@ def parse_args():
         default="",
         help="Optional suffix for report/history output names (example: beta)",
     )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="Rerun verification for a past date (YYYY-MM-DD) instead of today. "
+             "Restores that date's archived forecast/observation files from R2 "
+             "if they're no longer present locally. Omit for normal cron behavior.",
+    )
     return parser.parse_args()
 
 
@@ -594,14 +747,38 @@ def main():
     verification_csv_file = REPORTS_DIR / f"verification_history{suffix_tag}.csv"
 
     logger.info("Starting End of Day Validation Report...")
-    
-    # 1. Load Data (Auto-matching dates)
-    forecast_data, fc_file, raw_data, raw_file = find_matching_files(
-        FORECAST_DIR,
-        RAW_DATA_DIR,
-        forecast_glob_pattern=args.forecast_glob,
-    )
-    
+
+    target_date = None
+    if args.date:
+        try:
+            target_date = datetime.strptime(args.date, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            logger.error(f"--date must be YYYY-MM-DD, got: {args.date}")
+            sys.exit(1)
+
+    # 1. Load Data
+    if target_date:
+        date_compact = target_date.replace('-', '')
+        forecast_data, fc_file, raw_data, raw_file = find_files_for_date(
+            FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=args.forecast_glob,
+        )
+        if not forecast_data or not raw_data:
+            logger.info(f"No local archive/forecasts or archive/raw_data files for {target_date}; attempting R2 restore...")
+            from services.archive_bundler import restore_and_unpack_date
+            restore_and_unpack_date(date_compact)
+            forecast_data, fc_file, raw_data, raw_file = find_files_for_date(
+                FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=args.forecast_glob,
+            )
+        if not forecast_data or not raw_data:
+            logger.error(f"No archived data found for {target_date} (checked local disk and R2). Aborting.")
+            sys.exit(1)
+    else:
+        forecast_data, fc_file, raw_data, raw_file = find_matching_files(
+            FORECAST_DIR,
+            RAW_DATA_DIR,
+            forecast_glob_pattern=args.forecast_glob,
+        )
+
     if not forecast_data or not raw_data:
         logger.error("Missing data files. Aborting.")
         sys.exit(1)
@@ -625,7 +802,7 @@ def main():
     fc_df = get_forecast_dataframe(forecast_data, start_search, end_search)
     
     logger.info("Processing observation data...")
-    obs_df, qc_exclusions = get_observation_dataframe(raw_data, start_search, end_search)
+    obs_df, qc_exclusions, station_coords = get_observation_dataframe(raw_data, start_search, end_search)
     if qc_exclusions:
         logger.warning(f"QC excluded {len(qc_exclusions)} station/variable reading(s): {qc_exclusions}")
     
@@ -666,8 +843,25 @@ def main():
     )
     confusion = calculate_confusion_matrix(merged)
 
+    # 5b. Wind categorical scoring - additive, alongside the continuous
+    # Wind Speed (m/s) metrics above, not a replacement.
+    merged['pred_wind_cat'] = merged['pred_wind'].apply(wind_speed_ms_to_category)
+    merged['obs_wind_cat'] = merged['obs_wind'].apply(wind_speed_ms_to_category)
+    results['Wind Speed Category'] = calculate_categorical_metrics(
+        merged, 'pred_wind_cat', 'obs_wind_cat'
+    )
+    wind_confusion = calculate_confusion_matrix(merged, pred_col='pred_wind_cat', obs_col='obs_wind_cat')
+
+    # 5c. Neighborhood/regional verification - additive alongside the strict
+    # per-station confusion matrix/categorical metrics above.
+    neighbors = build_station_neighbors(station_coords)
+    neighborhood_verification = {
+        'fire_danger': calculate_neighborhood_metrics(merged, 'pred_fire_danger', 'obs_fire_danger', neighbors),
+        'wind_category': calculate_neighborhood_metrics(merged, 'pred_wind_cat', 'obs_wind_cat', neighbors),
+    }
+
     # 6. Output Report
-    report_date = datetime.now().strftime("%Y-%m-%d")
+    report_date = target_date or datetime.now().strftime("%Y-%m-%d")
     report = {
         'date': report_date,
         'generated_at': datetime.utcnow().isoformat() + 'Z',
@@ -677,6 +871,8 @@ def main():
         'observation_source': raw_file.name,
         'metrics': results,
         'confusion_matrix': confusion,
+        'wind_confusion_matrix': wind_confusion,
+        'neighborhood_verification': neighborhood_verification,
         'stations_count': merged['stidnunique'] if 'stidnunique' in dir(merged) else merged['stid'].nunique(),
         'record_count': len(merged),
         'qc_exclusions': qc_exclusions,

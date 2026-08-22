@@ -112,6 +112,8 @@ async def get_verification_report(date: str):
         "stations_count": summary.get("stations_count"),
         "metrics": summary.get("metrics", {}),
         "confusion_matrix": summary.get("confusion_matrix"),
+        "wind_confusion_matrix": summary.get("wind_confusion_matrix"),
+        "neighborhood_verification": summary.get("neighborhood_verification"),
         "gis": {
             "forecast_peak_tif": (
                 f"forecast_peak/archive/{date}.tif" if forecast_peak_tif_path.exists() else None
