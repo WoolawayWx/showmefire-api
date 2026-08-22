@@ -86,7 +86,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -195,6 +195,7 @@ app.include_router(discord_admin.router)
 app.include_router(afds.router)
 app.include_router(spatial_model.router)
 app.include_router(model_admin.router)
+app.include_router(verification_admin.router)
 app.include_router(mobile.router)
 app.include_router(posts.router)
 app.include_router(post_media.router)

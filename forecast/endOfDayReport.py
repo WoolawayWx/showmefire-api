@@ -739,9 +739,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    suffix = args.report_suffix.strip().lower()
+def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffix=""):
+    """Core report-generation logic, callable directly (e.g. from an admin
+    endpoint) as well as via the CLI. Raises RuntimeError on any condition
+    that should abort the run - callers that need process-exit-on-failure
+    CLI behavior (main(), below) are responsible for catching and exiting;
+    an API caller should let the exception surface as an HTTP error instead
+    of taking down the whole process with sys.exit().  Returns the report dict.
+    """
+    suffix = report_suffix.strip().lower()
     suffix_tag = f"_{suffix}" if suffix else ""
     history_file = REPORTS_DIR / f"validation_history{suffix_tag}.json"
     verification_csv_file = REPORTS_DIR / f"verification_history{suffix_tag}.csv"
@@ -749,39 +755,36 @@ def main():
     logger.info("Starting End of Day Validation Report...")
 
     target_date = None
-    if args.date:
+    if date:
         try:
-            target_date = datetime.strptime(args.date, "%Y-%m-%d").strftime("%Y-%m-%d")
+            target_date = datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
         except ValueError:
-            logger.error(f"--date must be YYYY-MM-DD, got: {args.date}")
-            sys.exit(1)
+            raise RuntimeError(f"date must be YYYY-MM-DD, got: {date}")
 
     # 1. Load Data
     if target_date:
         date_compact = target_date.replace('-', '')
         forecast_data, fc_file, raw_data, raw_file = find_files_for_date(
-            FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=args.forecast_glob,
+            FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=forecast_glob,
         )
         if not forecast_data or not raw_data:
             logger.info(f"No local archive/forecasts or archive/raw_data files for {target_date}; attempting R2 restore...")
             from services.archive_bundler import restore_and_unpack_date
             restore_and_unpack_date(date_compact)
             forecast_data, fc_file, raw_data, raw_file = find_files_for_date(
-                FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=args.forecast_glob,
+                FORECAST_DIR, RAW_DATA_DIR, date_compact, forecast_glob_pattern=forecast_glob,
             )
         if not forecast_data or not raw_data:
-            logger.error(f"No archived data found for {target_date} (checked local disk and R2). Aborting.")
-            sys.exit(1)
+            raise RuntimeError(f"No archived data found for {target_date} (checked local disk and R2).")
     else:
         forecast_data, fc_file, raw_data, raw_file = find_matching_files(
             FORECAST_DIR,
             RAW_DATA_DIR,
-            forecast_glob_pattern=args.forecast_glob,
+            forecast_glob_pattern=forecast_glob,
         )
 
     if not forecast_data or not raw_data:
-        logger.error("Missing data files. Aborting.")
-        sys.exit(1)
+        raise RuntimeError("Missing data files.")
 
     # 2. Determine Time Window
     # Use the forecast run_date to determine the validation window
@@ -807,20 +810,17 @@ def main():
         logger.warning(f"QC excluded {len(qc_exclusions)} station/variable reading(s): {qc_exclusions}")
     
     if fc_df.empty:
-        logger.warning("Forecast DataFrame is empty (no relevant timestamps).")
-        sys.exit(1)
-        
+        raise RuntimeError("Forecast DataFrame is empty (no relevant timestamps).")
+
     if obs_df.empty:
-        logger.warning("Observation DataFrame is empty.")
-        sys.exit(1)
-        
+        raise RuntimeError("Observation DataFrame is empty.")
+
     # 4. Merge
     logger.info("Merging forecasts and observations...")
     merged = pd.merge(fc_df, obs_df, on=['stid', 'timestamp'], how='inner')
-    
+
     if merged.empty:
-        logger.warning("No overlapping records found between forecast and observations.")
-        sys.exit(1)
+        raise RuntimeError("No overlapping records found between forecast and observations.")
         
     logger.info(f"Found {len(merged)} overlapping records for validation.")
     
@@ -866,7 +866,7 @@ def main():
         'date': report_date,
         'generated_at': datetime.utcnow().isoformat() + 'Z',
         'report_suffix': suffix or 'default',
-        'forecast_glob': args.forecast_glob,
+        'forecast_glob': forecast_glob,
         'forecast_source': fc_file.name,
         'observation_source': raw_file.name,
         'metrics': results,
@@ -933,8 +933,21 @@ def main():
     legacy_report_file = REPORTS_DIR / f"validation_summary{suffix_tag}_{report_date}.json"
     with open(legacy_report_file, 'w') as f:
         json.dump(report, f, indent=2, default=str)
-    
+
     logger.info(f"Report saved to {report_file}")
+    return report
+
+
+def main():
+    """Thin CLI wrapper around run_report() - preserves the existing
+    process-exits-nonzero-on-failure behavior cron relies on."""
+    args = parse_args()
+    try:
+        run_report(date=args.date, forecast_glob=args.forecast_glob, report_suffix=args.report_suffix)
+    except RuntimeError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
