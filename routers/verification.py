@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from core.config import GIS_DIR, IMAGES_DIR, REPORTS_DIR
+from core.config import ARCHIVE_RAW_DATA_DIR, ARCHIVE_DIR, GIS_DIR, IMAGES_DIR, REPORTS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,7 @@ async def get_verification_report(date: str):
         "generated_at": summary.get("generated_at"),
         "record_count": summary.get("record_count", 0),
         "stations_count": summary.get("stations_count"),
+        "ai_summary": summary.get("ai_summary"),
         "metrics": summary.get("metrics", {}),
         "confusion_matrix": summary.get("confusion_matrix"),
         "wind_confusion_matrix": summary.get("wind_confusion_matrix"),
@@ -129,3 +130,81 @@ async def get_verification_report(date: str):
             ),
         },
     }
+
+
+@router.get("/report/{date}/comparisons")
+async def get_verification_comparisons(date: str, station: Optional[str] = None, limit: int = 500):
+    """Return canonical hourly forecast/observation pairs for a report date."""
+    summary_path = Path(REPORTS_DIR) / date / "validation_summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail=f"No validation report available for {date}")
+
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        from forecast.endOfDayReport import (
+            find_matching_files,
+            get_forecast_dataframe,
+            get_observation_dataframe,
+        )
+        forecast_name = summary.get("forecast_source")
+        observation_name = summary.get("observation_source")
+        forecast_path = Path(ARCHIVE_DIR) / "forecasts" / forecast_name if forecast_name else None
+        observation_path = Path(ARCHIVE_RAW_DATA_DIR) / observation_name if observation_name else None
+        if not forecast_path or not observation_path or not forecast_path.exists() or not observation_path.exists():
+            forecast_data, forecast_path, raw_data, observation_path = find_matching_files(
+                Path(ARCHIVE_DIR) / "forecasts", Path(ARCHIVE_RAW_DATA_DIR)
+            )
+        else:
+            with open(forecast_path, "r", encoding="utf-8") as f:
+                forecast_data = json.load(f)
+            with open(observation_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        if not forecast_data or not raw_data:
+            raise HTTPException(status_code=404, detail="Archived comparison data is unavailable")
+
+        import pandas as pd
+        run_date = pd.Timestamp(forecast_data.get("run_date"))
+        start = pd.Timestamp(run_date.date(), tz="UTC") + pd.Timedelta(hours=16)
+        end = start + pd.Timedelta(hours=11)
+        forecast_df = get_forecast_dataframe(forecast_data, start, end)
+        observation_df, _, _ = get_observation_dataframe(raw_data, start, end)
+        merged = pd.merge(forecast_df, observation_df, on=["stid", "timestamp"], how="inner")
+        if station:
+            merged = merged[merged["stid"].str.upper() == station.strip().upper()]
+        rows = []
+        for _, row in merged.sort_values(["timestamp", "stid"]).head(min(max(limit, 1), 2000)).iterrows():
+            rows.append({
+                "station": row["stid"],
+                "timestamp": row["timestamp"].isoformat(),
+                "forecast": {
+                    "temperature_c": _json_number(row.get("pred_temp")),
+                    "relative_humidity_pct": _json_number(row.get("pred_rh")),
+                    "wind_speed_ms": _json_number(row.get("pred_wind")),
+                    "fuel_moisture_pct": _json_number(row.get("pred_fm")),
+                    "fire_danger": _json_number(row.get("pred_fire_danger")),
+                },
+                "observed": {
+                    "temperature_c": _json_number(row.get("obs_temp")),
+                    "relative_humidity_pct": _json_number(row.get("obs_rh")),
+                    "wind_speed_ms": _json_number(row.get("obs_wind")),
+                    "fuel_moisture_pct": _json_number(row.get("obs_fm")),
+                    "fire_danger": _json_number(row.get("obs_fire_danger")),
+                },
+            })
+        return {"date": date, "count": len(rows), "rows": rows}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to build comparisons for %s: %s", date, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to build forecast comparisons") from exc
+
+
+def _json_number(value):
+    try:
+        if value is None:
+            return None
+        value = float(value)
+        return value if value == value else None
+    except (TypeError, ValueError):
+        return None

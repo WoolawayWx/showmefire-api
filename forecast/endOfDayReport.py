@@ -877,6 +877,34 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
         'record_count': len(merged),
         'qc_exclusions': qc_exclusions,
     }
+
+    comparison_rows = []
+    for _, row in merged.sort_values(['timestamp', 'stid']).iterrows():
+        comparison_rows.append({
+            'station': row['stid'],
+            'timestamp': row['timestamp'].isoformat(),
+            'forecast': {
+                'temperature_c': _to_float_or_none(row.get('pred_temp')),
+                'relative_humidity_pct': _to_float_or_none(row.get('pred_rh')),
+                'wind_speed_ms': _to_float_or_none(row.get('pred_wind')),
+                'fuel_moisture_pct': _to_float_or_none(row.get('pred_fm')),
+                'fire_danger': _to_float_or_none(row.get('pred_fire_danger')),
+            },
+            'observed': {
+                'temperature_c': _to_float_or_none(row.get('obs_temp')),
+                'relative_humidity_pct': _to_float_or_none(row.get('obs_rh')),
+                'wind_speed_ms': _to_float_or_none(row.get('obs_wind')),
+                'fuel_moisture_pct': _to_float_or_none(row.get('obs_fm')),
+                'fire_danger': _to_float_or_none(row.get('obs_fire_danger')),
+            },
+        })
+    report['comparison_rows'] = comparison_rows
+    try:
+        from ai.verification_summary import generate_verification_summary
+        report['ai_summary'] = generate_verification_summary(report, comparison_rows)
+    except Exception:
+        logger.exception("Unable to generate optional Gemini verification summary")
+        report['ai_summary'] = None
     
     # Generate Plots
     logger.info("Generating plots...")
