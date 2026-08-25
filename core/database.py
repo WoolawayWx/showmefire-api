@@ -292,6 +292,24 @@ def init_database():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS forecast_discussions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            author_name TEXT,
+            issued_at TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'published', 'archived')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_forecast_discussions_status_issued '
+        'ON forecast_discussions(status, issued_at DESC)'
+    )
     
     # 2. Snapshots table (Tracks your Golden Rows)
     cursor.execute('''
@@ -2487,5 +2505,142 @@ def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
         purged = cursor.rowcount
         conn.commit()
         return purged
+    finally:
+        conn.close()
+
+
+# --- Staff forecast discussion helpers ---
+
+def _forecast_discussion_row(row: Optional[sqlite3.Row]) -> Optional[Dict]:
+    return dict(row) if row else None
+
+
+def list_forecast_discussions(status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM forecast_discussions WHERE status = ? "
+                "ORDER BY COALESCE(issued_at, created_at) DESC, id DESC LIMIT ? OFFSET ?",
+                (status, min(max(limit, 1), 100), max(offset, 0)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM forecast_discussions ORDER BY "
+                "COALESCE(issued_at, created_at) DESC, id DESC LIMIT ? OFFSET ?",
+                (min(max(limit, 1), 100), max(offset, 0)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_forecast_discussion(discussion_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        return _forecast_discussion_row(conn.execute(
+            "SELECT * FROM forecast_discussions WHERE id = ?", (discussion_id,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def get_latest_forecast_discussion() -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        return _forecast_discussion_row(conn.execute(
+            "SELECT * FROM forecast_discussions WHERE status = 'published' "
+            "ORDER BY issued_at DESC, id DESC LIMIT 1"
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def create_forecast_discussion(title: str, body: str, author_name: Optional[str] = None,
+                               status: str = "draft") -> Dict:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        issued_at = "CURRENT_TIMESTAMP" if status == "published" else None
+        if issued_at:
+            cursor = conn.execute(
+                "INSERT INTO forecast_discussions "
+                "(title, body, author_name, issued_at, status) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)",
+                (title.strip(), body, (author_name or "").strip() or None, status),
+            )
+        else:
+            cursor = conn.execute(
+                "INSERT INTO forecast_discussions (title, body, author_name, status) VALUES (?, ?, ?, ?)",
+                (title.strip(), body, (author_name or "").strip() or None, status),
+            )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM forecast_discussions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def update_forecast_discussion(discussion_id: int, title: Optional[str] = None, body: Optional[str] = None,
+                               author_name: Optional[str] = None, status: Optional[str] = None) -> Optional[Dict]:
+    current = get_forecast_discussion(discussion_id)
+    if not current:
+        return None
+    values = {
+        "title": current["title"] if title is None else title.strip(),
+        "body": current["body"] if body is None else body,
+        "author_name": current["author_name"] if author_name is None else (author_name.strip() or None),
+        "status": current["status"] if status is None else status,
+    }
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE forecast_discussions SET title = ?, body = ?, author_name = ?, status = ?, "
+            "issued_at = CASE WHEN ? = 'published' AND issued_at IS NULL THEN CURRENT_TIMESTAMP ELSE issued_at END, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (values["title"], values["body"], values["author_name"], values["status"],
+             values["status"], discussion_id),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM forecast_discussions WHERE id = ?", (discussion_id,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def publish_forecast_discussion(discussion_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("UPDATE forecast_discussions SET status = 'archived', updated_at = CURRENT_TIMESTAMP "
+                     "WHERE status = 'published' AND id != ?", (discussion_id,))
+        conn.execute(
+            "UPDATE forecast_discussions SET status = 'published', "
+            "issued_at = COALESCE(issued_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (discussion_id,),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM forecast_discussions WHERE id = ?", (discussion_id,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def archive_forecast_discussion(discussion_id: int) -> Optional[Dict]:
+    return update_forecast_discussion(discussion_id, status="archived")
+
+
+def delete_forecast_discussion(discussion_id: int) -> bool:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.execute("DELETE FROM forecast_discussions WHERE id = ?", (discussion_id,))
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
