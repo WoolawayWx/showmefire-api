@@ -36,6 +36,13 @@ def burn_ban_map_public_meta() -> dict:
     }
 
 
+def ensure_burn_ban_map() -> dict:
+    """Generate the static map if it has never been built."""
+    if not BURN_BAN_PNG.is_file():
+        generate_burn_ban_map()
+    return burn_ban_map_public_meta()
+
+
 def generate_burn_ban_map() -> dict:
     active = list_active_burn_bans()
     active_fips = {item["county_fips"] for item in active}

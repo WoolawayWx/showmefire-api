@@ -105,6 +105,21 @@ class BurnBanWorkflowTests(unittest.TestCase):
         active = database.list_active_burn_bans()
         self.assertEqual(len(active), 1)
 
+    @patch.object(burn_bans_router, "_maybe_regenerate_map")
+    def test_admin_create_publishes_ban(self, _map):
+        now = datetime.now(timezone.utc)
+        result = burn_bans_router.admin_create_burn_ban(
+            burn_bans_router.BurnBanAdminCreate(
+                county_fips="29019",
+                proof_url="https://example.gov/burn-ban",
+                effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at=(now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+            self.token,
+        )
+        self.assertEqual(result["submission"]["status"], "confirmed")
+        self.assertEqual(len(database.list_active_burn_bans()), 1)
+
     def test_expire_stale_burn_bans(self):
         now = datetime.now(timezone.utc)
         submission = database.create_burn_ban_submission(

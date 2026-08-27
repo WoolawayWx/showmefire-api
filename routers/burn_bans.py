@@ -248,10 +248,6 @@ class BurnBanModeration(BaseModel):
         return _parse_ban_datetime(value)
 
 
-class BurnBanRejection(BaseModel):
-    reason: str = Field(min_length=1, max_length=2000)
-
-
 class BurnBanUpdate(BaseModel):
     edit_reason: str = Field(min_length=1, max_length=2000)
     effective_at: Optional[str] = None
@@ -287,6 +283,62 @@ class BurnBanUpdate(BaseModel):
         return fips
 
 
+class BurnBanRejection(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class BurnBanAdminCreate(BaseModel):
+    county_fips: str = Field(min_length=5, max_length=5)
+    effective_at: str = Field(min_length=8, max_length=40)
+    expires_at: str = Field(min_length=8, max_length=40)
+    proof_url: str = Field(min_length=1, max_length=2000)
+    submitter_name: str = Field(default="Show Me Fire Staff", max_length=120)
+    submitter_contact: str = Field(default="admin@showmefire.org", max_length=120)
+    moderator_note: str = Field(default="", max_length=2000)
+
+    @field_validator("county_fips")
+    @classmethod
+    def _validate_county(cls, value: str) -> str:
+        fips = str(value or "").strip()
+        if fips not in _known_county_fips():
+            raise ValueError("county_fips must be a Missouri county FIPS code")
+        return fips
+
+    @field_validator("proof_url")
+    @classmethod
+    def _clean_proof_url(cls, value: str) -> str:
+        text = _clean_text(value, required=True, field="proof_url")
+        if not _URL_RE.fullmatch(text):
+            raise ValueError("proof_url must be an http or https URL")
+        return text
+
+    @field_validator("submitter_name")
+    @classmethod
+    def _clean_name(cls, value: str) -> str:
+        text = _clean_text(value, required=True, field="submitter_name")
+        if not _NAME_RE.fullmatch(text):
+            raise ValueError("submitter_name contains invalid characters")
+        return text
+
+    @field_validator("submitter_contact")
+    @classmethod
+    def _clean_contact(cls, value: str) -> str:
+        text = _clean_text(value, required=True, field="submitter_contact")
+        if not _CONTACT_RE.fullmatch(text):
+            raise ValueError("submitter_contact must be an email or phone number")
+        return text
+
+    @model_validator(mode="after")
+    def _validate_dates(self) -> "BurnBanAdminCreate":
+        effective = _parse_ban_datetime(self.effective_at)
+        expires = _parse_ban_datetime(self.expires_at)
+        if expires <= effective:
+            raise ValueError("expires_at must be after effective_at")
+        self.effective_at = effective
+        self.expires_at = expires
+        return self
+
+
 @router.get("/api/burn-bans/counties")
 def list_burn_ban_counties():
     return {"success": True, "counties": county_catalog()}
@@ -296,12 +348,12 @@ def list_burn_ban_counties():
 def list_public_active_burn_bans(response: Response):
     response.headers["Cache-Control"] = "public, max-age=300"
     bans = list_active_burn_bans()
-    from services.burn_ban_map import burn_ban_map_public_meta
+    from services.burn_ban_map import ensure_burn_ban_map
     return {
         "success": True,
         "count": len(bans),
         "bans": [_public_ban_payload(item) for item in bans],
-        "map": burn_ban_map_public_meta(),
+        "map": ensure_burn_ban_map(),
     }
 
 
@@ -447,6 +499,37 @@ def admin_list_burn_bans(
     return {"success": True, "submissions": items, "count": len(items)}
 
 
+@router.post("/api/admin/burn-bans", status_code=201)
+def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = None):
+    actor = _require_admin(token)
+    county_name = _known_county_fips()[payload.county_fips]
+    submission = create_burn_ban_submission(
+        county_fips=payload.county_fips,
+        county_name=county_name,
+        submitter_name=payload.submitter_name,
+        submitter_contact=payload.submitter_contact,
+        proof_url=payload.proof_url,
+        effective_at=payload.effective_at,
+        expires_at=payload.expires_at,
+        submitter_ip_hash="admin",
+        upload_token_hash="",
+        captcha_verdict="admin",
+        consent_version=CONSENT_VERSION,
+    )
+    result = moderate_burn_ban_submission(
+        submission["id"],
+        to_status="confirmed",
+        actor=actor,
+        reason=payload.moderator_note or "Created by administrator",
+        effective_at=payload.effective_at,
+        expires_at=payload.expires_at,
+    )
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to publish burn ban")
+    _maybe_regenerate_map()
+    return {"success": True, "submission": result}
+
+
 @router.get("/api/admin/burn-bans/{submission_id}")
 def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
     _require_admin(token)
@@ -577,9 +660,15 @@ def admin_delete_burn_ban(
 
 def run_burn_ban_maintenance() -> Dict[str, int]:
     from core.database import expire_stale_burn_bans
+    from services.burn_ban_map import ensure_burn_ban_map
     expired = expire_stale_burn_bans()
     purged = purge_burn_ban_submission_pii()
     throttle_purged = purge_burn_ban_throttle_rows()
     if expired:
         _maybe_regenerate_map()
+    else:
+        try:
+            ensure_burn_ban_map()
+        except Exception as exc:
+            logger.warning("Burn-ban map ensure failed: %s", exc, exc_info=True)
     return {"expired": expired, "pii_purged": purged, "throttle_purged": throttle_purged}
