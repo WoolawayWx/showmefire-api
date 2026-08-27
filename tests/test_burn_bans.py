@@ -120,6 +120,32 @@ class BurnBanWorkflowTests(unittest.TestCase):
         self.assertEqual(result["submission"]["status"], "confirmed")
         self.assertEqual(len(database.list_active_burn_bans()), 1)
 
+    def test_admin_regenerate_map(self):
+        now = datetime.now(timezone.utc)
+        database.create_burn_ban_submission(
+            county_fips="29019",
+            county_name="Boone",
+            submitter_name="Jane",
+            submitter_contact="jane@example.com",
+            proof_url="https://example.gov/ban",
+            effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expires_at=(now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            submitter_ip_hash="hash",
+            upload_token_hash="token",
+            captcha_verdict="success",
+            consent_version="test",
+        )
+        with patch("services.burn_ban_map.generate_burn_ban_map") as mock_generate:
+            mock_generate.return_value = {
+                "active_counties": 1,
+                "image_path": "mo-burnban.png",
+                "updated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            result = burn_bans_router.admin_regenerate_burn_ban_map(self.token)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["active_count"], 1)
+        mock_generate.assert_called_once()
+
     def test_expire_stale_burn_bans(self):
         now = datetime.now(timezone.utc)
         submission = database.create_burn_ban_submission(

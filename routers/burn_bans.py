@@ -530,6 +530,35 @@ def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = No
     return {"success": True, "submission": result}
 
 
+@router.get("/api/admin/burn-bans/map")
+def admin_get_burn_ban_map(token: Optional[str] = None):
+    _require_admin(token)
+    from services.burn_ban_map import burn_ban_map_public_meta
+    meta = burn_ban_map_public_meta()
+    active = list_active_burn_bans()
+    return {
+        "success": True,
+        "map": meta,
+        "active_count": len(active),
+    }
+
+
+@router.post("/api/admin/burn-bans/map/regenerate")
+def admin_regenerate_burn_ban_map(token: Optional[str] = None):
+    _require_admin(token)
+    from services.burn_ban_map import generate_burn_ban_map
+    result = generate_burn_ban_map()
+    return {
+        "success": True,
+        "map": {
+            "image_path": result["image_path"],
+            "url": "/images/mo-burnban.png",
+            "updated_at": result["updated_at"],
+        },
+        "active_count": result["active_counties"],
+    }
+
+
 @router.get("/api/admin/burn-bans/{submission_id}")
 def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
     _require_admin(token)
