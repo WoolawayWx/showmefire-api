@@ -12,8 +12,8 @@ import geopandas as gpd
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
-from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from matplotlib.patches import Patch
 
 from core.config import IMAGES_DIR
 from core.database import list_active_burn_bans
@@ -31,7 +31,7 @@ PIXEL_H = 1152
 MAP_DPI = 144
 BACKGROUND_COLOR = "#E8E8E8"
 BURN_BAN_COLOR = "#B91C1C"
-INACTIVE_COLOR = "#E8E8E8"
+INACTIVE_COLOR = "#FFFFFF"
 COUNTY_EDGE_COLOR = "#B6B6B6"
 STATE_EDGE_COLOR = "#000000"
 CENTRAL_TZ = ZoneInfo("America/Chicago")
@@ -119,7 +119,6 @@ def _add_county_fills(ax, counties: gpd.GeoDataFrame, active_fips: set[str], dat
             crs=data_crs,
             facecolor=BURN_BAN_COLOR,
             edgecolor="none",
-            alpha=0.88,
             zorder=7,
         )
 
@@ -149,15 +148,40 @@ def _add_boundaries(ax, counties: gpd.GeoDataFrame, data_crs) -> None:
 
 
 def _add_legend(fig) -> None:
-    cmap = ListedColormap([INACTIVE_COLOR, BURN_BAN_COLOR])
-    norm = BoundaryNorm([-0.5, 0.5, 1.5], cmap.N)
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-
-    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = fig.colorbar(sm, cax=cax, label="Burn Ban Status")
-    cbar.set_ticks([0, 1])
-    cbar.set_ticklabels(["No active ban", "Active burn ban"])
+    _load_fonts()
+    legend_handles = [
+        Patch(
+            facecolor=BURN_BAN_COLOR,
+            edgecolor=STATE_EDGE_COLOR,
+            linewidth=0.9,
+            label="Active burn ban",
+        ),
+        Patch(
+            facecolor=INACTIVE_COLOR,
+            edgecolor=COUNTY_EDGE_COLOR,
+            linewidth=0.9,
+            label="No active burn ban",
+        ),
+    ]
+    legend = fig.legend(
+        handles=legend_handles,
+        loc="upper right",
+        bbox_to_anchor=(0.99, 0.78),
+        frameon=True,
+        fancybox=False,
+        edgecolor="#444444",
+        facecolor="#FFFFFF",
+        fontsize=12,
+        handlelength=1.6,
+        handleheight=1.2,
+        borderpad=0.9,
+        labelspacing=0.85,
+        title="Burn Ban Status",
+    )
+    legend.get_frame().set_linewidth(1.2)
+    legend.get_frame().set_alpha(0.96)
+    legend.get_title().set_fontsize(13)
+    legend.get_title().set_fontweight("bold")
 
 
 def _add_branding(fig, ax, active_count: int, updated_at: datetime) -> None:
@@ -185,11 +209,8 @@ def _add_branding(fig, ax, active_count: int, updated_at: datetime) -> None:
     )
     fig.text(
         0.99,
-        0.62,
-        "Burn Ban Status:\n"
-        "Red: Confirmed active county burn ban\n"
-        "Gray: No active burn ban\n\n"
-        "Bans are submitted by officials and the public,\n"
+        0.48,
+        "Confirmed county burn bans submitted by officials and the public,\n"
         "then reviewed by Show Me Fire staff.\n\n"
         "For more info, visit ShowMeFire.org/burn-bans",
         fontsize=10,
@@ -237,8 +258,8 @@ def generate_burn_ban_map() -> dict:
     counties = _read_counties(data_crs)
     _add_county_fills(ax, counties, active_fips, data_crs)
     _add_boundaries(ax, counties, data_crs)
-    _add_legend(fig)
     _add_branding(fig, ax, len(active_fips), updated_at)
+    _add_legend(fig)
 
     BURN_BAN_PNG.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(BURN_BAN_PNG, dpi=MAP_DPI, bbox_inches=None, pad_inches=0, facecolor=BACKGROUND_COLOR)
