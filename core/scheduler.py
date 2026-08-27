@@ -23,6 +23,7 @@ from core.database import (
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.seasonal_fuel_state import update_daily_gdd
+from services.rtma_peak import run_rtma_peak_job
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=23,
         minute=45,
         id='end_of_day_archive'
+    )
+
+    scheduler.add_job(
+        run_rtma_peak_job,
+        'cron',
+        hour=23,
+        minute=35,
+        id='end_of_day_rtma_peak',
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(

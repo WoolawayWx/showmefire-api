@@ -54,6 +54,48 @@ class ForecastDiscussionTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             router.public_latest_forecast_discussion()
 
+    def test_admin_can_edit_current_and_archived_discussions(self):
+        first = self.create("First", "published")
+        second = self.create("Second", "published")
+        archived = router.public_get_forecast_discussion(first["id"])["discussion"]
+        current = router.public_latest_forecast_discussion()["discussion"]
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(current["id"], second["id"])
+
+        updated_archived = router.admin_update_forecast_discussion(
+            archived["id"],
+            router.ForecastDiscussionUpdate(title="Edited archive", body="Updated archive body."),
+            self.token,
+        )["discussion"]
+        updated_current = router.admin_update_forecast_discussion(
+            current["id"],
+            router.ForecastDiscussionUpdate(title="Edited current", body="Updated current body."),
+            self.token,
+        )["discussion"]
+
+        self.assertEqual(updated_archived["status"], "archived")
+        self.assertEqual(updated_archived["title"], "Edited archive")
+        self.assertEqual(updated_archived["body"], "Updated archive body.")
+        self.assertEqual(updated_current["status"], "published")
+        self.assertEqual(updated_current["title"], "Edited current")
+        self.assertEqual(router.public_latest_forecast_discussion()["discussion"]["title"], "Edited current")
+
+    def test_admin_can_delete_current_and_archived_discussions(self):
+        first = self.create("First", "published")
+        second = self.create("Second", "published")
+        archived_id = first["id"]
+        current_id = second["id"]
+
+        self.assertTrue(router.admin_delete_forecast_discussion(archived_id, self.token)["success"])
+        with self.assertRaises(HTTPException) as archived_ctx:
+            router.public_get_forecast_discussion(archived_id)
+        self.assertEqual(archived_ctx.exception.status_code, 404)
+
+        self.assertTrue(router.admin_delete_forecast_discussion(current_id, self.token)["success"])
+        with self.assertRaises(HTTPException):
+            router.public_latest_forecast_discussion()
+        self.assertEqual(router.public_list_forecast_discussions()["discussions"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
