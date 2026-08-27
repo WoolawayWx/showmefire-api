@@ -24,6 +24,7 @@ from core.database import (
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import run_rtma_peak_job
+from routers.burn_bans import run_burn_ban_maintenance
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,15 @@ async def update_seasonal_fuel_state_job():
         )
     except Exception as error:
         logger.error("Seasonal fuel state update failed: %s", error, exc_info=True)
+
+
+async def burn_ban_maintenance_job():
+    """Expire ended burn bans, purge old PII/throttle rows, and refresh the static map."""
+    try:
+        result = await asyncio.to_thread(run_burn_ban_maintenance)
+        logger.info("Burn-ban maintenance: %s", result)
+    except Exception as error:
+        logger.error("Burn-ban maintenance failed: %s", error, exc_info=True)
 
 
 def create_scheduler():
@@ -257,6 +267,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=4,
         minute=0,
         id='drift_check',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        burn_ban_maintenance_job,
+        'interval',
+        hours=3,
+        id='burn_ban_maintenance',
         max_instances=1,
         coalesce=True,
     )

@@ -670,6 +670,9 @@ def init_database():
     # 18. Public feedback form + its own submission throttle
     _ensure_feedback_tables(cursor)
 
+    # 19. County burn-ban submissions and moderation
+    _ensure_burn_ban_tables(cursor)
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {db_path}")
@@ -2494,6 +2497,78 @@ def consume_feedback_submission_quota(bucket_key: str, now: datetime, per_hour_l
         conn.close()
 
 
+def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burn_ban_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            county_fips TEXT NOT NULL,
+            county_name TEXT NOT NULL,
+            submitter_name TEXT NOT NULL DEFAULT '',
+            submitter_contact TEXT NOT NULL DEFAULT '',
+            proof_url TEXT NOT NULL DEFAULT '',
+            proof_stored_filename TEXT NOT NULL DEFAULT '',
+            proof_original_filename TEXT NOT NULL DEFAULT '',
+            proof_content_type TEXT NOT NULL DEFAULT '',
+            effective_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            upload_token_hash TEXT NOT NULL DEFAULT '',
+            captcha_verdict TEXT NOT NULL DEFAULT '',
+            consent_version TEXT NOT NULL DEFAULT '',
+            moderator_note TEXT NOT NULL DEFAULT '',
+            moderated_by TEXT NOT NULL DEFAULT '',
+            moderated_at TIMESTAMP,
+            published_at TIMESTAMP,
+            pii_purged_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_status_created '
+        'ON burn_ban_submissions(status, created_at DESC)'
+    )
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_county_active '
+        'ON burn_ban_submissions(county_fips, status, effective_at, expires_at)'
+    )
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burn_ban_moderation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            submission_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT '',
+            from_status TEXT NOT NULL DEFAULT '',
+            to_status TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            changed_fields_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (submission_id) REFERENCES burn_ban_submissions(id)
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_moderation_submission '
+        'ON burn_ban_moderation(submission_id, created_at)'
+    )
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burn_ban_submission_throttle (
+            bucket_key TEXT NOT NULL,
+            window_kind TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (bucket_key, window_kind, window_start)
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_throttle_updated '
+        'ON burn_ban_submission_throttle(updated_at)'
+    )
+
+
 def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -2642,5 +2717,461 @@ def delete_forecast_discussion(discussion_id: int) -> bool:
         cursor = conn.execute("DELETE FROM forecast_discussions WHERE id = ?", (discussion_id,))
         conn.commit()
         return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+# --- County burn-ban helpers ---
+
+BURN_BAN_STATUSES = {"pending", "confirmed", "denied", "expired"}
+
+
+def _burn_ban_row_to_dict(row: Optional[sqlite3.Row], *, admin: bool = False) -> Optional[Dict]:
+    if not row:
+        return None
+    data = dict(row)
+    if not admin:
+        for key in (
+            "submitter_name", "submitter_contact", "submitter_ip_hash",
+            "upload_token_hash", "captcha_verdict", "consent_version",
+            "proof_stored_filename", "proof_original_filename", "proof_content_type",
+            "moderator_note", "moderated_by", "pii_purged_at",
+        ):
+            data.pop(key, None)
+    return data
+
+
+def _record_burn_ban_moderation(
+    cursor: sqlite3.Cursor,
+    submission_id: int,
+    *,
+    action: str,
+    actor: str,
+    from_status: str,
+    to_status: str,
+    reason: str = "",
+    changed_fields: Optional[Dict] = None,
+) -> None:
+    import json as _json
+    cursor.execute('''
+        INSERT INTO burn_ban_moderation (
+            submission_id, action, actor, from_status, to_status, reason, changed_fields_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        submission_id, action, actor, from_status, to_status, reason,
+        _json.dumps(changed_fields or {}),
+    ))
+
+
+def create_burn_ban_submission(
+    *,
+    county_fips: str,
+    county_name: str,
+    submitter_name: str,
+    submitter_contact: str,
+    proof_url: str,
+    effective_at: str,
+    expires_at: str,
+    submitter_ip_hash: str,
+    upload_token_hash: str,
+    captcha_verdict: str,
+    consent_version: str,
+) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO burn_ban_submissions (
+                status, county_fips, county_name, submitter_name, submitter_contact,
+                proof_url, effective_at, expires_at, submitter_ip_hash, upload_token_hash,
+                captcha_verdict, consent_version
+            ) VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            county_fips, county_name, submitter_name, submitter_contact,
+            proof_url, effective_at, expires_at, submitter_ip_hash, upload_token_hash,
+            captcha_verdict, consent_version,
+        ))
+        submission_id = cursor.lastrowid
+        conn.commit()
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def get_burn_ban_submission(submission_id: int, *, admin: bool = False) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        data = _burn_ban_row_to_dict(row, admin=admin)
+        if admin:
+            cursor.execute('''
+                SELECT * FROM burn_ban_moderation WHERE submission_id = ?
+                ORDER BY created_at ASC
+            ''', (submission_id,))
+            data["moderation_history"] = [dict(r) for r in cursor.fetchall()]
+        return data
+    finally:
+        conn.close()
+
+
+def get_burn_ban_upload_token_hash(submission_id: int) -> Optional[str]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT upload_token_hash FROM burn_ban_submissions WHERE id = ? AND status = ?',
+            (submission_id, "pending"),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def list_burn_ban_submissions(
+    *,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    admin: bool = False,
+) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute('''
+                SELECT * FROM burn_ban_submissions WHERE status = ?
+                ORDER BY created_at DESC LIMIT ? OFFSET ?
+            ''', (status, limit, offset))
+        else:
+            cursor.execute('''
+                SELECT * FROM burn_ban_submissions
+                ORDER BY created_at DESC LIMIT ? OFFSET ?
+            ''', (limit, offset))
+        return [
+            _burn_ban_row_to_dict(row, admin=admin)
+            for row in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def _burn_ban_is_publicly_active(row: Dict, now_iso: str) -> bool:
+    if row.get("status") != "confirmed":
+        return False
+    effective_at = str(row.get("effective_at") or "")
+    expires_at = str(row.get("expires_at") or "")
+    if effective_at and effective_at > now_iso:
+        return False
+    if expires_at and expires_at <= now_iso:
+        return False
+    return True
+
+
+def list_active_burn_bans(*, now: Optional[datetime] = None) -> List[Dict]:
+    now = now or datetime.utcnow()
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT * FROM burn_ban_submissions
+            WHERE status = 'confirmed'
+              AND effective_at <= ?
+              AND expires_at > ?
+            ORDER BY county_name ASC
+        ''', (now_iso, now_iso))
+        return [
+            _burn_ban_row_to_dict(row, admin=False)
+            for row in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def set_burn_ban_proof_file(
+    submission_id: int,
+    stored_filename: str,
+    original_filename: str,
+    content_type: str,
+) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE burn_ban_submissions
+            SET proof_stored_filename = ?, proof_original_filename = ?,
+                proof_content_type = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'pending'
+        ''', (stored_filename, original_filename, content_type, submission_id))
+        if cursor.rowcount == 0:
+            conn.commit()
+            return None
+        conn.commit()
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def moderate_burn_ban_submission(
+    submission_id: int,
+    *,
+    to_status: str,
+    actor: str,
+    reason: str = "",
+    effective_at: Optional[str] = None,
+    expires_at: Optional[str] = None,
+) -> Optional[Dict]:
+    if to_status not in BURN_BAN_STATUSES:
+        raise ValueError(f"invalid status: {to_status}")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        from_status = current["status"]
+        if from_status != "pending" and to_status in {"confirmed", "denied"}:
+            return {"already_moderated": True, **current}
+
+        changed: Dict = {}
+        updates = ["status = ?", "moderated_by = ?", "moderator_note = ?",
+                   "moderated_at = CURRENT_TIMESTAMP", "updated_at = CURRENT_TIMESTAMP"]
+        params: List = [to_status, actor, reason]
+        if effective_at is not None:
+            updates.append("effective_at = ?")
+            params.append(effective_at)
+            changed["effective_at"] = effective_at
+        if expires_at is not None:
+            updates.append("expires_at = ?")
+            params.append(expires_at)
+            changed["expires_at"] = expires_at
+        if to_status == "confirmed":
+            updates.append("published_at = CURRENT_TIMESTAMP")
+        params.append(submission_id)
+        cursor.execute(
+            f"UPDATE burn_ban_submissions SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+        _record_burn_ban_moderation(
+            cursor, submission_id, action=to_status, actor=actor,
+            from_status=from_status, to_status=to_status, reason=reason,
+            changed_fields=changed,
+        )
+        conn.commit()
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def update_burn_ban_submission(
+    submission_id: int,
+    *,
+    actor: str,
+    edit_reason: str,
+    effective_at: Optional[str] = None,
+    expires_at: Optional[str] = None,
+    proof_url: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    county_name: Optional[str] = None,
+) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        if current["status"] not in {"confirmed", "pending"}:
+            return None
+
+        changed: Dict = {}
+        clauses = ["updated_at = CURRENT_TIMESTAMP"]
+        params: List = []
+        for field, value in (
+            ("effective_at", effective_at),
+            ("expires_at", expires_at),
+            ("proof_url", proof_url),
+            ("county_fips", county_fips),
+            ("county_name", county_name),
+        ):
+            if value is not None:
+                clauses.append(f"{field} = ?")
+                params.append(value)
+                changed[field] = value
+        if not changed:
+            return current
+        params.append(submission_id)
+        cursor.execute(
+            f"UPDATE burn_ban_submissions SET {', '.join(clauses)} WHERE id = ?",
+            params,
+        )
+        _record_burn_ban_moderation(
+            cursor, submission_id, action="edit", actor=actor,
+            from_status=current["status"], to_status=current["status"],
+            reason=edit_reason, changed_fields=changed,
+        )
+        conn.commit()
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def delete_burn_ban_submission(submission_id: int, *, actor: str, reason: str = "") -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT status FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        from_status = row["status"]
+        _record_burn_ban_moderation(
+            cursor, submission_id, action="delete", actor=actor,
+            from_status=from_status, to_status="deleted", reason=reason,
+        )
+        cursor.execute('DELETE FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def expire_stale_burn_bans(*, now: Optional[datetime] = None) -> int:
+    now = now or datetime.utcnow()
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id FROM burn_ban_submissions
+            WHERE status = 'confirmed' AND expires_at <= ?
+        ''', (now_iso,))
+        ids = [row[0] for row in cursor.fetchall()]
+        for submission_id in ids:
+            cursor.execute('''
+                UPDATE burn_ban_submissions
+                SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (submission_id,))
+            _record_burn_ban_moderation(
+                cursor, submission_id, action="expired", actor="system:auto-expire",
+                from_status="confirmed", to_status="expired",
+                reason="expiration date reached",
+            )
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def purge_burn_ban_submission_pii(older_than_days: int = 90) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            UPDATE burn_ban_submissions
+            SET submitter_name = '', submitter_contact = '', submitter_ip_hash = '',
+                upload_token_hash = '', pii_purged_at = CURRENT_TIMESTAMP
+            WHERE moderated_at IS NOT NULL
+              AND moderated_at <= datetime('now', ? || ' days')
+              AND pii_purged_at IS NULL
+              AND (submitter_name != '' OR submitter_contact != '' OR submitter_ip_hash != '')
+        ''', (f"-{max(0, older_than_days)}",))
+        purged = cursor.rowcount
+        conn.commit()
+        return purged
+    finally:
+        conn.close()
+
+
+def consume_burn_ban_submission_quota(
+    bucket_key: str, now: datetime, per_hour_limit: int, per_day_limit: int,
+) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path, timeout=10.0, isolation_level=None)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('BEGIN IMMEDIATE')
+        hour_key = now.strftime('%Y-%m-%dT%H')
+        day_key = now.strftime('%Y-%m-%d')
+        windows = (('hour', hour_key, per_hour_limit), ('day', day_key, per_day_limit))
+
+        for kind, window_start, limit in windows:
+            cursor.execute('''
+                SELECT hits FROM burn_ban_submission_throttle
+                WHERE bucket_key = ? AND window_kind = ? AND window_start = ?
+            ''', (bucket_key, kind, window_start))
+            row = cursor.fetchone()
+            if row and row[0] >= limit:
+                cursor.execute('ROLLBACK')
+                if kind == 'hour':
+                    retry_after = 3600 - (now.minute * 60 + now.second)
+                else:
+                    retry_after = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+                return {"allowed": False, "window": kind, "retry_after": max(1, retry_after)}
+
+        for kind, window_start, _limit in windows:
+            cursor.execute('''
+                INSERT INTO burn_ban_submission_throttle (bucket_key, window_kind, window_start, hits, updated_at)
+                VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(bucket_key, window_kind, window_start)
+                DO UPDATE SET hits = hits + 1, updated_at = CURRENT_TIMESTAMP
+            ''', (bucket_key, kind, window_start))
+        cursor.execute('COMMIT')
+        return {"allowed": True, "window": "", "retry_after": 0}
+    except Exception:
+        try:
+            cursor.execute('ROLLBACK')
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def purge_burn_ban_throttle_rows(older_than_hours: int = 48) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            DELETE FROM burn_ban_submission_throttle
+            WHERE updated_at <= datetime('now', ? || ' hours')
+        ''', (f"-{max(0, older_than_hours)}",))
+        purged = cursor.rowcount
+        conn.commit()
+        return purged
     finally:
         conn.close()
