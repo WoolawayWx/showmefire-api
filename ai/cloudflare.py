@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import httpx
 
-DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 WORKERS_AI_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
 
@@ -61,6 +61,8 @@ class CloudflareAIClient:
         )
         request = {
             "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 320,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",

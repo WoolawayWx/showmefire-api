@@ -4,7 +4,12 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from ai.briefing import briefing_json, build_briefing, validate_briefing_text
+from ai.briefing import (
+    briefing_json,
+    build_briefing,
+    contains_core_weather_facts,
+    validate_briefing_text,
+)
 from ai.cloudflare import CloudflareAIClient
 
 load_dotenv()
@@ -59,7 +64,11 @@ def generate_summary() -> str | None:
     )
     try:
         text = cloudflare_client.generate_text(prompt)
-        if text and _valid_summary(text, briefing):
+        if (
+            text
+            and _valid_summary(text, briefing)
+            and contains_core_weather_facts(text, briefing)
+        ):
             return text
         print("Gemini RSS summary failed numeric validation; omitting summary item.")
     except Exception as exc:

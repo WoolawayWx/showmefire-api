@@ -17,7 +17,11 @@ class FakeClient:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             return "Elevated Fire Danger Across Missouri"
-        return "Elevated fire danger is forecast statewide with low relative humidity. Rainfall remains below 0.080 inches."
+        return (
+            "Elevated fire danger is forecast statewide with relative humidity "
+            "near 25%, fuel moisture near 8%, and winds near 8.9 mph. "
+            "Rainfall remains below 0.080 inches."
+        )
 
 
 class ForecastAITests(unittest.TestCase):

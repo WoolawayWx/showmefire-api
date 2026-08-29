@@ -18,7 +18,12 @@ BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent.parent))
 ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
 
 sys.path.append(str(BASE_DIR))
-from ai.briefing import briefing_json, build_briefing, validate_briefing_text
+from ai.briefing import (
+    briefing_json,
+    build_briefing,
+    contains_core_weather_facts,
+    validate_briefing_text,
+)
 from ai.cloudflare import CloudflareAIClient
 from core.database import insert_forecast
 
@@ -50,17 +55,26 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
     return headline, discussion
 
 
-def generate_text(client: CloudflareAIClient, prompt: str, briefing: dict) -> str | None:
+def generate_text(
+    client: CloudflareAIClient,
+    prompt: str,
+    briefing: dict,
+    require_core_facts: bool = False,
+) -> str | None:
     """Generate validated text, retrying once with stricter instructions."""
     for attempt in range(2):
         try:
             text = client.generate_text(prompt)
-            if text and valid_text(text, briefing):
+            if text and valid_text(text, briefing) and (
+                not require_core_facts or contains_core_weather_facts(text, briefing)
+            ):
                 return text
             prompt = (
                 "Rewrite using only the supplied JSON. Do not mention a danger class "
                 "absent from fire_danger_present or precipitation above precip_in.max. "
-                "Return only the requested answer.\n\n" + prompt
+                "The discussion must include numeric relative humidity, fuel moisture, "
+                "and wind values from statewide. Return only the requested answer.\n\n"
+                + prompt
             )
         except Exception as exc:
             print(f"Cloudflare AI attempt {attempt + 1} failed: {exc}")
@@ -92,7 +106,7 @@ def generate_forecast_text(
     )
     return (
         generate_text(client, headline_prompt, briefing) or headline,
-        generate_text(client, summary_prompt, briefing) or discussion,
+        generate_text(client, summary_prompt, briefing, require_core_facts=True) or discussion,
     )
 
 

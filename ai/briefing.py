@@ -265,3 +265,23 @@ def validate_briefing_text(text: str, briefing: Mapping[str, Any]) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def contains_core_weather_facts(text: str, briefing: Mapping[str, Any]) -> bool:
+    """Require generated forecast prose to carry the key numeric observations."""
+    state = briefing["statewide"]
+    for metric in ("rh", "fuel_moisture", "wind_mph"):
+        values = state[metric]
+        available = [values.get("min"), values.get("max")]
+        if not any(value is not None for value in available):
+            continue
+        if not any(
+            re.search(
+                rf"(?<![\d.]){re.escape((str(value).rstrip('0').rstrip('.') or '0'))}(?![\d.])",
+                text,
+            )
+            for value in available
+            if value is not None
+        ):
+            return False
+    return True
