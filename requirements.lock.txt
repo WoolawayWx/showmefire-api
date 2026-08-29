@@ -57,8 +57,6 @@ fsspec==2026.2.0
 geojson==3.2.0
 geopandas==1.1.1
 goes2go==2025.10.0
-google-auth==2.45.0
-google-genai==1.56.0
 h11==0.16.0
 h5netcdf==1.8.1
 h5py==3.15.1

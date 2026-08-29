@@ -1,33 +1,44 @@
-from google import genai
-import PIL.Image
-from dotenv import load_dotenv
+"""Create a forecast title from the numeric briefing using Workers AI."""
+
 import os
+import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Determine project root
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", PROJECT_ROOT / "archive" / "forecasts"))
+sys.path.append(str(PROJECT_ROOT))
 
-genai_key = os.getenv('genai_key')
-client = genai.Client(api_key=genai_key)
+from ai.briefing import briefing_json, build_briefing, validate_briefing_text
+from ai.cloudflare import CloudflareAIClient
 
-img_path = PROJECT_ROOT / "images" / "mo-realtimefiredanger.png"
-img = PIL.Image.open(img_path)
+briefing = build_briefing(ARCHIVE_DIR)
+highest = briefing["statewide"].get("highest_fire_danger") or "Low"
+fallback = f"{highest} Fire Danger Across Missouri"
+client = CloudflareAIClient()
 
-response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=[
-        "Look at this graphic, and create a short informative headline",
-        "Needs to be useable for a RSS feed that will display in fire departments.",
-        "Need to be regionally correct in Missouri, so like NE, SW, Central, etc.",
-        "Just respond with one singular headline.",
-        "Use the legend on the side of the image to correctly address the level of fire danger.",
-        "green is low, yellow is moderate, orange is elevated, red is critical, and maroon is extreme.",
-        "get teh correct risk to color",
-        img
-    ]
-)
+if client.configured:
+    prompt = (
+        "Write one factual, informative 5-8 word headline for a Missouri "
+        "fire-weather RSS feed. Use only the supplied numeric briefing JSON. "
+        "Mention only fire-danger classes listed in statewide.fire_danger_present. "
+        "Return plain text only.\n\n" + briefing_json(briefing)
+    )
+    try:
+        generated_title = client.generate_text(prompt)
+        title = (
+            generated_title
+            if validate_briefing_text(generated_title, briefing)
+            else fallback
+        )
+    except Exception as exc:
+        print(f"Cloudflare title generation failed; using fallback: {exc}")
+        title = fallback
+else:
+    title = fallback
 
-print(response.text)
+print(title)

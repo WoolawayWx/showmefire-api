@@ -1,71 +1,71 @@
-from google import genai
-import PIL.Image
-import numpy as np
-from dotenv import load_dotenv
+"""Generate the optional RSS summary from numeric forecast data."""
+
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from ai.briefing import briefing_json, build_briefing, validate_briefing_text
+from ai.cloudflare import CloudflareAIClient
 
 load_dotenv()
 
-def hex_to_rgb(hex_color):
-    hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent.parent))
+ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
 
-DANGER_LEVELS = {
-    "Low": hex_to_rgb("#90EE90"),       
-    "Moderate": hex_to_rgb("#FFED4E"),  
-    "Elevated": hex_to_rgb("#FFA500"),  
-    "Critical": hex_to_rgb("#FF0000"),  
-    "Extreme": hex_to_rgb("#8B0000"),  
-}
 
-def get_present_danger_levels(image_path, legend_colors=DANGER_LEVELS, tolerance=30):
-    img = PIL.Image.open(image_path).convert('RGB')
-    arr = np.array(img)
-    present = []
-    for level, color in legend_colors.items():
-        mask = np.all(np.abs(arr - color) <= tolerance, axis=-1)
-        if np.any(mask):
-            present.append(level)
-    return present
-
-def generate_summary():
-    genai_key = os.getenv('genai_key')
-    client = genai.Client(api_key=genai_key)
-
-    images_folder = "images"
-    image_files = [
-        "mo-realtimefiredanger.png",
-        "mo-rh.png",
-        "mo-fuelmoisture.png",
-        "mo-windfilmap.png"
-    ]
-
-    images = []
-    for img_file in image_files:
-        img_path = os.path.join(images_folder, img_file)
-        if os.path.exists(img_path):
-            images.append(PIL.Image.open(img_path))
-        else:
-            print(f"Warning: {img_path} not found")
-
-    present_levels = get_present_danger_levels(os.path.join(images_folder, "mo-realtimefiredanger.png"))
-    levels_str = ", ".join(present_levels)
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=[
-            f"You are analyzing Missouri fire weather graphics. The only fire danger levels present on the map are: {levels_str}.",
-            f"Explicitly mention each of these levels — {levels_str} — and the regions where they appear. Do NOT mention any other danger levels.",
-            "Write a concise single paragraph summary of current fire weather conditions for Missouri.",
-            "Lead with the highest fire danger level and its region, then describe lower danger levels.",
-            "Only describe factors that directly drive fire danger: relative humidity, wind speed, and fuel moisture. Do not mention temperature, precipitation, rainfall, snowfall, or snow water equivalent under any circumstances.",
-            "Describe geographic regions using directional terms (north, south, central, etc.).",
-            "Do not include advice, recommendations, or outlooks for fire departments or the public.",
-            "Do not use bullet points, headers, or lists. Respond in plain prose only.",
-        ] + images
+def _fallback(briefing: dict) -> str:
+    state = briefing["statewide"]
+    danger = state["highest_fire_danger"] or "Low"
+    precipitation = state["precipitation"]
+    if precipitation == "trace":
+        rain = "trace precipitation"
+    elif state["precip_in"]["max"] is not None:
+        rain = f"precipitation up to {state['precip_in']['max']:.3f} inches"
+    else:
+        rain = "precipitation unavailable"
+    return (
+        f"{danger} is the highest forecast fire-danger class represented by the available station and county data. "
+        f"Minimum relative humidity ranges from {state['rh']['min']}% to {state['rh']['max']}%, "
+        f"fuel moisture ranges from {state['fuel_moisture']['min']}% to "
+        f"{state['fuel_moisture']['max']}%, with peak winds up to "
+        f"{state['wind_mph']['max']} mph where available and {rain}."
     )
 
-    return response.text
+
+def _valid_summary(text: str, briefing: dict) -> bool:
+    return validate_briefing_text(text, briefing)
+
+
+def generate_summary() -> str | None:
+    """Return a factual RSS summary, or None when optional AI is unavailable."""
+    try:
+        briefing = build_briefing(ARCHIVE_DIR)
+    except (OSError, ValueError) as exc:
+        print(f"Unable to build RSS numeric briefing: {exc}")
+        return None
+
+    fallback = _fallback(briefing)
+    cloudflare_client = CloudflareAIClient()
+    if not cloudflare_client.configured:
+        return fallback
+
+    prompt = (
+        "Write one concise paragraph summarizing this Missouri fire-weather "
+        "briefing for an RSS feed. Use only the supplied JSON. Use mph and "
+        "percentages. Report precipitation only in inches and never above "
+        "statewide.precip_in.max. Never mention a danger class absent from "
+        "statewide.fire_danger_present. Do not give advice or use headings.\n\n"
+        + briefing_json(briefing)
+    )
+    try:
+        text = cloudflare_client.generate_text(prompt)
+        if text and _valid_summary(text, briefing):
+            return text
+        print("Gemini RSS summary failed numeric validation; omitting summary item.")
+    except Exception as exc:
+        print(f"Gemini RSS summary failed; omitting summary item: {exc}")
+    return None
+
 
 if __name__ == "__main__":
-    print(generate_summary())
+    print(generate_summary() or "No summary available.")

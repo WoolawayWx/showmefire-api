@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from datetime import datetime, timedelta
 from typing import Optional
-from services.rss import generate_rss_feed
+from services.rss import write_rss_feed
 from services import fm_explain
 from maps.station_danger_history import (
     get_recent_fire_danger_history,
@@ -1485,6 +1485,20 @@ async def get_csv():
     except HTTPException as e:
         return {"error": str(e)}
     
+def _rss_file_response():
+    """Serve the feed from its canonical location, even before first generation."""
+    rss_file = Path(PUBLIC_DIR) / "rss.xml"
+    if not rss_file.exists():
+        write_rss_feed(add_summary=False)
+    return FileResponse(rss_file, media_type="application/rss+xml")
+
+
+@app.get("/rss.xml", include_in_schema=False)
+@app.get("/public/rss.xml", include_in_schema=False)
+async def public_rss_feed():
+    return _rss_file_response()
+
+
 app.mount("/", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
     
 

@@ -1,185 +1,139 @@
-import sys
+"""Generate forecast text from numeric forecast artifacts.
+
+Images are published for people, but are intentionally not sent to an AI model.
+Use ``--test`` to preview a generated forecast without writing to the database.
+"""
+
+import argparse
 import os
-from pathlib import Path
+import sys
 from datetime import datetime, timezone
-import json
+from pathlib import Path
 
-from google import genai
-import PIL.Image
 from dotenv import load_dotenv
-
-# Resolve paths inside and outside Docker. Allow overrides via env for mounted paths.
-BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent.parent))
-IMAGES_DIR = Path(os.getenv("IMAGES_DIR", BASE_DIR / "images"))
-ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
-
-sys.path.append(str(BASE_DIR))
-from core.database import insert_forecast
 
 load_dotenv()
 
-genai_key = os.getenv('genai_key')
-client = genai.Client(api_key=genai_key)
+BASE_DIR = Path(os.getenv("APP_ROOT", Path(__file__).resolve().parent.parent))
+ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
 
-# Get the most recent forecast JSON (filename format: station_forecasts_YYYYMMDD_HH.json)
-forecast_date = datetime.now().strftime('%Y%m%d')
-forecast_hour = '12'
-forecast_json_path = ARCHIVE_DIR / f"station_forecasts_{forecast_date}_{forecast_hour}.json"
+sys.path.append(str(BASE_DIR))
+from ai.briefing import briefing_json, build_briefing, validate_briefing_text
+from ai.cloudflare import CloudflareAIClient
+from core.database import insert_forecast
 
-# Load forecast metadata if it exists
-forecast_metadata = {}
-if forecast_json_path.exists():
-    with forecast_json_path.open('r') as f:
-        forecast_metadata = json.load(f)
-    print(f"Loaded forecast metadata from: {forecast_json_path}\n")
-else:
-    print(f"Warning: Forecast JSON not found at {forecast_json_path}\n")
 
-# List of image filenames to analyze with specific parameter info
-image_configs = {
-    "mo-forecastfiredanger": {
-        "param": "Fire Danger Index",
-        "instruction": """Match colors EXACTLY to the legend:
-        - Light green = Low
-        - Yellow = Moderate  
-        - Orange = Elevated
-        - Red = Critical
-        - Dark red/maroon = Extreme
-        
-        Look at what color dominates each region. If most of the state is yellow, say it's Moderate. Don't overstate the danger."""
-    },
-    "mo-forecastfuelmoisture": {
-        "param": "Fuel Moisture (%)",
-        "instruction": "Read the EXACT numbers on the left legend (likely 0, 10, 20, 30, 40). Match map colors to these specific values. Brown/tan = low values (dry), green = high values (moist)."
-    },
-    "mo-forecastmaxtemp": {
-        "param": "Maximum Temperature (°F)",
-        "instruction": "Read the EXACT temperature numbers on the left legend. Blue = cold, red = warm. Report the actual numeric ranges shown."
-    },
-    "mo-forecastmaxwind": {
-        "param": "Maximum Wind Speed (knots)",
-        "instruction": "Read the EXACT wind speed numbers on the left legend. Cool colors = light winds, warm colors = stronger winds. Report actual numeric ranges."
-    },
-    "mo-forecastminrh": {
-        "param": "Minimum Relative Humidity (%)",
-        "instruction": "Read the EXACT percentage numbers on the left legend (likely ranges from 10-100%). Cool colors = high RH (moist), warm colors = low RH (dry). RH below 20% is VERY rare."
-    },
-    "mo-forecastrainfall": {
-        "param": "Total Precipitation (inches and millimeters)",
-        "instruction": "Read the map and compare to the exact dual-unit measurements on the left legend. Report inches first and the equivalent millimeters in parentheses; white means little to no rain, light blue means light rainfall, and darker blue means higher rainfall totals."
-    },
-    "mo-forecastswe": {
-        "param": "Snow Water Equivalent (inches)",
-        "instruction": "Read the map and compare to the EXACT measurements on the left legend that is in inches. This map helps measure snowfall across the state to identify where snowfall is on hte ground, as such, it heavily limits the fire danger at that location. White is none, while darker the blue, more SWE that is on possible."
-    }
-}
+def valid_text(text: str, briefing: dict) -> bool:
+    """Reject prose that adds unsupported danger classes or rainfall totals."""
+    return validate_briefing_text(text, briefing)
 
-# Collect all analyses
-analyses = {}
 
-for image_filename, config in image_configs.items():
-    image_path = IMAGES_DIR / f"{image_filename}.png"
-    img = PIL.Image.open(image_path)
-    
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[
-            f"You are analyzing a {config['param']} map for Missouri.",
-            "",
-            "STEP 1: Look at the vertical color scale on the LEFT side of the image.",
-            "STEP 2: Read the NUMBERS written next to the color bar. These are the actual values.",
-            "STEP 3: Look at the map and identify which colors appear in each region.",
-            "STEP 4: Match those colors to the numbers you read in the legend.",
-            "",
-            config['instruction'],
-            "",
-            "Create ONE concise headline describing what you actually see on the map.",
-            "Be accurate - don't exaggerate. If most of the map is one color, that's the dominant condition.",
-            "Format: '[Region] sees [actual values from legend], while [Region] experiences [actual values]'",
-            "",
-            img
-        ]
+def fallback_text(briefing: dict) -> tuple[str, str]:
+    state = briefing["statewide"]
+    highest = state["highest_fire_danger"] or "Low"
+    precip = state["precip_in"]
+    if state["precipitation"] == "trace":
+        rain_text = "forecast precipitation is trace statewide"
+    elif precip["max"] is not None:
+        rain_text = f"forecast precipitation ranges up to {precip['max']:.3f} inches"
+    else:
+        rain_text = "forecast precipitation is unavailable"
+
+    headline = f"{highest} Fire Danger Across Missouri"
+    discussion = (
+        f"{highest} is the highest forecast fire-danger class represented by the available station and county data. "
+        f"Statewide minimum relative humidity ranges from {state['rh']['min']}% to {state['rh']['max']}%, "
+        f"fuel moisture ranges from {state['fuel_moisture']['min']}% to {state['fuel_moisture']['max']}%, "
+        f"and peak winds range from {state['wind_mph']['min']} to {state['wind_mph']['max']} mph where available. "
+        f"{rain_text}."
     )
-    
-    analyses[image_filename] = response.text.strip()
-    print(f"{image_filename}: {response.text}\n")
-
-# Generate headline/title
-current_date = datetime.now()
-date_string = current_date.strftime('%B %d, %Y')
-
-headline_prompt = f"""Based on these fire weather conditions for Missouri:
-
-Fire Danger: {analyses['mo-forecastfiredanger']}
-Fuel Moisture: {analyses['mo-forecastfuelmoisture']}
-Max Temperature: {analyses['mo-forecastmaxtemp']}
-Max Wind: {analyses['mo-forecastmaxwind']}
-Min Relative Humidity: {analyses['mo-forecastminrh']}
-Forecasted Rainfall via HRRR: {analyses['mo-forecastrainfall']}
-Observed Snow Water Equivalent: {analyses['mo-forecastswe']} 
+    return headline, discussion
 
 
-Create a short, catchy headline (5-8 words max) that summarizes the overall fire danger for Missouri.
+def generate_text(client: CloudflareAIClient, prompt: str, briefing: dict) -> str | None:
+    """Generate validated text, retrying once with stricter instructions."""
+    for attempt in range(2):
+        try:
+            text = client.generate_text(prompt)
+            if text and valid_text(text, briefing):
+                return text
+            prompt = (
+                "Rewrite using only the supplied JSON. Do not mention a danger class "
+                "absent from fire_danger_present or precipitation above precip_in.max. "
+                "Return only the requested answer.\n\n" + prompt
+            )
+        except Exception as exc:
+            print(f"Cloudflare AI attempt {attempt + 1} failed: {exc}")
+    return None
 
-Examples:
-- "Low to Moderate Fire Danger Across Missouri"
-- "Moderate Fire Danger for Central and Southern MO"
-- "Elevated Fire Risk in Southern Missouri"
-- "Low Fire Danger Statewide"
 
-Be accurate to the actual conditions - don't overstate. Respond with ONLY the headline, no extra text."""
+def generate_forecast_text(
+    briefing: dict,
+    client: CloudflareAIClient | None = None,
+) -> tuple[str, str]:
+    """Return a headline and discussion without persisting anything."""
+    headline, discussion = fallback_text(briefing)
+    client = client or CloudflareAIClient()
+    if not client.configured:
+        return headline, discussion
 
-headline_response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=headline_prompt
-)
-
-headline = headline_response.text.strip()
-
-# Now create a comprehensive summary paragraph
-summary_prompt = f"""Based on these fire weather conditions for Missouri:
-
-Fire Danger: {analyses['mo-forecastfiredanger']}
-Fuel Moisture: {analyses['mo-forecastfuelmoisture']}
-Max Temperature: {analyses['mo-forecastmaxtemp']}
-Max Wind: {analyses['mo-forecastmaxwind']}
-Min Relative Humidity: {analyses['mo-forecastminrh']}
-Forecasted Rainfall via HRRR: {analyses['mo-forecastrainfall']}
-Observed Snow Water Equivalent: {analyses['mo-forecastswe']} 
-
-Write a concise 3-4 sentence paragraph summarizing the overall fire danger outlook for Missouri fire departments. 
-
-IMPORTANT ACCURACY RULES:
-- If the fire danger analysis says "Low" or "Moderate", DO NOT say conditions are "Critical" or "Extreme"
-- Match the severity level to what was actually analyzed in the maps
-- Be specific about regions but don't overstate the danger
-- Only mention elevated/critical/extreme conditions if they were explicitly stated in the analyses above
-
-Keep it professional and actionable for emergency responders.
-
-Don't need input to first responders/fire departments. They know what they are doing. Focus on the facts to give a summary of the fire risk for the day.
-
-Use common units for the united states even if the data plots might be using others. etc use mph converted from the knots data"""
-
-summary_response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=summary_prompt
-)
-
-# Output
-print("\n" + "="*60)
-print(f"{headline} - {date_string}")
-print("="*60)
-print(summary_response.text)
-
-# Store forecast in database
-valid_time = current_date.replace(hour=12, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-try:
-    forecast_id = insert_forecast(
-        valid_time=valid_time,
-        title=headline,
-        discussion=summary_response.text.strip()
+    data = briefing_json(briefing)
+    headline_prompt = (
+        "Write a factual 5-8 word headline for a Missouri fire-weather forecast. "
+        "Use only this JSON and mention only classes in statewide.fire_danger_present. "
+        "Return plain text only.\n\n" + data
     )
-    print(f"\nForecast saved to database with ID: {forecast_id}")
-except Exception as e:
-    print(f"\nError saving forecast to database: {e}")
+    summary_prompt = (
+        "Write a concise 3-4 sentence Missouri fire-weather forecast discussion. "
+        "Use only this JSON. Report precipitation only in inches, never above "
+        "statewide.precip_in.max, and never mention a danger class absent from "
+        "statewide.fire_danger_present. Use mph and percentages. State facts only; "
+        "no recommendations, headings, or markdown.\n\n" + data
+    )
+    return (
+        generate_text(client, headline_prompt, briefing) or headline,
+        generate_text(client, summary_prompt, briefing) or discussion,
+    )
+
+
+def main(
+    test_mode: bool = False,
+    forecast_path: str | None = None,
+    client: CloudflareAIClient | None = None,
+) -> tuple[str, str]:
+    briefing = build_briefing(ARCHIVE_DIR, forecast_path=forecast_path)
+    print(f"Built numeric briefing from {briefing['source_file']}")
+    headline, discussion = generate_forecast_text(briefing, client=client)
+
+    current_date = datetime.now(timezone.utc)
+    print("\n" + "=" * 60)
+    print(f"{headline} - {current_date.strftime('%B %d, %Y')}")
+    print("=" * 60)
+    print(discussion)
+
+    if not test_mode:
+        valid_time = current_date.replace(hour=12, minute=0, second=0, microsecond=0)
+        forecast_id = insert_forecast(
+            valid_time=valid_time,
+            title=headline,
+            discussion=discussion,
+        )
+        print(f"\nForecast saved to database with ID: {forecast_id}")
+    else:
+        print("\nTEST MODE: forecast was not saved to the database.")
+    return headline, discussion
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate the daily forecast text.")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Preview the forecast and never write to the database.",
+    )
+    parser.add_argument(
+        "--forecast-file",
+        help="Use a specific station forecast JSON instead of the newest archive file.",
+    )
+    args = parser.parse_args()
+    main(test_mode=args.test, forecast_path=args.forecast_file)

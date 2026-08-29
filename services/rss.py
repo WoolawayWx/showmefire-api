@@ -1,71 +1,98 @@
-from feedgen.feed import FeedGenerator
-from datetime import datetime, timezone
-import pytz  # Add this import for timezone handling
-from services.synoptic import get_station_data  # Import your data function
-import argparse  # Add for command-line flags
-from ai.ai_summary import generate_summary  # Import AI summary function
+"""Generate the public Missouri fire-weather RSS feed."""
 
-def generate_rss_feed(add_summary=False):
+import argparse
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytz
+from feedgen.feed import FeedGenerator
+
+from ai.ai_summary import generate_summary
+from core.config import PUBLIC_DIR
+
+logger = logging.getLogger(__name__)
+
+MAPS = [
+    {
+        "title": "Fire Danger Assessment",
+        "url": "https://api.showmefire.org/images/mo-realtimefiredanger.png",
+        "id": "danger",
+    },
+    {
+        "title": "Relative Humidity",
+        "url": "https://api.showmefire.org/images/mo-rh.png",
+        "id": "rh",
+    },
+    {
+        "title": "Fuel Moisture",
+        "url": "https://api.showmefire.org/images/mo-fuelmoisture.png",
+        "id": "fuel",
+    },
+    {
+        "title": "Sustained Winds",
+        "url": "https://api.showmefire.org/images/mo-windfilmap.png",
+        "id": "wind",
+    },
+]
+
+
+def generate_rss_feed(add_summary: bool = False) -> str:
     fg = FeedGenerator()
-    fg.title('Show Me Fire | Missouri Weather & Danger Maps')
-    fg.description('Real-time fire weather analysis for Missouri')
-    fg.link(href='https://api.showmefire.org/rss.xml', rel='self')
-    
+    fg.title("Show Me Fire | Missouri Weather & Danger Maps")
+    fg.description("Real-time fire weather analysis for Missouri")
+    fg.link(href="https://api.showmefire.org/rss.xml", rel="self")
+
     now_utc = datetime.now(timezone.utc)
-    central_tz = pytz.timezone('US/Central')
-    now_central = now_utc.astimezone(central_tz)
-    valid_time = now_central.strftime('%H:%M CT')
+    now_central = now_utc.astimezone(pytz.timezone("US/Central"))
+    valid_time = now_central.strftime("%H:%M CT")
     fg.lastBuildDate(now_utc)
 
-    # Define your 4 images
-    maps = [
-        {"title": "Fire Danger Assessment", "url": "https://api.showmefire.org/images/mo-realtimefiredanger.png", "id": "danger"},
-        {"title": "Relative Humidity", "url": "https://api.showmefire.org/images/mo-rh.png", "id": "rh"},
-        {"title": "Fuel Moisture", "url": "https://api.showmefire.org/images/mo-fuelmoisture.png", "id": "fuel"},
-        {"title": "Sustained Winds", "url": "https://api.showmefire.org/images/mo-windfilmap.png", "id": "wind"}
-    ]
+    for map_info in MAPS:
+        image_url = f"{map_info['url']}?t={int(now_utc.timestamp())}"
+        entry = fg.add_entry()
+        entry.title(f"{map_info['title']} - {valid_time}")
+        entry.description(f'<img src="{image_url}" alt="{map_info["title"]}">')
+        entry.link(href=map_info["url"])
+        entry.guid(f"mo-map-{map_info['id']}", permalink=False)
+        entry.pubDate(now_utc)
+        entry.enclosure(image_url, 0, "image/png")
 
-    for m in maps:
-        fe = fg.add_entry()
-        fe.title(f"{m['title']} - {valid_time}")
-        
-        # Add a cache-buster (?t=timestamp) to ensure the CDN serves the fresh version
-        image_with_cache_buster = f"{m['url']}?t={int(now_utc.timestamp())}"
-        
-        fe.description(f'<img src="{image_with_cache_buster}" alt="{m["title"]}">')
-        fe.link(href=m['url'])
-        
-        # Use a static ID + type so it updates the same "post" in the reader
-        fe.guid(f"mo-map-{m['id']}", permalink=False)
-        fe.pubDate(now_utc)
-        fe.enclosure(image_with_cache_buster, 0, 'image/png')
-
-    # Add AI summary as an additional item if requested
     if add_summary:
-        summary_text = generate_summary()
-        fe = fg.add_entry()
-        fe.title(f"Current Fire Weather Summary - {valid_time}")
-        fe.description(summary_text)
-        fe.link(href='https://api.showmefire.org/rss.xml')  # Link to the feed itself
-        fe.guid("mo-summary", permalink=False)
-        fe.pubDate(now_utc)
+        try:
+            summary_text = generate_summary()
+        except Exception:
+            logger.exception("RSS summary generation failed")
+            summary_text = None
+        if summary_text:
+            entry = fg.add_entry()
+            entry.title(f"Current Fire Weather Summary - {valid_time}")
+            entry.description(summary_text)
+            entry.link(href="https://api.showmefire.org/rss.xml")
+            entry.guid("mo-summary", permalink=False)
+            entry.pubDate(now_utc)
 
-    return fg.rss_str(pretty=True).decode('utf-8')
+    return fg.rss_str(pretty=True).decode("utf-8")
+
+
+def write_rss_feed(add_summary: bool = False) -> Path:
+    """Write the feed to the path served by the API."""
+    output_file = Path(PUBLIC_DIR) / "rss.xml"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        generate_rss_feed(add_summary=add_summary),
+        encoding="utf-8",
+    )
+    return output_file
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate RSS feed with optional AI summary.")
-    parser.add_argument('--add-summary', action='store_true', help="Include AI-generated fire weather summary in the feed.")
+    parser = argparse.ArgumentParser(description="Generate the public RSS feed.")
+    parser.add_argument(
+        "--add-summary",
+        action="store_true",
+        help="Include the numeric/AI-generated fire-weather summary.",
+    )
     args = parser.parse_args()
-
-    # 1. Generate the XML string
-    xml_output = generate_rss_feed(add_summary=args.add_summary)
-    
-    # 2. Define where you want to save the file
-    # Change 'rss.xml' to the full path where your web server looks for files
-    output_file = "public/rss.xml" 
-    
-    # 3. Write to the file
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(xml_output)
-        
+    output_file = write_rss_feed(add_summary=args.add_summary)
     print(f"Successfully created {output_file} at {datetime.now().strftime('%H:%M:%S')}")

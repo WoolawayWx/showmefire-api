@@ -1,9 +1,10 @@
-"""Optional Gemini summary generation for completed verification reports."""
+"""Optional Cloudflare Workers AI summaries for completed verification reports."""
 
 import json
 import logging
-import os
 from typing import Any, Dict, Iterable, Optional
+
+from ai.cloudflare import CloudflareAIClient
 
 logger = logging.getLogger(__name__)
 
@@ -11,16 +12,14 @@ logger = logging.getLogger(__name__)
 def generate_verification_summary(report: Dict[str, Any], comparison_rows: Iterable[Dict[str, Any]]) -> Optional[str]:
     """Summarize a report and representative raw forecast/observation pairs.
 
-    Gemini is deliberately imported and initialized lazily so verification still
-    succeeds when the optional API key or package is unavailable.
+    Workers AI is initialized lazily so verification still succeeds when the
+    optional Cloudflare credentials or package is unavailable.
     """
-    api_key = os.getenv("genai_key", "").strip()
-    if not api_key:
+    client = CloudflareAIClient()
+    if not client.configured:
         return None
 
     try:
-        from google import genai
-
         rows = list(comparison_rows)
         prompt = (
             "You are summarizing a completed Missouri fire-weather forecast verification. "
@@ -31,10 +30,8 @@ def generate_verification_summary(report: Dict[str, Any], comparison_rows: Itera
             f"Aggregate report:\n{json.dumps(report, default=str)}\n\n"
             f"Representative forecast/observed rows:\n{json.dumps(rows[:40], default=str)}"
         )
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-        text = (response.text or "").strip()
+        text = client.generate_text(prompt)
         return text or None
     except Exception:
-        logger.exception("Gemini verification summary generation failed")
+        logger.exception("Cloudflare verification summary generation failed")
         return None
