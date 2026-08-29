@@ -68,10 +68,6 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         region_highest = region.get("highest_fire_danger")
         if region.get("station_count") and region_highest:
             regional_classes.setdefault(region_highest, []).append(region_name)
-    class_pattern = ", ".join(
-        f"{danger} in {', '.join(regions)}"
-        for danger, regions in regional_classes.items()
-    )
     driest_region = min(
         (
             region for region in briefing["regions"].values()
@@ -102,17 +98,31 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         ),
         "the strongest-wind areas",
     )
+    lower_classes = [
+        f"{danger.lower()} conditions in {', '.join(regions)}"
+        for danger, regions in regional_classes.items()
+        if danger != highest
+    ]
+    highest_regions = ", ".join(regional_classes.get(highest, []))
+    regional_sentence = (
+        f"The highest fire danger is expected in {highest_regions}, while "
+        f"{' and '.join(lower_classes)} are expected."
+        if highest_regions and lower_classes
+        else f"{highest} fire danger is expected across the state."
+    )
     discussion = (
-        f"Fire danger is forecast to range from {lowest} to {highest} across Missouri, "
-        f"with the regional pattern showing {class_pattern or 'limited station coverage'}. "
-        f"The driest air is expected in {driest_name}, where minimum relative humidity "
-        f"reaches {round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%, "
-        f"while the strongest winds are indicated in {strongest_name}, reaching "
-        f"{round(strongest_region['wind_mph']['max']) if strongest_region else round(state['wind_mph']['max'])} mph. "
-        f"Statewide fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
-        f"{round(state['fuel_moisture']['max'])}%, with maximum temperatures from "
-        f"{round(state['temp_f']['min'])}°F to {round(state['temp_f']['max'])}°F."
-        f"{rain_text}"
+        f"A mix of {lowest.lower()} to {highest.lower()} fire danger is expected across "
+        f"Missouri, with maximum temperatures ranging from {round(state['temp_f']['min'])}°F "
+        f"to {round(state['temp_f']['max'])}°F. "
+        + regional_sentence
+        + " "
+        + f"The driest air will be in {driest_name}, where humidity falls to "
+        f"{round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%; "
+        f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
+        f"{round(state['fuel_moisture']['max'])}%, and winds remain generally light, "
+        f"with the strongest values near {round(state['wind_mph']['max'])} mph in "
+        f"{strongest_name}."
+        + rain_text
     )
     return headline, discussion
 
@@ -167,10 +177,12 @@ def generate_forecast_text(
     )
     summary_prompt = (
         "Act as an NWS meteorologist writing a concise fire-weather forecast "
-        "discussion in AFD style. Use 3-6 sentences, using the additional detail "
-        "only when it is useful. Start with the overall statewide pattern, then "
-        "describe meaningful regional differences and the most important fire-weather "
-        "drivers. Use only this JSON. Report precipitation only in inches, never above "
+        "discussion in AFD style. Use 4-6 sentences when regional conditions differ, "
+        "using fewer only when the data is uniform. Start with the overall statewide "
+        "pattern, then synthesize the meaningful regional differences and fire-weather "
+        "drivers into natural human meteorologist prose. Do not mechanically recite "
+        "every JSON field, use field labels such as 'RH', or write a list of regions. "
+        "Use only this JSON. Report precipitation only in inches, never above "
         "statewide.precip_in.max, and never mention a danger class absent from "
         "statewide.fire_danger_present. Round temperature, RH, wind, and fuel "
         "moisture to whole numbers. Omit precipitation when it is trace or "
