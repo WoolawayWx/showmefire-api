@@ -102,23 +102,24 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         "the strongest-wind areas",
     )
     lower_classes = [
-        f"{danger.lower()} conditions in {', '.join(regions)}"
+        f"{danger.lower()} conditions are expected in "
+        f"{', '.join(regions[:-1]) + ', and ' if len(regions) > 1 else ''}{regions[-1]} Missouri"
         for danger, regions in regional_classes.items()
         if danger != highest
     ]
     highest_regions = ", ".join(regional_classes.get(highest, []))
     regional_sentence = (
-        f"The highest fire danger is expected in {highest_regions}, while "
-        f"{' and '.join(lower_classes)} are expected."
+        f"The highest fire danger is expected in {highest_regions} Missouri, while "
+        f"{' and '.join(lower_classes)}."
         if highest_regions and lower_classes
-        else f"{highest} fire danger is expected across the state."
+        else f"{highest} fire danger is expected across Missouri."
     )
     peak_class = state.get("highest_station_fire_danger") or highest
     peak_regions = regional_classes.get(peak_class, [])
     peak_start = state.get("fire_danger_peak_start")
     peak_end = state.get("fire_danger_peak_end")
     if peak_start and peak_end and peak_start != peak_end:
-        peak_time = f"from about {peak_start} through {peak_end}"
+        peak_time = f"between {peak_start} and {peak_end}"
     elif peak_start:
         peak_time = f"around {peak_start}"
     else:
@@ -132,8 +133,8 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         )
         peak_location = ", ".join(county_locations[:5])
     peak_sentence = (
-        f"The peak station-based {peak_class.lower()} conditions are expected "
-        f"{peak_time} in {peak_location}."
+        f"Peak {peak_class.lower()} fire danger in {peak_location} Missouri is "
+        f"expected {peak_time}."
         if peak_time and peak_location
         else ""
     )
@@ -150,19 +151,19 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
     else:
         wind_direction_text = ""
     discussion = (
-        f"A mix of {lowest.lower()} to {highest.lower()} fire danger is expected across "
+        f"Fire danger will range from {lowest.lower()} to {highest.lower()} across "
         f"Missouri, with maximum temperatures ranging from {round(state['temp_f']['min'])}°F "
         f"to {round(state['temp_f']['max'])}°F. "
         + regional_sentence
         + " "
         + peak_sentence
         + (" " if peak_sentence else "")
-        + f"The driest air will be in {driest_name}, where humidity falls to "
+        + f"The driest air will be in {driest_name} Missouri, where humidity falls to "
         f"{round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%; "
         f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
         f"{round(state['fuel_moisture']['max'])}%, and winds remain generally light, "
         f"with the strongest values near {round(state['wind_mph']['max'])} mph in "
-        f"{strongest_name}.{wind_direction_text}"
+        f"{strongest_name} Missouri.{wind_direction_text}"
         + rain_text
     )
     return headline, discussion
@@ -218,11 +219,13 @@ def generate_forecast_text(
     )
     summary_prompt = (
         "Act as an NWS meteorologist writing a concise fire-weather forecast "
-        "discussion in AFD style. Use 4-6 sentences when regional conditions differ, "
+        "discussion in AFD style. Use 4-6 well-formed sentences when regional conditions differ, "
         "using fewer only when the data is uniform. Start with the overall statewide "
         "pattern, then synthesize the meaningful regional differences and fire-weather "
         "drivers into natural human meteorologist prose. Do not mechanically recite "
         "every JSON field, use field labels such as 'RH', or write a list of regions. "
+        "Prioritize smooth grammar, complete sentences, and natural transitions over "
+        "mentioning every available number. "
         "Use full region names such as Northwest and Southwest. If wind direction "
         "data is present, describe the predominant direction or a meaningful shift "
         "through the forecast period; do not invent a direction when it is absent. "
