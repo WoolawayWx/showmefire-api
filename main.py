@@ -417,12 +417,11 @@ class TokenVerify(BaseModel):
 
 @app.post("/api/admin/verify")
 async def verify_admin_token(data: Optional[TokenVerify] = None):
-    """Verify if a token is still valid"""
+    """Session probe used by the public site. Unauthenticated callers get 200."""
     email = verify_token(data.token if data else None)
     if email:
         return {"valid": True, "email": email}
-    else:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return {"valid": False}
 
 @app.post("/api/admin/refresh")
 async def refresh_admin_token(request: Request, response: Response):

@@ -49,7 +49,9 @@ def test_refresh_rotates_access_cookie_and_logout_clears_both(client):
     assert logged_out.status_code == 200
     assert "admin_access=" in logged_out.headers["set-cookie"]
     assert "admin_refresh=" in logged_out.headers["set-cookie"]
-    assert client.post("/api/admin/verify").status_code == 401
+    verified = client.post("/api/admin/verify")
+    assert verified.status_code == 200
+    assert verified.json() == {"valid": False}
 
 
 def test_invalid_credentials_are_rejected_without_auth_cookies(client):
