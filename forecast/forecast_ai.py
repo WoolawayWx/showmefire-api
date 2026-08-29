@@ -63,14 +63,55 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         if lowest != highest
         else f"{highest} Fire Danger Across Missouri"
     )
+    regional_classes = {}
+    for region_name, region in briefing["regions"].items():
+        region_highest = region.get("highest_fire_danger")
+        if region.get("station_count") and region_highest:
+            regional_classes.setdefault(region_highest, []).append(region_name)
+    class_pattern = ", ".join(
+        f"{danger} in {', '.join(regions)}"
+        for danger, regions in regional_classes.items()
+    )
+    driest_region = min(
+        (
+            region for region in briefing["regions"].values()
+            if region.get("station_count") and region["rh"]["min"] is not None
+        ),
+        key=lambda region: region["rh"]["min"],
+        default=None,
+    )
+    strongest_region = max(
+        (
+            region for region in briefing["regions"].values()
+            if region.get("station_count") and region["wind_mph"]["max"] is not None
+        ),
+        key=lambda region: region["wind_mph"]["max"],
+        default=None,
+    )
+    driest_name = next(
+        (
+            name for name, region in briefing["regions"].items()
+            if region is driest_region
+        ),
+        "the driest areas",
+    )
+    strongest_name = next(
+        (
+            name for name, region in briefing["regions"].items()
+            if region is strongest_region
+        ),
+        "the strongest-wind areas",
+    )
     discussion = (
-        f"{highest} is the highest forecast fire-danger class represented by the available station and county data. "
-        f"Minimum relative humidity ranges from {round(state['rh']['min'])}% to {round(state['rh']['max'])}%, "
-        f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
-        f"{round(state['fuel_moisture']['max'])}%, and peak winds range from "
-        f"{round(state['wind_mph']['min'])} to {round(state['wind_mph']['max'])} mph. "
-        f"Maximum temperatures range from {round(state['temp_f']['min'])}°F to "
-        f"{round(state['temp_f']['max'])}°F."
+        f"Fire danger is forecast to range from {lowest} to {highest} across Missouri, "
+        f"with the regional pattern showing {class_pattern or 'limited station coverage'}. "
+        f"The driest air is expected in {driest_name}, where minimum relative humidity "
+        f"reaches {round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%, "
+        f"while the strongest winds are indicated in {strongest_name}, reaching "
+        f"{round(strongest_region['wind_mph']['max']) if strongest_region else round(state['wind_mph']['max'])} mph. "
+        f"Statewide fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
+        f"{round(state['fuel_moisture']['max'])}%, with maximum temperatures from "
+        f"{round(state['temp_f']['min'])}°F to {round(state['temp_f']['max'])}°F."
         f"{rain_text}"
     )
     return headline, discussion
@@ -125,14 +166,17 @@ def generate_forecast_text(
         "Do not include a date. Return plain text only.\n\n" + data
     )
     summary_prompt = (
-        "Write a concise Missouri fire-weather forecast discussion, using up to "
-        "6 sentences only when the additional detail is useful; otherwise use fewer. "
-        "Use only this JSON. Report precipitation only in inches, never above "
+        "Act as an NWS meteorologist writing a concise fire-weather forecast "
+        "discussion in AFD style. Use 3-6 sentences, using the additional detail "
+        "only when it is useful. Start with the overall statewide pattern, then "
+        "describe meaningful regional differences and the most important fire-weather "
+        "drivers. Use only this JSON. Report precipitation only in inches, never above "
         "statewide.precip_in.max, and never mention a danger class absent from "
         "statewide.fire_danger_present. Round temperature, RH, wind, and fuel "
         "moisture to whole numbers. Omit precipitation when it is trace or "
-        "unavailable. State facts only; no recommendations, headings, averages, "
-        "or markdown.\n\n" + data
+        "unavailable. Do not invent fronts, timing, cloud cover, confidence, "
+        "causes, or impacts that are not in the JSON. Do not give recommendations, "
+        "use headings, report averages, or use markdown.\n\n" + data
     )
     generated_headline = generate_text(client, headline_prompt, briefing)
     generated_discussion = generate_text(

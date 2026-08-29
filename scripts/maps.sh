@@ -59,7 +59,7 @@ else
 fi
 
 echo "Generating RSS feed..."
-"$PYTHON" -m services.rss --add-summary
+"$PYTHON" -m services.rss
 
 if (( ${#failed_scripts[@]} > 0 )); then
     echo ""

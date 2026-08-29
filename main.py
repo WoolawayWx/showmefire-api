@@ -1489,7 +1489,7 @@ def _rss_file_response():
     """Serve the feed from its canonical location, even before first generation."""
     rss_file = Path(PUBLIC_DIR) / "rss.xml"
     if not rss_file.exists():
-        write_rss_feed(add_summary=False)
+        write_rss_feed()
     return FileResponse(rss_file, media_type="application/rss+xml")
 
 
