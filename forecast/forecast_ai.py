@@ -6,6 +6,7 @@ Use ``--test`` to preview a generated forecast without writing to the database.
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from ai.briefing import (
     build_briefing,
     contains_core_weather_facts,
     validate_briefing_text,
+    validate_operational_style,
 )
 from ai.cloudflare import CloudflareAIClient
 from core.database import insert_forecast
@@ -33,24 +35,43 @@ def valid_text(text: str, briefing: dict) -> bool:
     return validate_briefing_text(text, briefing)
 
 
+def valid_headline(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:Low|Moderate|Elevated|Critical|Extreme)"
+            r"(?: to (?:Low|Moderate|Elevated|Critical|Extreme))?"
+            r" Fire Danger (?:Across|in) Missouri",
+            text.strip(),
+            re.IGNORECASE,
+        )
+    )
+
+
 def fallback_text(briefing: dict) -> tuple[str, str]:
     state = briefing["statewide"]
     highest = state["highest_fire_danger"] or "Low"
+    present = state.get("fire_danger_present") or [highest]
+    lowest = present[0]
     precip = state["precip_in"]
-    if state["precipitation"] == "trace":
-        rain_text = "forecast precipitation is trace statewide"
-    elif precip["max"] is not None:
-        rain_text = f"forecast precipitation ranges up to {precip['max']:.3f} inches"
-    else:
-        rain_text = "forecast precipitation is unavailable"
-
-    headline = f"{highest} Fire Danger Across Missouri"
+    rain_text = (
+        f" Measurable precipitation is possible, up to {precip['max']:.2f} inches."
+        if state["precipitation"] == "measurable" and precip["max"] is not None
+        else ""
+    )
+    headline = (
+        f"{lowest} to {highest} Fire Danger Across Missouri"
+        if lowest != highest
+        else f"{highest} Fire Danger Across Missouri"
+    )
     discussion = (
         f"{highest} is the highest forecast fire-danger class represented by the available station and county data. "
-        f"Statewide minimum relative humidity ranges from {state['rh']['min']}% to {state['rh']['max']}%, "
-        f"fuel moisture ranges from {state['fuel_moisture']['min']}% to {state['fuel_moisture']['max']}%, "
-        f"and peak winds range from {state['wind_mph']['min']} to {state['wind_mph']['max']} mph where available. "
-        f"{rain_text}."
+        f"Minimum relative humidity ranges from {round(state['rh']['min'])}% to {round(state['rh']['max'])}%, "
+        f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
+        f"{round(state['fuel_moisture']['max'])}%, and peak winds range from "
+        f"{round(state['wind_mph']['min'])} to {round(state['wind_mph']['max'])} mph. "
+        f"Maximum temperatures range from {round(state['temp_f']['min'])}°F to "
+        f"{round(state['temp_f']['max'])}°F."
+        f"{rain_text}"
     )
     return headline, discussion
 
@@ -66,14 +87,20 @@ def generate_text(
         try:
             text = client.generate_text(prompt)
             if text and valid_text(text, briefing) and (
-                not require_core_facts or contains_core_weather_facts(text, briefing)
+                not require_core_facts
+                or (
+                    contains_core_weather_facts(text, briefing)
+                    and validate_operational_style(text, briefing)
+                )
             ):
                 return text
             prompt = (
                 "Rewrite using only the supplied JSON. Do not mention a danger class "
                 "absent from fire_danger_present or precipitation above precip_in.max. "
-                "The discussion must include numeric relative humidity, fuel moisture, "
-                "and wind values from statewide. Return only the requested answer.\n\n"
+                "The discussion must include rounded whole-number relative humidity, "
+                "fuel moisture, and wind values from statewide. Omit precipitation "
+                "when it is trace or unavailable, and do not use averages. Return "
+                "only the requested answer.\n\n"
                 + prompt
             )
         except Exception as exc:
@@ -95,18 +122,28 @@ def generate_forecast_text(
     headline_prompt = (
         "Write a factual 5-8 word headline for a Missouri fire-weather forecast. "
         "Use only this JSON and mention only classes in statewide.fire_danger_present. "
-        "Return plain text only.\n\n" + data
+        "Do not include a date. Return plain text only.\n\n" + data
     )
     summary_prompt = (
-        "Write a concise 3-4 sentence Missouri fire-weather forecast discussion. "
+        "Write a concise Missouri fire-weather forecast discussion, using up to "
+        "6 sentences only when the additional detail is useful; otherwise use fewer. "
         "Use only this JSON. Report precipitation only in inches, never above "
         "statewide.precip_in.max, and never mention a danger class absent from "
-        "statewide.fire_danger_present. Use mph and percentages. State facts only; "
-        "no recommendations, headings, or markdown.\n\n" + data
+        "statewide.fire_danger_present. Round temperature, RH, wind, and fuel "
+        "moisture to whole numbers. Omit precipitation when it is trace or "
+        "unavailable. State facts only; no recommendations, headings, averages, "
+        "or markdown.\n\n" + data
+    )
+    generated_headline = generate_text(client, headline_prompt, briefing)
+    generated_discussion = generate_text(
+        client,
+        summary_prompt,
+        briefing,
+        require_core_facts=True,
     )
     return (
-        generate_text(client, headline_prompt, briefing) or headline,
-        generate_text(client, summary_prompt, briefing, require_core_facts=True) or discussion,
+        generated_headline if generated_headline and valid_headline(generated_headline) else headline,
+        generated_discussion or discussion,
     )
 
 
@@ -121,7 +158,8 @@ def main(
 
     current_date = datetime.now(timezone.utc)
     print("\n" + "=" * 60)
-    print(f"{headline} - {current_date.strftime('%B %d, %Y')}")
+    print(headline)
+    print(f"Forecast date: {current_date.strftime('%B %d, %Y')}")
     print("=" * 60)
     print(discussion)
 

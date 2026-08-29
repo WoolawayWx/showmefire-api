@@ -26,7 +26,7 @@ if client.configured:
         "Write one factual, informative 5-8 word headline for a Missouri "
         "fire-weather RSS feed. Use only the supplied numeric briefing JSON. "
         "Mention only fire-danger classes listed in statewide.fire_danger_present. "
-        "Return plain text only.\n\n" + briefing_json(briefing)
+        "Do not include a date. Return plain text only.\n\n" + briefing_json(briefing)
     )
     try:
         generated_title = client.generate_text(prompt)

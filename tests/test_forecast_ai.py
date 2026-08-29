@@ -19,7 +19,7 @@ class FakeClient:
             return "Elevated Fire Danger Across Missouri"
         return (
             "Elevated fire danger is forecast statewide with relative humidity "
-            "near 25%, fuel moisture near 8%, and winds near 8.9 mph. "
+            "near 25%, fuel moisture near 8%, and winds near 9 mph. "
             "Rainfall remains below 0.080 inches."
         )
 
@@ -67,7 +67,7 @@ class ForecastAITests(unittest.TestCase):
                 client=type("UnavailableClient", (), {"configured": False})(),
             )
         self.assertEqual(headline, "Elevated Fire Danger Across Missouri")
-        self.assertIn("0.080 inches", discussion)
+        self.assertIn("0.08 inches", discussion)
 
 
 if __name__ == "__main__":

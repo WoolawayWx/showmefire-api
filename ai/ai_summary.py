@@ -9,6 +9,7 @@ from ai.briefing import (
     build_briefing,
     contains_core_weather_facts,
     validate_briefing_text,
+    validate_operational_style,
 )
 from ai.cloudflare import CloudflareAIClient
 
@@ -21,19 +22,17 @@ ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", BASE_DIR / "archive" / "forecasts"))
 def _fallback(briefing: dict) -> str:
     state = briefing["statewide"]
     danger = state["highest_fire_danger"] or "Low"
-    precipitation = state["precipitation"]
-    if precipitation == "trace":
-        rain = "trace precipitation"
-    elif state["precip_in"]["max"] is not None:
-        rain = f"precipitation up to {state['precip_in']['max']:.3f} inches"
-    else:
-        rain = "precipitation unavailable"
+    rain = (
+        f", with precipitation up to {state['precip_in']['max']:.2f} inches"
+        if state["precipitation"] == "measurable" and state["precip_in"]["max"] is not None
+        else ""
+    )
     return (
         f"{danger} is the highest forecast fire-danger class represented by the available station and county data. "
-        f"Minimum relative humidity ranges from {state['rh']['min']}% to {state['rh']['max']}%, "
-        f"fuel moisture ranges from {state['fuel_moisture']['min']}% to "
-        f"{state['fuel_moisture']['max']}%, with peak winds up to "
-        f"{state['wind_mph']['max']} mph where available and {rain}."
+        f"Minimum relative humidity ranges from {round(state['rh']['min'])}% to {round(state['rh']['max'])}%, "
+        f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
+        f"{round(state['fuel_moisture']['max'])}%, with peak winds up to "
+        f"{round(state['wind_mph']['max'])} mph where available{rain}."
     )
 
 
@@ -56,7 +55,8 @@ def generate_summary() -> str | None:
 
     prompt = (
         "Write one concise paragraph summarizing this Missouri fire-weather "
-        "briefing for an RSS feed. Use only the supplied JSON. Use mph and "
+        "briefing for an RSS feed, using no more than 6 sentences and fewer "
+        "when sufficient. Use only the supplied JSON. Use mph and "
         "percentages. Report precipitation only in inches and never above "
         "statewide.precip_in.max. Never mention a danger class absent from "
         "statewide.fire_danger_present. Do not give advice or use headings.\n\n"
@@ -68,11 +68,12 @@ def generate_summary() -> str | None:
             text
             and _valid_summary(text, briefing)
             and contains_core_weather_facts(text, briefing)
+            and validate_operational_style(text, briefing)
         ):
             return text
-        print("Gemini RSS summary failed numeric validation; omitting summary item.")
+        print("Cloudflare RSS summary failed operational validation; omitting summary item.")
     except Exception as exc:
-        print(f"Gemini RSS summary failed; omitting summary item: {exc}")
+        print(f"Cloudflare RSS summary failed; omitting summary item: {exc}")
     return None
 
 

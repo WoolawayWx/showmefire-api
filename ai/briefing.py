@@ -275,13 +275,33 @@ def contains_core_weather_facts(text: str, briefing: Mapping[str, Any]) -> bool:
         available = [values.get("min"), values.get("max")]
         if not any(value is not None for value in available):
             continue
-        if not any(
-            re.search(
-                rf"(?<![\d.]){re.escape((str(value).rstrip('0').rstrip('.') or '0'))}(?![\d.])",
-                text,
-            )
+        candidates = {
+            candidate
             for value in available
             if value is not None
+            for candidate in (
+                str(value).rstrip("0").rstrip(".") or "0",
+                str(round(value)),
+            )
+        }
+        if not any(
+            re.search(rf"(?<![\d.]){re.escape(candidate)}(?![\d.])", text)
+            for candidate in candidates
         ):
             return False
+    return True
+
+
+def validate_operational_style(text: str, briefing: Mapping[str, Any]) -> bool:
+    """Keep AI prose concise and appropriate for operational readers."""
+    if len(re.findall(r"[.!?](?:\s|$)", text)) > 6:
+        return False
+    if re.search(r"\d+\.\d+\s*(?:°?\s*F|degrees?|mph|%)\b", text, re.IGNORECASE):
+        return False
+    if "average" in text.lower():
+        return False
+    if briefing["statewide"]["precipitation"] != "measurable" and re.search(
+        r"\b(?:precipitation|rainfall|rain|showers?)\b", text, re.IGNORECASE
+    ):
+        return False
     return True
