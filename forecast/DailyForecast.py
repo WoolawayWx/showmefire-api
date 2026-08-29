@@ -3,6 +3,7 @@ import pandas as pd
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import gaussian_filter
 import logging
+import math
 import os
 import json
 import matplotlib.patheffects as path_effects
@@ -1025,6 +1026,9 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_t = float(temp[sy, sx])
                     val_rh = float(rh[sy, sx])
                     val_ws = float(ws_fire_ms[sy, sx])
+                    val_wind_direction = (
+                        math.degrees(math.atan2(-float(u[sy, sx]), -float(v[sy, sx]))) + 360
+                    ) % 360
                     val_precip_mm = float(precip_mm[sy, sx])
                     val_precip_interval_mm = float(precip_interval_mm[sy, sx])
                     val_precip_in = val_precip_mm / 25.4
@@ -1077,6 +1081,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "temp_c": round(val_t, 2),
                         "rh": round(val_rh, 1),
                         "wind_speed_ms": round(val_ws, 2),
+                        "wind_direction_deg": round(val_wind_direction, 1),
                         "precip_in": round(val_precip_in, 3),
                         "precip_mm": round(val_precip_mm, 2),
                         "precip_interval_mm": round(val_precip_interval_mm, 2),

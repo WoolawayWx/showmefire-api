@@ -23,6 +23,7 @@ from ai.briefing import (
     briefing_json,
     build_briefing,
     contains_core_weather_facts,
+    REGION_NAMES,
     validate_briefing_text,
     validate_operational_style,
 )
@@ -67,7 +68,9 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
     for region_name, region in briefing["regions"].items():
         region_highest = region.get("highest_fire_danger")
         if region.get("station_count") and region_highest:
-            regional_classes.setdefault(region_highest, []).append(region_name)
+            regional_classes.setdefault(region_highest, []).append(
+                REGION_NAMES.get(region_name, region_name)
+            )
     driest_region = min(
         (
             region for region in briefing["regions"].values()
@@ -86,14 +89,14 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
     )
     driest_name = next(
         (
-            name for name, region in briefing["regions"].items()
+            REGION_NAMES.get(name, name) for name, region in briefing["regions"].items()
             if region is driest_region
         ),
         "the driest areas",
     )
     strongest_name = next(
         (
-            name for name, region in briefing["regions"].items()
+            REGION_NAMES.get(name, name) for name, region in briefing["regions"].items()
             if region is strongest_region
         ),
         "the strongest-wind areas",
@@ -110,18 +113,56 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         if highest_regions and lower_classes
         else f"{highest} fire danger is expected across the state."
     )
+    peak_class = state.get("highest_station_fire_danger") or highest
+    peak_regions = regional_classes.get(peak_class, [])
+    peak_start = state.get("fire_danger_peak_start")
+    peak_end = state.get("fire_danger_peak_end")
+    if peak_start and peak_end and peak_start != peak_end:
+        peak_time = f"from about {peak_start} through {peak_end}"
+    elif peak_start:
+        peak_time = f"around {peak_start}"
+    else:
+        peak_time = None
+    peak_location = ", ".join(peak_regions)
+    if not peak_location:
+        county_locations = (
+            briefing.get("county_danger", {})
+            .get("counties_by_fire_danger", {})
+            .get(highest, [])
+        )
+        peak_location = ", ".join(county_locations[:5])
+    peak_sentence = (
+        f"The peak station-based {peak_class.lower()} conditions are expected "
+        f"{peak_time} in {peak_location}."
+        if peak_time and peak_location
+        else ""
+    )
+    wind_direction = state.get("predominant_wind_direction")
+    wind_start = state.get("wind_direction_start")
+    wind_end = state.get("wind_direction_end")
+    if wind_start and wind_end and wind_start != wind_end:
+        wind_direction_text = (
+            f" Winds turn from the {wind_start} early in the period toward the "
+            f"{wind_end} direction later."
+        )
+    elif wind_direction:
+        wind_direction_text = f" Winds are predominantly from the {wind_direction}."
+    else:
+        wind_direction_text = ""
     discussion = (
         f"A mix of {lowest.lower()} to {highest.lower()} fire danger is expected across "
         f"Missouri, with maximum temperatures ranging from {round(state['temp_f']['min'])}°F "
         f"to {round(state['temp_f']['max'])}°F. "
         + regional_sentence
         + " "
+        + peak_sentence
+        + (" " if peak_sentence else "")
         + f"The driest air will be in {driest_name}, where humidity falls to "
         f"{round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%; "
         f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
         f"{round(state['fuel_moisture']['max'])}%, and winds remain generally light, "
         f"with the strongest values near {round(state['wind_mph']['max'])} mph in "
-        f"{strongest_name}."
+        f"{strongest_name}.{wind_direction_text}"
         + rain_text
     )
     return headline, discussion
@@ -182,6 +223,12 @@ def generate_forecast_text(
         "pattern, then synthesize the meaningful regional differences and fire-weather "
         "drivers into natural human meteorologist prose. Do not mechanically recite "
         "every JSON field, use field labels such as 'RH', or write a list of regions. "
+        "Use full region names such as Northwest and Southwest. If wind direction "
+        "data is present, describe the predominant direction or a meaningful shift "
+        "through the forecast period; do not invent a direction when it is absent. "
+        "State when the peak danger is expected and identify the affected regions or "
+        "counties when the briefing provides them. Do not invent exact timing beyond "
+        "the supplied peak window. "
         "Use only this JSON. Report precipitation only in inches, never above "
         "statewide.precip_in.max, and never mention a danger class absent from "
         "statewide.fire_danger_present. Round temperature, RH, wind, and fuel "

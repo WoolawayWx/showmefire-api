@@ -11,12 +11,21 @@ from __future__ import annotations
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from core.fire_events import MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN
 
 DANGER_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
+REGION_NAMES = {
+    "NW": "Northwest",
+    "NE": "Northeast",
+    "Central": "Central",
+    "SW": "Southwest",
+    "SE": "Southeast",
+}
 MS_TO_MPH = 2.2369362920544
 
 
@@ -56,6 +65,14 @@ def _region(latitude: float, longitude: float) -> str:
     return "SW" if longitude < -92.5 else "SE"
 
 
+def _direction_sector(degrees: float) -> str:
+    directions = (
+        "north", "northeast", "east", "southeast",
+        "south", "southwest", "west", "northwest",
+    )
+    return directions[int((degrees + 22.5) % 360 // 45)]
+
+
 def _latest_forecast_file(archive_dir: Path) -> Path:
     candidates = sorted(
         (
@@ -90,6 +107,16 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         wind = values("wind_speed_ms")
         temp_c = values("temp_c")
         danger = [int(number) for number in values("fire_danger") if 0 <= int(number) <= 4]
+        wind_directions = values("wind_direction_deg")
+        danger_peak_times = []
+        if danger:
+            peak_danger = max(danger)
+            for item in forecasts:
+                item_danger = _finite(item.get("fire_danger"))
+                if item_danger is not None and int(item_danger) == peak_danger:
+                    timestamp = item.get("time")
+                    if timestamp:
+                        danger_peak_times.append(timestamp)
         if not any((precip, fuel, rh, wind, temp_c, danger)):
             continue
 
@@ -105,8 +132,12 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "fuel_moisture": min(fuel) if fuel else None,
             "rh": min(rh) if rh else None,
             "wind_mph": max(wind) * MS_TO_MPH if wind else None,
+            "wind_direction_sectors": [
+                _direction_sector(direction) for direction in wind_directions
+            ],
             "temp_f": max(temp_c) * 9 / 5 + 32 if temp_c else None,
             "fire_danger": max(danger) if danger else None,
+            "danger_peak_times": danger_peak_times,
         })
     return rows
 
@@ -136,11 +167,56 @@ def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     result["fire_danger_present"] = [
         label for label, count in danger_counts.items() if count
     ]
+    direction_counts: dict[str, int] = {}
+    direction_start_counts: dict[str, int] = {}
+    direction_end_counts: dict[str, int] = {}
+    for row in row_list:
+        directions = row.get("wind_direction_sectors", [])
+        for direction in directions:
+            direction_counts[direction] = direction_counts.get(direction, 0) + 1
+        if directions:
+            direction_start_counts[directions[0]] = direction_start_counts.get(directions[0], 0) + 1
+            direction_end_counts[directions[-1]] = direction_end_counts.get(directions[-1], 0) + 1
+    result["wind_direction_counts"] = direction_counts
+    result["predominant_wind_direction"] = (
+        max(direction_counts, key=direction_counts.get)
+        if direction_counts
+        else None
+    )
+    result["wind_direction_start"] = (
+        max(direction_start_counts, key=direction_start_counts.get)
+        if direction_start_counts
+        else None
+    )
+    result["wind_direction_end"] = (
+        max(direction_end_counts, key=direction_end_counts.get)
+        if direction_end_counts
+        else None
+    )
     danger_values = [
         row["fire_danger"] for row in row_list
         if isinstance(row.get("fire_danger"), int)
     ]
     result["highest_fire_danger"] = DANGER_LABELS[max(danger_values)] if danger_values else None
+    result["highest_station_fire_danger"] = result["highest_fire_danger"]
+    peak_times = [
+        timestamp for row in row_list for timestamp in row.get("danger_peak_times", [])
+    ]
+    if peak_times:
+        try:
+            parsed_times = sorted(
+                datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                for timestamp in peak_times
+            )
+            central = ZoneInfo("America/Chicago")
+            result["fire_danger_peak_start"] = parsed_times[0].astimezone(central).strftime("%I:%M %p %Z").lstrip("0")
+            result["fire_danger_peak_end"] = parsed_times[-1].astimezone(central).strftime("%I:%M %p %Z").lstrip("0")
+        except (TypeError, ValueError):
+            result["fire_danger_peak_start"] = None
+            result["fire_danger_peak_end"] = None
+    else:
+        result["fire_danger_peak_start"] = None
+        result["fire_danger_peak_end"] = None
     result["precipitation"] = (
         "trace" if result["precip_in"]["max"] is not None and result["precip_in"]["max"] < 0.05
         else "measurable"
@@ -166,10 +242,14 @@ def _county_summary(county_path: Path | None) -> dict[str, Any] | None:
     else:
         entries = []
     values = []
+    counties_by_class: dict[str, list[str]] = {}
     for entry in entries:
         value = _finite(entry.get("max_fire_danger")) if isinstance(entry, Mapping) else None
         if value is not None and 0 <= int(value) < len(DANGER_LABELS):
             values.append(int(value))
+            county_name = entry.get("county") if isinstance(entry, Mapping) else None
+            if county_name:
+                counties_by_class.setdefault(DANGER_LABELS[int(value)], []).append(county_name)
     if not values:
         return None
     counts = {label: values.count(index) for index, label in enumerate(DANGER_LABELS)}
@@ -178,6 +258,7 @@ def _county_summary(county_path: Path | None) -> dict[str, Any] | None:
         "fire_danger_class_counts": {label: count for label, count in counts.items() if count},
         "fire_danger_present": [label for label, count in counts.items() if count],
         "highest_fire_danger": DANGER_LABELS[max(values)],
+        "counties_by_fire_danger": counties_by_class,
     }
 
 
@@ -193,8 +274,10 @@ def build_briefing(
         payload = json.load(handle)
 
     rows = _daily_station_rows(payload)
-    regions = {name: _summary(row for row in rows if row["region"] == name)
-               for name in ("NW", "NE", "Central", "SW", "SE")}
+    regions = {
+        REGION_NAMES[name]: _summary(row for row in rows if row["region"] == name)
+        for name in ("NW", "NE", "Central", "SW", "SE")
+    }
     resolved_county_path = (
         Path(county_path)
         if county_path

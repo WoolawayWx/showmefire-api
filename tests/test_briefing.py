@@ -16,8 +16,8 @@ class BriefingTests(unittest.TestCase):
                     "central": {
                         "lat": 38.95, "lon": -92.33,
                         "forecasts": [
-                            {"temp_c": 25, "rh": 40, "wind_speed_ms": 2, "precip_in": 0.01, "fuel_moisture": 12, "fire_danger": 1},
-                            {"temp_c": 30, "rh": 30, "wind_speed_ms": 5, "precip_in": 0.15, "fuel_moisture": 8, "fire_danger": 2},
+                            {"time": "2026-08-28T18:00:00Z", "temp_c": 25, "rh": 40, "wind_speed_ms": 2, "wind_direction_deg": 0, "precip_in": 0.01, "fuel_moisture": 12, "fire_danger": 1},
+                            {"time": "2026-08-28T21:00:00Z", "temp_c": 30, "rh": 30, "wind_speed_ms": 5, "wind_direction_deg": 180, "precip_in": 0.15, "fuel_moisture": 8, "fire_danger": 2},
                         ],
                     },
                     "northwest": {
@@ -40,6 +40,9 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(central["precip_in"]["max"], 0.15)
         self.assertEqual(central["fuel_moisture"]["min"], 8)
         self.assertEqual(central["fire_danger_present"], ["Elevated"])
+        self.assertEqual(central["wind_direction_start"], "north")
+        self.assertEqual(central["wind_direction_end"], "south")
+        self.assertEqual(briefing["statewide"]["fire_danger_peak_start"], "4:00 PM CDT")
         self.assertEqual(briefing["statewide"]["station_count"], 2)
         self.assertEqual(briefing["statewide"]["precip_in"]["max"], 0.15)
         self.assertEqual(briefing["statewide"]["precipitation"], "measurable")
