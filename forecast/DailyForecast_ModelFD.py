@@ -50,6 +50,7 @@ from core.precipitation import (PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CON
 from export_fire_danger_gis import export_all_gis_formats
 from models.versioning import load_active_model_path
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger, meters_per_second_to_knots
+from core.beta_fire_danger import score_fire_danger
 from core.domain import crop as crop_to_missouri
 from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
@@ -60,6 +61,7 @@ from services.spatial_fm import try_predict as try_predict_spatial_fm
 # which has its own versioning under fire-danger-model/ (see fire-danger-model/config.py)
 # and is intentionally not part of the api/models/versioning.py registry.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_ROOT = Path(os.getenv("FORECAST_OUTPUT_ROOT", BASE_DIR))
 FD_MODEL_PATH = os.path.join(BASE_DIR, 'fire-danger-model', 'models', 'fire_danger_model.json')
 FD_MODEL_META_PATH = os.path.join(BASE_DIR, 'fire-danger-model', 'models', 'fire_danger_model_meta.json')
 FD_DEFAULT_CATEGORY_THRESHOLDS = [0.5, 1.5, 2.5, 3.5]
@@ -693,7 +695,14 @@ def interpolate_swe_to_grid(swe_data, swe_lon, swe_lat, target_lon, target_lat):
         logger.error(f"Error interpolating SWE grid: {e}")
         return None
 
-def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=None):
+def process_forecast_with_observations(
+    ds_full,
+    lon,
+    lat,
+    port='8000',
+    run_date=None,
+    experimental_score=False,
+):
     logger.info("Processing forecast with observations-based fuel moisture.")
     """
     Process HRRR forecast with actual fuel moisture observations as starting point.
@@ -978,24 +987,33 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         hourly_ws.append(ws_kts)
         hourly_fm.append(fm)
         
-        # Calculate fire danger using the standalone fire-danger-model artifact.
-        risk_model = predict_fire_danger_grid(
-            temp,
-            rh,
-            ws_ms,
-            hour_val,
-            month_val,
-            temp_history,
-            rh_history,
-            precip_history,
-            swe_grid=swe_grid,
-        )
-        collapsed, class_dist, dominant_fraction = is_collapsed_risk_distribution(
-            risk_model,
-            dominance_threshold=MODELFD_COLLAPSE_DOMINANCE_THRESHOLD,
-        )
+        if experimental_score:
+            # Testbed mode uses the same FM/RH/wind fields but evaluates the
+            # continuous threshold contract rather than the categorical model.
+            risk = np.vectorize(
+                lambda fuel, humidity, wind: score_fire_danger(fuel, humidity, wind)["score"],
+                otypes=[float],
+            )(fm, rh, ws_kts)
+            collapsed = False
+        else:
+            # Calculate fire danger using the standalone fire-danger-model artifact.
+            risk_model = predict_fire_danger_grid(
+                temp,
+                rh,
+                ws_ms,
+                hour_val,
+                month_val,
+                temp_history,
+                rh_history,
+                precip_history,
+                swe_grid=swe_grid,
+            )
+            collapsed, class_dist, dominant_fraction = is_collapsed_risk_distribution(
+                risk_model,
+                dominance_threshold=MODELFD_COLLAPSE_DOMINANCE_THRESHOLD,
+            )
 
-        if collapsed and ENABLE_MODELFD_RULE_FALLBACK:
+        if not experimental_score and collapsed and ENABLE_MODELFD_RULE_FALLBACK:
             logger.warning(
                 "ModelFD risk collapsed at hour %s (dominant_fraction=%.3f, dist=%s). Falling back to rule-based risk.",
                 i,
@@ -1003,7 +1021,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                 class_dist,
             )
             risk = calculate_fire_danger_grid_rule_based(fm, rh, ws_kts)
-        else:
+        elif not experimental_score:
             risk = risk_model
             logger.info(
                 "ModelFD risk distribution at hour %s: dominant_fraction=%.3f dist=%s",
@@ -1017,7 +1035,10 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
         if APPLY_HOURLY_RISK_SMOOTHING:
             smoothed_risk = gaussian_filter(risk.astype(float), sigma=HOURLY_RISK_SMOOTHING_SIGMA)
-            risk = np.clip(np.rint(smoothed_risk), 0, 4).astype(int)
+            if experimental_score:
+                risk = np.clip(smoothed_risk, 0, 4)
+            else:
+                risk = np.clip(np.rint(smoothed_risk), 0, 4).astype(int)
             # Keep snow cells hard-forced to LOW after smoothing to avoid category bleed.
             risk[snow_mask] = 0
 
@@ -1105,7 +1126,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "fire_danger": val_risk
                     })
             
-            if forecast_rows:
+            if forecast_rows and env_bool('FORECAST_WRITE_DATABASE', True):
                 try:
                     conn = sqlite3.connect(db_path)
                     conn.executemany('''
@@ -1130,7 +1151,11 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     # MODIFIED: Removed "and json_output_data['stations']" so file is created even if station list is empty
     if run_date:
         filename = f"station_forecasts_beta_{run_date.strftime('%Y%m%d_%H')}.json"
-        save_path = Path("archive/forecasts") / filename
+        archive_dir = Path(os.getenv(
+            "FORECAST_ARCHIVE_FORECASTS_DIR",
+            str(OUTPUT_ROOT / "archive" / "forecasts"),
+        ))
+        save_path = archive_dir / filename
         
         if not json_output_data.get('stations'):
             logger.warning(f"Station list is empty. Generating {filename} with no station data.")
@@ -1392,6 +1417,10 @@ def generate_complete_forecast():
     """
     SCRIPT_DIR = Path(__file__).resolve().parent
     PROJECT_DIR = SCRIPT_DIR.parent
+    # The default remains the historical project root. Testbed jobs provide
+    # FORECAST_OUTPUT_ROOT so every generated artifact is isolated.
+    OUTPUT_DIR = Path(os.getenv("FORECAST_OUTPUT_ROOT", str(PROJECT_DIR)))
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     load_dotenv()
     start_time = time.time()
@@ -1427,7 +1456,7 @@ def generate_complete_forecast():
     data_crs = ccrs.PlateCarree()
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
     
-    cache_dir = Path('/app/cache/hrrr')
+    cache_dir = Path(os.getenv("FORECAST_CACHE_DIR", "/app/cache/hrrr"))
     cache_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Cache directory: {cache_dir}")
     
@@ -1591,7 +1620,7 @@ def generate_complete_forecast():
 
     # Continue with forecast using ML model
     hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, swe_grid = process_forecast_with_observations(
-        ds_full, lon, lat, port=port, run_date=RUN_DATE
+        ds_full, lon, lat, port=port, run_date=RUN_DATE, experimental_score=True
     )
     
     # --- Extract and process precipitation data ---
@@ -1756,7 +1785,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastfiredanger-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(OUTPUT_DIR / 'images/mo-forecastfiredanger-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1765,7 +1794,7 @@ def generate_complete_forecast():
     gis_files = export_all_gis_formats(
         peak_risk_smooth, lon, lat,
         run_date=RUN_DATE,
-        out_dir=PROJECT_DIR / 'gis'
+        out_dir=OUTPUT_DIR / 'gis'
     )
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
@@ -1846,7 +1875,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastfuelmoisture-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(OUTPUT_DIR / 'images/mo-forecastfuelmoisture-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1890,7 +1919,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastminrh-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(OUTPUT_DIR / 'images/mo-forecastminrh-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1946,7 +1975,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxwind-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(OUTPUT_DIR / 'images/mo-forecastmaxwind-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1994,7 +2023,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxtemp-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(OUTPUT_DIR / 'images/mo-forecastmaxtemp-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -2047,7 +2076,7 @@ def generate_complete_forecast():
                 RUN_DATE, SCRIPT_DIR
             )
             
-            fig.savefig(PROJECT_DIR / 'images/mo-forecastrainfall-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            fig.savefig(OUTPUT_DIR / 'images/mo-forecastrainfall-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
             plt.close(fig)
             logger.info(f"Saved rainfall forecast map")
             
@@ -2129,7 +2158,7 @@ def generate_complete_forecast():
                 RUN_DATE, SCRIPT_DIR
             )
             
-            fig.savefig(PROJECT_DIR / 'images/mo-forecastswe-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            fig.savefig(OUTPUT_DIR / 'images/mo-forecastswe-beta.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
             plt.close(fig)
             logger.info(f"Saved SWE map")
             
@@ -2347,7 +2376,7 @@ def generate_complete_forecast():
                         RUN_DATE, SCRIPT_DIR
                     )
                     filename = f'{region_code}-forecastfiredanger-beta.png'
-                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
                     del fig, ax, cs, cax, cbar
@@ -2381,7 +2410,7 @@ def generate_complete_forecast():
                         RUN_DATE, SCRIPT_DIR
                     )
                     filename = f'{region_code}-forecastfuelmoisture-beta.png'
-                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
                     del fig, ax, cs, cax, cbar
@@ -2420,7 +2449,7 @@ def generate_complete_forecast():
                         RUN_DATE, SCRIPT_DIR
                     )
                     filename = f'{region_code}-forecastminrh-beta.png'
-                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
                     del fig, ax, cs, cax, cbar
@@ -2459,7 +2488,7 @@ def generate_complete_forecast():
                         RUN_DATE, SCRIPT_DIR
                     )
                     filename = f'{region_code}-forecastmaxwind-beta.png'
-                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
                     del fig, ax, cs, cax, cbar
@@ -2496,7 +2525,7 @@ def generate_complete_forecast():
                         RUN_DATE, SCRIPT_DIR
                     )
                     filename = f'{region_code}-forecastmaxtemp-beta.png'
-                    fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                    fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
                     del fig, ax, cs, cax, cbar
@@ -2539,7 +2568,7 @@ def generate_complete_forecast():
                             RUN_DATE, SCRIPT_DIR
                         )
                         filename = f'{region_code}-forecastrainfall-beta.png'
-                        fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+                        fig.savefig(OUTPUT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                         all_generated_maps.append(filename)
                         plt.close(fig)
                         del fig, ax, cs, cax, cbar
@@ -2560,12 +2589,13 @@ def generate_complete_forecast():
     print(f"Script runtime: {runtime_sec:.2f} seconds")
 
     # Log results
-    logging.basicConfig(filename='logs/forecastfiredanger.log', level=logging.INFO)
+    (OUTPUT_DIR / 'logs').mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=str(OUTPUT_DIR / 'logs' / 'forecastfiredanger.log'), level=logging.INFO)
     logging.info(f"All forecast maps updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
     logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
 
     # Update status file
-    status_file = PROJECT_DIR / 'status.json'
+    status_file = OUTPUT_DIR / 'status.json'
     if status_file.exists():
         try:
             with open(status_file, 'r') as f:
@@ -2575,7 +2605,8 @@ def generate_complete_forecast():
     else:
         status = {}
 
-    status['ForecastFireDanger'] = {
+    status_key = os.getenv('FORECAST_STATUS_KEY', 'ForecastFireDanger')
+    status[status_key] = {
         'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
         'model_run': RUN_DATE.strftime('%Y-%m-%d %HZ'),
         'status': 'updated',
@@ -2611,7 +2642,7 @@ def generate_complete_forecast():
                 import upload_cdn
                 
                 # Upload all generated forecast images dynamically
-                forecast_files = [PROJECT_DIR / 'images' / f for f in all_generated_maps]
+                forecast_files = [OUTPUT_DIR / 'images' / f for f in all_generated_maps]
                 
                 # Support test mode with optional path prefix
                 test_prefix = os.getenv('CDN_TEST_PREFIX', None)  # e.g., 'test' for testing

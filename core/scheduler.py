@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state
+from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data
 from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
@@ -23,8 +23,9 @@ from core.database import (
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.seasonal_fuel_state import update_daily_gdd
-from services.rtma_peak import run_rtma_peak_job
+from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from routers.burn_bans import run_burn_ban_maintenance
+from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,39 @@ async def fetch_and_store_raws_stations():
         raws_station_data["error"] = str(e)
         raws_station_data["stations"] = []
         raws_station_data["last_updated"] = datetime.now().isoformat()
+
+
+async def refresh_testbed_observations_job():
+    """Build isolated beta observation products from the latest station fetch."""
+    try:
+        await asyncio.to_thread(
+            refresh_observation_products,
+            get_station_data(),
+            raws_station_data,
+        )
+    except Exception as error:
+        logger.error("Testbed observation refresh failed: %s", error, exc_info=True)
+
+
+async def refresh_testbed_rtma_job():
+    """Build an isolated continuous-score RTMA peak after the production run."""
+    try:
+        result = await asyncio.to_thread(
+            generate_rtma_peak,
+            None,
+            output_root=BETA_ROOT,
+            experimental=True,
+        )
+        manifest = load_manifest()
+        manifest["rtma_updated_at"] = datetime.now().isoformat()
+        manifest.setdefault("products", {})["rtma_peak"] = {
+            "kind": "image",
+            "path": f"images/{result['png']}",
+            "generated_at": manifest["rtma_updated_at"],
+        }
+        save_manifest(manifest)
+    except Exception as error:
+        logger.error("Testbed RTMA refresh failed: %s", error, exc_info=True)
 
 
 async def fetch_and_store_afds():
@@ -154,6 +188,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    scheduler.add_job(
+        refresh_testbed_observations_job,
+        'interval',
+        minutes=5,
+        seconds=30,
+        id='refresh_testbed_observations',
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(fetch_and_store_afds, 'interval', minutes=AFD_POLL_MINUTES, id='fetch_afds')
     scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
@@ -214,6 +257,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=22,
         minute=20,
         id='end_of_day_rtma_peak',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        refresh_testbed_rtma_job,
+        'cron',
+        hour=22,
+        minute=25,
+        id='refresh_testbed_rtma',
         max_instances=1,
         coalesce=True,
     )
@@ -287,4 +339,5 @@ async def run_initial_fetches():
     await fetch_synoptic_data()
     await fetchtimeseriesdata()
     await fetch_and_store_raws_stations()
+    await refresh_testbed_observations_job()
     await fetch_and_store_afds()

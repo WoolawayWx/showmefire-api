@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from core.config import GIS_DIR, IMAGES_DIR
 from core.fire_danger import calculate_fire_danger
+from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
 from services.rtma_capture import fetch_rtma
 
@@ -78,7 +79,7 @@ def _parse_local_date(target_date: str | date | None) -> date:
         raise ValueError(f"date must be YYYY-MM-DD, got: {target_date}") from exc
 
 
-def _classify_grid(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _classify_grid(ds: xr.Dataset, scorer=calculate_fire_danger, score_key: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return class grid and -180/180 lon/lat meshes for one RTMA hour."""
     lon, lat = _lon_lat_meshes(ds["longitude"].values, ds["latitude"].values)
     rh = _squeeze2d(np.asarray(ds["r2"].values, dtype=float))
@@ -94,7 +95,10 @@ def _classify_grid(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raise ValueError(f"RTMA field shape {rh.shape} does not match lon/lat {lon.shape}")
     valid = np.isfinite(fuel_moisture) & np.isfinite(rh) & np.isfinite(wind)
     result = np.full(rh.shape, np.nan, dtype=float)
-    classify = np.vectorize(calculate_fire_danger, otypes=[float])
+    if score_key:
+        classify = np.vectorize(lambda fm, rh, wind: scorer(fm, rh, wind)[score_key], otypes=[float])
+    else:
+        classify = np.vectorize(scorer, otypes=[float])
     result[valid] = classify(fuel_moisture[valid], rh[valid], wind[valid])
     return result, lon, lat
 
@@ -226,7 +230,12 @@ def _render_png(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, out_path: Pa
     return out_path
 
 
-def generate_rtma_peak(target_date: str | date | None = None) -> dict:
+def generate_rtma_peak(
+    target_date: str | date | None = None,
+    *,
+    output_root: Path | None = None,
+    experimental: bool = False,
+) -> dict:
     """Generate and archive the RTMA peak for a local date.
 
     Missing individual RTMA hours are skipped.  The run fails only when no
@@ -241,7 +250,11 @@ def generate_rtma_peak(target_date: str | date | None = None) -> dict:
         try:
             path = fetch_rtma(hour)
             with xr.open_dataset(path) as ds:
-                current, current_lon, current_lat = _classify_grid(ds)
+                current, current_lon, current_lat = _classify_grid(
+                    ds,
+                    score_fire_danger if experimental else calculate_fire_danger,
+                    "score" if experimental else None,
+                )
                 if peak is None:
                     peak = current
                     lon, lat = current_lon, current_lat
@@ -257,15 +270,27 @@ def generate_rtma_peak(target_date: str | date | None = None) -> dict:
     if peak is None or not np.isfinite(peak).any():
         raise RuntimeError(f"No usable RTMA analyses found for {local_date}")
 
-    tif_path = RTMA_PEAK_ARCHIVE_DIR / f"{local_date.isoformat()}.tif"
-    png_path = RTMA_PEAK_IMAGE_ARCHIVE_DIR / f"{local_date.isoformat()}.png"
-    RTMA_PEAK_TODAY_TIF.parent.mkdir(parents=True, exist_ok=True)
+    if output_root is None:
+        gis_dir = Path(GIS_DIR)
+        image_dir = Path(IMAGES_DIR)
+        today_tif = RTMA_PEAK_TODAY_TIF
+        today_png = RTMA_PEAK_TODAY_PNG
+    else:
+        gis_dir = Path(output_root) / "gis"
+        image_dir = Path(output_root) / "images"
+        today_tif = gis_dir / "rtma_peak_today.tif"
+        today_png = image_dir / "rtma_peak_today.png"
+    tif_dir = gis_dir / "rtma_peak" / "archive"
+    png_dir = image_dir / "rtma_peak" / "archive"
+    tif_path = tif_dir / f"{local_date.isoformat()}.tif"
+    png_path = png_dir / f"{local_date.isoformat()}.png"
+    today_tif.parent.mkdir(parents=True, exist_ok=True)
     if not export_geotiff(peak, lon, lat, tif_path, run_date=datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ)):
         raise RuntimeError(f"Failed to write RTMA peak GeoTIFF for {local_date}")
-    shutil.copy2(tif_path, RTMA_PEAK_TODAY_TIF)
+    shutil.copy2(tif_path, today_tif)
     _render_png(peak, lon, lat, png_path, local_date)
-    RTMA_PEAK_TODAY_PNG.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(png_path, RTMA_PEAK_TODAY_PNG)
+    today_png.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(png_path, today_png)
     return {
         "date": local_date.isoformat(),
         "hours_used": len(used_hours),
@@ -273,6 +298,7 @@ def generate_rtma_peak(target_date: str | date | None = None) -> dict:
         "peak_class": int(np.nanmax(peak)),
         "tif": f"rtma_peak/archive/{local_date.isoformat()}.tif",
         "png": f"rtma_peak/archive/{local_date.isoformat()}.png",
+        "experimental": experimental,
     }
 
 
