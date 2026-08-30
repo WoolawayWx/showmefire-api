@@ -24,6 +24,63 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
 
+FIRE_DANGER_COLORS = {
+    0: (144, 238, 144, 255),
+    1: (255, 237, 78, 255),
+    2: (255, 165, 0, 255),
+    3: (255, 0, 0, 255),
+    4: (139, 0, 0, 255),
+    255: (0, 0, 0, 0),
+}
+
+
+def _safe_gis_path(filename: str) -> Path:
+    base = Path(GIS_DIR).resolve()
+    path = (base / filename).resolve()
+    if base != path and base not in path.parents:
+        raise HTTPException(status_code=400, detail="Invalid GeoTIFF filename")
+    return path
+
+
+def _bounds_list(bounds) -> list[float]:
+    if bounds is None:
+        return [-95.8, 35.8, -89.1, 40.8]
+    if hasattr(bounds, "left"):
+        return [float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top)]
+    if isinstance(bounds, dict):
+        return [
+            float(bounds.get("left", bounds.get("west"))),
+            float(bounds.get("bottom", bounds.get("south"))),
+            float(bounds.get("right", bounds.get("east"))),
+            float(bounds.get("top", bounds.get("north"))),
+        ]
+    return [float(value) for value in list(bounds)[:4]]
+
+
+def _render_classified_png(img: ImageData) -> bytes:
+    data = np.asarray(img.data)
+    arr = data[0] if data.ndim == 3 else data
+    mask = np.asarray(img.mask) if getattr(img, "mask", None) is not None else None
+    if mask is None or mask.shape != arr.shape:
+        valid = np.ones(arr.shape, dtype=bool)
+    elif mask.dtype == bool:
+        valid = mask
+    else:
+        valid = mask > 0
+
+    rounded = np.full(arr.shape, 255, dtype=np.int16)
+    finite = np.isfinite(arr)
+    rounded[finite] = np.clip(np.rint(arr[finite]), 0, 255).astype(np.int16)
+
+    rgba = np.zeros(arr.shape + (4,), dtype=np.uint8)
+    for value, color in FIRE_DANGER_COLORS.items():
+        rgba[valid & (rounded == value)] = color
+    rgba[~valid] = (0, 0, 0, 0)
+
+    with BytesIO() as buf:
+        Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
 
 def _render_multiband_png(img: ImageData) -> bytes:
     """Fallback PNG encoder for RGB/RGBA tiles using data+mask arrays."""
@@ -61,7 +118,7 @@ async def cog_info(filename: str = "peak_fire_danger.tif"):
     
     Returns: Metadata including bounds, zoom levels, band info
     """
-    tif_path = Path(GIS_DIR) / filename
+    tif_path = _safe_gis_path(filename)
     
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
@@ -71,9 +128,9 @@ async def cog_info(filename: str = "peak_fire_danger.tif"):
             info = src.info()
             
             return {
-                "bounds": src.bounds,
-                "minzoom": src.minzoom,
-                "maxzoom": src.maxzoom,
+                "bounds": _bounds_list(src.bounds),
+                "minzoom": 4,
+                "maxzoom": max(int(src.maxzoom or 11), 11),
                 "band_metadata": info.band_metadata,
                 "band_descriptions": info.band_descriptions,
                 "width": src.dataset.width,
@@ -110,7 +167,7 @@ async def cog_tile(
     
     Returns: PNG tile image
     """
-    tif_path = Path(GIS_DIR) / filename
+    tif_path = _safe_gis_path(filename)
     
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
@@ -125,33 +182,7 @@ async def cog_tile(
                 img = src.tile(x, y, z, indexes=(1, 2, 3))
             else:
                 img = src.tile(x, y, z)
-            
-            # Parse rescale values
-            try:
-                vmin, vmax = map(float, rescale.split(","))
-            except ValueError:
-                vmin, vmax = 0, 4
-            
-            # Select colormap
-            if colormap == "fire_danger":
-                # Custom fire danger colormap
-                colormap_dict = {
-                    0: (144, 238, 144, 255),  # Low - Light green
-                    1: (255, 237, 78, 255),   # Moderate - Yellow
-                    2: (255, 165, 0, 255),    # Elevated - Orange
-                    3: (255, 0, 0, 255),      # Critical - Red
-                    4: (139, 0, 0, 255),      # Extreme - Dark red
-                    255: (0, 0, 0, 0),        # NoData - Transparent
-                }
-            else:
-                # Try to get from rio-tiler built-in colormaps
-                try:
-                    colormap_dict = rio_cmap.get(colormap)
-                except KeyError:
-                    # Fallback to rdylgn_r (red-yellow-green reversed)
-                    colormap_dict = rio_cmap.get("rdylgn_r")
-            
-            # RGBA/RGB rasters already contain styling; single-band rasters need colormap.
+
             if band_count >= 4:
                 png_data = _render_multiband_png(img)
             elif band_count >= 3:
@@ -159,11 +190,14 @@ async def cog_tile(
                     png_data = img.render(img_format="PNG")
                 except Exception:
                     png_data = _render_multiband_png(img)
+            elif colormap == "fire_danger":
+                png_data = _render_classified_png(img)
             else:
-                png_data = img.render(
-                    img_format="PNG",
-                    colormap=colormap_dict,
-                )
+                try:
+                    colormap_dict = rio_cmap.get(colormap)
+                except KeyError:
+                    colormap_dict = rio_cmap.get("rdylgn_r")
+                png_data = img.render(img_format="PNG", colormap=colormap_dict)
             
             return Response(
                 content=png_data,
@@ -204,7 +238,7 @@ async def cog_preview(
     
     Returns: PNG preview image
     """
-    tif_path = Path(GIS_DIR) / filename
+    tif_path = _safe_gis_path(filename)
     
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
@@ -220,22 +254,6 @@ async def cog_preview(
             else:
                 img = src.preview(max_size=max_size)
             
-            # Select colormap (same logic as tiles)
-            if colormap == "fire_danger":
-                colormap_dict = {
-                    0: (144, 238, 144, 255),
-                    1: (255, 237, 78, 255),
-                    2: (255, 165, 0, 255),
-                    3: (255, 0, 0, 255),
-                    4: (139, 0, 0, 255),
-                    255: (0, 0, 0, 0),
-                }
-            else:
-                try:
-                    colormap_dict = rio_cmap.get(colormap)
-                except KeyError:
-                    colormap_dict = rio_cmap.get("rdylgn_r")
-            
             if band_count >= 4:
                 png_data = _render_multiband_png(img)
             elif band_count >= 3:
@@ -243,11 +261,14 @@ async def cog_preview(
                     png_data = img.render(img_format="PNG")
                 except Exception:
                     png_data = _render_multiband_png(img)
+            elif colormap == "fire_danger":
+                png_data = _render_classified_png(img)
             else:
-                png_data = img.render(
-                    img_format="PNG",
-                    colormap=colormap_dict,
-                )
+                try:
+                    colormap_dict = rio_cmap.get(colormap)
+                except KeyError:
+                    colormap_dict = rio_cmap.get("rdylgn_r")
+                png_data = img.render(img_format="PNG", colormap=colormap_dict)
             
             return Response(
                 content=png_data,

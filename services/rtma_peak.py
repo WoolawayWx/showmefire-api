@@ -18,8 +18,7 @@ from zoneinfo import ZoneInfo
 
 from core.config import GIS_DIR, IMAGES_DIR
 from core.fire_danger import calculate_fire_danger
-from maps.observed_peak_history import DANGER_CLASS_COLORS
-from maps.realtime_geotiff import export_discrete_rgba_geotiff
+from forecast.export_fire_danger_gis import export_geotiff
 from services.rtma_capture import fetch_rtma
 
 logger = logging.getLogger(__name__)
@@ -48,6 +47,26 @@ def _hours_for_local_date(target_date: date):
     return [start.astimezone(timezone.utc) + timedelta(hours=i) for i in range(PEAK_WINDOW_HOURS)]
 
 
+def _lon180(lon: np.ndarray) -> np.ndarray:
+    lon = np.asarray(lon, dtype=float)
+    return np.where(lon > 180.0, lon - 360.0, lon)
+
+
+def _squeeze2d(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values)
+    while values.ndim > 2:
+        values = np.take(values, 0, axis=0)
+    return values
+
+
+def _lon_lat_meshes(lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    lon = _lon180(_squeeze2d(lon))
+    lat = _squeeze2d(lat)
+    if lon.ndim == 1 and lat.ndim == 1:
+        return np.meshgrid(lon, lat)
+    return lon, lat
+
+
 def _parse_local_date(target_date: str | date | None) -> date:
     if target_date is None:
         return datetime.now(CHICAGO_TZ).date()
@@ -60,18 +79,19 @@ def _parse_local_date(target_date: str | date | None) -> date:
 
 
 def _classify_grid(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return class grid, longitude mesh, and latitude mesh for one RTMA hour."""
-    lat = np.asarray(ds["latitude"].values)
-    lon = np.asarray(ds["longitude"].values)
-    rh = np.asarray(ds["r2"].values, dtype=float)
+    """Return class grid and -180/180 lon/lat meshes for one RTMA hour."""
+    lon, lat = _lon_lat_meshes(ds["longitude"].values, ds["latitude"].values)
+    rh = _squeeze2d(np.asarray(ds["r2"].values, dtype=float))
     wind = np.hypot(
-        np.asarray(ds["u10"].values, dtype=float),
-        np.asarray(ds["v10"].values, dtype=float),
+        _squeeze2d(np.asarray(ds["u10"].values, dtype=float)),
+        _squeeze2d(np.asarray(ds["v10"].values, dtype=float)),
     ) * 1.9438444924406
 
     # RTMA has no fuel-moisture field.  This transparent RH-based estimate is
     # only the weather-driven spatial diagnostic; it is not a training label.
     fuel_moisture = 3.0 + 0.25 * rh
+    if rh.shape != lon.shape:
+        raise ValueError(f"RTMA field shape {rh.shape} does not match lon/lat {lon.shape}")
     valid = np.isfinite(fuel_moisture) & np.isfinite(rh) & np.isfinite(wind)
     result = np.full(rh.shape, np.nan, dtype=float)
     classify = np.vectorize(calculate_fire_danger, otypes=[float])
@@ -90,10 +110,7 @@ def _missouri_mask(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
         missouriborder = missouriborder.to_crs("EPSG:4326")
     missouri_geom = missouriborder.geometry.iloc[0].buffer(0.01)
     prepared_geom = prep(missouri_geom)
-    if lon.ndim == 1 and lat.ndim == 1:
-        lon_mesh, lat_mesh = np.meshgrid(lon, lat)
-    else:
-        lon_mesh, lat_mesh = lon, lat
+    lon_mesh, lat_mesh = _lon_lat_meshes(lon, lat)
     points_flat = np.column_stack([lon_mesh.ravel(), lat_mesh.ravel()])
     mask_flat = np.array([prepared_geom.contains(Point(pt)) for pt in points_flat])
     return mask_flat.reshape(lon_mesh.shape), lon_mesh, lat_mesh
@@ -112,7 +129,12 @@ def _render_png(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, out_path: Pa
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     mask, lon_mesh, lat_mesh = _missouri_mask(lon, lat)
+    if mask.shape != grid.shape:
+        raise ValueError(f"Missouri mask shape {mask.shape} does not match peak grid {grid.shape}")
     masked = np.where(mask, grid, np.nan)
+    if not np.isfinite(masked).any():
+        logger.warning("Missouri mask dropped every RTMA cell; drawing the unmasked peak grid")
+        masked = grid
 
     pixelw, pixelh, mapdpi = 2048, 1152, 144
     extent = (-95.8, -89.1, 35.8, 40.8)
@@ -223,8 +245,6 @@ def generate_rtma_peak(target_date: str | date | None = None) -> dict:
                 if peak is None:
                     peak = current
                     lon, lat = current_lon, current_lat
-                    if lon.ndim == 1 and lat.ndim == 1:
-                        lon, lat = np.meshgrid(lon, lat)
                 elif current.shape == peak.shape and np.allclose(current_lon, lon) and np.allclose(current_lat, lat):
                     peak = np.fmax(peak, current)
                 else:
@@ -239,17 +259,10 @@ def generate_rtma_peak(target_date: str | date | None = None) -> dict:
 
     tif_path = RTMA_PEAK_ARCHIVE_DIR / f"{local_date.isoformat()}.tif"
     png_path = RTMA_PEAK_IMAGE_ARCHIVE_DIR / f"{local_date.isoformat()}.png"
-    export_discrete_rgba_geotiff(
-        peak, lon, lat, tif_path, DANGER_CLASS_COLORS,
-        f"RTMA weather-derived peak fire danger - {local_date}",
-        "RTMA t2m/r2/u10/v10 + RH-derived fuel-moisture diagnostic, 10:00-21:00 CT",
-        "Low=green, Moderate=yellow, Elevated=orange, Critical=red, Extreme=dark red",
-    )
-    export_discrete_rgba_geotiff(
-        peak, lon, lat, RTMA_PEAK_TODAY_TIF, DANGER_CLASS_COLORS,
-        f"RTMA weather-derived peak fire danger - {local_date}",
-        "RTMA t2m/r2/u10/v10 + RH-derived fuel-moisture diagnostic, 10:00-21:00 CT",
-    )
+    RTMA_PEAK_TODAY_TIF.parent.mkdir(parents=True, exist_ok=True)
+    if not export_geotiff(peak, lon, lat, tif_path, run_date=datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ)):
+        raise RuntimeError(f"Failed to write RTMA peak GeoTIFF for {local_date}")
+    shutil.copy2(tif_path, RTMA_PEAK_TODAY_TIF)
     _render_png(peak, lon, lat, png_path, local_date)
     RTMA_PEAK_TODAY_PNG.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(png_path, RTMA_PEAK_TODAY_PNG)

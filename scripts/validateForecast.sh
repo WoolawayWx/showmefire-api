@@ -30,6 +30,8 @@ fi
 
 # Peak RTMA analysis for the same local date / 10:00–21:00 CT window as
 # the station verification report. Failure here must not skip scoring.
+"$PYTHON" -c "from maps.observed_peak_history import snapshot_observed_peak_for_date; snapshot_observed_peak_for_date('$TODAY_DASH')" \
+	|| echo "WARN: Observed peak archive snapshot failed for $TODAY_DASH" >&2
 "$PYTHON" -c "from services.rtma_peak import generate_rtma_peak; generate_rtma_peak('$TODAY_DASH')" \
 	|| echo "WARN: RTMA peak generation failed for $TODAY_DASH" >&2
 

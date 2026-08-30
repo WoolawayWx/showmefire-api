@@ -109,6 +109,12 @@ async def get_verification_report(date: str):
         logger.error("Failed to read validation summary for %s: %s", date, exc)
         raise HTTPException(status_code=500, detail="Failed to read validation report") from exc
 
+    try:
+        from maps.observed_peak_history import snapshot_observed_peak_for_date
+        snapshot_observed_peak_for_date(date)
+    except Exception:
+        logger.exception("Failed to snapshot observed peak archive for %s", date)
+
     observed_peak_tif_path = _observed_peak_tif_path(date)
     forecast_peak_tif_path = _forecast_peak_tif_path(date)
     observed_peak_png_path = _observed_peak_png_path(date)
@@ -121,7 +127,6 @@ async def get_verification_report(date: str):
         "generated_at": summary.get("generated_at"),
         "record_count": summary.get("record_count", 0),
         "stations_count": summary.get("stations_count"),
-        "ai_summary": summary.get("ai_summary"),
         "metrics": summary.get("metrics", {}),
         "confusion_matrix": summary.get("confusion_matrix"),
         "wind_confusion_matrix": summary.get("wind_confusion_matrix"),

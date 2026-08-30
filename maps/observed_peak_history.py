@@ -9,6 +9,7 @@ so far today - the observed counterpart to the forecast pipeline's
 peak_risk_smooth (gis/peak_fire_danger.tif).
 """
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -245,3 +246,32 @@ def update_observed_peak_grid(
         "peak_class": peak_class,
         "peak_reached_at_utc": peak_reached_at_utc,
     }
+
+
+def snapshot_observed_peak_for_date(date_local: str) -> Path | None:
+    """Copy today's in-progress observed peak into the dated archive.
+
+    Verification runs at 22:30 CT, before midnight rollover would normally
+    write archive/{date}.tif. Snapshot so the performance page can show the
+    same day's station peak alongside the forecast and RTMA peaks.
+    """
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = ARCHIVE_DIR / f"{date_local}.tif"
+    if archive_path.exists() and archive_path.stat().st_size > 0:
+        return archive_path
+
+    today_local = datetime.now(CHICAGO_TZ).strftime("%Y-%m-%d")
+    state = _load_state()
+    state_date = state.get("date_local") if state else None
+    if date_local not in {today_local, state_date}:
+        return None
+    if not TODAY_TIF.exists() or TODAY_TIF.stat().st_size <= 0:
+        return None
+
+    shutil.copy2(TODAY_TIF, archive_path)
+    live_png = Path("images") / "mo-observedpeakfiredanger.png"
+    png_archive = Path("images") / "observed_peak" / "archive" / f"{date_local}.png"
+    if live_png.exists():
+        png_archive.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(live_png, png_archive)
+    return archive_path

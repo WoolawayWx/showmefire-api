@@ -899,9 +899,23 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
             },
         })
     report['comparison_rows'] = comparison_rows
+    report['verification_ai_packet'] = (
+        f"reports/{report_date}/verification_ai_packet{suffix_tag}.json"
+    )
     try:
         from ai.verification_summary import generate_verification_summary
-        report['ai_summary'] = generate_verification_summary(report, comparison_rows)
+        recent_history = []
+        if history_file.exists():
+            try:
+                with open(history_file, 'r', encoding='utf-8') as history_handle:
+                    loaded_history = json.load(history_handle)
+                if isinstance(loaded_history, list):
+                    recent_history = loaded_history
+            except (json.JSONDecodeError, OSError):
+                logger.warning("Could not load prior verification history for AI context.")
+        report['ai_summary'] = generate_verification_summary(
+            report, comparison_rows, recent_history
+        )
     except Exception:
         logger.exception("Unable to generate optional Gemini verification summary")
         report['ai_summary'] = None
@@ -956,6 +970,23 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
     report_file = daily_report_dir / report_filename
     with open(report_file, 'w') as f:
         json.dump(report, f, indent=2, default=str)
+
+    # Machine-readable input for the Cloudflare AI worker. Keep this separate
+    # from the public summary so the worker can generate its own narrative.
+    try:
+        from ai.verification_summary import write_verification_ai_packet
+        packet_file = daily_report_dir / f"verification_ai_packet{suffix_tag}.json"
+        write_verification_ai_packet(report, history, comparison_rows, packet_file)
+        if not suffix:
+            write_verification_ai_packet(
+                report,
+                history,
+                comparison_rows,
+                REPORTS_DIR / "verification_ai_packet.json",
+            )
+        logger.info(f"AI verification packet saved to {packet_file}")
+    except Exception:
+        logger.exception("Unable to write Cloudflare AI verification packet.")
         
     # Also save to main dir for compat
     legacy_report_file = REPORTS_DIR / f"validation_summary{suffix_tag}_{report_date}.json"
