@@ -19,6 +19,17 @@ BETA_FORECAST_ROOT = BETA_ROOT / "forecast"
 JOB_STATE_PATH = BETA_ROOT / "forecast_job.json"
 FORECAST_SCRIPT = Path(__file__).resolve().parent.parent / "forecast" / "DailyForecast_ModelFD.py"
 _job_lock = threading.Lock()
+STALE_JOB_GRACE_SECONDS = int(os.getenv("TESTBED_FORECAST_STALE_GRACE_SECONDS", "300"))
+
+# These switches are part of the Testbed safety boundary. Keep them explicit
+# and inspectable so the beta-operations scorecard can verify the subprocess
+# can neither publish nor write operational database state.
+BETA_FORECAST_ENV = {
+    "FORECAST_STATUS_KEY": "ForecastFireDangerBeta",
+    "FORECAST_WRITE_DATABASE": "false",
+    "MODEL_SHADOW_ENABLED": "false",
+    "uploadForecast": "false",
+}
 
 
 def _now() -> str:
@@ -37,6 +48,44 @@ def _write_job(job: dict) -> None:
     temporary = JOB_STATE_PATH.with_suffix(".tmp")
     temporary.write_text(json.dumps(job, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, JOB_STATE_PATH)
+
+
+def _prepare_beta_directories() -> None:
+    """Create the clean-room filesystem expected by the forecast script."""
+    for path in (
+        BETA_FORECAST_ROOT / "images",
+        BETA_FORECAST_ROOT / "gis",
+        BETA_FORECAST_ROOT / "logs",
+        BETA_FORECAST_ROOT / "cache" / "hrrr",
+        BETA_FORECAST_ROOT / "archive" / "forecasts",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _failure_excerpt(log_path: Path, line_limit: int = 20) -> str | None:
+    try:
+        lines = [line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return None
+    return "\n".join(lines[-line_limit:]) or None
+
+
+def _job_is_stale(job: dict, now: datetime | None = None) -> bool:
+    """Recognize queued/running state left behind by an interrupted API process."""
+    if job.get("status") not in {"queued", "running"}:
+        return False
+    timestamp = job.get("started_at") or job.get("requested_at")
+    if not timestamp:
+        return True
+    try:
+        started = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    timeout = int(os.getenv("TESTBED_FORECAST_TIMEOUT_SECONDS", "3600"))
+    age = ((now or datetime.now(timezone.utc)) - started).total_seconds()
+    return age > timeout + STALE_JOB_GRACE_SECONDS
 
 
 def _update_manifest(job: dict) -> None:
@@ -144,7 +193,7 @@ def _write_forecast_comparison() -> bool:
 
 
 def _run_beta_forecast(job: dict) -> None:
-    BETA_FORECAST_ROOT.mkdir(parents=True, exist_ok=True)
+    _prepare_beta_directories()
     log_path = BETA_FORECAST_ROOT / "forecast.log"
     job["status"] = "running"
     job["started_at"] = _now()
@@ -154,9 +203,8 @@ def _run_beta_forecast(job: dict) -> None:
         "FORECAST_OUTPUT_ROOT": str(BETA_FORECAST_ROOT),
         "FORECAST_CACHE_DIR": str(BETA_FORECAST_ROOT / "cache" / "hrrr"),
         "FORECAST_ARCHIVE_FORECASTS_DIR": str(BETA_FORECAST_ROOT / "archive" / "forecasts"),
-        "FORECAST_STATUS_KEY": "ForecastFireDangerBeta",
-        "FORECAST_WRITE_DATABASE": "false",
-        "uploadForecast": "false",
+        "FORECAST_LOG_DIR": str(BETA_FORECAST_ROOT / "logs"),
+        **BETA_FORECAST_ENV,
     })
     try:
         with log_path.open("w", encoding="utf-8") as log:
@@ -174,6 +222,9 @@ def _run_beta_forecast(job: dict) -> None:
         job["model_run"] = _read_model_run()
         if job["status"] == "completed":
             _update_manifest({**job, "finished_at": _now()})
+        else:
+            job["error"] = f"Beta forecast process exited with code {completed.returncode}."
+            job["error_detail"] = _failure_excerpt(log_path)
     except subprocess.TimeoutExpired:
         job["status"] = "failed"
         job["error"] = "Beta forecast exceeded its timeout."
@@ -196,14 +247,19 @@ def _read_model_run() -> str | None:
 def trigger_beta_forecast(requested_by: str) -> dict:
     with _job_lock:
         existing = _read_job()
-        if existing and existing.get("status") in {"queued", "running"}:
+        stale_job_id = None
+        if existing and existing.get("status") in {"queued", "running"} and not _job_is_stale(existing):
             raise RuntimeError("A beta forecast is already running.")
+        if existing and _job_is_stale(existing):
+            stale_job_id = existing.get("job_id")
         job = {
             "job_id": uuid.uuid4().hex,
             "status": "queued",
             "requested_by": requested_by,
             "requested_at": _now(),
         }
+        if stale_job_id:
+            job["replaces_stale_job_id"] = stale_job_id
         _write_job(job)
         threading.Thread(target=_run_beta_forecast, args=(job,), daemon=True).start()
         return job
@@ -211,4 +267,3 @@ def trigger_beta_forecast(requested_by: str) -> dict:
 
 def get_beta_forecast_status() -> dict:
     return _read_job() or {"status": "idle"}
-

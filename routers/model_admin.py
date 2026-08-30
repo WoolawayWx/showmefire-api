@@ -1,9 +1,13 @@
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from core.security import verify_token
-from models.versioning import get_model_entry
+from models.versioning import get_model_entry, validate_promotion_candidate
+from services.beta_operations import build_beta_operations_status
+from services.beta_verification import run_beta_verification
 from services.model_shadow import diagnostics as fuel_moisture_shadow_diagnostics
 from services.model_shadow import evaluate_shadow_evidence
 from services.v4_shadow import diagnostics as v4_shadow_diagnostics
@@ -32,27 +36,61 @@ def _require_admin(token: Optional[str] = None) -> str:
 def _registry_summary(model_type: str) -> dict:
     entry = get_model_entry(model_type)
     history = entry.get("history") or []
+    beta = entry.get("beta")
+    blockers = []
+    if beta:
+        try:
+            blockers = validate_promotion_candidate(model_type, beta)
+        except Exception as error:
+            blockers = [f"promotion validation failed: {error}"]
     return {
         "model_type": model_type,
         "stable": entry.get("stable"),
-        "beta": entry.get("beta"),
+        "beta": beta,
+        "promotion": {
+            "ready": bool(beta) and not blockers,
+            "blockers": blockers,
+        },
         "history": history[-MAX_HISTORY_ENTRIES:],
     }
+
+
+class BetaVerificationRequest(BaseModel):
+    date: Optional[str] = None
 
 
 @router.get("/status")
 async def get_model_status(token: Optional[str] = None):
     _require_admin(token)
+    shadows = {
+        "fuel_moisture": fuel_moisture_shadow_diagnostics(),
+        "v4": v4_shadow_diagnostics(),
+        "v5": v5_shadow_diagnostics(),
+        "risk_fusion": risk_fusion_shadow_diagnostics(),
+        "risk_fusion_glm": risk_fusion_glm_shadow_diagnostics(),
+    }
     return {
         "registry": [_registry_summary(model_type) for model_type in REGISTRY_MODEL_TYPES],
         "fuel_moisture_shadow": {
-            "diagnostics": fuel_moisture_shadow_diagnostics(),
+            "diagnostics": shadows["fuel_moisture"],
             "promotion_gate": evaluate_shadow_evidence(),
         },
         "guarded_shadows": {
-            "v4": v4_shadow_diagnostics(),
-            "v5": v5_shadow_diagnostics(),
-            "risk_fusion": risk_fusion_shadow_diagnostics(),
-            "risk_fusion_glm": risk_fusion_glm_shadow_diagnostics(),
+            "v4": shadows["v4"],
+            "v5": shadows["v5"],
+            "risk_fusion": shadows["risk_fusion"],
+            "risk_fusion_glm": shadows["risk_fusion_glm"],
         },
+        "operations": build_beta_operations_status(shadows=shadows),
     }
+
+
+@router.post("/verify-beta")
+async def verify_beta_forecast(payload: BetaVerificationRequest, token: Optional[str] = None):
+    _require_admin(token)
+    try:
+        return await asyncio.to_thread(run_beta_verification, payload.date)
+    except RuntimeError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Beta verification failed: {error}") from error

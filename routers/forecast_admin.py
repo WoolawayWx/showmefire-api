@@ -29,6 +29,6 @@ async def run_beta_forecast(token: Optional[str] = None):
 
 
 @router.get("/status")
-async def beta_forecast_status():
+async def beta_forecast_status(token: Optional[str] = None):
+    _require_admin(token)
     return get_beta_forecast_status()
-

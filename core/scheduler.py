@@ -26,6 +26,7 @@ from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
+from services.beta_verification import run_beta_verification
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,22 @@ async def refresh_testbed_rtma_job():
         save_manifest(manifest)
     except Exception as error:
         logger.error("Testbed RTMA refresh failed: %s", error, exc_info=True)
+
+
+async def verify_latest_beta_forecast_job():
+    """Score Testbed outcomes before nightly archiving moves source observations."""
+    try:
+        report = await asyncio.to_thread(run_beta_verification)
+        logger.info(
+            "Beta verification completed: date=%s records=%s status=%s",
+            report.get("date"), report.get("record_count"), report.get("status"),
+        )
+    except RuntimeError as error:
+        # A beta forecast is intentionally optional. Missing or not-yet-mature
+        # evidence should remain visible without failing an operational job.
+        logger.info("Beta verification skipped: %s", error)
+    except Exception as error:
+        logger.error("Beta verification failed: %s", error, exc_info=True)
 
 
 async def fetch_and_store_afds():
@@ -239,6 +256,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=23,
         minute=30,
         id='update_seasonal_fuel_state',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        verify_latest_beta_forecast_job,
+        'cron',
+        hour=23,
+        minute=40,
+        id='verify_latest_beta_forecast',
         max_instances=1,
         coalesce=True,
     )

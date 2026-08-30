@@ -134,7 +134,10 @@ SNOW_FM_FLOOR_PCT = env_float('SNOW_FM_FLOOR_PCT', 30.0)
 warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
 
 # Set up logging to file in logs folder
-LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
+LOGS_DIR = os.getenv(
+    "FORECAST_LOG_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs'),
+)
 os.makedirs(LOGS_DIR, exist_ok=True)
 log_file_path = os.path.join(LOGS_DIR, 'forecastedfiredanger_modelfd.log')
 
@@ -1298,7 +1301,8 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     validate_feature_contract(df, {"feature_columns": FEATURES, "feature_schema_version": "1.0.0"})
     dmat = xgb.DMatrix(df[FEATURES])
     preds = FM_MODEL.predict(dmat)
-    preds = run_shadow(df, preds)
+    if env_bool("MODEL_SHADOW_ENABLED", True):
+        preds = run_shadow(df, preds)
     
     # 4. Reshape back to the original 2D map
     preds_2d = preds.reshape(shape)
@@ -1421,6 +1425,10 @@ def generate_complete_forecast():
     # FORECAST_OUTPUT_ROOT so every generated artifact is isolated.
     OUTPUT_DIR = Path(os.getenv("FORECAST_OUTPUT_ROOT", str(PROJECT_DIR)))
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # A production checkout already has these folders, but a clean Testbed
+    # output root does not. Create them before the first figure/GIS write.
+    for child in ("images", "gis", "logs", "archive/forecasts"):
+        (OUTPUT_DIR / child).mkdir(parents=True, exist_ok=True)
     
     load_dotenv()
     start_time = time.time()

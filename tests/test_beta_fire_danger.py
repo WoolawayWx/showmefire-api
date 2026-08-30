@@ -1,11 +1,13 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.beta_fire_danger import score_fire_danger
 from core.fire_danger import calculate_fire_danger
 from services import beta_products
+from services import forecast_jobs
 try:
     from routers import forecast_admin
 except ModuleNotFoundError:
@@ -75,6 +77,61 @@ class BetaFireDangerTests(unittest.TestCase):
                 self.assertEqual(result["products"]["realtime_current"]["features"][0]["properties"]["stid"], "TEST")
                 self.assertTrue((root / "gis" / "realtime_current.geojson").exists())
                 self.assertEqual(result["manifest"]["scorer_version"], "1.0.0")
+
+    def test_beta_forecast_prepares_clean_output_tree(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "forecast"
+            with patch.object(forecast_jobs, "BETA_FORECAST_ROOT", root):
+                forecast_jobs._prepare_beta_directories()
+            for relative in ("images", "gis", "logs", "cache/hrrr", "archive/forecasts"):
+                self.assertTrue((root / relative).is_dir(), relative)
+
+    def test_failed_subprocess_records_admin_visible_reason(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "forecast"
+            job_state = Path(directory) / "forecast_job.json"
+
+            def fail_run(*args, **kwargs):
+                kwargs["stdout"].write("forecast setup\nfirst image write failed\n")
+                kwargs["stdout"].flush()
+                return SimpleNamespace(returncode=2)
+
+            job = {"job_id": "test", "status": "queued"}
+            with patch.object(forecast_jobs, "BETA_FORECAST_ROOT", root), \
+                    patch.object(forecast_jobs, "JOB_STATE_PATH", job_state), \
+                    patch.object(forecast_jobs.subprocess, "run", side_effect=fail_run), \
+                    patch.object(forecast_jobs, "_read_model_run", return_value=None):
+                forecast_jobs._run_beta_forecast(job)
+
+            stored = forecast_jobs.json.loads(job_state.read_text(encoding="utf-8"))
+            self.assertEqual(stored["status"], "failed")
+            self.assertEqual(stored["return_code"], 2)
+            self.assertIn("exited with code 2", stored["error"])
+            self.assertIn("first image write failed", stored["error_detail"])
+            self.assertTrue((root / "images").is_dir())
+
+    def test_stale_running_job_does_not_block_rerun(self):
+        stale = {
+            "job_id": "interrupted",
+            "status": "running",
+            "started_at": "2000-01-01T00:00:00+00:00",
+        }
+        with patch.object(forecast_jobs, "_read_job", return_value=stale), \
+                patch.object(forecast_jobs, "_write_job"), \
+                patch.object(forecast_jobs.threading.Thread, "start"):
+            job = forecast_jobs.trigger_beta_forecast("admin@example.org")
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["replaces_stale_job_id"], "interrupted")
+
+    def test_recent_running_job_still_blocks_duplicate(self):
+        active = {
+            "job_id": "active",
+            "status": "running",
+            "started_at": forecast_jobs._now(),
+        }
+        with patch.object(forecast_jobs, "_read_job", return_value=active):
+            with self.assertRaisesRegex(RuntimeError, "already running"):
+                forecast_jobs.trigger_beta_forecast("admin@example.org")
 
     @unittest.skipIf(forecast_admin is None, "API authentication dependencies are not installed")
     def test_forecast_trigger_requires_admin(self):
