@@ -8,6 +8,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
+TODAY_DASH=$(TZ="America/Chicago" date +%Y-%m-%d)
+
 # Ensure cron can find common binaries and prefer virtualenv Python.
 export PATH="/opt/venv/bin:$REPO_ROOT/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
@@ -26,10 +28,14 @@ fi
 
 "$PYTHON" scripts/endOfDay.py "$@"
 
+# Peak RTMA analysis for the same local date / 10:00–21:00 CT window as
+# the station verification report. Failure here must not skip scoring.
+"$PYTHON" -c "from services.rtma_peak import generate_rtma_peak; generate_rtma_peak('$TODAY_DASH')" \
+	|| echo "WARN: RTMA peak generation failed for $TODAY_DASH" >&2
+
 "$PYTHON" forecast/endOfDayReport.py
 "$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta
 
-TODAY_DASH=$(TZ="America/Chicago" date +%Y-%m-%d)
 SUMMARY_FILE="reports/$TODAY_DASH/validation_summary.json"
 SUMMARY_FILE_BETA="reports/$TODAY_DASH/validation_summary_beta.json"
 VERIFICATION_CSV="reports/verification_history.csv"

@@ -56,6 +56,14 @@ def _forecast_peak_png_path(date: str) -> Path:
     return Path(IMAGES_DIR) / "forecast_peak" / "archive" / f"{date}.png"
 
 
+def _rtma_peak_tif_path(date: str) -> Path:
+    return Path(GIS_DIR) / "rtma_peak" / "archive" / f"{date}.tif"
+
+
+def _rtma_peak_png_path(date: str) -> Path:
+    return Path(IMAGES_DIR) / "rtma_peak" / "archive" / f"{date}.png"
+
+
 def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:
     value = entry.get("metrics", {}).get(metric_label, {}).get("mae")
     return value if isinstance(value, (int, float)) else None
@@ -82,6 +90,7 @@ async def get_verification_history(limit: int = 90):
         row["fire_danger_accuracy"] = _fire_danger_accuracy(entry)
         row["has_confusion_matrix"] = bool(entry.get("confusion_matrix"))
         row["has_observed_peak"] = _observed_peak_tif_path(date).exists()
+        row["has_rtma_peak"] = _rtma_peak_tif_path(date).exists()
         dates.append(row)
 
     return {"dates": dates}
@@ -104,6 +113,8 @@ async def get_verification_report(date: str):
     forecast_peak_tif_path = _forecast_peak_tif_path(date)
     observed_peak_png_path = _observed_peak_png_path(date)
     forecast_peak_png_path = _forecast_peak_png_path(date)
+    rtma_peak_tif_path = _rtma_peak_tif_path(date)
+    rtma_peak_png_path = _rtma_peak_png_path(date)
 
     return {
         "date": summary.get("date", date),
@@ -127,6 +138,12 @@ async def get_verification_report(date: str):
             ),
             "observed_peak_png": (
                 f"observed_peak/archive/{date}.png" if observed_peak_png_path.exists() else None
+            ),
+            "rtma_peak_tif": (
+                f"rtma_peak/archive/{date}.tif" if rtma_peak_tif_path.exists() else None
+            ),
+            "rtma_peak_png": (
+                f"rtma_peak/archive/{date}.png" if rtma_peak_png_path.exists() else None
             ),
         },
     }

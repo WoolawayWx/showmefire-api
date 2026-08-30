@@ -36,6 +36,8 @@ class RerunRequest(BaseModel):
 async def rerun_verification(payload: RerunRequest, token: Optional[str] = None):
     email = _require_admin(token)
     try:
+        from services.rtma_peak import generate_rtma_peak_for_verification
+        generate_rtma_peak_for_verification(payload.date)
         report = run_report(
             date=payload.date,
             forecast_glob=payload.forecast_glob or "station_forecasts_*.json",

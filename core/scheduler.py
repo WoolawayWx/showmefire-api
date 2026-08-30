@@ -211,8 +211,8 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(
         run_rtma_peak_job,
         'cron',
-        hour=23,
-        minute=35,
+        hour=22,
+        minute=20,
         id='end_of_day_rtma_peak',
         max_instances=1,
         coalesce=True,
