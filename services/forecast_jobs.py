@@ -175,6 +175,8 @@ def _write_forecast_comparison() -> bool:
                 "wind_speed_ms": best.get("wind_speed_ms"),
                 "official_category": best["beta"]["official_category"],
                 "official_label": best["beta"]["official_label"],
+                "beta_category": best["beta"]["beta_category"],
+                "beta_label": best["beta"]["beta_label"],
                 "beta_score": best["beta"]["score"],
                 "criteria": best["beta"]["criteria"],
             },

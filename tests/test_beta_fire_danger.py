@@ -49,6 +49,28 @@ class BetaFireDangerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             score_fire_danger(float("nan"), 40, 10)
 
+    def test_beta_category_matches_official_away_from_or_boundaries(self):
+        samples = [(20, 70, 5), (14, 44, 5), (8, 34, 12), (8, 24, 5), (8, 24, 15), (6, 19, 25)]
+        for fm, rh, wind in samples:
+            result = score_fire_danger(fm, rh, wind)
+            self.assertEqual(result["beta_category"], result["official_category"])
+
+    def test_beta_category_can_diverge_when_two_or_branches_are_each_partly_satisfied(self):
+        # Neither elevated branch's hard AND is satisfied here (branch1's wind is
+        # far short of 12; branch2's rh sits just above 25 and its wind is only
+        # moderately past 5), so the canonical rule stays at Moderate. Beta's
+        # soft-OR lets the two partially-satisfied branches combine past 0.5.
+        result = score_fire_danger(8, 25.2, 8.4)
+        self.assertEqual(calculate_fire_danger(8, 25.2, 8.4), 1)
+        self.assertEqual(result["official_category"], 1)
+        self.assertEqual(result["official_label"], "Moderate")
+        self.assertEqual(result["beta_category"], 2)
+        self.assertEqual(result["beta_label"], "Elevated")
+        branches = result["criteria"]["elevated_branches"]
+        self.assertLess(branches["rh35_wind12"], 0.5)
+        self.assertLess(branches["rh25_wind5"], 0.5)
+        self.assertGreaterEqual(result["criteria"]["elevated"], 0.5)
+
     def test_observation_products_are_written_to_beta_paths(self):
         station = {
             "stid": "TEST",
@@ -76,7 +98,7 @@ class BetaFireDangerTests(unittest.TestCase):
                 )
                 self.assertEqual(result["products"]["realtime_current"]["features"][0]["properties"]["stid"], "TEST")
                 self.assertTrue((root / "gis" / "realtime_current.geojson").exists())
-                self.assertEqual(result["manifest"]["scorer_version"], "1.0.0")
+                self.assertEqual(result["manifest"]["scorer_version"], "2.0.0")
 
     def test_beta_forecast_prepares_clean_output_tree(self):
         with TemporaryDirectory() as directory:

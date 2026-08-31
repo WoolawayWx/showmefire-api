@@ -82,6 +82,8 @@ def _station_features(stations: Iterable[dict], raws_by_stid: dict[str, dict]) -
             "wind_speed_knots": round(wind_kts, 2),
             "official_category": result["official_category"],
             "official_label": result["official_label"],
+            "beta_category": result["beta_category"],
+            "beta_label": result["beta_label"],
             "beta_score": result["score"],
             "criteria": result["criteria"],
         }
@@ -143,7 +145,7 @@ def refresh_observation_products(stations_payload: dict, raws_payload: dict) -> 
     for feature in current_features:
         properties = dict(feature["properties"])
         properties["category_difference"] = (
-            properties["beta_score"] - properties["official_category"]
+            properties["beta_category"] - properties["official_category"]
         )
         difference_features.append({**feature, "properties": properties})
 

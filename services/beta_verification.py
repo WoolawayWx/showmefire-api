@@ -158,7 +158,7 @@ def run_beta_verification(
                 meters_per_second_to_knots(row.pred_wind),
             )
             scores.append(result["score"])
-            categories.append(result["official_category"])
+            categories.append(result["beta_category"])
         except (TypeError, ValueError):
             scores.append(np.nan)
             categories.append(np.nan)
