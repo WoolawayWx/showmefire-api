@@ -12,11 +12,13 @@ The admin **Beta Models** page is the operating console. It combines the registr
 
 ## Daily workflow
 
-1. Open `/testbed` and run the isolated beta forecast from the admin control.
+1. The scheduler triggers a fresh isolated beta forecast at 9:00 AM Central (`run_scheduled_beta_forecast`), ahead of the 10 AM–9 PM Central observation window it will be verified against. You can also open `/testbed` and run one manually from the admin control at any time — the scheduled trigger backs off with a log line if one is already running.
 2. Confirm the job reaches `completed` and inspect the generated maps and station comparison.
 3. The scheduler attempts verification at 11:40 PM Central, immediately before nightly archiving. You can also open `/admin/models` and select **Verify latest beta forecast** while the matching observation archive is still local.
 4. Review category MAE, continuous-score MAE, exact match, within-one-category rate, bias, elevated-event support, and the beta-minus-stable deltas.
 5. Investigate any failed isolation check, auto-disabled shadow, drift flag, stale output, or promotion blocker before considering promotion.
+
+Without step 1 happening daily, verification has nothing fresh to score: it silently skips (logged as "Beta verification skipped") whenever the most recent beta forecast predates the observation archive still available on disk.
 
 A negative MAE delta means beta was closer to observations. A positive exact-match or within-one delta means beta improved that rate. Reports with fewer than `BETA_VERIFICATION_MINIMUM_SUPPORT` matched station-hours remain in `collecting_evidence`; the default minimum is 50.
 

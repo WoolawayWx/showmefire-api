@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from services.beta_products import load_manifest, refresh_observation_products
+from services.beta_verification import load_latest_beta_verification
 from services.synoptic import get_station_data
 from core.scheduler import raws_station_data
 
@@ -15,6 +16,16 @@ router = APIRouter(prefix="/api/testbed", tags=["testbed"])
 def get_testbed_products():
     """Return the current beta manifest and refreshable product metadata."""
     return load_manifest()
+
+
+@router.get("/verification")
+def get_testbed_verification():
+    """Return the latest beta-vs-stable outcome verification report, if any.
+
+    Aggregate accuracy metrics only (no station-level or personal data) -
+    safe to expose without authentication, same as the other Testbed reads.
+    """
+    return load_latest_beta_verification() or {"status": "no_report"}
 
 
 @router.post("/observations/refresh")

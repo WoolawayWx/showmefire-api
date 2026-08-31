@@ -27,6 +27,7 @@ from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
+from services.forecast_jobs import trigger_beta_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,22 @@ async def refresh_testbed_rtma_job():
         save_manifest(manifest)
     except Exception as error:
         logger.error("Testbed RTMA refresh failed: %s", error, exc_info=True)
+
+
+async def run_scheduled_beta_forecast_job():
+    """Regenerate the isolated Testbed forecast daily so verification has fresh evidence to score.
+
+    Without this, the nightly verification job has nothing new to compare
+    unless an admin happens to click "Run beta forecast" that same day.
+    """
+    try:
+        job = await asyncio.to_thread(trigger_beta_forecast, "scheduler")
+        logger.info("Scheduled beta forecast triggered: job_id=%s", job.get("job_id"))
+    except RuntimeError as error:
+        # A beta forecast triggered manually (or by a prior tick) is still running.
+        logger.info("Scheduled beta forecast skipped: %s", error)
+    except Exception as error:
+        logger.error("Scheduled beta forecast trigger failed: %s", error, exc_info=True)
 
 
 async def verify_latest_beta_forecast_job():
@@ -256,6 +273,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=23,
         minute=30,
         id='update_seasonal_fuel_state',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        run_scheduled_beta_forecast_job,
+        'cron',
+        hour=9,
+        minute=0,
+        id='run_scheduled_beta_forecast',
         max_instances=1,
         coalesce=True,
     )
