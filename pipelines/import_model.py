@@ -63,6 +63,7 @@ def _verify_generic_multiasset(files, declarations, required_roles):
 
 
 def _verify_fire_behavior_static_assets(files, declarations):
+    import numpy as np
     import xarray as xr
 
     required = {"static_bundle", "static_manifest"}
@@ -75,11 +76,31 @@ def _verify_fire_behavior_static_assets(files, declarations):
             raise SystemExit(f"Missing or invalid release asset: {role}")
         resolved[role] = path
     manifest = json.loads(resolved["static_manifest"].read_text())
+    if manifest.get("synthetic"):
+        raise SystemExit("Synthetic fire behavior bundles cannot be imported into production")
     if manifest.get("sha256") and manifest["sha256"] != _sha256(resolved["static_bundle"]):
         raise SystemExit("Fire behavior static bundle/manifest checksum mismatch")
+    validation = manifest.get("validation") or {}
+    required_gates = {"crs_validated", "units_validated", "nodata_validated"}
+    if not required_gates.issubset(validation) or not all(validation[key] is True for key in required_gates):
+        raise SystemExit("Fire behavior static manifest is missing required validation gates")
     with xr.open_dataset(resolved["static_bundle"]) as ds:
         if ds.sizes.get("x") != 256 or ds.sizes.get("y") != 256:
             raise SystemExit("Fire behavior static bundle grid is not 256x256")
+        required_channels = {
+            "elevation_m", "slope_degrees", "aspect_sin", "aspect_cos",
+            "canopy_cover_pct", "canopy_height_m", "latitude", "longitude",
+            "static_valid_mask", "fuel_model_fbfm40",
+        }
+        if missing := required_channels - set(ds.data_vars):
+            raise SystemExit(f"Fire behavior static channels missing: {sorted(missing)}")
+        if ds.attrs.get("grid_fingerprint") != manifest.get("grid_fingerprint"):
+            raise SystemExit("Fire behavior static grid fingerprint mismatch")
+        if declarations["static_bundle"].get("grid_fingerprint") != manifest.get("grid_fingerprint"):
+            raise SystemExit("Fire behavior release declaration grid fingerprint mismatch")
+        valid = np.asarray(ds["static_valid_mask"].values) > 0.5
+        if not valid.any() or not np.isfinite(ds["latitude"].values[valid]).all():
+            raise SystemExit("Fire behavior static bundle has no valid georeferenced cells")
     return resolved
 
 

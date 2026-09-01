@@ -42,3 +42,25 @@ The scorecard is evidence, not an automatic promotion mechanism. Promotion remai
 - beta accuracy is materially worse than stable without an understood reason.
 
 This keeps evaluation reversible and production changes deliberate.
+
+## Observed Rothermel spread rate
+
+The spread-rate Testbed layer is separate from beta forecast verification. It
+polls for RTMA every 15 minutes and requires a promoted
+`fire_behavior_static` asset contract plus 120–168 cached RTMA hours.
+
+Build and publish the static bundle on the desktop by following
+`ShowMeFire-Models/docs/observed_spread_rate_runbook.md`. On this server:
+
+```bash
+python pipelines/import_model.py \
+  --model fire_behavior_static \
+  --tag fire_behavior_static-vVERSION-beta.N \
+  --repo OWNER/ShowMeFire-Models
+python pipelines/promote_model.py --model fire_behavior_static
+python -c "from services.rtma_capture import warmup_rtma_cache; print(warmup_rtma_cache(days=7))"
+```
+
+Check `/api/testbed/spread-rate/status` before requesting artifacts. A missing
+stable bundle is an operator setup error; `warming` is expected until the
+causal RTMA requirement is met.
