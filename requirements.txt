@@ -98,7 +98,7 @@ pycparser==2.23
 pydantic==2.12.5
 pydantic_core==2.41.5
 pyogrio==0.12.1
-pyretechnics==2025.5.15
+# Installed separately with --no-deps; see requirements.pyretechnics.txt.
 pyparsing==3.2.5
 pyproj==3.7.1
 pyshp==3.0.3

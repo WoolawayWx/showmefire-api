@@ -32,6 +32,12 @@ RUN pip install --upgrade pip
 
 COPY requirements.lock.txt .
 RUN python -m pip install --no-cache-dir -r requirements.lock.txt
+COPY requirements.pyretechnics.txt .
+# Pyretechnics pins NumPy 1.24.x, while goes2go requires NumPy 2.2.5+.
+# Its surface-fire extension is compatible with the locked NumPy 2.2.6,
+# so install the pinned package without asking pip to resolve that stale pin.
+RUN python -m pip install --no-cache-dir --no-deps -r requirements.pyretechnics.txt \
+    && python -c "import numpy, pyretechnics.surface_fire; assert numpy.__version__ == '2.2.6'"
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
 COPY . .
 

@@ -1,0 +1,5 @@
+# Pyretechnics 2025.5.15 unnecessarily constrains NumPy to 1.24.x.
+# The API requires NumPy 2.2.x (including goes2go), and the exercised
+# Pyretechnics surface-fire API is compatible with it. Install this pinned
+# package without dependency resolution after the primary lock file.
+pyretechnics==2025.5.15
