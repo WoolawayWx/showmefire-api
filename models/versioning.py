@@ -148,7 +148,8 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
             shutil.copy2(source, destination)
             asset_records[role] = {"file": str(destination.relative_to(API_DIR)), "sha256": _sha256(destination),
                                    **{key: val for key, val in specification.items() if key != "path"}}
-        primary = asset_records.get("model") or asset_records.get("checkpoint"); versioned_path = API_DIR / primary["file"] if primary else None
+        primary = asset_records.get("model") or asset_records.get("checkpoint") or asset_records.get("static_bundle")
+        versioned_path = API_DIR / primary["file"] if primary else None
     else:
         source_path = Path(source_path); versioned_path = VERSIONS_DIR / f"{model_type}_{version}{source_path.suffix}"; shutil.copy2(source_path, versioned_path)
 
@@ -186,6 +187,12 @@ def validate_promotion_candidate(model_type, candidate):
         missing = sorted(REQUIRED_BETA_METADATA.difference(metadata))
         if missing:
             blockers.append(f"missing metadata: {', '.join(missing)}")
+    if model_type == "fire_behavior_static":
+        if not (candidate.get("assets") or {}).get("static_bundle"):
+            blockers.append("static_bundle asset is required")
+        manifest_asset = (candidate.get("assets") or {}).get("static_manifest")
+        if not manifest_asset:
+            blockers.append("static_manifest asset is required")
     if model_type == "fire_risk_fusion":
         missing = sorted(REQUIRED_BETA_METADATA.union(REQUIRED_RISK_FUSION_METADATA).difference(metadata))
         if missing:

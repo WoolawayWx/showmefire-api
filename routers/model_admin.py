@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/admin/models", tags=["model-admin"])
 # (models/versioning.py). The guarded v4/v5/risk-fusion shadow bundles are
 # separate, non-registry evidence paths - see the top-level README's
 # "V4 guarded shadow boundary" section - and are reported alongside instead.
-REGISTRY_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial"]
+REGISTRY_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_behavior_static"]
 
 MAX_HISTORY_ENTRIES = 5
 

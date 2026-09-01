@@ -15,6 +15,8 @@ from herbie import Herbie
 logger = logging.getLogger(__name__)
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
 RTMA_FILE_RE = re.compile(r"^rtma_(\d{8})_(\d{2})z\.nc$")
+REQUIRED_RTMA_VARS = frozenset({"t2m", "r2", "u10", "v10", "apcp"})
+DEFAULT_SPREAD_RATE_POLL_MINUTES = 15
 
 
 def _root() -> Path:
@@ -71,18 +73,103 @@ def _relative_humidity(temp_k, dewpoint_k):
     return rh.clip(0.0, 100.0)
 
 
+def _fetch_precipitation_mm(run_dt: datetime) -> xr.DataArray:
+  """Hourly accumulated precipitation from the separate RTMA pcp product."""
+  h = Herbie(run_dt, fxx=0, model="rtma", product="pcp")
+  try:
+    pcp = _as_dataset(h.xarray(":(?:APCP|tp):"))
+  except Exception:
+    pcp = _as_dataset(h.xarray("APCP"))
+  if "tp" in pcp:
+    precip = pcp["tp"]
+  elif "apcp" in pcp:
+    precip = pcp["apcp"]
+  else:
+    raise KeyError(f"RTMA precipitation variable missing: {list(pcp.data_vars)}")
+  precip = precip.where(precip > 0, 0.0)
+  precip = precip.rename("apcp")
+  precip.attrs.update({"long_name": "1-hour accumulated precipitation", "units": "mm"})
+  return precip
+
+
+def cache_path_for_hour(run_dt: datetime, cache_dir: Path | None = None) -> Path:
+    if run_dt.tzinfo is not None:
+        run_dt = run_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    run_dt = run_dt.replace(minute=0, second=0, microsecond=0)
+    cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    return cache_dir / f"rtma_{run_dt:%Y%m%d_%H}z.nc"
+
+
+def is_analysis_hour_cached(run_dt: datetime, cache_dir: Path | None = None) -> bool:
+    target = cache_path_for_hour(run_dt, cache_dir=cache_dir)
+    if not target.is_file():
+        return False
+    try:
+        with xr.open_dataset(target) as cached:
+            return REQUIRED_RTMA_VARS.issubset(cached.data_vars)
+    except Exception:
+        return False
+
+
+def ensure_analysis_hour_cached(run_dt: datetime | None = None, cache_dir: Path | None = None) -> dict:
+    """Best-effort fetch of one RTMA hour into the on-server cache."""
+    run_dt = run_dt or latest_complete_hour()
+    cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    already_cached = is_analysis_hour_cached(run_dt, cache_dir=cache_dir)
+    if already_cached:
+        path = cache_path_for_hour(run_dt, cache_dir=cache_dir)
+        return {
+            "analysis_hour": run_dt.isoformat() + "Z",
+            "cached": True,
+            "fetched": False,
+            "path": str(path),
+        }
+    try:
+        path = fetch_rtma(run_dt, cache_dir=cache_dir)
+        return {
+            "analysis_hour": run_dt.isoformat() + "Z",
+            "cached": True,
+            "fetched": True,
+            "path": str(path),
+        }
+    except Exception as exc:
+        logger.warning("RTMA fetch failed for %s: %s", run_dt, exc)
+        return {
+            "analysis_hour": run_dt.isoformat() + "Z",
+            "cached": is_analysis_hour_cached(run_dt, cache_dir=cache_dir),
+            "fetched": False,
+            "error": str(exc),
+        }
+
+
+def ensure_latest_analysis_cached(cache_dir: Path | None = None) -> dict:
+    """Poll NOAA for the latest complete RTMA hour and retain it on disk."""
+    analysis_hour = latest_complete_hour()
+    result = ensure_analysis_hour_cached(analysis_hour, cache_dir=cache_dir)
+    result["cache_dir"] = str(cache_dir or (_root() / "cache" / "rtma"))
+    return result
+
+
+def spread_rate_poll_minutes() -> int:
+    try:
+        minutes = int(os.getenv("SPREAD_RATE_POLL_MINUTES", str(DEFAULT_SPREAD_RATE_POLL_MINUTES)))
+    except ValueError:
+        logger.warning("Invalid SPREAD_RATE_POLL_MINUTES; using %s", DEFAULT_SPREAD_RATE_POLL_MINUTES)
+        minutes = DEFAULT_SPREAD_RATE_POLL_MINUTES
+    return max(5, min(minutes, 60))
+
+
 def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
     if run_dt.tzinfo is not None:
         run_dt = run_dt.astimezone(timezone.utc).replace(tzinfo=None)
     run_dt = run_dt.replace(minute=0, second=0, microsecond=0)
     cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    target = cache_path_for_hour(run_dt, cache_dir=cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = cache_dir / f"rtma_{run_dt:%Y%m%d_%H}z.nc"
     if target.exists():
         try:
             with xr.open_dataset(target) as cached:
-                required = {"t2m", "r2", "u10", "v10"}
-                if required.issubset(cached.data_vars):
+                if REQUIRED_RTMA_VARS.issubset(cached.data_vars):
                     return target
         except Exception:
             pass
@@ -106,17 +193,63 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
             raise KeyError(f"RTMA variables cannot derive RH: {list(ds.data_vars)}")
         ds["r2"] = _relative_humidity(ds["t2m"], ds["d2m"])
         ds["r2"].attrs.update({"long_name": "relative humidity", "units": "%", "derived_from": "t2m,d2m Magnus formula"})
+    try:
+        precip = _fetch_precipitation_mm(run_dt)
+        ds = _sanitize_dataset(xr.merge([ds, precip], compat="override"))
+    except Exception as error:
+        logger.warning("RTMA precipitation unavailable for %s: %s", run_dt, error)
+        ds["apcp"] = xr.zeros_like(ds["t2m"], dtype="float32")
+        ds["apcp"].attrs.update({"long_name": "1-hour accumulated precipitation", "units": "mm", "missing": "true"})
     ds = _crop(ds).load()
     ds.attrs.update({"requested_analysis_time_utc": run_dt.isoformat() + "Z", "domain_bbox": str(MO_BUFFERED_BBOX)})
     ds = _sanitize_dataset(ds)
     temp = target.with_suffix(".nc.tmp")
     ds.to_netcdf(temp, engine="netcdf4")
     with xr.open_dataset(temp) as check:
-        if not {"t2m", "r2", "u10", "v10"}.issubset(check.data_vars):
+        if not REQUIRED_RTMA_VARS.issubset(check.data_vars):
             raise RuntimeError("RTMA cache verification failed")
     temp.replace(target)
     logger.info("cached RTMA %s", target)
     return target
+
+
+def warmup_rtma_cache(
+    days: int = 7,
+    cache_dir: Path | None = None,
+    end_hour: datetime | None = None,
+) -> dict:
+    """Best-effort backfill of hourly RTMA analyses for spread-rate conditioning."""
+    cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    end_hour = end_hour or latest_complete_hour()
+    if end_hour.tzinfo is not None:
+        end_hour = end_hour.astimezone(timezone.utc).replace(tzinfo=None)
+    fetched = failed = 0
+    for offset in range(days * 24):
+        stamp = end_hour - timedelta(hours=offset)
+        try:
+            fetch_rtma(stamp, cache_dir=cache_dir)
+            fetched += 1
+        except Exception:
+            failed += 1
+            logger.exception("RTMA warm-up failed for %s", stamp)
+    return {"fetched": fetched, "failed": failed, "target_hours": days * 24, "end_hour": end_hour.isoformat() + "Z"}
+
+
+def count_cached_hours(
+    end_hour: datetime,
+    hours: int,
+    cache_dir: Path | None = None,
+) -> int:
+    cache_dir = Path(cache_dir or (_root() / "cache" / "rtma"))
+    if end_hour.tzinfo is not None:
+        end_hour = end_hour.astimezone(timezone.utc).replace(tzinfo=None)
+    available = 0
+    for offset in range(hours):
+        stamp = end_hour - timedelta(hours=offset)
+        path = cache_dir / f"rtma_{stamp:%Y%m%d_%H}z.nc"
+        if path.is_file():
+            available += 1
+    return available
 
 
 def latest_complete_hour(now: datetime | None = None) -> datetime:

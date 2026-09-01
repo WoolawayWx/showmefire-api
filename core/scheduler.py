@@ -11,7 +11,7 @@ from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive
-from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour
+from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
@@ -24,6 +24,7 @@ from core.database import (
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
+from services.spread_rate import run_spread_rate_job, run_spread_rate_pipeline
 from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
@@ -82,6 +83,26 @@ async def refresh_testbed_rtma_job():
         save_manifest(manifest)
     except Exception as error:
         logger.error("Testbed RTMA refresh failed: %s", error, exc_info=True)
+
+
+async def refresh_testbed_spread_rate_job():
+    """Poll RTMA and publish spread-rate artifacts on a 15-minute cadence."""
+    try:
+        await run_spread_rate_job(raws_station_data if raws_station_data.get("stations") else None)
+    except Exception as error:
+        logger.error("Testbed spread-rate refresh failed: %s", error, exc_info=True)
+
+
+async def rtma_spread_rate_pipeline_job():
+    """Ensure latest RTMA is cached on the server, then refresh spread-rate."""
+    try:
+        await asyncio.to_thread(run_spread_rate_pipeline, raws_station_data if raws_station_data.get("stations") else None)
+        try:
+            await asyncio.to_thread(cleanup_rtma_cache)
+        except Exception as cleanup_error:
+            logger.error("Spread-rate RTMA retention cleanup failed: %s", cleanup_error, exc_info=True)
+    except Exception as error:
+        logger.error("RTMA/spread-rate pipeline failed: %s", error, exc_info=True)
 
 
 async def run_scheduled_beta_forecast_job():
@@ -258,11 +279,13 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         id='fetch_advanced_fire_detections'
     )
 
+    spread_rate_poll = spread_rate_poll_minutes()
+
     scheduler.add_job(
-        capture_latest_rtma,
-        'cron',
-        minute=50,
-        id='capture_rtma',
+        rtma_spread_rate_pipeline_job,
+        'interval',
+        minutes=spread_rate_poll,
+        id='rtma_spread_rate_pipeline',
         max_instances=1,
         coalesce=True,
     )

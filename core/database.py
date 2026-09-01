@@ -181,15 +181,39 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         ("reporter_org", "TEXT NOT NULL DEFAULT ''"),
         ("address_text", "TEXT NOT NULL DEFAULT ''"),
         ("upload_token_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("incident_id", "INTEGER"),
     ):
         if name not in columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {name} {definition}")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_incident ON fire_events(incident_id)')
 
     # Migrate fire_event_media tables created before department-report uploads.
     cursor.execute("PRAGMA table_info(fire_event_media)")
     media_columns = {row[1] for row in cursor.fetchall()}
     if "kind" not in media_columns:
         cursor.execute("ALTER TABLE fire_event_media ADD COLUMN kind TEXT NOT NULL DEFAULT 'photo'")
+
+
+def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
+    """Persistent grouping of nearby/recent satellite fire detections into one incident."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            centroid_latitude REAL NOT NULL,
+            centroid_longitude REAL NOT NULL,
+            first_detected_at TEXT NOT NULL,
+            last_detected_at TEXT NOT NULL,
+            detection_count INTEGER NOT NULL DEFAULT 0,
+            county_fips TEXT,
+            county_name TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_last_detected ON fire_incidents(last_detected_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_centroid ON fire_incidents(centroid_latitude, centroid_longitude)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_county ON fire_incidents(county_fips)')
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -663,6 +687,7 @@ def init_database():
 
     # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
     _ensure_fire_event_tables(cursor)
+    _ensure_fire_incident_tables(cursor)
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)
@@ -1864,6 +1889,11 @@ def upsert_detection_event(
         cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
         event_id = cursor.fetchone()[0]
         if is_new:
+            if source in ("modis", "viirs", "ngfs"):
+                incident_id = find_or_create_incident_for_detection(
+                    cursor, latitude, longitude, occurred_at, county_fips, county_name
+                )
+                cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
                                     to_status="approved", to_tier=verification_tier)
         conn.commit()
@@ -2029,6 +2059,189 @@ def list_fire_events(
             event["fuel_types"] = _fire_event_fuels(cursor, event["id"])
             events.append(event)
         return events
+    finally:
+        conn.close()
+
+
+INCIDENT_CLUSTER_RADIUS_KM = float(os.getenv("FIRE_INCIDENT_CLUSTER_RADIUS_KM", "2.0"))
+INCIDENT_CLUSTER_WINDOW_HOURS = float(os.getenv("FIRE_INCIDENT_CLUSTER_WINDOW_HOURS", "48.0"))
+
+
+def _parse_occurred_at(occurred_at: str) -> datetime:
+    return datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+
+
+def find_or_create_incident_for_detection(
+    cursor: sqlite3.Cursor,
+    latitude: float,
+    longitude: float,
+    occurred_at: str,
+    county_fips: Optional[str] = None,
+    county_name: Optional[str] = None,
+    radius_km: float = INCIDENT_CLUSTER_RADIUS_KM,
+    window_hours: float = INCIDENT_CLUSTER_WINDOW_HOURS,
+) -> int:
+    """
+    Find an existing fire_incidents row within radius_km/window_hours of this
+    satellite detection and attach to it (updating its running-average
+    centroid, detection_count, and time span), or create a new incident.
+
+    Caller owns the transaction/commit (same convention as
+    record_fire_moderation). Only meant for satellite-sourced detections
+    (modis/viirs/ngfs) - human-submitted reports keep their separate
+    list_nearby_fire_events() duplicate-hint workflow untouched.
+    """
+    from datetime import timedelta
+    from core.geo import degree_box, haversine_km
+
+    occurred_dt = _parse_occurred_at(occurred_at)
+    window_start = (occurred_dt - timedelta(hours=window_hours)).isoformat()
+    window_end = (occurred_dt + timedelta(hours=window_hours)).isoformat()
+    min_lat, max_lat, min_lon, max_lon = degree_box(latitude, longitude, radius_km)
+
+    cursor.execute('''
+        SELECT id, centroid_latitude, centroid_longitude, detection_count,
+               first_detected_at, last_detected_at
+        FROM fire_incidents
+        WHERE centroid_latitude BETWEEN ? AND ? AND centroid_longitude BETWEEN ? AND ?
+          AND last_detected_at >= ? AND first_detected_at <= ?
+    ''', (min_lat, max_lat, min_lon, max_lon, window_start, window_end))
+
+    best_row, best_distance = None, None
+    for row in cursor.fetchall():
+        distance = haversine_km(latitude, longitude, row["centroid_latitude"], row["centroid_longitude"])
+        if distance <= radius_km and (best_distance is None or distance < best_distance):
+            best_row, best_distance = row, distance
+
+    if best_row is not None:
+        n = best_row["detection_count"]
+        new_lat = (best_row["centroid_latitude"] * n + latitude) / (n + 1)
+        new_lon = (best_row["centroid_longitude"] * n + longitude) / (n + 1)
+        new_first = min(best_row["first_detected_at"], occurred_at)
+        new_last = max(best_row["last_detected_at"], occurred_at)
+        cursor.execute('''
+            UPDATE fire_incidents
+            SET centroid_latitude = ?, centroid_longitude = ?, detection_count = detection_count + 1,
+                first_detected_at = ?, last_detected_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (new_lat, new_lon, new_first, new_last, best_row["id"]))
+        return best_row["id"]
+
+    cursor.execute('''
+        INSERT INTO fire_incidents
+            (centroid_latitude, centroid_longitude, first_detected_at, last_detected_at,
+             detection_count, county_fips, county_name)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+    ''', (latitude, longitude, occurred_at, occurred_at, county_fips, county_name))
+    return cursor.lastrowid
+
+
+def list_unclustered_satellite_events() -> List[Dict]:
+    """Satellite-sourced fire_events rows with no incident_id yet, oldest first."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id, latitude, longitude, occurred_at, county_fips, county_name
+            FROM fire_events
+            WHERE source IN ('modis', 'viirs', 'ngfs') AND incident_id IS NULL
+            ORDER BY occurred_at ASC
+        ''')
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def _fire_incident_sources(cursor: sqlite3.Cursor, incident_id: int) -> Dict[str, int]:
+    cursor.execute('SELECT source, COUNT(*) as n FROM fire_events WHERE incident_id = ? GROUP BY source', (incident_id,))
+    return {row["source"]: row["n"] for row in cursor.fetchall()}
+
+
+def list_fire_incidents(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    source: Optional[str] = None,
+    bbox: Optional[tuple] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict]:
+    """bbox is (min_lon, min_lat, max_lon, max_lat), matching list_fire_events."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
+
+        clauses = []
+        params: List = []
+        if since:
+            clauses.append("last_detected_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("first_detected_at <= ?")
+            params.append(until)
+        if bbox:
+            min_lon, min_lat, max_lon, max_lat = bbox
+            clauses.append("centroid_latitude BETWEEN ? AND ? AND centroid_longitude BETWEEN ? AND ?")
+            params.extend([min_lat, max_lat, min_lon, max_lon])
+        if source:
+            clauses.append('''EXISTS (
+                SELECT 1 FROM fire_events fe WHERE fe.incident_id = fire_incidents.id AND fe.source = ?
+            )''')
+            params.append(source)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor.execute(f'''
+            SELECT * FROM fire_incidents
+            {where}
+            ORDER BY last_detected_at DESC
+            LIMIT ? OFFSET ?
+        ''', (*params, safe_limit, safe_offset))
+
+        incidents = []
+        for row in cursor.fetchall():
+            incident = dict(row)
+            incident["sources"] = _fire_incident_sources(cursor, incident["id"])
+            incidents.append(incident)
+        return incidents
+    finally:
+        conn.close()
+
+
+def get_fire_incident(incident_id: int) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM fire_incidents WHERE id = ?', (incident_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        incident = dict(row)
+        incident["sources"] = _fire_incident_sources(cursor, incident_id)
+        return incident
+    finally:
+        conn.close()
+
+
+def list_fire_incident_members(incident_id: int) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source
+            FROM fire_events
+            WHERE incident_id = ?
+            ORDER BY occurred_at ASC
+        ''', (incident_id,))
+        return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 

@@ -103,10 +103,23 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
     )
 
 
+def _satdet_sort_key(feature: Dict[str, Any]) -> str:
+    return (feature.get("properties") or {}).get("ACQ_DATE_TIME") or ""
+
+
+def _ngfs_sort_key(feature: Dict[str, Any]) -> str:
+    return (feature.get("properties") or {}).get("event_datetime") or ""
+
+
 def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: bool = False) -> Dict[str, Any]:
     """
     Ingest api/gis/satfiredetection.geojson and
     api/data/missouri_fires.geojson into fire_events.
+
+    Features are processed oldest-first (GeoJSON feature order isn't
+    guaranteed chronological) so incident clustering in
+    upsert_detection_event/find_or_create_incident_for_detection sees
+    detections in a stable, time-forward order.
 
     Returns {"inserted": n, "updated": n, "skipped": n, "errors": [...]}.
     """
@@ -114,7 +127,10 @@ def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: boo
     inserted = updated = skipped = 0
     errors: List[str] = []
 
-    for satdet_feature in _load_geojson(resolved.get("satdet", SATDET_PATH)):
+    satdet_features = sorted(_load_geojson(resolved.get("satdet", SATDET_PATH)), key=_satdet_sort_key)
+    ngfs_features = sorted(_load_geojson(resolved.get("ngfs", NGFS_PATH)), key=_ngfs_sort_key)
+
+    for satdet_feature in satdet_features:
         try:
             if dry_run:
                 if _extract_coordinates(satdet_feature) is None:
@@ -130,7 +146,7 @@ def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: boo
         except Exception as exc:
             errors.append(f"satdet: {exc}")
 
-    for ngfs_feature in _load_geojson(resolved.get("ngfs", NGFS_PATH)):
+    for ngfs_feature in ngfs_features:
         try:
             if dry_run:
                 if _extract_coordinates(ngfs_feature) is None:

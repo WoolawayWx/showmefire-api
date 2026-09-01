@@ -5,6 +5,7 @@ from fastapi import APIRouter
 
 from services.beta_products import load_manifest, refresh_observation_products
 from services.beta_verification import load_latest_beta_verification
+from services.spread_rate import spread_rate_status
 from services.synoptic import get_station_data
 from core.scheduler import raws_station_data
 
@@ -26,6 +27,12 @@ def get_testbed_verification():
     safe to expose without authentication, same as the other Testbed reads.
     """
     return load_latest_beta_verification() or {"status": "no_report"}
+
+
+@router.get("/spread-rate/status")
+def get_spread_rate_status():
+    """Return methodology, latency, and warm-up status for the spread-rate layer."""
+    return spread_rate_status()
 
 
 @router.post("/observations/refresh")

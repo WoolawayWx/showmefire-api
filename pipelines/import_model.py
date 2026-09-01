@@ -62,6 +62,27 @@ def _verify_generic_multiasset(files, declarations, required_roles):
     return resolved
 
 
+def _verify_fire_behavior_static_assets(files, declarations):
+    import xarray as xr
+
+    required = {"static_bundle", "static_manifest"}
+    if missing := required - set(declarations):
+        raise SystemExit(f"Fire behavior static release assets missing: {sorted(missing)}")
+    resolved = {}
+    for role, declaration in declarations.items():
+        path = files.get(declaration["filename"])
+        if not path or _sha256(path) != declaration["sha256"]:
+            raise SystemExit(f"Missing or invalid release asset: {role}")
+        resolved[role] = path
+    manifest = json.loads(resolved["static_manifest"].read_text())
+    if manifest.get("sha256") and manifest["sha256"] != _sha256(resolved["static_bundle"]):
+        raise SystemExit("Fire behavior static bundle/manifest checksum mismatch")
+    with xr.open_dataset(resolved["static_bundle"]) as ds:
+        if ds.sizes.get("x") != 256 or ds.sizes.get("y") != 256:
+            raise SystemExit("Fire behavior static bundle grid is not 256x256")
+    return resolved
+
+
 def _verify_spatial_assets(files, declarations):
     import numpy as np
     import onnxruntime as ort
@@ -117,6 +138,8 @@ def import_release(model_type, tag, repo, bump="patch"):
             files_by_name = {path.name: path for path in model_files}
             if model_type == "fuel_moisture_spatial":
                 resolved = _verify_spatial_assets(files_by_name, declarations)
+            elif model_type == "fire_behavior_static":
+                resolved = _verify_fire_behavior_static_assets(files_by_name, declarations)
             elif model_type == "fire_risk_fusion":
                 resolved = _verify_generic_multiasset(files_by_name, declarations, REQUIRED_RISK_FUSION_ASSET_ROLES)
             else:
@@ -137,7 +160,7 @@ def import_release(model_type, tag, repo, bump="patch"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Import a model from a GitHub release into this server's registry as a beta candidate")
     parser.add_argument("--model", required=True,
-                         choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion"])
+                         choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion", "fire_behavior_static"])
     parser.add_argument("--tag", required=True, help="Release tag to import, e.g. fuel_moisture-v1.5.0-beta.1")
     parser.add_argument("--repo", default=None, help="owner/repo (defaults to SMF_GITHUB_REPO env var)")
     parser.add_argument("--bump", choices=["major", "minor", "patch"], default="patch",

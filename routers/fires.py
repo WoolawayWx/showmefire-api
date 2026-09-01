@@ -42,9 +42,12 @@ from core.database import (
     delete_fire_event,
     export_fire_labels,
     get_fire_event,
+    get_fire_incident,
     get_fire_upload_token_hash,
     is_ip_blocked,
     list_fire_events,
+    list_fire_incident_members,
+    list_fire_incidents,
     list_nearby_fire_events,
     set_fire_event_status,
     update_fire_event,
@@ -797,3 +800,34 @@ def admin_add_to_blocklist(payload: BlocklistCreate, token: Optional[str] = None
     actor = _require_admin(token)
     add_ip_to_blocklist(payload.ip_hash, payload.reason, actor)
     return {"success": True}
+
+
+# --- Admin: satellite detection incidents ---
+
+@router.get("/api/admin/fires/incidents")
+def admin_list_fire_incidents(
+    token: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    source: Optional[str] = None,
+    bbox: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List satellite-detection incidents, most recently active first (admin only)"""
+    _require_admin(token)
+    incidents = list_fire_incidents(
+        since=since, until=until, source=source, bbox=_parse_bbox(bbox), limit=limit, offset=offset,
+    )
+    return {"success": True, "incidents": incidents, "count": len(incidents)}
+
+
+@router.get("/api/admin/fires/incidents/{incident_id}")
+def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
+    """Incident detail, including every member detection for map plotting (admin only)"""
+    _require_admin(token)
+    incident = get_fire_incident(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    incident["detections"] = list_fire_incident_members(incident_id)
+    return {"success": True, "incident": incident}
