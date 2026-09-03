@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+import pyproj
 import xarray as xr
 from herbie import Herbie
 
@@ -80,6 +81,40 @@ def _relative_humidity(temp_k, dewpoint_k):
     dewpoint_c = dewpoint_k - 273.15
     rh = 100.0 * np.exp((17.625 * dewpoint_c) / (243.04 + dewpoint_c) - (17.625 * temp_c) / (243.04 + temp_c))
     return rh.clip(0.0, 100.0)
+
+
+def _projected_axes(ds):
+    """Derive regular projected x/y axes from Herbie's 2D lat/lon fields."""
+    projection = ds.get("gribfile_projection")
+    if projection is None or "grid_mapping_name" not in projection.attrs:
+        raise ValueError("RTMA dataset has no CF projection metadata")
+    crs = pyproj.CRS.from_cf(projection.attrs)
+    longitude = xr.where(ds.longitude > 180, ds.longitude - 360, ds.longitude)
+    x_values, y_values = pyproj.Transformer.from_crs(
+        "EPSG:4326", crs, always_xy=True
+    ).transform(longitude.values, ds.latitude.values)
+    return np.asarray(x_values)[0, :], np.asarray(y_values)[:, 0]
+
+
+def _align_precipitation(precip, target):
+    """Put precipitation on the analysis grid when RTMA products differ."""
+    if precip.sizes == target.sizes and np.allclose(
+        precip.latitude.values, target.latitude.values, equal_nan=True
+    ) and np.allclose(
+        precip.longitude.values, target.longitude.values, equal_nan=True
+    ):
+        return precip
+    source_x, source_y = _projected_axes(precip)
+    target_x, target_y = _projected_axes(target)
+    values = precip.reset_coords(drop=True).assign_coords(
+        x=("x", source_x), y=("y", source_y)
+    )
+    aligned = values.interp(
+        x=("x", target_x), y=("y", target_y), method="nearest"
+    )
+    return aligned.assign_coords(
+        latitude=target.latitude, longitude=target.longitude
+    )
 
 
 def _fetch_precipitation_mm(run_dt: datetime) -> xr.DataArray:
@@ -225,6 +260,7 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
         ds["r2"].attrs.update({"long_name": "relative humidity", "units": "%", "derived_from": "t2m,d2m Magnus formula"})
     try:
         precip = _fetch_precipitation_mm(run_dt)
+        precip = _align_precipitation(precip, ds["t2m"])
         ds = _sanitize_dataset(xr.merge([ds, precip], compat="override"))
     except Exception as error:
         logger.warning("RTMA precipitation unavailable for %s: %s", run_dt, error)
