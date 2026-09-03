@@ -6,14 +6,47 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pyproj
 import xarray as xr
 
 from services.rtma_capture import (
     REQUIRED_RTMA_VARS,
+    _align_precipitation,
     ensure_analysis_hour_cached,
     is_analysis_hour_cached,
     spread_rate_poll_minutes,
 )
+
+
+def _grid_dataset(x_values, y_values, variable):
+    crs = pyproj.CRS.from_epsg(5070)
+    xx, yy = np.meshgrid(x_values, y_values)
+    longitude, latitude = pyproj.Transformer.from_crs(
+        crs, "EPSG:4326", always_xy=True
+    ).transform(xx, yy)
+    projection = xr.DataArray(0.0, attrs=crs.to_cf())
+    return xr.Dataset(
+        {
+            variable: (("y", "x"), np.ones(xx.shape, dtype=np.float32)),
+            "gribfile_projection": projection,
+        },
+        coords={
+            "latitude": (("y", "x"), latitude),
+            "longitude": (("y", "x"), longitude),
+        },
+    )
+
+
+def test_precipitation_aligns_to_analysis_grid():
+    source = _grid_dataset(np.arange(0, 5000, 1000), np.arange(0, 4000, 1000), "apcp")
+    source_data = source["apcp"].copy(deep=False)
+    source_data.attrs["_projection_attrs"] = pyproj.CRS.from_epsg(5070).to_cf()
+    target = _grid_dataset(np.arange(0, 4000, 1000), np.arange(0, 3000, 1000), "t2m")
+
+    aligned = _align_precipitation(source_data, target)
+
+    assert aligned.sizes == target.sizes
+    assert "_projection_attrs" not in aligned.attrs
 
 
 def test_complete_cache_must_include_precipitation(tmp_path):

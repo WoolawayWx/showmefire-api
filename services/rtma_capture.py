@@ -85,10 +85,14 @@ def _relative_humidity(temp_k, dewpoint_k):
 
 def _projected_axes(ds):
     """Derive regular projected x/y axes from Herbie's 2D lat/lon fields."""
-    projection = ds.get("gribfile_projection")
-    if projection is None or "grid_mapping_name" not in projection.attrs:
+    projection = ds.get("gribfile_projection") if hasattr(ds, "get") else None
+    projection_attrs = (
+        projection.attrs if projection is not None
+        else ds.attrs.get("_projection_attrs", {})
+    )
+    if "grid_mapping_name" not in projection_attrs:
         raise ValueError("RTMA dataset has no CF projection metadata")
-    crs = pyproj.CRS.from_cf(projection.attrs)
+    crs = pyproj.CRS.from_cf(projection_attrs)
     longitude = xr.where(ds.longitude > 180, ds.longitude - 360, ds.longitude)
     x_values, y_values = pyproj.Transformer.from_crs(
         "EPSG:4326", crs, always_xy=True
@@ -98,22 +102,26 @@ def _projected_axes(ds):
 
 def _align_precipitation(precip, target):
     """Put precipitation on the analysis grid when RTMA products differ."""
+    target_data = target["t2m"] if isinstance(target, xr.Dataset) else target
     if precip.sizes == target.sizes and np.allclose(
-        precip.latitude.values, target.latitude.values, equal_nan=True
+        precip.latitude.values, target_data.latitude.values, equal_nan=True
     ) and np.allclose(
-        precip.longitude.values, target.longitude.values, equal_nan=True
+        precip.longitude.values, target_data.longitude.values, equal_nan=True
     ):
+        precip = precip.copy(deep=False)
+        precip.attrs.pop("_projection_attrs", None)
         return precip
     source_x, source_y = _projected_axes(precip)
     target_x, target_y = _projected_axes(target)
     values = precip.reset_coords(drop=True).assign_coords(
         x=("x", source_x), y=("y", source_y)
     )
+    values.attrs.pop("_projection_attrs", None)
     aligned = values.interp(
         x=("x", target_x), y=("y", target_y), method="nearest"
     )
     return aligned.assign_coords(
-        latitude=target.latitude, longitude=target.longitude
+        latitude=target_data.latitude, longitude=target_data.longitude
     )
 
 
@@ -147,6 +155,8 @@ def _fetch_precipitation_mm(run_dt: datetime) -> xr.DataArray:
     raise KeyError(f"RTMA precipitation variable missing: {list(pcp.data_vars)}")
   precip = precip.where(precip > 0, 0.0)
   precip = precip.rename("apcp")
+  if "gribfile_projection" in pcp:
+    precip.attrs["_projection_attrs"] = dict(pcp["gribfile_projection"].attrs)
   precip.attrs.update({"long_name": "1-hour accumulated precipitation", "units": "mm"})
   return precip
 
@@ -260,7 +270,7 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
         ds["r2"].attrs.update({"long_name": "relative humidity", "units": "%", "derived_from": "t2m,d2m Magnus formula"})
     try:
         precip = _fetch_precipitation_mm(run_dt)
-        precip = _align_precipitation(precip, ds["t2m"])
+        precip = _align_precipitation(precip, ds)
         ds = _sanitize_dataset(xr.merge([ds, precip], compat="override"))
     except Exception as error:
         logger.warning("RTMA precipitation unavailable for %s: %s", run_dt, error)
