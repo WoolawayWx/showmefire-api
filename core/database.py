@@ -2723,8 +2723,9 @@ def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
             proof_stored_filename TEXT NOT NULL DEFAULT '',
             proof_original_filename TEXT NOT NULL DEFAULT '',
             proof_content_type TEXT NOT NULL DEFAULT '',
+            request_type TEXT NOT NULL DEFAULT 'issue',
             effective_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL DEFAULT '',
             submitter_ip_hash TEXT NOT NULL DEFAULT '',
             upload_token_hash TEXT NOT NULL DEFAULT '',
             captcha_verdict TEXT NOT NULL DEFAULT '',
@@ -2780,6 +2781,12 @@ def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
         'CREATE INDEX IF NOT EXISTS idx_burn_ban_throttle_updated '
         'ON burn_ban_submission_throttle(updated_at)'
     )
+    cursor.execute("PRAGMA table_info(burn_ban_submissions)")
+    burn_ban_columns = {row[1] for row in cursor.fetchall()}
+    if "request_type" not in burn_ban_columns:
+        cursor.execute(
+            "ALTER TABLE burn_ban_submissions ADD COLUMN request_type TEXT NOT NULL DEFAULT 'issue'"
+        )
 
 
 def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
@@ -2937,6 +2944,7 @@ def delete_forecast_discussion(discussion_id: int) -> bool:
 # --- County burn-ban helpers ---
 
 BURN_BAN_STATUSES = {"pending", "confirmed", "denied", "expired"}
+BURN_BAN_REQUEST_TYPES = {"issue", "lift"}
 
 
 def _burn_ban_row_to_dict(row: Optional[sqlite3.Row], *, admin: bool = False) -> Optional[Dict]:
@@ -2984,27 +2992,29 @@ def create_burn_ban_submission(
     submitter_contact: str,
     proof_url: str,
     effective_at: str,
-    expires_at: str,
+    expires_at: str = "",
     submitter_ip_hash: str,
     upload_token_hash: str,
     captcha_verdict: str,
     consent_version: str,
+    request_type: str = "issue",
 ) -> Dict:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
+        kind = request_type if request_type in BURN_BAN_REQUEST_TYPES else "issue"
         cursor.execute('''
             INSERT INTO burn_ban_submissions (
                 status, county_fips, county_name, submitter_name, submitter_contact,
-                proof_url, effective_at, expires_at, submitter_ip_hash, upload_token_hash,
-                captcha_verdict, consent_version
-            ) VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                proof_url, request_type, effective_at, expires_at, submitter_ip_hash,
+                upload_token_hash, captcha_verdict, consent_version
+            ) VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             county_fips, county_name, submitter_name, submitter_contact,
-            proof_url, effective_at, expires_at, submitter_ip_hash, upload_token_hash,
-            captcha_verdict, consent_version,
+            proof_url, kind, effective_at, expires_at or "", submitter_ip_hash,
+            upload_token_hash, captcha_verdict, consent_version,
         ))
         submission_id = cursor.lastrowid
         conn.commit()
@@ -3104,8 +3114,9 @@ def list_active_burn_bans(*, now: Optional[datetime] = None) -> List[Dict]:
         cursor.execute('''
             SELECT * FROM burn_ban_submissions
             WHERE status = 'confirmed'
+              AND COALESCE(request_type, 'issue') = 'issue'
               AND effective_at <= ?
-              AND expires_at > ?
+              AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
             ORDER BY county_name ASC
         ''', (now_iso, now_iso))
         return [
@@ -3288,7 +3299,10 @@ def expire_stale_burn_bans(*, now: Optional[datetime] = None) -> int:
     try:
         cursor.execute('''
             SELECT id FROM burn_ban_submissions
-            WHERE status = 'confirmed' AND expires_at <= ?
+            WHERE status = 'confirmed'
+              AND expires_at IS NOT NULL
+              AND expires_at != ''
+              AND expires_at <= ?
         ''', (now_iso,))
         ids = [row[0] for row in cursor.fetchall()]
         for submission_id in ids:
@@ -3301,6 +3315,42 @@ def expire_stale_burn_bans(*, now: Optional[datetime] = None) -> int:
                 cursor, submission_id, action="expired", actor="system:auto-expire",
                 from_status="confirmed", to_status="expired",
                 reason="expiration date reached",
+            )
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def expire_confirmed_burn_bans_for_county(
+    county_fips: str,
+    *,
+    actor: str,
+    reason: str = "",
+    exclude_id: Optional[int] = None,
+) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT id FROM burn_ban_submissions
+            WHERE status = 'confirmed'
+              AND county_fips = ?
+              AND COALESCE(request_type, 'issue') = 'issue'
+              AND (? IS NULL OR id != ?)
+        ''', (county_fips, exclude_id, exclude_id))
+        ids = [row[0] for row in cursor.fetchall()]
+        for submission_id in ids:
+            cursor.execute('''
+                UPDATE burn_ban_submissions
+                SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (submission_id,))
+            _record_burn_ban_moderation(
+                cursor, submission_id, action="expired", actor=actor,
+                from_status="confirmed", to_status="expired",
+                reason=reason or "county burn ban lifted",
             )
         conn.commit()
         return len(ids)

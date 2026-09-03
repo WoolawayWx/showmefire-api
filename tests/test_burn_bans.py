@@ -52,6 +52,26 @@ class BurnBanValidationTests(unittest.TestCase):
                 expires_at=(now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             ))
 
+    def test_allows_missing_expiration(self):
+        payload = burn_bans_router.BurnBanCreate(**_valid_payload(expires_at=""))
+        self.assertEqual(payload.expires_at, "")
+
+    def test_accepts_lift_request(self):
+        payload = burn_bans_router.BurnBanCreate(**_valid_payload(request_type="lift", expires_at=""))
+        self.assertEqual(payload.request_type, "lift")
+        self.assertEqual(payload.expires_at, "")
+
+    def test_admin_create_allows_missing_source_and_end_date(self):
+        now = datetime.now(timezone.utc)
+        payload = burn_bans_router.BurnBanAdminCreate(
+            county_fips="29019",
+            proof_url="",
+            effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            expires_at="",
+        )
+        self.assertEqual(payload.proof_url, "")
+        self.assertEqual(payload.expires_at, "")
+
     def test_rejects_honeypot(self):
         with self.assertRaises(ValidationError):
             burn_bans_router.BurnBanCreate(**_valid_payload(website="spam"))
@@ -119,6 +139,56 @@ class BurnBanWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(result["submission"]["status"], "confirmed")
         self.assertEqual(len(database.list_active_burn_bans()), 1)
+
+    @patch.object(burn_bans_router, "_maybe_regenerate_map")
+    def test_admin_create_without_source_or_end_date(self, _map):
+        now = datetime.now(timezone.utc)
+        result = burn_bans_router.admin_create_burn_ban(
+            burn_bans_router.BurnBanAdminCreate(
+                county_fips="29019",
+                proof_url="",
+                effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at="",
+            ),
+            self.token,
+        )
+        self.assertEqual(result["submission"]["status"], "confirmed")
+        self.assertEqual(result["submission"]["proof_url"], "")
+        self.assertEqual(result["submission"]["expires_at"], "")
+        self.assertEqual(len(database.list_active_burn_bans()), 1)
+
+    @patch.object(burn_bans_router, "verify_turnstile", return_value=(True, "success"))
+    @patch.object(burn_bans_router, "_maybe_regenerate_map")
+    def test_confirming_lift_expires_active_ban(self, _map, _turnstile):
+        now = datetime.now(timezone.utc)
+        created = burn_bans_router.admin_create_burn_ban(
+            burn_bans_router.BurnBanAdminCreate(
+                county_fips="29019",
+                proof_url="",
+                effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at="",
+            ),
+            self.token,
+        )
+        self.assertEqual(len(database.list_active_burn_bans()), 1)
+        lift = burn_bans_router.submit_burn_ban(
+            burn_bans_router.BurnBanCreate(**_valid_payload(
+                request_type="lift",
+                effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                expires_at="",
+            )),
+            _FakeRequest(),
+        )
+        confirmed = burn_bans_router.admin_confirm_burn_ban(
+            lift["submission"]["id"],
+            burn_bans_router.BurnBanModeration(),
+            self.token,
+        )
+        self.assertEqual(confirmed["submission"]["status"], "confirmed")
+        self.assertEqual(confirmed["submission"]["request_type"], "lift")
+        self.assertEqual(database.list_active_burn_bans(), [])
+        original = database.get_burn_ban_submission(created["submission"]["id"], admin=True)
+        self.assertEqual(original["status"], "expired")
 
     def test_admin_regenerate_map(self):
         now = datetime.now(timezone.utc)

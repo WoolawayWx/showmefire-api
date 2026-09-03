@@ -28,6 +28,7 @@ from core.database import (
     consume_burn_ban_submission_quota,
     create_burn_ban_submission,
     delete_burn_ban_submission,
+    expire_confirmed_burn_bans_for_county,
     get_burn_ban_submission,
     get_burn_ban_upload_token_hash,
     list_active_burn_bans,
@@ -69,6 +70,7 @@ MAX_PROOF_BYTES = 10 * 1024 * 1024
 PROOF_DIR = Path(os.getenv("BURN_BAN_PROOF_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "burn-ban-proofs")))
 
 STATUSES = {"pending", "confirmed", "denied", "expired"}
+REQUEST_TYPES = {"issue", "lift"}
 
 
 def _require_admin(token: Optional[str] = None) -> str:
@@ -105,6 +107,13 @@ def _known_county_fips() -> Dict[str, str]:
     return {item["fips"]: item["name"] for item in county_catalog()}
 
 
+def _parse_optional_ban_datetime(value: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return _parse_ban_datetime(text)
+
+
 def _parse_ban_datetime(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -133,8 +142,9 @@ def _public_ban_payload(submission: Dict) -> Dict:
         "id": submission["id"],
         "county_fips": submission["county_fips"],
         "county_name": submission["county_name"],
+        "request_type": submission.get("request_type") or "issue",
         "effective_at": submission["effective_at"],
-        "expires_at": submission["expires_at"],
+        "expires_at": submission.get("expires_at") or None,
         "proof_url": submission.get("proof_url") or None,
         "published_at": submission.get("published_at"),
         "updated_at": submission.get("updated_at"),
@@ -169,11 +179,12 @@ def _maybe_regenerate_map() -> None:
 
 class BurnBanCreate(BaseModel):
     county_fips: str = Field(min_length=5, max_length=5)
+    request_type: str = Field(default="issue", min_length=4, max_length=8)
     submitter_name: str = Field(min_length=1, max_length=120)
     submitter_contact: str = Field(min_length=1, max_length=120)
     proof_url: str = Field(default="", max_length=2000)
     effective_at: str = Field(min_length=8, max_length=40)
-    expires_at: str = Field(min_length=8, max_length=40)
+    expires_at: str = Field(default="", max_length=40)
     consent_acknowledged: bool
     turnstile_token: str = Field(min_length=1, max_length=4096)
     website: str = Field(default="", max_length=200)
@@ -224,14 +235,24 @@ class BurnBanCreate(BaseModel):
             raise ValueError("consent must be acknowledged")
         return True
 
+    @field_validator("request_type")
+    @classmethod
+    def _validate_request_type(cls, value: str) -> str:
+        kind = str(value or "issue").strip().lower()
+        if kind not in REQUEST_TYPES:
+            raise ValueError("request_type must be issue or lift")
+        return kind
+
     @model_validator(mode="after")
     def _validate_dates(self) -> "BurnBanCreate":
         effective = _parse_ban_datetime(self.effective_at)
-        expires = _parse_ban_datetime(self.expires_at)
-        if expires <= effective:
+        expires = _parse_optional_ban_datetime(self.expires_at)
+        if self.request_type == "lift":
+            expires = None
+        if expires and expires <= effective:
             raise ValueError("expires_at must be after effective_at")
         self.effective_at = effective
-        self.expires_at = expires
+        self.expires_at = expires or ""
         return self
 
 
@@ -243,8 +264,10 @@ class BurnBanModeration(BaseModel):
     @field_validator("effective_at", "expires_at")
     @classmethod
     def _normalize_optional_dates(cls, value: Optional[str]) -> Optional[str]:
-        if value is None or not str(value).strip():
+        if value is None:
             return None
+        if not str(value).strip():
+            return ""
         return _parse_ban_datetime(value)
 
 
@@ -258,8 +281,10 @@ class BurnBanUpdate(BaseModel):
     @field_validator("effective_at", "expires_at")
     @classmethod
     def _normalize_optional_dates(cls, value: Optional[str]) -> Optional[str]:
-        if value is None or not str(value).strip():
+        if value is None:
             return None
+        if not str(value).strip():
+            return ""
         return _parse_ban_datetime(value)
 
     @field_validator("proof_url")
@@ -290,8 +315,8 @@ class BurnBanRejection(BaseModel):
 class BurnBanAdminCreate(BaseModel):
     county_fips: str = Field(min_length=5, max_length=5)
     effective_at: str = Field(min_length=8, max_length=40)
-    expires_at: str = Field(min_length=8, max_length=40)
-    proof_url: str = Field(min_length=1, max_length=2000)
+    expires_at: str = Field(default="", max_length=40)
+    proof_url: str = Field(default="", max_length=2000)
     submitter_name: str = Field(default="Show Me Fire Staff", max_length=120)
     submitter_contact: str = Field(default="admin@showmefire.org", max_length=120)
     moderator_note: str = Field(default="", max_length=2000)
@@ -307,8 +332,8 @@ class BurnBanAdminCreate(BaseModel):
     @field_validator("proof_url")
     @classmethod
     def _clean_proof_url(cls, value: str) -> str:
-        text = _clean_text(value, required=True, field="proof_url")
-        if not _URL_RE.fullmatch(text):
+        text = _clean_text(value, required=False, field="proof_url")
+        if text and not _URL_RE.fullmatch(text):
             raise ValueError("proof_url must be an http or https URL")
         return text
 
@@ -331,11 +356,11 @@ class BurnBanAdminCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_dates(self) -> "BurnBanAdminCreate":
         effective = _parse_ban_datetime(self.effective_at)
-        expires = _parse_ban_datetime(self.expires_at)
-        if expires <= effective:
+        expires = _parse_optional_ban_datetime(self.expires_at)
+        if expires and expires <= effective:
             raise ValueError("expires_at must be after effective_at")
         self.effective_at = effective
-        self.expires_at = expires
+        self.expires_at = expires or ""
         return self
 
 
@@ -416,6 +441,7 @@ def submit_burn_ban(payload: BurnBanCreate, request: Request):
         upload_token_hash=hashlib.sha256(upload_token.encode()).hexdigest(),
         captcha_verdict=verdict,
         consent_version=CONSENT_VERSION,
+        request_type=payload.request_type,
     )
 
     return {
@@ -425,6 +451,7 @@ def submit_burn_ban(payload: BurnBanCreate, request: Request):
             "status": submission["status"],
             "submitted_at": submission["created_at"],
             "county_name": submission["county_name"],
+            "request_type": submission.get("request_type") or payload.request_type,
             "upload_token": upload_token,
             "proof_required": not bool(payload.proof_url.strip()),
         },
@@ -597,12 +624,18 @@ def admin_confirm_burn_ban(
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    request_type = submission.get("request_type") or "issue"
     effective_at = payload.effective_at or submission["effective_at"]
-    expires_at = payload.expires_at or submission["expires_at"]
-    if expires_at <= effective_at:
+    if payload.expires_at is None:
+        expires_at = submission.get("expires_at") or ""
+    else:
+        expires_at = payload.expires_at
+    if request_type == "lift":
+        expires_at = ""
+    if expires_at and expires_at <= effective_at:
         raise HTTPException(status_code=400, detail="expires_at must be after effective_at")
     check = {**submission, "effective_at": effective_at, "expires_at": expires_at}
-    if not _has_proof(check):
+    if request_type == "issue" and not _has_proof(check):
         raise HTTPException(status_code=400, detail="A proof URL or uploaded document is required")
 
     result = moderate_burn_ban_submission(
@@ -617,6 +650,13 @@ def admin_confirm_burn_ban(
         raise HTTPException(status_code=404, detail="Submission not found")
     if result.get("already_moderated"):
         raise HTTPException(status_code=409, detail="Submission already moderated")
+    if request_type == "lift":
+        expire_confirmed_burn_bans_for_county(
+            submission["county_fips"],
+            actor=actor,
+            reason=payload.moderator_note or "Public lift request confirmed",
+            exclude_id=submission_id,
+        )
     _maybe_regenerate_map()
     return {"success": True, "submission": result}
 
