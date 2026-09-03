@@ -90,9 +90,33 @@ def _projected_axes(ds):
         projection.attrs if projection is not None
         else ds.attrs.get("_projection_attrs", {})
     )
-    if "grid_mapping_name" not in projection_attrs:
-        raise ValueError("RTMA dataset has no CF projection metadata")
-    crs = pyproj.CRS.from_cf(projection_attrs)
+    if "grid_mapping_name" in projection_attrs:
+        crs = pyproj.CRS.from_cf(projection_attrs)
+    else:
+        candidates = [ds.attrs]
+        if isinstance(ds, xr.Dataset):
+            candidates.extend(variable.attrs for variable in ds.data_vars.values())
+        grib = next(
+            (
+                attrs for attrs in candidates
+                if attrs.get("GRIB_gridType") == "lambert"
+                and "GRIB_LoVInDegrees" in attrs
+            ),
+            None,
+        )
+        if grib is None:
+            raise ValueError("RTMA dataset has no usable CF or GRIB projection metadata")
+        longitude_of_origin = float(grib["GRIB_LoVInDegrees"])
+        if longitude_of_origin > 180:
+            longitude_of_origin -= 360
+        latitude_of_origin = float(grib["GRIB_LaDInDegrees"])
+        first_parallel = float(grib["GRIB_Latin1InDegrees"])
+        second_parallel = float(grib.get("GRIB_Latin2InDegrees", first_parallel))
+        crs = pyproj.CRS.from_proj4(
+            f"+proj=lcc +lat_0={latitude_of_origin} "
+            f"+lon_0={longitude_of_origin} +lat_1={first_parallel} "
+            f"+lat_2={second_parallel} +R=6371229 +units=m +no_defs"
+        )
     longitude = xr.where(ds.longitude > 180, ds.longitude - 360, ds.longitude)
     x_values, y_values = pyproj.Transformer.from_crs(
         "EPSG:4326", crs, always_xy=True

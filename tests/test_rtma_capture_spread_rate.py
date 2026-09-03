@@ -37,6 +37,28 @@ def _grid_dataset(x_values, y_values, variable):
     )
 
 
+def test_precipitation_aligns_with_grib_projection_fallback():
+    source = _grid_dataset(np.arange(0, 5000, 1000), np.arange(0, 4000, 1000), "apcp")
+    target = _grid_dataset(np.arange(0, 4000, 1000), np.arange(0, 3000, 1000), "t2m")
+    grib_attrs = {
+        "GRIB_gridType": "lambert",
+        "GRIB_LoVInDegrees": 264.0,
+        "GRIB_LaDInDegrees": 23.0,
+        "GRIB_Latin1InDegrees": 29.5,
+        "GRIB_Latin2InDegrees": 45.5,
+    }
+    source_data = source["apcp"].copy(deep=False)
+    source_data.attrs.update(grib_attrs)
+    source_data.attrs.pop("_projection_attrs", None)
+    target = target.drop_vars("gribfile_projection")
+    target["t2m"].attrs.update(grib_attrs)
+
+    aligned = _align_precipitation(source_data, target)
+
+    assert aligned.sizes == target.sizes
+    assert np.isfinite(aligned.values).all()
+
+
 def test_precipitation_aligns_to_analysis_grid():
     source = _grid_dataset(np.arange(0, 5000, 1000), np.arange(0, 4000, 1000), "apcp")
     source_data = source["apcp"].copy(deep=False)
