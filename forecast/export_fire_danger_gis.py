@@ -4,7 +4,7 @@ export_fire_danger_gis.py
 Drop-in replacement for the GIS export block in forecastedfiredanger.py.
 
 Exports peak fire danger as:
-  1. GeoTIFF  – single-band uint8, EPSG:4326 (no reproject, no flipud bug)
+  1. GeoTIFF  – single-band uint8, EPSG:32615 on the canonical Missouri grid
   2. GeoJSON  – polygon contour regions (best for MapLibre fill layers)
   3. GeoJSON  – point grid  (best for QGIS spot checks / agency sharing)
 
@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import rasterio
-from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 
 from scipy.ndimage import label as nd_label
@@ -88,7 +87,7 @@ def archive_forecast_peak_tif(tif_path: Path, out_dir: Path, run_date=None) -> P
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1.  GeoTIFF  (single-band uint8, EPSG:4326 – no reproject needed)
+# 1.  GeoTIFF  (single-band uint8, canonical EPSG:32615 grid)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def export_geotiff(peak_risk_smooth: np.ndarray,
@@ -97,20 +96,20 @@ def export_geotiff(peak_risk_smooth: np.ndarray,
                    out_path: Path,
                    run_date=None) -> bool:
     """
-    Write a single-band uint8 GeoTIFF in EPSG:4326.
+    Write a single-band uint8 GeoTIFF in EPSG:32615.
 
     Why single-band instead of RGBA?
       • RGBA GeoTIFFs embed colours that clash with QGIS/MapLibre symbology.
       • A single uint8 band (0-4 = danger level, 255 = nodata) is universally
         understood: apply any colour ramp you like in the viewer.
 
-    Why regrid to regular lat/lon?
+    Why regrid to the canonical projected grid?
       • HRRR data comes on Lambert Conformal grid with 2D coordinate arrays
       • from_bounds assumes regular spacing in lat/lon, which causes distortion
-      • Regridding to regular lat/lon ensures accurate geographic placement
+      • direct coordinate-aware interpolation preserves geographic placement
     """
     try:
-        from scipy.interpolate import griddata as scipy_griddata
+        from services.gis_publisher import canonical_grid, regrid_lonlat
         
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,39 +123,13 @@ def export_geotiff(peak_risk_smooth: np.ndarray,
         nan_mask = np.isnan(peak_risk_smooth)
         risk_binned[nan_mask] = NODATA_UINT8
 
-        # ── Regrid to regular lat/lon grid ────────────────────────────────────
-        # Get bounds from 2D coordinate arrays
-        lon_min, lon_max = float(lon.min()), float(lon.max())
-        lat_min, lat_max = float(lat.min()), float(lat.max())
-        
-        # Create regular lat/lon grid (matching original resolution approximately)
-        rows, cols = risk_binned.shape
-        regular_lon = np.linspace(lon_min, lon_max, cols)
-        regular_lat = np.linspace(lat_max, lat_min, rows)  # north to south
-        grid_lon, grid_lat = np.meshgrid(regular_lon, regular_lat)
-        
-        # Flatten source coordinates and values
-        src_points = np.column_stack([lon.ravel(), lat.ravel()])
-        src_values = risk_binned.ravel()
-        
-        # Only interpolate non-nodata points
-        valid_mask = src_values != NODATA_UINT8
-        
-        # Interpolate to regular grid using nearest neighbor (preserves integer categories)
-        regridded = scipy_griddata(
-            src_points[valid_mask],
-            src_values[valid_mask],
-            (grid_lon, grid_lat),
-            method='nearest',
-            fill_value=NODATA_UINT8
-        ).astype(np.uint8)
-
-        # ── Build transform for regular grid ──────────────────────────────────
-        transform = from_bounds(
-            west=lon_min, south=lat_min,
-            east=lon_max, north=lat_max,
-            width=cols, height=rows
-        )
+        source = risk_binned.astype(float)
+        source[risk_binned == NODATA_UINT8] = np.nan
+        projected = regrid_lonlat(source, lon, lat, categorical=True)
+        regridded = np.where(np.isfinite(projected), projected, NODATA_UINT8).astype(np.uint8)
+        grid = canonical_grid()
+        rows, cols = regridded.shape
+        transform = grid['transform']
 
         run_str = run_date.strftime('%Y-%m-%d %HZ') if run_date else 'unknown'
 
@@ -167,7 +140,7 @@ def export_geotiff(peak_risk_smooth: np.ndarray,
             width=cols,
             count=1,
             dtype=rasterio.uint8,
-            crs=CRS.from_epsg(4326),
+            crs=CRS.from_epsg(32615),
             transform=transform,
             nodata=NODATA_UINT8,
             compress='lzw',

@@ -385,16 +385,8 @@ def list_public_active_burn_bans(response: Response):
 @router.get("/api/burn-bans/active.geojson")
 def list_public_active_burn_bans_geojson(response: Response):
     response.headers["Cache-Control"] = "public, max-age=300"
-    bans = list_active_burn_bans()
-    return {
-        "type": "FeatureCollection",
-        "features": [_ban_to_geojson_feature(item) for item in bans],
-        "metadata": {
-            "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "feature_count": len(bans),
-            "join_key": "county_fips",
-        },
-    }
+    from services.burn_ban_map import burn_ban_feature_collection
+    return burn_ban_feature_collection(list_active_burn_bans())
 
 
 @router.post("/api/burn-bans/submissions", status_code=201)

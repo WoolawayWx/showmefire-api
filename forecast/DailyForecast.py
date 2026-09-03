@@ -1677,6 +1677,78 @@ def generate_complete_forecast():
         if total_precip_smooth is not None:
             total_precip_smooth = np.where(mask, total_precip_smooth, np.nan)
 
+    # Publish the complete production grid set for MapServer. This is
+    # failure-isolated so GIS delivery can never prevent the established PNG,
+    # archive, notification, or CDN forecast workflow from completing.
+    gis_staging_root = None
+    try:
+        from services.gis_publisher import (
+            cleanup_retention, commit_staging_root, create_staging_root,
+            discard_staging_root, publish_raster,
+        )
+        gis_staging_root = create_staging_root()
+
+        cropped_hourly = {
+            "forecast_fire_danger": (hourly_risks, "category", True, "fire_danger"),
+            "forecast_fuel_moisture": (hourly_fm, "percent", False, "fuel_moisture"),
+            "forecast_rh": (hourly_rh, "percent", False, "relative_humidity"),
+            "forecast_wind": (hourly_ws, "knots", False, "wind_speed"),
+            "forecast_temperature": (hourly_temp, "degree_Fahrenheit", False, "temperature"),
+            "forecast_precipitation": (hourly_precip, "millimeter", False, "precipitation"),
+        }
+        steps = list(ds_full.step.values)
+        for product, (series, units, categorical, style) in cropped_hourly.items():
+            for index, source_grid in enumerate(series):
+                grid = np.asarray(source_grid)[rmin:rmax+1, cmin:cmax+1]
+                if not missouriborder.empty:
+                    grid = np.where(mask, grid, np.nan)
+                valid_time = pd.Timestamp(RUN_DATE) + pd.Timedelta(steps[index])
+                publish_raster(
+                    product, grid, lon, lat, units=units, categorical=categorical,
+                    accumulated=(product == "forecast_precipitation"),
+                    style=style, run_time=RUN_DATE, valid_time=valid_time.to_pydatetime(),
+                    source="HRRR + Show Me Fire production forecast",
+                    rebuild_index=False,
+                    root=gis_staging_root,
+                )
+
+        summaries = {
+            "forecast_peak_fire_danger": (peak_risk_smooth, "category", True, "fire_danger"),
+            "forecast_min_fuel_moisture": (min_fuel_moisture_smooth, "percent", False, "fuel_moisture"),
+            "forecast_min_rh": (min_rh_smooth, "percent", False, "relative_humidity"),
+            "forecast_max_wind": (max_wind_smooth, "knots", False, "wind_speed"),
+            "forecast_max_temperature": (max_temp_smooth, "degree_Fahrenheit", False, "temperature"),
+        }
+        if total_precip_smooth is not None:
+            summaries["forecast_total_precipitation"] = (
+                total_precip_smooth, "inch", False, "precipitation",
+            )
+        if swe_grid is not None and np.asarray(swe_grid).shape == lon.shape:
+            summaries["forecast_swe"] = (
+                np.where(mask, swe_grid, np.nan) if not missouriborder.empty else swe_grid,
+                "millimeter", False, "snow_water_equivalent",
+            )
+        for product, (grid, units, categorical, style) in summaries.items():
+            publish_raster(
+                product, grid, lon, lat, units=units, categorical=categorical,
+                accumulated=(product == "forecast_total_precipitation"),
+                style=style, run_time=RUN_DATE,
+                valid_time=(pd.Timestamp(RUN_DATE) + pd.Timedelta(steps[-1])).to_pydatetime(),
+                source="HRRR + Show Me Fire production forecast",
+                rebuild_index=False,
+                root=gis_staging_root,
+            )
+        commit_staging_root(gis_staging_root)
+        gis_staging_root = None
+        cleanup_retention()
+    except Exception as e:
+        if gis_staging_root is not None:
+            try:
+                discard_staging_root(gis_staging_root)
+            except Exception:
+                pass
+        logger.error("MapServer GIS forecast publication failed (non-fatal): %s", e, exc_info=True)
+
     # ========== MAP 1: PEAK FIRE DANGER ==========
     logger.info("Generating peak fire danger map...")
     colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']

@@ -240,6 +240,7 @@ def condition_moisture(
         "temp_c": weather["temp_c"],
         "rh": weather["rh"],
         "wind_ms": weather["wind_ms"],
+        "precip_mm": weather["precip_mm"],
         "u_ms": weather["u_ms"],
         "v_ms": weather["v_ms"],
         "conditioning_hours_available": available_hours,

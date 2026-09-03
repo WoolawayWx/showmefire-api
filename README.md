@@ -99,3 +99,19 @@ API refuses to start without it), `FIRE_REPORT_IP_SALT`,
 
 See [`docs/fire_report_moderation_runbook.md`](docs/fire_report_moderation_runbook.md)
 for the operator playbook.
+# GIS publication
+
+The production forecast and observation jobs publish MapServer-ready data when
+`SMF_GIS_PUBLISH_DIR` is set. Use a persistent host-mounted directory shared
+with the `showmefire-mapserver` deployment; the API needs read/write access and
+MapServer mounts the same directory read-only as `/data`.
+
+Optional settings:
+
+- `SMF_GIS_RESOLUTION_METERS` (default `3000`) controls the fixed Missouri
+  EPSG:32615 grid resolution.
+- `SMF_GIS_RETENTION_DAYS` (default `30`) controls time-stamped raster history.
+
+The API also serves `catalog.json` and `burn_bans.geojson` beneath `/gis`.
+Operational GeoTIFFs and GeoPackages use EPSG:32615; public GeoJSON uses
+EPSG:4326.

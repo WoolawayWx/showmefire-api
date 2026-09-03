@@ -29,6 +29,7 @@ from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
 from services.forecast_jobs import trigger_beta_forecast
+from services.gis_vectors import publish_fire_detections, publish_weather_stations
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,14 @@ async def refresh_testbed_observations_job():
         )
     except Exception as error:
         logger.error("Testbed observation refresh failed: %s", error, exc_info=True)
+
+
+async def publish_gis_observations_job():
+    """Publish the latest production station observations for WMS/WFS."""
+    try:
+        await asyncio.to_thread(publish_weather_stations, get_station_data(), raws_station_data)
+    except Exception as error:
+        logger.error("GIS station publication failed: %s", error, exc_info=True)
 
 
 async def refresh_testbed_rtma_job():
@@ -182,6 +191,7 @@ async def ingest_fire_detections_job():
     """
     try:
         await asyncio.to_thread(ingest_detection_files)
+        await asyncio.to_thread(publish_fire_detections)
     except Exception as error:
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
 
@@ -249,6 +259,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         minutes=5,
         seconds=30,
         id='refresh_testbed_observations',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        publish_gis_observations_job,
+        'interval',
+        minutes=5,
+        seconds=45,
+        id='publish_gis_observations',
         max_instances=1,
         coalesce=True,
     )

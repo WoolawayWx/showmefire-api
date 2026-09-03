@@ -452,6 +452,62 @@ def generate_spread_rate(
         _write_geotiff(static, grids, TIF_PATH)
         status = _build_status_payload(status="ready", moisture={**moisture, "rtma_cache": rtma_cache}, static=static, grids=grids)
         _render_png(grids, static, PNG_PATH, status)
+        try:
+            from core.fire_danger import calculate_fire_danger, meters_per_second_to_knots
+            from services.gis_publisher import (
+                cleanup_retention, commit_staging_root, create_staging_root,
+                discard_staging_root, publish_raster,
+            )
+
+            observation_time = moisture["analysis_hour"]
+            gis_staging_root = create_staging_root()
+            common = {
+                "longitude": static["lon"], "latitude": static["lat"],
+                "observation_time": observation_time, "source": "RTMA + Show Me Fire",
+            }
+            wind_knots = meters_per_second_to_knots(np.asarray(moisture["wind_ms"], dtype=float))
+            fire_danger = np.vectorize(
+                lambda fm, rh, wind: calculate_fire_danger(fm, rh, wind, missing_category=np.nan),
+                otypes=[float],
+            )(
+                moisture["fm10_pct"], moisture["rh"], wind_knots,
+            )
+            realtime = {
+                "realtime_fire_danger": (fire_danger, "category", True, "fire_danger"),
+                "realtime_fuel_moisture": (moisture["fm10_pct"], "percent", False, "fuel_moisture"),
+                "realtime_rh": (moisture["rh"], "percent", False, "relative_humidity"),
+                "realtime_wind": (wind_knots, "knots", False, "wind_speed"),
+                "realtime_temperature": (np.asarray(moisture["temp_c"]) * 9.0 / 5.0 + 32.0, "degree_Fahrenheit", False, "temperature"),
+                "realtime_precipitation": (moisture["precip_mm"], "millimeter", False, "precipitation"),
+                "realtime_spread_rate": (grids["ros_ch_per_h"], "chain_per_hour", False, "spread_rate"),
+            }
+            for product, (values, units, categorical, style) in realtime.items():
+                publish_raster(
+                    product, values, units=units, categorical=categorical,
+                    accumulated=(product == "realtime_precipitation"), style=style, **common,
+                    rebuild_index=False,
+                    root=gis_staging_root,
+                )
+            commit_staging_root(gis_staging_root)
+            gis_staging_root = None
+            cleanup_retention()
+        except Exception as publish_error:
+            if locals().get("gis_staging_root") is not None:
+                try:
+                    discard_staging_root(gis_staging_root)
+                except Exception:
+                    pass
+            logger.exception("Production real-time GIS publication failed; prior products retained")
+            try:
+                from services.gis_publisher import mark_stale
+                for product in (
+                    "realtime_fire_danger", "realtime_fuel_moisture", "realtime_rh",
+                    "realtime_wind", "realtime_temperature", "realtime_precipitation",
+                    "realtime_spread_rate",
+                ):
+                    mark_stale(product, str(publish_error))
+            except Exception:
+                logger.exception("Could not mark real-time GIS products stale")
         _atomic_json_write(STATUS_PATH, status)
         _update_manifest(status)
         return status

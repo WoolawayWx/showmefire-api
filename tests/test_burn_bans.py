@@ -238,6 +238,24 @@ class BurnBanWorkflowTests(unittest.TestCase):
         self.assertEqual(expired_count, 1)
         self.assertEqual(database.list_active_burn_bans(now=now), [])
 
+    def test_active_geojson_contains_county_geometry_and_no_private_fields(self):
+        now = datetime.now(timezone.utc)
+        created = database.create_burn_ban_submission(
+            county_fips="29019", county_name="Boone", submitter_name="Private Name",
+            submitter_contact="private@example.com", proof_url="https://example.gov/ban",
+            effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), expires_at="",
+            submitter_ip_hash="hash", upload_token_hash="token", captcha_verdict="success",
+            consent_version="test",
+        )
+        database.moderate_burn_ban_submission(created["id"], to_status="confirmed", actor="test")
+        response = SimpleNamespace(headers={})
+        result = burn_bans_router.list_public_active_burn_bans_geojson(response)
+        self.assertEqual(result["features"][0]["geometry"]["type"], "Polygon")
+        properties = result["features"][0]["properties"]
+        self.assertEqual(properties["county_fips"], "29019")
+        self.assertNotIn("submitter_name", properties)
+        self.assertNotIn("submitter_contact", properties)
+
 
 if __name__ == "__main__":
     unittest.main()

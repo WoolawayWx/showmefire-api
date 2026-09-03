@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +20,7 @@ from matplotlib.patches import Patch
 
 from core.config import IMAGES_DIR
 from core.database import list_active_burn_bans
+from services.gis_publisher import PUBLISH_ROOT, publish_vectors
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COUNTIES_SHP = PROJECT_ROOT / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp"
 STATE_SHP = PROJECT_ROOT / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
 BURN_BAN_PNG = Path(IMAGES_DIR) / "mo-burnban.png"
+BURN_BAN_GEOJSON = PUBLISH_ROOT / "burn_bans.geojson"
+BURN_BAN_GPKG = PUBLISH_ROOT / "burn_bans.gpkg"
 
 MAP_EXTENT = (-95.8, -89.1, 35.8, 40.8)
 PIXEL_W = 2048
@@ -55,6 +61,66 @@ def ensure_burn_ban_map() -> dict:
     if not BURN_BAN_PNG.is_file():
         generate_burn_ban_map()
     return burn_ban_map_public_meta()
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    os.close(fd)
+    try:
+        Path(temporary).write_bytes(source.read_bytes())
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def burn_ban_feature_collection(active=None) -> dict:
+    """Return public active bans joined to county polygons in EPSG:4326."""
+    active = list_active_burn_bans() if active is None else active
+    counties = gpd.read_file(COUNTIES_SHP).to_crs("EPSG:4326")
+    counties["county_fips"] = counties["COUNTYFIPS"].astype(str).str.zfill(3).radd("29")
+    by_fips = {str(item["county_fips"]): item for item in active}
+    features = []
+    public_fields = (
+        "county_fips", "county_name", "effective_at", "expires_at",
+        "proof_url", "published_at", "updated_at",
+    )
+    for _, county in counties[counties["county_fips"].isin(by_fips)].iterrows():
+        ban = by_fips[county["county_fips"]]
+        properties = {field: ban.get(field) or None for field in public_fields}
+        properties["county_fips"] = county["county_fips"]
+        properties["county_name"] = ban.get("county_name") or county.get("COUNTYNAME")
+        properties["status"] = "active"
+        features.append({
+            "type": "Feature",
+            "geometry": county.geometry.__geo_interface__,
+            "properties": properties,
+        })
+    return {
+        "type": "FeatureCollection",
+        "metadata": {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "feature_count": len(features),
+            "join_key": "county_fips",
+            "crs": "EPSG:4326",
+        },
+        "features": features,
+    }
+
+
+def publish_burn_ban_gis(active=None) -> dict:
+    collection = burn_ban_feature_collection(active)
+    paths = publish_vectors(
+        "burn_bans", collection["features"],
+        generated_at=collection["metadata"]["generated_at"],
+    )
+    _atomic_copy(paths["geojson"], BURN_BAN_GEOJSON)
+    _atomic_copy(paths["geopackage"], BURN_BAN_GPKG)
+    return {
+        "geojson": str(BURN_BAN_GEOJSON),
+        "geopackage": str(BURN_BAN_GPKG),
+        "feature_count": len(collection["features"]),
+    }
 
 
 def _format_central_timestamp(value: datetime | None = None) -> str:
@@ -265,6 +331,8 @@ def generate_burn_ban_map() -> dict:
     fig.savefig(BURN_BAN_PNG, dpi=MAP_DPI, bbox_inches=None, pad_inches=0, facecolor=BACKGROUND_COLOR)
     plt.close(fig)
 
+    gis = publish_burn_ban_gis(active)
+
     updated_at_str = datetime.fromtimestamp(
         BURN_BAN_PNG.stat().st_mtime, tz=timezone.utc,
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -273,4 +341,5 @@ def generate_burn_ban_map() -> dict:
         "active_counties": len(active_fips),
         "image_path": "mo-burnban.png",
         "updated_at": updated_at_str,
+        "gis": gis,
     }

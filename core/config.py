@@ -3,7 +3,10 @@ from pathlib import Path
 
 # Directory Paths
 IMAGES_DIR = Path("images")
-GIS_DIR = Path("gis")
+# When configured in production this is the same host directory mounted
+# read-only at /data by MapServer. The API remains able to serve the static
+# catalog/GeoJSON contracts from /gis.
+GIS_DIR = Path(os.getenv("SMF_GIS_PUBLISH_DIR", "gis"))
 PUBLIC_DIR = Path("public")
 REPORTS_DIR = Path("reports")
 LOGS_DIR = Path("logs")
