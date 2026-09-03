@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,14 @@ MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
 RTMA_FILE_RE = re.compile(r"^rtma_(\d{8})_(\d{2})z\.nc$")
 REQUIRED_RTMA_VARS = frozenset({"t2m", "r2", "u10", "v10", "apcp"})
 DEFAULT_SPREAD_RATE_POLL_MINUTES = 15
+
+
+def _new_herbie(*args, **kwargs):
+    """Construct Herbie safely on Windows consoles using a legacy code page."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure:
+        reconfigure(encoding="utf-8", errors="replace")
+    return Herbie(*args, **kwargs)
 
 
 def _root() -> Path:
@@ -75,11 +84,26 @@ def _relative_humidity(temp_k, dewpoint_k):
 
 def _fetch_precipitation_mm(run_dt: datetime) -> xr.DataArray:
   """Hourly accumulated precipitation from the separate RTMA pcp product."""
-  h = Herbie(run_dt, fxx=0, model="rtma", product="pcp")
+  h = _new_herbie(run_dt, fxx=0, model="rtma", product="pcp")
   try:
     pcp = _as_dataset(h.xarray(":(?:APCP|tp):"))
+  except AttributeError as error:
+    # Some RTMA precipitation indexes contain only ``range=0-`` and no
+    # end_byte. Herbie's byte-range subsetter then raises AttributeError
+    # even though the GRIB2 object is present. Fall back to downloading and
+    # opening the complete (single-field) precipitation file.
+    if "end_byte" not in str(error):
+        raise
+    full_grib = h.download(search=None)
+    pcp = _as_dataset(xr.open_dataset(full_grib, engine="cfgrib"))
   except Exception:
-    pcp = _as_dataset(h.xarray("APCP"))
+    try:
+      pcp = _as_dataset(h.xarray("APCP"))
+    except AttributeError as error:
+      if "end_byte" not in str(error):
+          raise
+      full_grib = h.download(search=None)
+      pcp = _as_dataset(xr.open_dataset(full_grib, engine="cfgrib"))
   if "tp" in pcp:
     precip = pcp["tp"]
   elif "apcp" in pcp:
@@ -106,7 +130,10 @@ def is_analysis_hour_cached(run_dt: datetime, cache_dir: Path | None = None) -> 
         return False
     try:
         with xr.open_dataset(target) as cached:
-            return REQUIRED_RTMA_VARS.issubset(cached.data_vars)
+            precipitation_missing = bool(
+                cached["apcp"].attrs.get("missing", False)
+            ) if "apcp" in cached else True
+            return REQUIRED_RTMA_VARS.issubset(cached.data_vars) and not precipitation_missing
     except Exception:
         return False
 
@@ -169,7 +196,10 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
     if target.exists():
         try:
             with xr.open_dataset(target) as cached:
-                if REQUIRED_RTMA_VARS.issubset(cached.data_vars):
+                precipitation_missing = bool(
+                    cached["apcp"].attrs.get("missing", False)
+                ) if "apcp" in cached else True
+                if REQUIRED_RTMA_VARS.issubset(cached.data_vars) and not precipitation_missing:
                     return target
         except Exception:
             pass
@@ -178,7 +208,7 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
     # A single analysis does not need FastHerbie. FastHerbie always runs
     # combine_nested(time, step), which triggers an xarray/cfgrib collision
     # when RTMA's scalar step coordinate carries a GRIB ``dtype`` attribute.
-    h = Herbie(run_dt, fxx=0, model="rtma", product="anl")
+    h = _new_herbie(run_dt, fxx=0, model="rtma", product="anl")
     try:
         therm = _as_dataset(h.xarray(":(?:TMP|DPT):2 m above ground:"))
     except Exception:
