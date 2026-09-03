@@ -1326,18 +1326,24 @@ def generate_complete_forecast():
     # Configuration
     now = pd.Timestamp.utcnow()
     logger.info(f"Current UTC time: {now}")
-    
-    # Always use the most recent available 12z run
-    # HRRR runs are available ~1-2 hours after model time
-    # So 12z run is typically available by ~14z (2pm UTC)
-    if now.hour < 14:
-        logger.info("Using previous day's 12z HRRR run.")
-        # If before 14z, use yesterday's 12z run (most recent available)
-        RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+
+    # Which HRRR cycle to run against (default: the operational 12z run).
+    # Set FORECAST_CYCLE_HOUR=9 to run the same pipeline against the 9z cycle instead.
+    CYCLE_HOUR = int(os.getenv('FORECAST_CYCLE_HOUR', '12'))
+    # Suffix appended to every generated image filename (default '' preserves
+    # today's mo-forecast*.png names exactly). Set e.g. '_09z' for a secondary run.
+    IMAGE_SUFFIX = os.getenv('FORECAST_IMAGE_SUFFIX', '')
+
+    # Always use the most recent available run for this cycle.
+    # HRRR runs are available ~1-2 hours after model time.
+    if now.hour < CYCLE_HOUR + 2:
+        logger.info(f"Using previous day's {CYCLE_HOUR:02d}z HRRR run.")
+        # If before cycle+2z, use yesterday's run (most recent available)
+        RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=CYCLE_HOUR, minute=0, second=0, microsecond=0)
     else:
-        logger.info("Using today's 12z HRRR run.")
-        # If after 14z, today's 12z run should be available
-        RUN_DATE = now.replace(hour=12, minute=0, second=0, microsecond=0)
+        logger.info(f"Using today's {CYCLE_HOUR:02d}z HRRR run.")
+        # If after cycle+2z, today's run should be available
+        RUN_DATE = now.replace(hour=CYCLE_HOUR, minute=0, second=0, microsecond=0)
 
     # Ensure RUN_DATE is tz-naive (UTC)
     if RUN_DATE.tzinfo is not None:
@@ -1357,11 +1363,15 @@ def generate_complete_forecast():
     cache_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Cache directory: {cache_dir}")
     
-    # Check for any cache file matching the date pattern, regardless of hour
-    # This helps if we have 12z data but the script is looking for 13z or vice versa
+    # Check for a cache file at this cycle hour or one hour late (e.g. 12z data
+    # cached under 13z because the download ran a bit behind). Scoped to this
+    # cycle specifically - NOT any hour of the day - so a 9z run can never
+    # pick up a 12z run's cache file (or vice versa) when both run the same day.
     date_str = RUN_DATE.strftime('%Y%m%d')
-    potential_caches = list(cache_dir.glob(f"hrrr_{date_str}_*z_f04-15.nc"))
-    
+    potential_caches = []
+    for candidate_hour in (CYCLE_HOUR, CYCLE_HOUR + 1):
+        potential_caches.extend(cache_dir.glob(f"hrrr_{date_str}_{candidate_hour:02d}z_f04-15.nc"))
+
     if potential_caches:
         # Use the most recent cache file found for this date
         cache_file = sorted(potential_caches)[-1]
@@ -1794,25 +1804,30 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    forecast_png_path = PROJECT_DIR / 'images/mo-forecastfiredanger.png'
+    forecast_png_path = PROJECT_DIR / 'images' / f'mo-forecastfiredanger{IMAGE_SUFFIX}.png'
     fig.savefig(forecast_png_path, dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
 
-    try:
-        png_archive_dir = PROJECT_DIR / 'images' / 'forecast_peak' / 'archive'
-        png_archive_dir.mkdir(parents=True, exist_ok=True)
-        date_local = forecast_peak_local_date(RUN_DATE)
-        shutil.copy2(forecast_png_path, png_archive_dir / f'{date_local}.png')
-    except Exception as e:
-        logger.error(f"Failed to archive forecast peak PNG: {e}")
+    # This per-date archive backs day-over-day verification against the single
+    # operational forecast; a secondary-cycle run (IMAGE_SUFFIX set) skips it
+    # rather than duplicating/contending for that one slot.
+    if not IMAGE_SUFFIX:
+        try:
+            png_archive_dir = PROJECT_DIR / 'images' / 'forecast_peak' / 'archive'
+            png_archive_dir.mkdir(parents=True, exist_ok=True)
+            date_local = forecast_peak_local_date(RUN_DATE)
+            shutil.copy2(forecast_png_path, png_archive_dir / f'{date_local}.png')
+        except Exception as e:
+            logger.error(f"Failed to archive forecast peak PNG: {e}")
 
     logger.info("Exporting peak fire danger in all GIS formats...")
     gis_files = export_all_gis_formats(
         peak_risk_smooth, lon, lat,
         run_date=RUN_DATE,
-        out_dir=PROJECT_DIR / 'gis'
+        out_dir=PROJECT_DIR / 'gis',
+        filename_suffix=IMAGE_SUFFIX
     )
 
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========
@@ -1893,7 +1908,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastfuelmoisture.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastfuelmoisture{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1937,7 +1952,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastminrh.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastminrh{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -1993,7 +2008,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxwind.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastmaxwind{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -2040,7 +2055,7 @@ def generate_complete_forecast():
         RUN_DATE, SCRIPT_DIR
     )
     
-    fig.savefig(PROJECT_DIR / 'images/mo-forecastmaxtemp.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastmaxtemp{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
     del fig, ax, cs, cax, cbar
     gc.collect()
@@ -2093,7 +2108,7 @@ def generate_complete_forecast():
                 RUN_DATE, SCRIPT_DIR
             )
             
-            fig.savefig(PROJECT_DIR / 'images/mo-forecastrainfall.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastrainfall{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
             plt.close(fig)
             logger.info(f"Saved rainfall forecast map")
             
@@ -2175,7 +2190,7 @@ def generate_complete_forecast():
                 RUN_DATE, SCRIPT_DIR
             )
             
-            fig.savefig(PROJECT_DIR / 'images/mo-forecastswe.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
+            fig.savefig(PROJECT_DIR / 'images' / f'mo-forecastswe{IMAGE_SUFFIX}.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
             plt.close(fig)
             logger.info(f"Saved SWE map")
             
@@ -2194,17 +2209,17 @@ def generate_complete_forecast():
     
     # List to keep track of ALL generated map files for logging/upload
     all_generated_maps = [
-        'mo-forecastfiredanger.png',
-        'mo-forecastfuelmoisture.png',
-        'mo-forecastminrh.png',
-        'mo-forecastmaxwind.png',
-        'mo-forecastmaxtemp.png',
+        f'mo-forecastfiredanger{IMAGE_SUFFIX}.png',
+        f'mo-forecastfuelmoisture{IMAGE_SUFFIX}.png',
+        f'mo-forecastminrh{IMAGE_SUFFIX}.png',
+        f'mo-forecastmaxwind{IMAGE_SUFFIX}.png',
+        f'mo-forecastmaxtemp{IMAGE_SUFFIX}.png',
     ]
     if total_precip_smooth is not None:
-        all_generated_maps.append('mo-forecastrainfall.png')
-        
+        all_generated_maps.append(f'mo-forecastrainfall{IMAGE_SUFFIX}.png')
+
     if swe_data is not None:
-        all_generated_maps.append('mo-forecastswe.png')
+        all_generated_maps.append(f'mo-forecastswe{IMAGE_SUFFIX}.png')
     
     if state_only:
         logger.info("state_only is True. Skipping generation of regional maps.")
@@ -2392,7 +2407,7 @@ def generate_complete_forecast():
                         "For More Info, Visit ShowMeFire.org", 
                         RUN_DATE, SCRIPT_DIR
                     )
-                    filename = f'{region_code}-forecastfiredanger.png'
+                    filename = f'{region_code}-forecastfiredanger{IMAGE_SUFFIX}.png'
                     fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
@@ -2426,7 +2441,7 @@ def generate_complete_forecast():
                         "For More Info, Visit ShowMeFire.org",
                         RUN_DATE, SCRIPT_DIR
                     )
-                    filename = f'{region_code}-forecastfuelmoisture.png'
+                    filename = f'{region_code}-forecastfuelmoisture{IMAGE_SUFFIX}.png'
                     fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
@@ -2465,7 +2480,7 @@ def generate_complete_forecast():
                         "For More Info, Visit ShowMeFire.org",
                         RUN_DATE, SCRIPT_DIR
                     )
-                    filename = f'{region_code}-forecastminrh.png'
+                    filename = f'{region_code}-forecastminrh{IMAGE_SUFFIX}.png'
                     fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
@@ -2504,7 +2519,7 @@ def generate_complete_forecast():
                         "For More Info, Visit ShowMeFire.org",
                         RUN_DATE, SCRIPT_DIR
                     )
-                    filename = f'{region_code}-forecastmaxwind.png'
+                    filename = f'{region_code}-forecastmaxwind{IMAGE_SUFFIX}.png'
                     fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
@@ -2541,7 +2556,7 @@ def generate_complete_forecast():
                         "For More Info, Visit ShowMeFire.org",
                         RUN_DATE, SCRIPT_DIR
                     )
-                    filename = f'{region_code}-forecastmaxtemp.png'
+                    filename = f'{region_code}-forecastmaxtemp{IMAGE_SUFFIX}.png'
                     fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                     all_generated_maps.append(filename)
                     plt.close(fig)
@@ -2584,7 +2599,7 @@ def generate_complete_forecast():
                             "For More Info, Visit ShowMeFire.org",
                             RUN_DATE, SCRIPT_DIR
                         )
-                        filename = f'{region_code}-forecastrainfall.png'
+                        filename = f'{region_code}-forecastrainfall{IMAGE_SUFFIX}.png'
                         fig.savefig(PROJECT_DIR / 'images' / filename, dpi=mapdpi, bbox_inches=None, pad_inches=0)
                         all_generated_maps.append(filename)
                         plt.close(fig)
@@ -2621,7 +2636,8 @@ def generate_complete_forecast():
     else:
         status = {}
 
-    status['ForecastFireDanger'] = {
+    status_key = os.getenv('FORECAST_STATUS_KEY', 'ForecastFireDanger')
+    status[status_key] = {
         'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
         'model_run': RUN_DATE.strftime('%Y-%m-%d %HZ'),
         'status': 'updated',

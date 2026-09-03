@@ -286,6 +286,52 @@ def get_db_path():
     # core/database.py -> parent=core -> parent=root -> data/showmefire.db
     return Path(__file__).resolve().parent.parent / 'data' / 'showmefire.db'
     
+def _migrate_forecasts_off_legacy_valid_time_unique(conn: sqlite3.Connection) -> None:
+    """Rebuild `forecasts` if it still carries the original single-column
+    UNIQUE(valid_time) constraint. That constraint predates the `cycle` column
+    and would otherwise block a 9z row from coexisting with a 12z row for the
+    same valid_time even after the new composite (valid_time, cycle) index is
+    added below. Only runs (and only once) when the legacy constraint is
+    actually still present, so it's a no-op on fresh installs and on databases
+    already migrated.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='forecasts'")
+    if not cursor.fetchone():
+        return
+    cursor.execute("PRAGMA index_list('forecasts')")
+    legacy_unique = False
+    for _, index_name, is_unique, *_rest in cursor.fetchall():
+        if not is_unique:
+            continue
+        cursor.execute(f"PRAGMA index_info('{index_name}')")
+        cols = [row[2] for row in cursor.fetchall()]
+        if cols == ['valid_time']:
+            legacy_unique = True
+            break
+    if not legacy_unique:
+        return
+    logger.info("Migrating forecasts table off legacy UNIQUE(valid_time) constraint")
+    cursor.execute('''
+        CREATE TABLE forecasts_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            valid_time TIMESTAMP NOT NULL,
+            title TEXT NOT NULL,
+            discussion TEXT NOT NULL,
+            cycle INTEGER NOT NULL DEFAULT 12,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        INSERT INTO forecasts_new (id, valid_time, title, discussion, cycle, created_at, updated_at)
+        SELECT id, valid_time, title, discussion, cycle, created_at, updated_at FROM forecasts
+    ''')
+    cursor.execute('DROP TABLE forecasts')
+    cursor.execute('ALTER TABLE forecasts_new RENAME TO forecasts')
+    conn.commit()
+
+
 def init_database():
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,20 +348,32 @@ def init_database():
     except: pass
     try: conn.execute('ALTER TABLE forecasts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
     except: pass
+    # HRRR cycle this forecast was generated from (12 = operational, 9 = early secondary run).
+    # Existing rows default to 12 so they keep meaning "the 12z forecast" with no data change.
+    try: conn.execute('ALTER TABLE forecasts ADD COLUMN cycle INTEGER NOT NULL DEFAULT 12')
+    except: pass
+    _migrate_forecasts_off_legacy_valid_time_unique(conn)
 
     cursor = conn.cursor()
-    
+
     # 1. Your existing forecasts table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS forecasts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            valid_time TIMESTAMP NOT NULL UNIQUE,
+            valid_time TIMESTAMP NOT NULL,
             title TEXT NOT NULL,
             discussion TEXT NOT NULL,
+            cycle INTEGER NOT NULL DEFAULT 12,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # valid_time was UNIQUE on its own; now unique per (valid_time, cycle) so a
+    # 9z row and a 12z row for the same day can coexist without colliding.
+    cursor.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_forecasts_valid_time_cycle '
+        'ON forecasts(valid_time, cycle)'
+    )
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS forecast_discussions (
@@ -702,65 +760,71 @@ def init_database():
     conn.close()
     logger.info(f"Database initialized at {db_path}")
 
-def get_latest_forecast():
+def get_latest_forecast(cycle: int = 12):
     """
-    Retrieves the most recent forecast from the database.
+    Retrieves the most recent forecast from the database for the given HRRR
+    cycle (default 12 = the operational forecast). This default means every
+    existing caller keeps seeing only the 12z forecast, regardless of whether
+    or when a secondary-cycle (e.g. 9z) forecast has also been written.
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     try:
         cursor.execute('''
-            SELECT * FROM forecasts 
-            ORDER BY id DESC 
+            SELECT * FROM forecasts
+            WHERE cycle = ?
+            ORDER BY id DESC
             LIMIT 1
-        ''')
-        
+        ''', (cycle,))
+
         row = cursor.fetchone()
-        
+
         if row:
             return dict(row)
         return None
     finally:
         conn.close()
 
-def get_forecast_by_time(valid_time):
+def get_forecast_by_time(valid_time, cycle: int = 12):
     """
-    Retrieves a forecast by its valid_time.
+    Retrieves a forecast by its valid_time and HRRR cycle (default 12).
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
-    cursor.execute('SELECT * FROM forecasts WHERE valid_time = ?', (valid_time,))
+
+    cursor.execute('SELECT * FROM forecasts WHERE valid_time = ? AND cycle = ?', (valid_time, cycle))
     row = cursor.fetchone()
     conn.close()
-    
+
     if row:
         return dict(row)
     return None
 
-def get_recent_forecasts(limit=5):
+def get_recent_forecasts(limit=5, cycle: int = 12):
     """
-    Retrieves the most recent forecasts from the database.
+    Retrieves the most recent forecasts from the database for the given HRRR
+    cycle (default 12 = the operational forecast).
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    
+
     cursor.execute('''
-        SELECT * FROM forecasts 
-        ORDER BY valid_time DESC 
+        SELECT * FROM forecasts
+        WHERE cycle = ?
+        ORDER BY valid_time DESC
         LIMIT ?
-    ''', (limit,))
-    
+    ''', (cycle, limit))
+
     rows = cursor.fetchall()
     conn.close()
-    
+
     return [dict(row) for row in rows]
 
 def get_forecast_count():
@@ -1029,48 +1093,53 @@ def _ensure_forecasts_schema(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE forecasts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     if "updated_at" not in columns:
         cursor.execute("ALTER TABLE forecasts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    if "cycle" not in columns:
+        cursor.execute("ALTER TABLE forecasts ADD COLUMN cycle INTEGER NOT NULL DEFAULT 12")
 
-def insert_forecast(valid_time, title, discussion):
+def insert_forecast(valid_time, title, discussion, cycle: int = 12):
     """
     Inserts a new forecast into the database.
-    
+
     Args:
         valid_time (datetime): The valid time of the forecast.
         title (str): The headline/title of the forecast.
         discussion (str): The detailed discussion text.
-        
+        cycle (int): The HRRR cycle hour this forecast was generated from
+            (12 = operational run, 9 = early secondary run). Defaults to 12
+            so existing callers keep writing the operational forecast.
+
     Returns:
         int: The ID of the inserted forecast.
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     try:
         _ensure_forecasts_schema(cursor)
         cursor.execute('''
-            INSERT INTO forecasts (valid_time, title, discussion)
-            VALUES (?, ?, ?)
-        ''', (valid_time, title, discussion))
-        
+            INSERT INTO forecasts (valid_time, title, discussion, cycle)
+            VALUES (?, ?, ?, ?)
+        ''', (valid_time, title, discussion, cycle))
+
         forecast_id = cursor.lastrowid
         conn.commit()
         return forecast_id
-        
+
     except sqlite3.IntegrityError:
-        # Forecast for this time already exists - update it instead
+        # Forecast for this (time, cycle) already exists - update it instead
         cursor.execute('''
-            UPDATE forecasts 
+            UPDATE forecasts
             SET title = ?, discussion = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE valid_time = ?
-        ''', (title, discussion, valid_time))
+            WHERE valid_time = ? AND cycle = ?
+        ''', (title, discussion, valid_time, cycle))
         conn.commit()
-        
+
         # Get the ID of the updated row
-        cursor.execute('SELECT id FROM forecasts WHERE valid_time = ?', (valid_time,))
+        cursor.execute('SELECT id FROM forecasts WHERE valid_time = ? AND cycle = ?', (valid_time, cycle))
         row = cursor.fetchone()
         return row[0] if row else None
-        
+
     finally:
         conn.close()
 

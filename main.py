@@ -87,7 +87,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, spread_rate_admin
+from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, spread_rate_admin
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -209,6 +209,7 @@ app.include_router(forecast_discussions.router)
 app.include_router(burn_bans.router)
 app.include_router(testbed.router)
 app.include_router(forecast_admin.router)
+app.include_router(forecast_admin_09z.router)
 app.include_router(spread_rate_admin.router)
 
 origins = [
@@ -1167,8 +1168,8 @@ async def get_image_timeline():
     else:
         raise HTTPException(status_code=404, detail="Timeline file not found")    
 @app.get("/forecast/latest")
-def api_latest_forecast():
-    forecast = get_latest_forecast()
+def api_latest_forecast(cycle: int = 12):
+    forecast = get_latest_forecast(cycle=cycle)
     if not forecast:
         raise HTTPException(status_code=404, detail="No forecast found")
     return forecast

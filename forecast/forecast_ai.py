@@ -274,11 +274,13 @@ def main(
     print(discussion)
 
     if not test_mode:
-        valid_time = current_date.replace(hour=12, minute=0, second=0, microsecond=0)
+        cycle_hour = int(os.getenv("FORECAST_CYCLE_HOUR", "12"))
+        valid_time = current_date.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
         forecast_id = insert_forecast(
             valid_time=valid_time,
             title=headline,
             discussion=discussion,
+            cycle=cycle_hour,
         )
         print(f"\nForecast saved to database with ID: {forecast_id}")
     else:

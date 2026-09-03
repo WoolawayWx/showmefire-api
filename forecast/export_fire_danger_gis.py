@@ -391,11 +391,21 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
                            lon: np.ndarray,
                            lat: np.ndarray,
                            run_date=None,
-                           out_dir: Path = Path('gis')) -> dict:
+                           out_dir: Path = Path('gis'),
+                           filename_suffix: str = '') -> dict:
     """
     Export peak fire danger in all three GIS formats.
 
     Returns a dict of {format: path_or_None} so callers can log/upload selectively.
+
+    filename_suffix (default '', i.e. today's peak_fire_danger.* filenames
+    unchanged): set e.g. '_09z' so a secondary-cycle run writes its own
+    peak_fire_danger_09z.tif / _polygons_09z.geojson / _points_09z.geojson
+    instead of overwriting the live operational files that map tiles/the
+    frontend read. When a suffix is set, the run is also skipped from the
+    per-date forecast-peak archive (archive_forecast_peak_tif) - that archive
+    backs day-over-day verification against the single operational forecast
+    and isn't meant to be duplicated per secondary run.
 
     Typical usage in generate_complete_forecast()
     ─────────────────────────────────────────────
@@ -416,19 +426,19 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     results = {}
 
     # ── GeoTIFF ───────────────────────────────────────────────────────────────
-    tif_path = out_dir / 'peak_fire_danger.tif'
+    tif_path = out_dir / f'peak_fire_danger{filename_suffix}.tif'
     ok = export_geotiff(peak_risk_smooth, lon, lat, tif_path, run_date)
     results['geotiff'] = tif_path if ok else None
-    if ok:
+    if ok and not filename_suffix:
         results['geotiff_archive'] = archive_forecast_peak_tif(tif_path, out_dir, run_date)
 
     # ── GeoJSON polygons ──────────────────────────────────────────────────────
-    poly_path = out_dir / 'peak_fire_danger_polygons.geojson'
+    poly_path = out_dir / f'peak_fire_danger_polygons{filename_suffix}.geojson'
     ok = export_geojson_polygons(peak_risk_smooth, lon, lat, poly_path, run_date)
     results['geojson_polygons'] = poly_path if ok else None
 
     # ── GeoJSON points ────────────────────────────────────────────────────────
-    pts_path = out_dir / 'peak_fire_danger_points.geojson'
+    pts_path = out_dir / f'peak_fire_danger_points{filename_suffix}.geojson'
     ok = export_geojson_points(peak_risk_smooth, lon, lat, pts_path, run_date, stride=1)
     results['geojson_points'] = pts_path if ok else None
 
