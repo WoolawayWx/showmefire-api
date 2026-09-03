@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     shared-mime-info \
     sqlite3 \
     curl \
+    gh \
     cron \
     && rm -rf /var/lib/apt/lists/*
 
