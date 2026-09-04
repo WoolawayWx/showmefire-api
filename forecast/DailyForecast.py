@@ -373,11 +373,12 @@ def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_D
     except (ImportError, FileNotFoundError):
         pass
 
-def get_current_fuel_moisture_field(port='8000', target_date=None, include_metadata=False):
-    logger.info(f"Getting current fuel moisture field from RAWS at 7 AM CT (port={port})")
+def get_current_fuel_moisture_field(port='8000', target_date=None, target_hour_utc=None, include_metadata=False):
+    target_label = f"{int(target_hour_utc):02d}z" if target_hour_utc is not None else "7 AM CT"
+    logger.info(f"Getting current fuel moisture field from RAWS at {target_label} (port={port})")
     """
-    Get observed fuel moisture from RAWS stations near 7 AM Central Time.
-    Uses the new /api/fuel-moisture/morning endpoint for consistent timing.
+    Get observed fuel moisture from RAWS stations near the requested time.
+    Defaults to 7 AM Central, while secondary cycles can request a UTC hour.
     This provides the starting point for the forecast.
     
     Args:
@@ -392,6 +393,8 @@ def get_current_fuel_moisture_field(port='8000', target_date=None, include_metad
         params = {}
         if target_date:
             params['date'] = target_date
+        if target_hour_utc is not None:
+            params['hour_utc'] = int(target_hour_utc)
         
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
@@ -670,7 +673,14 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     Returns: hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, hourly_precip, swe_grid
     """
     # Get current fuel moisture observations
-    fuel_result = get_current_fuel_moisture_field(port, include_metadata=True)
+    observation_hour_utc = os.getenv('FORECAST_OBSERVATION_HOUR_UTC')
+    observation_date = pd.Timestamp(run_date).strftime('%Y-%m-%d') if observation_hour_utc and run_date is not None else None
+    fuel_result = get_current_fuel_moisture_field(
+        port,
+        target_date=observation_date,
+        target_hour_utc=int(observation_hour_utc) if observation_hour_utc else None,
+        include_metadata=True,
+    )
     fuel_points, initial_station_records = fuel_result if fuel_result else (None, [])
     
     # Create grid meshes for interpolation
@@ -1349,7 +1359,11 @@ def generate_complete_forecast():
     if RUN_DATE.tzinfo is not None:
         RUN_DATE = RUN_DATE.tz_convert('UTC').tz_localize(None)
     
-    FORECAST_HOURS = range(4, 16)
+    forecast_start_hour = int(os.getenv('FORECAST_START_HOUR', '4'))
+    forecast_end_hour = int(os.getenv('FORECAST_END_HOUR', '15'))
+    if forecast_end_hour < forecast_start_hour:
+        raise ValueError("FORECAST_END_HOUR must be greater than or equal to FORECAST_START_HOUR")
+    FORECAST_HOURS = range(forecast_start_hour, forecast_end_hour + 1)
     
     pixelw = 2048
     pixelh = 1152
@@ -1370,7 +1384,9 @@ def generate_complete_forecast():
     date_str = RUN_DATE.strftime('%Y%m%d')
     potential_caches = []
     for candidate_hour in (CYCLE_HOUR, CYCLE_HOUR + 1):
-        potential_caches.extend(cache_dir.glob(f"hrrr_{date_str}_{candidate_hour:02d}z_f04-15.nc"))
+        potential_caches.extend(cache_dir.glob(
+            f"hrrr_{date_str}_{candidate_hour:02d}z_f{forecast_start_hour:02d}-{forecast_end_hour:02d}.nc"
+        ))
 
     if potential_caches:
         # Use the most recent cache file found for this date
@@ -1378,8 +1394,16 @@ def generate_complete_forecast():
         logger.info(f"Found existing cache file: {cache_file}")
     else:
         # Default to the specific run hour we calculated
-        cache_file = cache_dir / f"hrrr_{RUN_DATE.strftime('%Y%m%d_%H')}z_f04-15.nc"
-        logger.info(f"No cache found matching pattern hrrr_{date_str}_*z_f04-15.nc")
+        cache_file = cache_dir / (
+            f"hrrr_{RUN_DATE.strftime('%Y%m%d_%H')}z_"
+            f"f{forecast_start_hour:02d}-{forecast_end_hour:02d}.nc"
+        )
+        logger.info(
+            "No cache found matching pattern hrrr_%s_*z_f%02d-%02d.nc",
+            date_str,
+            forecast_start_hour,
+            forecast_end_hour,
+        )
         
         # Debug: List files in directory to help diagnose
         if cache_dir.exists():
@@ -1429,6 +1453,8 @@ def generate_complete_forecast():
             ds_full = ds_rh_temp.merge(ds_wind, compat='override').merge(ds_precip, compat='override')
         except Exception as e:
             logger.warning(f"Could not download precipitation data: {e}")
+            if env_bool('REQUIRE_COMPLETE_HRRR', False):
+                raise RuntimeError("Required HRRR precipitation data is unavailable") from e
             ds_full = ds_rh_temp.merge(ds_wind, compat='override')
 
         # Wind gust: additive-only, best-effort. Not required and not used
@@ -1442,6 +1468,8 @@ def generate_complete_forecast():
             ds_full = ds_full.merge(ds_gust, compat='override')
             logger.info("Successfully downloaded wind gust data")
         except Exception as e:
+            if env_bool('REQUIRE_COMPLETE_HRRR', False):
+                raise RuntimeError("Required HRRR wind-gust data is unavailable") from e
             logger.info(f"Wind gust unavailable for this run (non-fatal): {e}")
         
         # Save to cache for future use

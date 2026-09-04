@@ -53,8 +53,10 @@ RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
     && echo "" >> /etc/cron.d/forecasts \
     && chmod 0644 /etc/cron.d/forecasts
 
-RUN echo "TZ=America/Chicago" > /etc/cron.d/forecasts09z \
-    && echo "30 06 * * * root /bin/bash /app/scripts/forecasts_09z.sh >> /app/logs/cron09z.log 2>&1" >> /etc/cron.d/forecasts09z \
+# Begin checking the 09z HRRR f05-f18 window just after 12z. The job itself
+# waits for every required frame and field before forecast generation.
+RUN echo "TZ=UTC" > /etc/cron.d/forecasts09z \
+    && echo "05 12 * * * root /bin/bash /app/scripts/forecasts_09z.sh >> /app/logs/cron09z.log 2>&1" >> /etc/cron.d/forecasts09z \
     && echo "" >> /etc/cron.d/forecasts09z \
     && chmod 0644 /etc/cron.d/forecasts09z
 
@@ -82,4 +84,3 @@ EXPOSE 8000
 
 # Use production-friendly CMD (no --reload)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-

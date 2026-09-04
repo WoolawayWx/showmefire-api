@@ -7,6 +7,7 @@ import pandas as pd
 import json
 from pathlib import Path
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 # from broadcast import broadcast_update
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,23 @@ load_dotenv()
 SYNOPTIC_API_TOKEN = os.getenv("SYNOPTIC_API_TOKEN")
 
 from core.ignored_stations import get_ignored_stations
+
+
+def resolve_fuel_moisture_target_time(target_date=None, hour_utc=None, now=None):
+    """Resolve an optional date/hour request to an aware UTC datetime."""
+    if hour_utc is not None and not 0 <= hour_utc <= 23:
+        raise ValueError("hour_utc must be between 0 and 23")
+
+    if target_date:
+        base = datetime.strptime(target_date, "%Y-%m-%d")
+    else:
+        base = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None)
+
+    if hour_utc is not None:
+        return base.replace(hour=hour_utc, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    if target_date:
+        return base.replace(hour=7, minute=0, second=0, microsecond=0, tzinfo=ZoneInfo("America/Chicago")).astimezone(timezone.utc)
+    return None
 
 
 def _debug(msg: str):
@@ -581,6 +599,5 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
     logger.info(f"Found {len(stations_with_fm)} stations with fuel moisture data")
     
     return result
-
 
 

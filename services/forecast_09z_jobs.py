@@ -28,17 +28,23 @@ FORECAST_DIR = API_ROOT / "forecast"
 DAILY_FORECAST_SCRIPT = FORECAST_DIR / "DailyForecast.py"
 FORECAST_AI_SCRIPT = FORECAST_DIR / "forecast_ai.py"
 COMPARE_SCRIPT = API_ROOT / "scripts" / "compare_09z_12z.py"
+READINESS_SCRIPT = API_ROOT / "scripts" / "wait_for_hrrr.py"
 
 JOB_STATE_PATH = DATA_DIR / "forecast_09z_job.json"
 _job_lock = threading.Lock()
 
 STALE_JOB_GRACE_SECONDS = int(os.getenv("FORECAST_09Z_STALE_GRACE_SECONDS", "300"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("FORECAST_09Z_TIMEOUT_SECONDS", "3600"))
+READINESS_TIMEOUT_SECONDS = int(os.getenv("HRRR_READINESS_TIMEOUT_SECONDS", "7200"))
 
 # Pinned onto every subprocess this job runs. The suffix is what actually
 # keeps 09z artifacts from colliding with the 12z run's images/status key.
 FORECAST_09Z_ENV = {
     "FORECAST_CYCLE_HOUR": "9",
+    "FORECAST_START_HOUR": "5",
+    "FORECAST_END_HOUR": "18",
+    "FORECAST_OBSERVATION_HOUR_UTC": "9",
+    "REQUIRE_COMPLETE_HRRR": "true",
     "FORECAST_IMAGE_SUFFIX": "_09z",
     "FORECAST_STATUS_KEY": "ForecastFireDanger09z",
     "CDN_TEST_PREFIX": "09z",
@@ -76,7 +82,7 @@ def _job_is_stale(job: dict, now: datetime | None = None) -> bool:
     except (TypeError, ValueError):
         return True
     age = ((now or datetime.now(timezone.utc)) - started).total_seconds()
-    return age > JOB_TIMEOUT_SECONDS + STALE_JOB_GRACE_SECONDS
+    return age > READINESS_TIMEOUT_SECONDS + JOB_TIMEOUT_SECONDS + STALE_JOB_GRACE_SECONDS
 
 
 def _failure_excerpt(log_path: Path, line_limit: int = 20) -> str | None:
@@ -87,7 +93,7 @@ def _failure_excerpt(log_path: Path, line_limit: int = 20) -> str | None:
     return "\n".join(lines[-line_limit:]) or None
 
 
-def _run_step(script: Path, log_path: Path, environment: dict) -> int:
+def _run_step(script: Path, log_path: Path, environment: dict, timeout: int = JOB_TIMEOUT_SECONDS) -> int:
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n=== Running {script.name} at {_now()} ===\n")
         log.flush()
@@ -97,7 +103,7 @@ def _run_step(script: Path, log_path: Path, environment: dict) -> int:
             env=environment,
             stdout=log,
             stderr=subprocess.STDOUT,
-            timeout=JOB_TIMEOUT_SECONDS,
+            timeout=timeout,
             check=False,
         )
     return completed.returncode
@@ -115,7 +121,14 @@ def _run_09z_forecast(job: dict) -> None:
     environment.update(FORECAST_09Z_ENV)
 
     try:
-        return_code = _run_step(DAILY_FORECAST_SCRIPT, log_path, environment)
+        return_code = _run_step(
+            READINESS_SCRIPT,
+            log_path,
+            environment,
+            timeout=READINESS_TIMEOUT_SECONDS + 60,
+        )
+        if return_code == 0:
+            return_code = _run_step(DAILY_FORECAST_SCRIPT, log_path, environment)
         if return_code == 0:
             return_code = _run_step(FORECAST_AI_SCRIPT, log_path, environment)
         if return_code == 0 and COMPARE_SCRIPT.exists():

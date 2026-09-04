@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Secondary 9z HRRR forecast run. Mirrors forecasts.sh but pinned to the 9z
-# cycle (FORECAST_CYCLE_HOUR=9), with every output suffixed _09z so it never
+# Secondary 9z HRRR forecast run. Starts after 12z, waits for the complete
+# 9z f05-f18 input window, and initializes fuel moisture from 09z RAWS data.
+# Every output is suffixed _09z so it never
 # collides with the 12z run's files, and with NO Discord/mobile notification
 # and no PerCounty/beta steps.
 
@@ -28,6 +29,10 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 # Pin this whole run to the 9z HRRR cycle and suffix every generated artifact
 # so it can never overwrite the operational 12z run's files.
 export FORECAST_CYCLE_HOUR=9
+export FORECAST_START_HOUR=5
+export FORECAST_END_HOUR=18
+export FORECAST_OBSERVATION_HOUR_UTC=9
+export REQUIRE_COMPLETE_HRRR=true
 export FORECAST_IMAGE_SUFFIX=_09z
 export FORECAST_STATUS_KEY=ForecastFireDanger09z
 export CDN_TEST_PREFIX=09z
@@ -52,6 +57,13 @@ run_step() {
     fi
     return 0
 }
+
+run_step "Waiting for complete 9z HRRR f05-f18 data" "$PROJECT_DIR/scripts/wait_for_hrrr.py"
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
+    exit $EXIT_CODE
+fi
 
 run_step "Running 9z Daily Forecast" "$PROJECT_DIR/forecast/DailyForecast.py"
 EXIT_CODE=$?

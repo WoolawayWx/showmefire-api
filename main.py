@@ -1240,19 +1240,27 @@ async def get_latest_training_stats():
     raise HTTPException(status_code=404, detail="Stats file missing")
 
 @app.get("/api/fuel-moisture/morning")
-async def get_morning_fuel_moisture():
+async def get_morning_fuel_moisture(
+    date: Optional[str] = None,
+    hour_utc: Optional[int] = None,
+):
     """
-    Fetch fuel moisture observations near 7 AM Central Time for today.
+    Fetch fuel moisture observations near 7 AM Central Time by default.
+    The secondary forecast may explicitly request a UTC date and hour.
     Uses default states (MO and surrounding) and network 2 (RAWS).
     
     Returns: Fuel moisture observations from stations
     """
-    from services.synoptic import fetch_fuel_moisture_at_time
+    from services.synoptic import fetch_fuel_moisture_at_time, resolve_fuel_moisture_target_time
     
     try:
-        # Use defaults: current day 7 AM CT, multi-state, network 2
+        try:
+            target_time = resolve_fuel_moisture_target_time(date, hour_utc)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
         data = await fetch_fuel_moisture_at_time(
-            target_time=None,  # Defaults to 7 AM CT today
+            target_time=target_time,
             states=None,       # Defaults to MO and surrounding states
             networks=None      # Defaults to network 2
         )
@@ -1261,6 +1269,8 @@ async def get_morning_fuel_moisture():
             "success": True,
             "data": data
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching morning fuel moisture: {e}")
         raise HTTPException(
