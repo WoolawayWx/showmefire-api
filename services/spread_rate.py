@@ -275,6 +275,8 @@ def _write_geotiff(static: dict, grids: dict[str, np.ndarray], out_path: Path) -
 
 
 def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, metadata: dict) -> None:
+    import cartopy.crs as ccrs
+    import geopandas as gpd
     import matplotlib.pyplot as plt
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
@@ -284,27 +286,107 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
     cmap = ListedColormap(ROS_CLASS_COLORS)
     norm = BoundaryNorm(np.arange(-0.5, len(ROS_CLASS_LABELS) + 0.5, 1.0), len(ROS_CLASS_LABELS))
 
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=144)
+    pixel_width, pixel_height, dpi = 2048, 1152, 144
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(
+        central_longitude=-92.45, central_latitude=38.3
+    )
+    fig = plt.figure(
+        figsize=(pixel_width / dpi, pixel_height / dpi),
+        dpi=dpi,
+        facecolor="#E8E8E8",
+    )
+    ax = fig.add_axes([0.04, 0.04, 0.70, 0.92], projection=map_crs)
+    ax.set_extent((-95.8, -89.1, 35.8, 40.8), crs=data_crs)
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
     lon = static["lon"]
     lat = static["lat"]
-    mesh = ax.pcolormesh(lon, lat, classes, cmap=cmap, norm=norm, shading="auto")
-    cbar = fig.colorbar(mesh, ax=ax, ticks=np.arange(len(ROS_CLASS_LABELS)))
-    cbar.ax.set_yticklabels(ROS_CLASS_LABELS)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.set_title("Observed Rothermel Spread Rate (Experimental)")
-    subtitle = (
-        f"Analysis {metadata.get('analysis_hour', 'n/a')} · "
-        f"Generated {metadata.get('generated_at', 'n/a')} · "
-        f"Max {metadata.get('max_ros_ch_per_h', 'n/a')} ch/h"
+    mesh = ax.pcolormesh(
+        lon,
+        lat,
+        classes,
+        transform=data_crs,
+        cmap=cmap,
+        norm=norm,
+        shading="auto",
+        alpha=0.78,
+        zorder=2,
     )
-    ax.text(0.5, 1.02, subtitle, transform=ax.transAxes, ha="center", fontsize=9)
-    fig.tight_layout()
+
+    maps_dir = Path(__file__).resolve().parent.parent / "maps"
+    county_path = maps_dir / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
+    state_path = maps_dir / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
+    if county_path.is_file():
+        counties = gpd.read_file(county_path).to_crs("EPSG:4326")
+        ax.add_geometries(
+            counties.geometry,
+            crs=data_crs,
+            edgecolor="#B6B6B6",
+            facecolor="none",
+            linewidth=0.7,
+            zorder=4,
+        )
+    if state_path.is_file():
+        state = gpd.read_file(state_path).to_crs("EPSG:4326")
+        ax.add_geometries(
+            state.geometry,
+            crs=data_crs,
+            edgecolor="#111111",
+            facecolor="none",
+            linewidth=1.5,
+            zorder=5,
+        )
+
+    cax = fig.add_axes([0.02, 0.12, 0.018, 0.58])
+    cbar = fig.colorbar(mesh, cax=cax, ticks=np.arange(len(ROS_CLASS_LABELS)))
+    cbar.ax.set_yticklabels(ROS_CLASS_LABELS)
+    cbar.set_label("Potential Head-Fire Spread Rate")
+
+    fig.text(
+        0.98,
+        0.95,
+        "Observed Rothermel Spread Rate",
+        fontsize=25,
+        fontweight="bold",
+        ha="right",
+        va="top",
+    )
+    fig.text(
+        0.98,
+        0.885,
+        "Experimental potential head-fire rate",
+        fontsize=15,
+        ha="right",
+        va="top",
+    )
+    fig.text(
+        0.77,
+        0.68,
+        f"Analysis: {metadata.get('analysis_hour', 'n/a')}\n\n"
+        f"Generated: {metadata.get('generated_at', 'n/a')}\n\n"
+        f"Maximum: {metadata.get('max_ros_ch_per_h', 'n/a')} ch/h\n\n"
+        "Categories\n"
+        "Very Low: < 2 ch/h\n"
+        "Low: 2–5 ch/h\n"
+        "Moderate: 5–20 ch/h\n"
+        "High: 20–50 ch/h\n"
+        "Very High: 50–150 ch/h\n"
+        "Extreme: ≥ 150 ch/h\n\n"
+        "Inputs: RTMA weather, conditioned fuel\n"
+        "moisture, LANDFIRE fuels/canopy, USGS 3DEP\n\n"
+        "Experimental—not an operational fire forecast",
+        fontsize=12,
+        ha="left",
+        va="top",
+        linespacing=1.35,
+    )
     fd, temporary = tempfile.mkstemp(prefix=".spread_rate.", suffix=".png", dir=out_path.parent)
     os.close(fd)
     temp_path = Path(temporary)
     try:
-        fig.savefig(temp_path, bbox_inches="tight")
+        fig.savefig(temp_path, facecolor=fig.get_facecolor())
         plt.close(fig)
         _atomic_replace(temp_path, out_path)
     finally:
