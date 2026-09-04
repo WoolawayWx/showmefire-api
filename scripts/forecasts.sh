@@ -58,6 +58,11 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+# The 09z comparison must run after this operational 12z archive exists.
+# It is observational/reporting-only and must not block forecast publication.
+run_step "Comparing 9z run against same-day 12z run" "$PROJECT_DIR/scripts/compare_09z_12z.py" || \
+  echo "WARNING: 9z comparison generation failed at $(date)" >> "$LOG_FILE" 2>&1
+
 run_step "Running AI Text Generation" "$PROJECT_DIR/forecast/forecast_ai.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
