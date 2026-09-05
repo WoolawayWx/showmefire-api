@@ -60,20 +60,23 @@ async def rerun_verification(payload: RerunRequest, token: Optional[str] = None)
 
 
 @router.get("/summary/{date}")
-async def get_verification_ai_summary(date: str, token: Optional[str] = None):
-    """Return the generated verification narrative to authenticated admins."""
+def get_verification_ai_summary(date: str, token: Optional[str] = None):
     _require_admin(token)
-    try:
-        report_date = datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from exc
+    from services.verification_feedback import feedback_status
+    return feedback_status(date)
 
-    summary_path = Path(REPORTS_DIR) / report_date / "validation_summary.json"
-    if not summary_path.exists():
-        raise HTTPException(status_code=404, detail=f"No validation report available for {report_date}")
+
+@router.post("/summary/{date}/generate")
+def generate_verification_ai_feedback(date: str, token: Optional[str] = None):
+    _require_admin(token)
+    from services.verification_feedback import generate_feedback
+    from ai.cloudflare import CloudflareAIClient
+    if not CloudflareAIClient().configured:
+        raise HTTPException(status_code=503, detail="Cloudflare Workers AI credentials are not configured")
     try:
-        with summary_path.open("r", encoding="utf-8") as report_file:
-            report = json.load(report_file)
-    except (json.JSONDecodeError, OSError) as exc:
-        raise HTTPException(status_code=500, detail="Failed to read validation report") from exc
-    return {"date": report_date, "ai_summary": report.get("ai_summary")}
+        return generate_feedback(date)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("AI feedback generation failed for %s", date)
+        raise HTTPException(status_code=502, detail="AI feedback could not be generated. Please retry; the report is unchanged.") from exc

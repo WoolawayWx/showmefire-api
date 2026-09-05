@@ -23,6 +23,8 @@ def _inside(path: Path, root: Path) -> bool:
 def isolation_checks(beta_root: Path = BETA_ROOT) -> dict:
     """Return executable assertions for the Testbed's production boundary."""
     beta_root = Path(beta_root)
+    if not beta_root.is_absolute():
+        beta_root = Path(__file__).resolve().parents[1] / beta_root
     designated_outputs = {
         "forecast": beta_root / "forecast",
         "products": beta_root / "gis",

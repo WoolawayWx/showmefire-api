@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from ai.cloudflare import CloudflareAIClient
+from services.verification_metrics import directional_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def build_verification_ai_packet(report, recent_history, comparison_rows):
             "record_count": report.get("record_count", 0),
             "stations_count": report.get("stations_count"),
             "metrics": _metric_snapshot(report),
+            "directional_metrics": directional_metrics(report),
             "confusion_matrix": report.get("confusion_matrix"),
             "wind_confusion_matrix": report.get("wind_confusion_matrix"),
             "neighborhood_verification": report.get("neighborhood_verification"),
@@ -70,6 +72,7 @@ def generate_verification_summary(
     report: Dict[str, Any],
     comparison_rows: Iterable[Dict[str, Any]],
     recent_history: Iterable[Dict[str, Any]] = (),
+    *, strict: bool = False,
 ) -> Optional[str]:
     """Summarize a report and representative raw forecast/observation pairs.
 
@@ -78,20 +81,26 @@ def generate_verification_summary(
     """
     client = CloudflareAIClient()
     if not client.configured:
+        if strict:
+            raise RuntimeError('Cloudflare Workers AI credentials are not configured')
         return None
 
     try:
         packet = build_verification_ai_packet(report, recent_history, comparison_rows)
         prompt = (
-            "You are summarizing a completed Missouri fire-weather forecast verification. "
-            "Use only the supplied data. Do not invent causes or claim more certainty "
+            "You are reviewing a Missouri fire-weather forecast verification, which may cover only part of a day. "
+            "Sample counts do not prove full-day coverage. Use only the supplied data. Do not invent causes or claim more certainty "
             "than the metrics support. Return exactly three labeled sections: Today "
             "(one paragraph), Recent trends (at least one paragraph), and Improvement "
             "ideas (a paragraph or concise bullet list), in plain text.\n\n"
             f"Verification packet:\n{json.dumps(packet, default=str)}"
         )
-        text = client.generate_text(prompt)
+        text = client.generate_text(prompt, max_tokens=1000)
+        if strict and not text:
+            raise RuntimeError('AI returned an empty response')
         return text or None
     except Exception:
         logger.exception("Cloudflare verification summary generation failed")
+        if strict:
+            raise
         return None

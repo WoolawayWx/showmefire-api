@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
+from services.verification_metrics import directional_metrics
 
 from core.config import ARCHIVE_RAW_DATA_DIR, ARCHIVE_DIR, GIS_DIR, IMAGES_DIR, REPORTS_DIR
 
@@ -173,6 +174,9 @@ async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
         for field, label in _METRIC_FIELD_MAP.items():
             row[field] = _mae_for(entry, label)
         row["fire_danger_accuracy"] = _fire_danger_accuracy(entry)
+        direction = directional_metrics(entry).get("Fire Danger Index", {})
+        row["fire_danger_bias"] = direction.get("bias")
+        row["direction"] = direction.get("direction")
         row["has_confusion_matrix"] = bool(entry.get("confusion_matrix"))
         row["has_observed_peak"] = _observed_peak_tif_path(date).exists()
         row["has_rtma_peak"] = _rtma_peak_tif_path(date).exists()
@@ -208,6 +212,7 @@ async def get_verification_report(date: str):
         "record_count": summary.get("record_count", 0),
         "stations_count": summary.get("stations_count"),
         "metrics": summary.get("metrics", {}),
+        "directional_metrics": directional_metrics(summary),
         "confusion_matrix": summary.get("confusion_matrix"),
         "wind_confusion_matrix": summary.get("wind_confusion_matrix"),
         "neighborhood_verification": summary.get("neighborhood_verification"),

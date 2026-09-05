@@ -44,6 +44,7 @@ class CloudflareAIClient:
         system: str | None = None,
         *,
         model: str | None = None,
+        max_tokens: int = 320,
     ) -> str:
         if not self.api_key:
             raise CloudflareAIError("CLOUDFLARE_AI_API_KEY is not configured")
@@ -62,7 +63,7 @@ class CloudflareAIClient:
         request = {
             "messages": messages,
             "temperature": 0.1,
-            "max_tokens": 320,
+            "max_tokens": max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",

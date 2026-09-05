@@ -903,6 +903,8 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
             },
         })
     report['comparison_rows'] = comparison_rows
+    from services.verification_metrics import directional_metrics
+    report['directional_metrics'] = directional_metrics(report)
     report['verification_ai_packet'] = (
         f"reports/{report_date}/verification_ai_packet{suffix_tag}.json"
     )
@@ -921,7 +923,7 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
             report, comparison_rows, recent_history
         )
     except Exception:
-        logger.exception("Unable to generate optional Gemini verification summary")
+        logger.exception("Unable to generate optional Cloudflare verification summary")
         report['ai_summary'] = None
     
     # Generate Plots
