@@ -19,6 +19,7 @@ Usage inside generate_complete_forecast():
 
 import json
 import logging
+import re
 import shutil
 import numpy as np
 from pathlib import Path
@@ -66,7 +67,12 @@ def forecast_peak_local_date(run_date=None) -> str:
     return run_time_utc.astimezone(CHICAGO_TZ).strftime("%Y-%m-%d")
 
 
-def archive_forecast_peak_tif(tif_path: Path, out_dir: Path, run_date=None) -> Path | None:
+def archive_forecast_peak_tif(
+    tif_path: Path,
+    out_dir: Path,
+    run_date=None,
+    archive_name: str = "forecast_peak",
+) -> Path | None:
     """Copy the just-written peak_fire_danger.tif into a per-date archive.
 
     Mirrors gis/observed_peak/archive/{date}.tif so verification can compare
@@ -76,7 +82,9 @@ def archive_forecast_peak_tif(tif_path: Path, out_dir: Path, run_date=None) -> P
     """
     try:
         date_local = forecast_peak_local_date(run_date)
-        archive_dir = Path(out_dir) / "forecast_peak" / "archive"
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", archive_name):
+            raise ValueError(f"Invalid forecast peak archive name: {archive_name}")
+        archive_dir = Path(out_dir) / archive_name / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
         archive_path = archive_dir / f"{date_local}.tif"
         shutil.copy2(tif_path, archive_path)
@@ -402,10 +410,8 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     unchanged): set e.g. '_09z' so a secondary-cycle run writes its own
     peak_fire_danger_09z.tif / _polygons_09z.geojson / _points_09z.geojson
     instead of overwriting the live operational files that map tiles/the
-    frontend read. When a suffix is set, the run is also skipped from the
-    per-date forecast-peak archive (archive_forecast_peak_tif) - that archive
-    backs day-over-day verification against the single operational forecast
-    and isn't meant to be duplicated per secondary run.
+    frontend read. Dated archives use the same suffix (for example,
+    forecast_peak_09z/archive) so each cycle can be verified independently.
 
     Typical usage in generate_complete_forecast()
     ─────────────────────────────────────────────
@@ -429,8 +435,11 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     tif_path = out_dir / f'peak_fire_danger{filename_suffix}.tif'
     ok = export_geotiff(peak_risk_smooth, lon, lat, tif_path, run_date)
     results['geotiff'] = tif_path if ok else None
-    if ok and not filename_suffix:
-        results['geotiff_archive'] = archive_forecast_peak_tif(tif_path, out_dir, run_date)
+    if ok:
+        archive_name = f"forecast_peak{filename_suffix}" if filename_suffix else "forecast_peak"
+        results['geotiff_archive'] = archive_forecast_peak_tif(
+            tif_path, out_dir, run_date, archive_name=archive_name,
+        )
 
     # ── GeoJSON polygons ──────────────────────────────────────────────────────
     poly_path = out_dir / f'peak_fire_danger_polygons{filename_suffix}.geojson'

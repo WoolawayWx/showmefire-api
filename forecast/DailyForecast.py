@@ -1838,17 +1838,17 @@ def generate_complete_forecast():
     del fig, ax, cs, cax, cbar
     gc.collect()
 
-    # This per-date archive backs day-over-day verification against the single
-    # operational forecast; a secondary-cycle run (IMAGE_SUFFIX set) skips it
-    # rather than duplicating/contending for that one slot.
-    if not IMAGE_SUFFIX:
-        try:
-            png_archive_dir = PROJECT_DIR / 'images' / 'forecast_peak' / 'archive'
-            png_archive_dir.mkdir(parents=True, exist_ok=True)
-            date_local = forecast_peak_local_date(RUN_DATE)
-            shutil.copy2(forecast_png_path, png_archive_dir / f'{date_local}.png')
-        except Exception as e:
-            logger.error(f"Failed to archive forecast peak PNG: {e}")
+    # Keep each cycle in its own dated archive. The operational run retains the
+    # original forecast_peak path; the 09z preview uses forecast_peak_09z so it
+    # can be verified later without contending with the 12z product.
+    try:
+        png_archive_name = f'forecast_peak{IMAGE_SUFFIX}' if IMAGE_SUFFIX else 'forecast_peak'
+        png_archive_dir = PROJECT_DIR / 'images' / png_archive_name / 'archive'
+        png_archive_dir.mkdir(parents=True, exist_ok=True)
+        date_local = forecast_peak_local_date(RUN_DATE)
+        shutil.copy2(forecast_png_path, png_archive_dir / f'{date_local}.png')
+    except Exception as e:
+        logger.error(f"Failed to archive forecast peak PNG: {e}")
 
     logger.info("Exporting peak fire danger in all GIS formats...")
     gis_files = export_all_gis_formats(

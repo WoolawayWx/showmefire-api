@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 TODAY_DASH=$(TZ="America/Chicago" date +%Y-%m-%d)
+TODAY_COMPACT=$(TZ="America/Chicago" date +%Y%m%d)
 CURRENT_HOUR_CT=$(TZ="America/Chicago" date +%H)
 
 # A scheduled current-day report is invalid until the 10:00-21:00 Central
@@ -46,10 +47,23 @@ fi
 "$PYTHON" forecast/endOfDayReport.py
 "$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta
 
+HAS_09Z=false
+if [[ -f "archive/forecasts/station_forecasts_${TODAY_COMPACT}_09.json" ]]; then
+	HAS_09Z=true
+	"$PYTHON" forecast/endOfDayReport.py \
+		--forecast-glob "station_forecasts_*_09.json" \
+		--report-suffix 09z
+	"$PYTHON" scripts/compare_09z_rtma.py --date "$TODAY_DASH"
+else
+	echo "WARN: No 09z station forecast archive for $TODAY_DASH; skipping 09z observed verification." >&2
+fi
+
 SUMMARY_FILE="reports/$TODAY_DASH/validation_summary.json"
 SUMMARY_FILE_BETA="reports/$TODAY_DASH/validation_summary_beta.json"
+SUMMARY_FILE_09Z="reports/$TODAY_DASH/validation_summary_09z.json"
 VERIFICATION_CSV="reports/verification_history.csv"
 VERIFICATION_CSV_BETA="reports/verification_history_beta.csv"
+VERIFICATION_CSV_09Z="reports/verification_history_09z.csv"
 
 if [[ ! -f "$SUMMARY_FILE" ]]; then
 	echo "ERROR: Missing validation summary: $SUMMARY_FILE" >&2
@@ -105,4 +119,29 @@ if [[ ! -f "$VERIFICATION_CSV_BETA" ]]; then
 	exit 1
 fi
 
-echo "Validation complete: record_count=$RECORD_COUNT beta_record_count=$RECORD_COUNT_BETA"
+RECORD_COUNT_09Z=0
+if [[ "$HAS_09Z" == true ]]; then
+	if [[ ! -f "$SUMMARY_FILE_09Z" ]]; then
+		echo "ERROR: Missing 09z validation summary: $SUMMARY_FILE_09Z" >&2
+		exit 1
+	fi
+	if [[ ! -f "$VERIFICATION_CSV_09Z" ]]; then
+		echo "ERROR: Missing 09z compatibility CSV: $VERIFICATION_CSV_09Z" >&2
+		exit 1
+	fi
+	RECORD_COUNT_09Z=$("$PYTHON" - "$SUMMARY_FILE_09Z" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], 'r') as summary_file:
+	summary = json.load(summary_file)
+print(int(summary.get('record_count', 0) or 0))
+PY
+)
+	if [[ "$RECORD_COUNT_09Z" -le 0 ]]; then
+		echo "ERROR: 09z validation produced zero overlapping records." >&2
+		exit 1
+	fi
+fi
+
+echo "Validation complete: record_count=$RECORD_COUNT beta_record_count=$RECORD_COUNT_BETA 09z_record_count=$RECORD_COUNT_09Z"
