@@ -137,7 +137,7 @@ def refresh_observation_products(stations_payload: dict, raws_payload: dict) -> 
         stid = feature["properties"]["stid"]
         current = feature["properties"]
         previous = peak_by_stid.get(stid)
-        if previous is None or current["beta_score"] > previous["beta_score"]:
+        if previous is None or current["beta_score"] > previous["properties"]["beta_score"]:
             peak_by_stid[stid] = feature
 
     peak_features = list(peak_by_stid.values())
