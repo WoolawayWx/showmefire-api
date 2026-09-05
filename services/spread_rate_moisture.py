@@ -178,7 +178,8 @@ def apply_raws_10hr_correction(
     meta = {
         "station_count": len(stations),
         "mean_residual": float(np.mean(residuals)),
-        "nearest_station_distance_deg": nearest_distance.reshape(target_lat.shape),
+        "mean_nearest_station_distance_deg": float(np.mean(nearest_distance)),
+        "max_nearest_station_distance_deg": float(np.max(nearest_distance)),
     }
     return corrected, meta
 
