@@ -87,7 +87,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -191,6 +191,7 @@ OPSBRIEF_DIR.mkdir(parents=True, exist_ok=True)
 OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 
 # Include tile router for GeoTIFF rendering
+app.include_router(archive_admin.router)
 app.include_router(tiles.router)
 app.include_router(outlook.router)
 app.include_router(discord_admin.router)
@@ -1069,10 +1070,15 @@ async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
     '''
     archive_path = Path(archive_dir)
     
-    if not archive_path.exists():
-        return {"success": True, "files": []}
-    
     files = []
+    if archive_dir == str(ARCHIVE_RAW_DATA_DIR):
+        from services.archive_store import ArchiveStore
+        store = ArchiveStore()
+        for m in await asyncio.to_thread(store.list_observations):
+            files.append({"filename": m['name'], "size_mb": round(m['size'] / 1024 / 1024, 2),
+                          "created": m['captured_at'],
+                          "modified": datetime.fromtimestamp(m['mtime_ns'] / 1e9).isoformat(),
+                          "storage": "r2"})
     for filepath in archive_path.glob("raw_data_*.json"):
         stat = filepath.stat()
         files.append({
@@ -1082,6 +1088,7 @@ async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
         })
     
+    files = list({item['filename']: item for item in files}.values())
     files.sort(key=lambda x: x['modified'], reverse=True)
     
     return {
@@ -1106,12 +1113,17 @@ async def load_archived_file(filename: str, archive_dir: str = str(ARCHIVE_RAW_D
     '''
     archive_path = Path(archive_dir) / filename
     
-    if not archive_path.exists():
-        return {"success": False, "error": "File not found"}
-    
     try:
-        with open(archive_path, 'r') as f:
-            data = json.load(f)
+        if archive_path.exists():
+            with open(archive_path, 'r') as f:
+                data = json.load(f)
+        elif archive_dir == str(ARCHIVE_RAW_DATA_DIR):
+            from services.archive_store import ArchiveStore
+            data = await asyncio.to_thread(ArchiveStore().read_observation, filename)
+            if data is None:
+                return {"success": False, "error": "File not found"}
+        else:
+            return {"success": False, "error": "File not found"}
         
         return {
             "success": True,

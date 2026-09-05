@@ -18,7 +18,7 @@ explicit and resumable:
 python scripts/backfill_synoptic.py --dry-run
 python scripts/backfill_synoptic.py
 
-# Bundle HRRR, observations, and forecasts. RTMA is intentionally excluded.
+# Sync versioned HRRR, observations, and forecasts to R2. RTMA is excluded.
 python -m services.archive_bundler
 ```
 
@@ -115,3 +115,11 @@ Optional settings:
 The API also serves `catalog.json` and `burn_bans.geojson` beneath `/gis`.
 Operational GeoTIFFs and GeoPackages use EPSG:32615; public GeoJSON uses
 EPSG:4326.
+
+## R2 archive and data operations
+
+Versioned, checksummed data objects replace daily ZIP production. The admin
+page at `/admin/archive` tracks source coverage, upload progress, and processing
+status. See [the migration and operations runbook](docs/r2_archive_runbook.md)
+for configuration, existing ZIP imports, restores, and training downloads.
+Local pruning is opt-in; existing ZIPs remain readable.

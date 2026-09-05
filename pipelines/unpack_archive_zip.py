@@ -41,7 +41,7 @@ def _destination_for(entry_name):
     return None, basename
 
 
-def unpack_zip(zip_path):
+def unpack_zip(zip_path, preserve_existing=False):
     print(f"Unpacking {zip_path.name}...")
     unrecognized = []
     extracted = 0
@@ -60,7 +60,7 @@ def unpack_zip(zip_path):
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_path = dest_dir / basename
 
-            if dest_path.exists() and dest_path.stat().st_size == info.file_size:
+            if dest_path.exists() and (preserve_existing or dest_path.stat().st_size == info.file_size):
                 skipped += 1
                 continue
 

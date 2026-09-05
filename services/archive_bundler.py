@@ -1,21 +1,8 @@
-"""
-End-of-day archiving: bundle each day's HRRR grids, station forecasts, and
-raw station observations into one verified zip per date, then delete the
-originals for that date once the zip is confirmed intact.
+"""Scheduler entry point for the versioned R2 data archive.
 
-Groups files by the date embedded in their filenames, processes one date at
-a time (zip, verify, delete), keeping peak extra disk usage to about one
-day's worth of data - cache/hrrr alone runs into the tens of GB, so disk
-space is tight.
-
-Path resolution mirrors core/database.py's get_db_path(): prefer the
-Docker-mounted /app root when present, falling back to the project root for
-local dev. This means source/output locations move together with wherever
-docker-compose (or its production override) actually mounts cache/archive/
-data_archive_day on the host - no separate env var needed here.
-
-Runs both as a standalone script (useful for working through the existing
-backlog) and as a scheduled job via core/scheduler.py.
+Legacy ZIP helpers remain for historical restores and compatibility. New
+scheduled writes use ArchiveStore, retaining local sources unless pruning is
+explicitly enabled. ZIP history is never removed by this module's new sync path.
 """
 import asyncio
 import logging
@@ -199,14 +186,22 @@ def restore_from_r2_if_needed(date, final_path):
     try:
         s3 = _r2_client()
         s3.head_object(Bucket=R2_BUCKET, Key=key)
-    except Exception:
-        return
+    except Exception as exc:
+        if getattr(exc, 'response', {}).get('Error', {}).get('Code') in ('404', 'NoSuchKey', 'NotFound'):
+            return
+        raise
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        s3.download_file(R2_BUCKET, key, str(final_path))
+        temp_path = final_path.with_suffix('.restore.tmp')
+        s3.download_file(R2_BUCKET, key, str(temp_path))
+        with zipfile.ZipFile(temp_path) as zf:
+            if zf.testzip() is not None:
+                raise RuntimeError('Restored archive is corrupt')
+        temp_path.replace(final_path)
         logger.info(f"{date}: restored existing archive from R2 ({R2_BUCKET}/{key}) for merge")
     except Exception as e:
         logger.warning(f"{date}: failed to restore existing archive from R2 ({R2_BUCKET}/{key}): {e}")
+        raise
 
 
 def restore_and_unpack_date(date_compact):
@@ -221,13 +216,19 @@ def restore_and_unpack_date(date_compact):
     ARCHIVE_ZIPS_DIR (data/archive_zips) - the two modules target different
     directories and nothing today bridges them.
     """
+    from services.archive_store import ArchiveStore
+    from datetime import datetime
+    store = ArchiveStore()
+    restored = 0
+    if store.configured:
+        restored = store.restore(datetime.strptime(date_compact, '%Y%m%d').strftime('%Y-%m-%d'))
     final_path = OUTPUT_DIR / f"{date_compact}.zip"
     restore_from_r2_if_needed(date_compact, final_path)
     if not final_path.exists():
-        return False
+        return bool(restored)
 
     from pipelines.unpack_archive_zip import unpack_zip
-    unpack_zip(final_path)
+    unpack_zip(final_path, preserve_existing=True)
     return True
 
 
@@ -275,13 +276,8 @@ def process_date(date, paths):
 
 def run_archive_bundle():
     """Sync entry point - safe to run standalone (e.g. against the backlog)."""
-    files_by_date = collect_files_by_date()
-    if not files_by_date:
-        logger.info("No matching files found.")
-        return
-
-    for date in sorted(files_by_date):
-        process_date(date, files_by_date[date])
+    from services.archive_store import ArchiveStore
+    return ArchiveStore().sync(prune=os.getenv('SMF_ARCHIVE_PRUNE', 'false').lower() == 'true')
 
 
 async def run_end_of_day_archive():

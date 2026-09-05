@@ -341,10 +341,11 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
 
     scheduler.add_job(
         run_end_of_day_archive,
-        'cron',
-        hour=23,
-        minute=45,
-        id='end_of_day_archive'
+        'interval',
+        minutes=15,
+        id='end_of_day_archive',
+        max_instances=1,
+        coalesce=True
     )
 
     scheduler.add_job(
