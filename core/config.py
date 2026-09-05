@@ -8,7 +8,7 @@ IMAGES_DIR = Path("images")
 # catalog/GeoJSON contracts from /gis.
 GIS_DIR = Path(os.getenv("SMF_GIS_PUBLISH_DIR", "gis"))
 PUBLIC_DIR = Path("public")
-REPORTS_DIR = Path("reports")
+REPORTS_DIR = Path(os.getenv("SMF_REPORTS_DIR", str(Path(__file__).resolve().parents[1] / "reports")))
 LOGS_DIR = Path("logs")
 ARCHIVE_DIR = Path("archive")
 ARCHIVE_RAW_DATA_DIR = ARCHIVE_DIR / "raw_data"

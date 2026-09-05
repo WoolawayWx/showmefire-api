@@ -237,17 +237,7 @@ class LoginRequest(BaseModel):
     email:str
     password:str
 
-def _set_auth_cookie(response: Response, name: str, value: str, max_age: int) -> None:
-    response.set_cookie(
-        key=name,
-        value=value,
-        max_age=max_age,
-        httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite=AUTH_COOKIE_SAMESITE,
-        domain=AUTH_COOKIE_DOMAIN,
-        path="/",
-    )
+from core.admin_session import admin_cookie_context, set_auth_cookie as _set_auth_cookie
 
 def _clear_auth_cookie(response: Response, name: str) -> None:
     response.delete_cookie(
@@ -259,15 +249,7 @@ def _clear_auth_cookie(response: Response, name: str) -> None:
         path="/",
     )
 
-@app.middleware("http")
-async def admin_cookie_context(request: Request, call_next):
-    """Make the access cookie available to legacy verify_token callers."""
-    context = set_request_token(request.cookies.get(ACCESS_COOKIE_NAME))
-    try:
-        return await call_next(request)
-    finally:
-        reset_request_token(context)
-
+app.middleware("http")(admin_cookie_context)
 
 class DevProjectCreate(BaseModel):
     name: str

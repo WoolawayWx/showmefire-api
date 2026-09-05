@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from core.config import ARCHIVE_RAW_DATA_DIR, ARCHIVE_DIR, GIS_DIR, IMAGES_DIR, REPORTS_DIR
 
@@ -61,15 +61,68 @@ def _report_covers_closed_window(
         return False
 
 
-def _load_history() -> List[Dict[str, Any]]:
-    if not HISTORY_FILE.exists():
-        return []
+def _normalize_date(value):
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
-    return data if isinstance(data, list) else []
+        return datetime.strptime(str(value).replace('-', ''), '%Y%m%d').strftime('%Y-%m-%d')
+    except ValueError:
+        return None
+
+
+def _window_status(entry):
+    if not entry.get('generated_at'):
+        return 'unknown'
+    return 'closed' if _report_covers_closed_window(entry) else 'early'
+
+
+def _report_is_available(entry, fallback_date=None):
+    # A report produced early remains useful historical evidence. Keep it
+    # visible once the day closes, with its early-generation status attached.
+    return _report_covers_closed_window({'date': entry.get('date') or fallback_date})
+
+
+def _load_history() -> List[Dict[str, Any]]:
+    entries = {}
+    daily_paths = sorted(Path(REPORTS_DIR).glob('*/validation_summary.json'),
+                         key=lambda path: (len(path.parent.name) == 10, str(path)))
+    paths = [HISTORY_FILE, *daily_paths]
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            continue
+        except (json.JSONDecodeError, OSError):
+            logger.warning('Unable to read verification history source %s', path, exc_info=True)
+            continue
+        candidates = data if path == HISTORY_FILE and isinstance(data, list) else [data]
+        for entry in candidates:
+            if not isinstance(entry, dict) or not isinstance(entry.get('metrics'), dict):
+                continue
+            date = _normalize_date(entry.get('date') or (path.parent.name if path != HISTORY_FILE else ''))
+            if date:
+                # Daily summaries are authoritative if the index is stale.
+                entries[date] = {**entry, 'date': date}
+    return list(entries.values())
+
+
+def _read_summary(date):
+    normalized = _normalize_date(date)
+    if normalized is None:
+        raise HTTPException(status_code=422, detail='date must be YYYY-MM-DD')
+    for directory in (normalized, normalized.replace('-', '')):
+        path = Path(REPORTS_DIR) / directory / 'validation_summary.json'
+        if path.exists():
+            try:
+                summary = json.loads(path.read_text(encoding='utf-8'))
+                if not isinstance(summary, dict):
+                    raise ValueError('Invalid report')
+                return {**summary, 'date': normalized}
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=500, detail='Failed to read validation report') from exc
+    # The history index also contains full reports in older deployments.
+    for entry in _load_history():
+        if entry['date'] == normalized:
+            return entry
+    raise HTTPException(status_code=404, detail=f'No validation report available for {normalized}')
 
 
 def _observed_peak_tif_path(date: str) -> Path:
@@ -107,16 +160,16 @@ def _fire_danger_accuracy(entry: Dict[str, Any]) -> Optional[float]:
 
 
 @router.get("/history")
-async def get_verification_history(limit: int = 90):
+async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
     history = _load_history()
-    history_sorted = sorted(history, key=lambda e: e.get("date", ""), reverse=True)[:limit]
+    history_sorted = sorted((e for e in history if _report_is_available(e)), key=lambda e: e["date"], reverse=True)[:limit]
 
     dates = []
     for entry in history_sorted:
         date = entry.get("date")
-        if not date or not _report_covers_closed_window(entry):
+        if not date:
             continue
-        row = {"date": date, "record_count": entry.get("record_count", 0)}
+        row = {"date": date, "record_count": entry.get("record_count", 0), "window_status": _window_status(entry)}
         for field, label in _METRIC_FIELD_MAP.items():
             row[field] = _mae_for(entry, label)
         row["fire_danger_accuracy"] = _fire_danger_accuracy(entry)
@@ -130,18 +183,9 @@ async def get_verification_history(limit: int = 90):
 
 @router.get("/report/{date}")
 async def get_verification_report(date: str):
-    summary_path = Path(REPORTS_DIR) / date / "validation_summary.json"
-    if not summary_path.exists():
-        raise HTTPException(status_code=404, detail=f"No validation report available for {date}")
-
-    try:
-        with open(summary_path, "r", encoding="utf-8") as f:
-            summary = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.error("Failed to read validation summary for %s: %s", date, exc)
-        raise HTTPException(status_code=500, detail="Failed to read validation report") from exc
-
-    if not _report_covers_closed_window(summary, date):
+    summary = _read_summary(date)
+    date = summary['date']
+    if not _report_is_available(summary, date):
         raise HTTPException(status_code=404, detail=f"No completed validation report available for {date}")
 
     try:
@@ -160,6 +204,7 @@ async def get_verification_report(date: str):
     return {
         "date": summary.get("date", date),
         "generated_at": summary.get("generated_at"),
+        "window_status": _window_status(summary),
         "record_count": summary.get("record_count", 0),
         "stations_count": summary.get("stations_count"),
         "metrics": summary.get("metrics", {}),
@@ -192,14 +237,10 @@ async def get_verification_report(date: str):
 @router.get("/report/{date}/comparisons")
 async def get_verification_comparisons(date: str, station: Optional[str] = None, limit: int = 500):
     """Return canonical hourly forecast/observation pairs for a report date."""
-    summary_path = Path(REPORTS_DIR) / date / "validation_summary.json"
-    if not summary_path.exists():
-        raise HTTPException(status_code=404, detail=f"No validation report available for {date}")
-
+    summary = _read_summary(date)
+    date = summary['date']
     try:
-        with open(summary_path, "r", encoding="utf-8") as f:
-            summary = json.load(f)
-        if not _report_covers_closed_window(summary, date):
+        if not _report_is_available(summary, date):
             raise HTTPException(status_code=404, detail=f"No completed validation report available for {date}")
         # Reports generated by the current end-of-day pipeline persist the
         # exact comparison rows used for scoring. Prefer those rows because

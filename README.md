@@ -123,3 +123,18 @@ page at `/admin/archive` tracks source coverage, upload progress, and processing
 status. See [the migration and operations runbook](docs/r2_archive_runbook.md)
 for configuration, existing ZIP imports, restores, and training downloads.
 Local pruning is opt-in; existing ZIPs remain readable.
+
+## Admin sessions
+
+Admin sign-ins now last 30 days by default (`REFRESH_TOKEN_EXPIRE_DAYS`). The
+shorter access cookie renews automatically on ordinary API requests while the
+refresh cookie remains valid, including after reopening a tab. Renewal happens
+before the endpoint runs, so saving a form does not require replaying its request.
+The refresh expiry is fixed from sign-in; requests do not extend it indefinitely.
+Explicit logout clears both HttpOnly cookies and never triggers renewal.
+
+Deploy the API and website together. Existing refresh cookies retain their
+original expiry; sign in again after deployment to receive the longer lifetime.
+`ACCESS_TOKEN_EXPIRE_MINUTES` (or `ACCESS_TOKEN_EXPIRE_HOURS`) still controls the
+short-lived access token. Keep the same `JWT_SECRET` across restarts and workers
+so valid sessions survive deployments.
