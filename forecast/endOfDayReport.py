@@ -797,6 +797,7 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
         end_search = start_search + pd.Timedelta(hours=11)  # 16:00 to 03:00 next day
     else:
         # fallback
+        forecast_day = pd.Timestamp.now(tz='America/Chicago').date()
         start_search = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=1)
         end_search = pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=1)
     
@@ -861,7 +862,10 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
     }
 
     # 6. Output Report
-    report_date = target_date or datetime.now().strftime("%Y-%m-%d")
+    # Key the report to the forecast/observation window, not the server's
+    # calendar date. The production verification job runs after midnight UTC
+    # while it is still the prior evening in Central Time.
+    report_date = target_date or forecast_day.isoformat()
     report = {
         'date': report_date,
         'generated_at': datetime.utcnow().isoformat() + 'Z',
