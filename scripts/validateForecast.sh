@@ -9,6 +9,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 TODAY_DASH=$(TZ="America/Chicago" date +%Y-%m-%d)
+CURRENT_HOUR_CT=$(TZ="America/Chicago" date +%H)
+
+# A scheduled current-day report is invalid until the 10:00-21:00 Central
+# observation window has closed. Explicit historical reruns may pass args.
+if [[ $# -eq 0 && 10#$CURRENT_HOUR_CT -lt 22 ]]; then
+	echo "ERROR: Refusing current-day verification before 22:00 Central." >&2
+	exit 1
+fi
 
 # Ensure cron can find common binaries and prefer virtualenv Python.
 export PATH="/opt/venv/bin:$REPO_ROOT/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"

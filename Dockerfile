@@ -60,8 +60,10 @@ RUN echo "TZ=UTC" > /etc/cron.d/forecasts09z \
     && echo "" >> /etc/cron.d/forecasts09z \
     && chmod 0644 /etc/cron.d/forecasts09z
 
-RUN echo "TZ=America/Chicago" > /etc/cron.d/validate \
-    && echo "30 22 * * * root /bin/bash /app/scripts/validateForecast.sh >> /app/logs/valForecast.log 2>&1" >> /etc/cron.d/validate \
+# Verification covers 10:00-21:00 Central. Run at 04:30 UTC on the following
+# UTC day: 22:30 CST / 23:30 CDT, safely after the local observation window.
+RUN echo "TZ=UTC" > /etc/cron.d/validate \
+    && echo "30 04 * * * root /bin/bash /app/scripts/validateForecast.sh >> /app/logs/valForecast.log 2>&1" >> /etc/cron.d/validate \
     && echo "" >> /etc/cron.d/validate \
     && chmod 0644 /etc/cron.d/validate
 
