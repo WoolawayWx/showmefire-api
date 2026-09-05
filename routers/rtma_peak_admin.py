@@ -1,6 +1,7 @@
 """Admin controls and status for the additive RTMA peak product."""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -27,6 +28,13 @@ def _require_admin(token: Optional[str] = None):
 async def rtma_peak_status(date: str, token: Optional[str] = None):
     _require_admin(token)
     from services.rtma_peak import RTMA_PEAK_IMAGE_ARCHIVE_DIR, RTMA_PEAK_ARCHIVE_DIR
+    metadata = {}
+    try:
+        payload = json.loads((RTMA_PEAK_ARCHIVE_DIR / f"{date}.json").read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            metadata = payload.get("fuel_moisture", {})
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
     return {
         "date": date,
         "available": (
@@ -35,6 +43,7 @@ async def rtma_peak_status(date: str, token: Optional[str] = None):
         ),
         "png": f"rtma_peak/archive/{date}.png",
         "tif": f"rtma_peak/archive/{date}.tif",
+        "fuel_moisture": metadata or {"mode": "unknown"},
     }
 
 

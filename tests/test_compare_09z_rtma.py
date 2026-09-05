@@ -40,6 +40,25 @@ def test_build_comparison_scores_only_overlapping_valid_pixels(tmp_path):
     assert agreement["mean_abs_diff"] == 1
     assert summary["confusion_matrix"]["matrix"][1][2] == 1
     assert summary["confusion_matrix"]["matrix"][2][4] == 1
+    assert summary["rtma_fuel_moisture"]["mode"] == "unknown"
+
+
+def test_build_comparison_exposes_rtma_fuel_moisture_method(tmp_path):
+    forecast = _write_tif(tmp_path / "forecast.tif", np.array([[1]]))
+    rtma = _write_tif(tmp_path / "rtma.tif", np.array([[1]]))
+    rtma.with_suffix(".json").write_text(
+        json.dumps({
+            "fuel_moisture": {
+                "mode": "rh_estimate_calibrated_with_raws",
+                "measured_hours": 8,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    summary = comparison.build_comparison(forecast, rtma, "2026-09-04")
+    assert summary["rtma_fuel_moisture"]["mode"] == "rh_estimate_calibrated_with_raws"
+    assert summary["rtma_fuel_moisture"]["measured_hours"] == 8
 
 
 def test_main_writes_dated_and_latest_summaries(tmp_path, monkeypatch):

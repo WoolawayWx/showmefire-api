@@ -79,13 +79,22 @@ def build_comparison(forecast_path: Path, rtma_path: Path, date: str) -> dict:
     count = int(differences.size)
     matches = int(np.count_nonzero(differences == 0))
     within_one = int(np.count_nonzero(np.abs(differences) <= 1))
+    rtma_metadata = {}
+    try:
+        payload = json.loads(rtma_path.with_suffix(".json").read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("fuel_moisture"), dict):
+            rtma_metadata = payload["fuel_moisture"]
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "date": date,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "comparison": "09z_minus_rtma",
         "forecast_source": forecast_path.name,
         "rtma_source": rtma_path.name,
+        "rtma_fuel_moisture": rtma_metadata or {"mode": "unknown"},
         "valid_pixel_count": count,
         "fire_danger_category_agreement": {
             "matches": matches,

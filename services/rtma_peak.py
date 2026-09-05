@@ -6,6 +6,7 @@ realtime analysis products.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from datetime import date, datetime, timedelta, timezone
@@ -16,7 +17,7 @@ import numpy as np
 import xarray as xr
 from zoneinfo import ZoneInfo
 
-from core.config import GIS_DIR, IMAGES_DIR
+from core.config import ARCHIVE_RAW_DATA_DIR, GIS_DIR, IMAGES_DIR
 from core.fire_danger import calculate_fire_danger
 from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
@@ -39,6 +40,8 @@ RTMA_PEAK_TODAY_PNG = Path(IMAGES_DIR) / "mo-rtma-observedpeakfiredanger.png"
 # Same fire-weather window as DailyForecast peak maps and endOfDayReport.
 PEAK_WINDOW_START_HOUR = 10
 PEAK_WINDOW_HOURS = 12
+MINIMUM_FUEL_MOISTURE_STATIONS = 3
+FUEL_MOISTURE_MAX_AGE = timedelta(minutes=75)
 
 
 def _hours_for_local_date(target_date: date):
@@ -79,7 +82,120 @@ def _parse_local_date(target_date: str | date | None) -> date:
         raise ValueError(f"date must be YYYY-MM-DD, got: {target_date}") from exc
 
 
-def _classify_grid(ds: xr.Dataset, scorer=calculate_fire_danger, score_key: str | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _observation_series(observations: dict, *names: str) -> list:
+    for name in names:
+        values = observations.get(name)
+        if isinstance(values, dict):
+            values = values.get("value")
+        if values is not None:
+            return values if isinstance(values, list) else [values]
+    return []
+
+
+def _load_fuel_moisture_archive(target_date: date, archive_dir: Path | None = None) -> dict | None:
+    path = Path(archive_dir or ARCHIVE_RAW_DATA_DIR) / f"raw_data_{target_date:%Y%m%d}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.info("No archived RAWS fuel moisture for %s; using the RTMA RH estimate", target_date)
+        return None
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Unable to read archived RAWS fuel moisture from %s", path)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fuel_moisture_observations(payload: dict | None, valid_time: datetime) -> list[dict]:
+    """Return each station's closest measured fuel moisture for an RTMA hour."""
+    if not payload:
+        return []
+    selected = []
+    target = valid_time.astimezone(timezone.utc)
+    for station in payload.get("STATION", []):
+        observations = station.get("OBSERVATIONS", {})
+        times = _observation_series(observations, "date_time")
+        values = _observation_series(
+            observations,
+            "fuel_moisture_value_1",
+            "fuel_moisture_set_1",
+            "fuel_moisture",
+        )
+        candidates = []
+        for index, raw_time in enumerate(times):
+            if index >= len(values) or values[index] is None:
+                continue
+            try:
+                observed_time = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+                if observed_time.tzinfo is None:
+                    observed_time = observed_time.replace(tzinfo=timezone.utc)
+                age = abs(target - observed_time.astimezone(timezone.utc))
+                value = float(values[index])
+            except (TypeError, ValueError):
+                continue
+            if age <= FUEL_MOISTURE_MAX_AGE and np.isfinite(value) and 0 < value <= 60:
+                candidates.append((age, value, observed_time))
+        if not candidates:
+            continue
+        try:
+            longitude = float(station["LONGITUDE"])
+            latitude = float(station["LATITUDE"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        _, value, observed_time = min(candidates, key=lambda candidate: candidate[0])
+        selected.append({
+            "station": station.get("STID") or station.get("ID"),
+            "longitude": longitude,
+            "latitude": latitude,
+            "fuel_moisture": value,
+            "observation_time": observed_time.isoformat(),
+        })
+    return selected
+
+
+def _calibrate_fuel_moisture(
+    estimate: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    observations: list[dict],
+) -> np.ndarray:
+    """Bias-correct the RH estimate with inverse-distance RAWS residuals."""
+    if len(observations) < MINIMUM_FUEL_MOISTURE_STATIONS:
+        return estimate
+
+    weighted_residual = np.zeros(estimate.shape, dtype=float)
+    weight_sum = np.zeros(estimate.shape, dtype=float)
+    latitude_scale = np.cos(np.deg2rad(float(np.nanmean(lat))))
+    for observation in observations:
+        station_lon = observation["longitude"]
+        station_lat = observation["latitude"]
+        nearest = np.nanargmin(
+            np.square((lon - station_lon) * latitude_scale) + np.square(lat - station_lat)
+        )
+        estimated_at_station = float(estimate.ravel()[nearest])
+        residual = np.clip(observation["fuel_moisture"] - estimated_at_station, -15.0, 15.0)
+        distance_squared = (
+            np.square((lon - station_lon) * latitude_scale)
+            + np.square(lat - station_lat)
+        )
+        weights = 1.0 / (distance_squared + 0.05 ** 2)
+        weighted_residual += weights * residual
+        weight_sum += weights
+
+    correction = np.divide(
+        weighted_residual,
+        weight_sum,
+        out=np.zeros_like(weighted_residual),
+        where=weight_sum > 0,
+    )
+    return np.clip(estimate + correction, 1.0, 40.0)
+
+
+def _classify_grid(
+    ds: xr.Dataset,
+    scorer=calculate_fire_danger,
+    score_key: str | None = None,
+    fuel_moisture_observations: list[dict] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return class grid and -180/180 lon/lat meshes for one RTMA hour."""
     lon, lat = _lon_lat_meshes(ds["longitude"].values, ds["latitude"].values)
     rh = _squeeze2d(np.asarray(ds["r2"].values, dtype=float))
@@ -88,9 +204,15 @@ def _classify_grid(ds: xr.Dataset, scorer=calculate_fire_danger, score_key: str 
         _squeeze2d(np.asarray(ds["v10"].values, dtype=float)),
     ) * 1.9438444924406
 
-    # RTMA has no fuel-moisture field.  This transparent RH-based estimate is
-    # only the weather-driven spatial diagnostic; it is not a training label.
-    fuel_moisture = 3.0 + 0.25 * rh
+    # RTMA has no fuel-moisture field, so RH supplies continuous coverage.
+    # Where archived RAWS measurements exist, their residual from this estimate
+    # is interpolated across the grid to anchor the field to observed fuels.
+    fuel_moisture = _calibrate_fuel_moisture(
+        3.0 + 0.25 * rh,
+        lon,
+        lat,
+        fuel_moisture_observations or [],
+    )
     if rh.shape != lon.shape:
         raise ValueError(f"RTMA field shape {rh.shape} does not match lon/lat {lon.shape}")
     valid = np.isfinite(fuel_moisture) & np.isfinite(rh) & np.isfinite(wind)
@@ -120,7 +242,14 @@ def _missouri_mask(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     return mask_flat.reshape(lon_mesh.shape), lon_mesh, lat_mesh
 
 
-def _render_png(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, out_path: Path, target_date: date) -> Path:
+def _render_png(
+    grid: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    out_path: Path,
+    target_date: date,
+    fuel_moisture_note: str,
+) -> Path:
     """Render the branded 2048x1152 fire-danger map used by forecast/realtime products."""
     import cartopy.crs as ccrs
     import geopandas as gpd
@@ -210,7 +339,7 @@ def _render_png(grid: np.ndarray, lon: np.ndarray, lat: np.ndarray, out_path: Pa
         "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
         "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
         "Data Source: NOAA RTMA (t2m/r2/u10/v10)\n"
-        "Fuel moisture estimated from RH for this diagnostic\n"
+        f"Fuel moisture: {fuel_moisture_note}\n"
         "For More Info, Visit ShowMeFire.org",
         fontsize=10, ha="right", va="top", linespacing=1.6, fontname="Montserrat",
     )
@@ -235,6 +364,7 @@ def generate_rtma_peak(
     *,
     output_root: Path | None = None,
     experimental: bool = False,
+    fuel_moisture_archive_dir: Path | None = None,
 ) -> dict:
     """Generate and archive the RTMA peak for a local date.
 
@@ -242,18 +372,24 @@ def generate_rtma_peak(
     usable hours exist, which makes historical retries safe and resumable.
     """
     local_date = _parse_local_date(target_date)
+    fuel_archive = _load_fuel_moisture_archive(local_date, fuel_moisture_archive_dir)
 
     peak = None
     lon = lat = None
     used_hours = []
+    measured_hours = 0
+    measured_station_observations = 0
     for hour in _hours_for_local_date(local_date):
         try:
             path = fetch_rtma(hour)
             with xr.open_dataset(path) as ds:
+                fuel_observations = _fuel_moisture_observations(fuel_archive, hour)
+                use_measurements = len(fuel_observations) >= MINIMUM_FUEL_MOISTURE_STATIONS
                 current, current_lon, current_lat = _classify_grid(
                     ds,
                     score_fire_danger if experimental else calculate_fire_danger,
                     "score" if experimental else None,
+                    fuel_observations if use_measurements else None,
                 )
                 if peak is None:
                     peak = current
@@ -264,11 +400,21 @@ def generate_rtma_peak(
                     logger.warning("Skipping RTMA hour %s because its grid does not match the first hour", hour)
                     continue
                 used_hours.append(hour.isoformat())
+                if use_measurements:
+                    measured_hours += 1
+                    measured_station_observations += len(fuel_observations)
         except Exception:
             logger.exception("Unable to process RTMA hour %s for %s", hour, local_date)
 
     if peak is None or not np.isfinite(peak).any():
         raise RuntimeError(f"No usable RTMA analyses found for {local_date}")
+
+    if measured_hours:
+        fuel_moisture_mode = "rh_estimate_calibrated_with_raws"
+        fuel_moisture_note = f"RTMA RH estimate calibrated with RAWS ({measured_hours}/{len(used_hours)} hours)"
+    else:
+        fuel_moisture_mode = "rh_estimate_only"
+        fuel_moisture_note = "estimated from RTMA RH (archived RAWS measurements unavailable)"
 
     if output_root is None:
         gis_dir = Path(GIS_DIR)
@@ -284,14 +430,23 @@ def generate_rtma_peak(
     png_dir = image_dir / "rtma_peak" / "archive"
     tif_path = tif_dir / f"{local_date.isoformat()}.tif"
     png_path = png_dir / f"{local_date.isoformat()}.png"
+    metadata_path = tif_dir / f"{local_date.isoformat()}.json"
     today_tif.parent.mkdir(parents=True, exist_ok=True)
     if not export_geotiff(peak, lon, lat, tif_path, run_date=datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ)):
         raise RuntimeError(f"Failed to write RTMA peak GeoTIFF for {local_date}")
+    import rasterio
+    with rasterio.open(tif_path, "r+") as destination:
+        destination.update_tags(
+            SOURCE="NOAA RTMA + ShowMeFire fuel-moisture analysis",
+            FUEL_MOISTURE_MODE=fuel_moisture_mode,
+            RAWS_MEASURED_HOURS=str(measured_hours),
+            RTMA_HOURS_USED=str(len(used_hours)),
+        )
     shutil.copy2(tif_path, today_tif)
-    _render_png(peak, lon, lat, png_path, local_date)
+    _render_png(peak, lon, lat, png_path, local_date, fuel_moisture_note)
     today_png.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(png_path, today_png)
-    return {
+    result = {
         "date": local_date.isoformat(),
         "hours_used": len(used_hours),
         "window": "10:00-21:00 CT",
@@ -299,7 +454,19 @@ def generate_rtma_peak(
         "tif": f"rtma_peak/archive/{local_date.isoformat()}.tif",
         "png": f"rtma_peak/archive/{local_date.isoformat()}.png",
         "experimental": experimental,
+        "fuel_moisture": {
+            "mode": fuel_moisture_mode,
+            "measured_hours": measured_hours,
+            "total_hours": len(used_hours),
+            "station_observations_used": measured_station_observations,
+            "minimum_stations_per_hour": MINIMUM_FUEL_MOISTURE_STATIONS,
+        },
     }
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_metadata_path = metadata_path.with_suffix(".json.tmp")
+    temporary_metadata_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    temporary_metadata_path.replace(metadata_path)
+    return result
 
 
 def generate_rtma_peak_for_verification(target_date: str | date | None = None) -> dict | None:
