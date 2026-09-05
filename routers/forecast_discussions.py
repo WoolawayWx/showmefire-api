@@ -90,10 +90,7 @@ def public_latest_forecast_discussion():
 
 @router.get("/api/forecast-discussions")
 def public_list_forecast_discussions(limit: int = 50, offset: int = 0):
-    discussions = list_forecast_discussions(status="published", limit=100, offset=0)
-    discussions += list_forecast_discussions(status="archived", limit=100, offset=0)
-    discussions.sort(key=lambda item: (item.get("issued_at") or item.get("created_at") or "", item["id"]), reverse=True)
-    return {"discussions": discussions[offset:offset + min(max(limit, 1), 100)]}
+    return {"discussions": list_forecast_discussions(public_only=True, limit=limit, offset=offset)}
 
 
 @router.get("/api/forecast-discussions/{discussion_id}")

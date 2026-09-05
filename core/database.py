@@ -2879,11 +2879,17 @@ def _forecast_discussion_row(row: Optional[sqlite3.Row]) -> Optional[Dict]:
     return dict(row) if row else None
 
 
-def list_forecast_discussions(status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
+def list_forecast_discussions(status: Optional[str] = None, limit: int = 50, offset: int = 0, public_only: bool = False) -> List[Dict]:
     conn = sqlite3.connect(get_db_path())
     conn.row_factory = sqlite3.Row
     try:
-        if status:
+        if public_only:
+            rows = conn.execute(
+                "SELECT * FROM forecast_discussions WHERE status IN ('published', 'archived') "
+                "ORDER BY COALESCE(issued_at, created_at) DESC, id DESC LIMIT ? OFFSET ?",
+                (min(max(limit, 1), 100), max(offset, 0)),
+            ).fetchall()
+        elif status:
             rows = conn.execute(
                 "SELECT * FROM forecast_discussions WHERE status = ? "
                 "ORDER BY COALESCE(issued_at, created_at) DESC, id DESC LIMIT ? OFFSET ?",
