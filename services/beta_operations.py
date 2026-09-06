@@ -66,8 +66,8 @@ def _mean(values: list[float]) -> float | None:
     return round(sum(numeric) / len(numeric), 4) if numeric else None
 
 
-def _performance_summary() -> dict:
-    history = _load_history()[-30:]
+def _performance_summary(history: list[dict]) -> dict:
+    history = history[-30:]
     return {
         "days": len(history),
         "records": sum(int(item.get("record_count", 0) or 0) for item in history),
@@ -78,6 +78,22 @@ def _performance_summary() -> dict:
             (item.get("beta") or {}).get("exact_match_rate") for item in history
         ]),
     }
+
+
+def _performance_series(history: list[dict]) -> list[dict]:
+    """Day-by-day beta-vs-stable series for charting (trimmed to the same window as the summary)."""
+    series = []
+    for item in history[-30:]:
+        if not item.get("date"):
+            continue
+        series.append({
+            "date": item["date"],
+            "record_count": int(item.get("record_count", 0) or 0),
+            "stable_mae": (item.get("stable") or {}).get("mae"),
+            "beta_mae": (item.get("beta") or {}).get("mae"),
+            "beta_exact_match_rate": (item.get("beta") or {}).get("exact_match_rate"),
+        })
+    return series
 
 
 def _age_hours(timestamp: str | None) -> float | None:
@@ -97,6 +113,7 @@ def build_beta_operations_status(*, shadows: dict) -> dict:
     latest = load_latest_beta_verification()
     isolation = isolation_checks()
     forecast_job = get_beta_forecast_status()
+    history = _load_history()
 
     shadow_rows = []
     for name, diagnostics in shadows.items():
@@ -148,7 +165,8 @@ def build_beta_operations_status(*, shadows: dict) -> dict:
         },
         "verification": {
             "latest": latest,
-            "rolling_30_days": _performance_summary(),
+            "rolling_30_days": _performance_summary(history),
+            "history": _performance_series(history),
         },
         "shadows": shadow_rows,
         "drift": drift_diagnostics(),
