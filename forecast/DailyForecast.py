@@ -904,6 +904,15 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
        "run_date": run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%dT%H:%M:%SZ'),
        "stations": {}
     }
+    # Ground-truth shadow archive: same schema as json_output_data, populated only
+    # when a registry beta fuel_moisture model exists (see predict_fm_grid's
+    # shadow_capture param below). Never written to the DB, never read by serving -
+    # purely so endOfDayReport.py can score the beta model against real observations
+    # the same way it already scores the stable model.
+    shadow_json_output_data = {
+       "run_date": json_output_data["run_date"],
+       "stations": {}
+    }
     v5_rows, v5_stable = [], []
     try:
         v5_initial = {str(item["station_id"]): item for item in v5_initialization_rows(base_time, initial_station_records)
@@ -962,8 +971,11 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         
         # Calculate fuel moisture with XGBoost
         print(f"  Predicting Fuel Moisture via XGBoost for hour {i}...")
+        shadow_capture = {}
         fm, snow_mask, fm_interval = predict_fm_grid(temp, rh, ws_ms, hour_val, month_val, temp_history, rh_history,
-                                       precip_history, swe_grid=swe_grid, day_of_year=forecast_time.dayofyear)
+                                       precip_history, swe_grid=swe_grid, day_of_year=forecast_time.dayofyear,
+                                       shadow_capture=shadow_capture)
+        beta_fm_grid = shadow_capture.get('beta_preds_2d')
         if spatial_prediction is not None and i < len(spatial_prediction["p50"]):
             fm = spatial_prediction["p50"][i]
             # The spatial model's own uncertainty band (not the XGBoost
@@ -1104,7 +1116,32 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "fuel_moisture": round(val_fm, 1),
                         "fire_danger": val_risk
                     })
-            
+
+                    # Ground-truth shadow: same station/hour, sampled from the beta
+                    # model's grid instead of stable's. Failure-isolated by construction -
+                    # beta_fm_grid is None whenever there's no beta candidate or the
+                    # shadow prediction itself failed, so this block simply never runs.
+                    if beta_fm_grid is not None:
+                        beta_fm_val = float(beta_fm_grid[sy, sx])
+                        # Mirrors the pre-smoothing snow/fire-danger formula used for
+                        # `risk` above (smoothing is a map-rendering concern, not
+                        # applied here since this never feeds a rendered map).
+                        beta_risk_val = 0 if snow_mask[sy, sx] else calculate_fire_danger(beta_fm_val, val_rh, ws_kts[sy, sx])
+                        if sid not in shadow_json_output_data['stations']:
+                            shadow_json_output_data['stations'][sid] = {
+                                "lat": st.get('lat'),
+                                "lon": st.get('lon'),
+                                "forecasts": []
+                            }
+                        shadow_json_output_data['stations'][sid]['forecasts'].append({
+                            "time": json_valid_time,
+                            "temp_c": round(val_t, 2),
+                            "rh": round(val_rh, 1),
+                            "wind_speed_ms": round(val_ws, 2),
+                            "fuel_moisture": round(beta_fm_val, 1),
+                            "fire_danger": beta_risk_val
+                        })
+
             if forecast_rows:
                 try:
                     conn = sqlite3.connect(db_path)
@@ -1153,10 +1190,24 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         except Exception as e:
              logger.error(f"Failed to save station forecast history JSON: {e}")
 
+        # Ground-truth shadow archive: only written when a beta fuel_moisture
+        # candidate actually produced data this run. Failures here are logged and
+        # swallowed - this must never affect the real forecast output above.
+        if shadow_json_output_data.get('stations'):
+            shadow_filename = f"station_forecasts_model_shadow_{run_date.strftime('%Y%m%d_%H')}.json"
+            shadow_save_path = Path("archive/forecasts") / shadow_filename
+            try:
+                shadow_save_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(shadow_save_path, 'w') as f:
+                    json.dump(shadow_json_output_data, f, indent=2)
+                logger.info(f"Saved model-shadow station forecast history to {shadow_save_path}")
+            except Exception as e:
+                logger.error(f"Failed to save model-shadow station forecast history JSON: {e}")
+
     return hourly_fm, hourly_rh, hourly_ws, hourly_temp, hourly_risks, hourly_precip, swe_grid
 
 def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hist=None, precip_hist=None,
-                    swe_grid=None, day_of_year=None):
+                    swe_grid=None, day_of_year=None, shadow_capture=None):
     """
     Predict fuel moisture across a grid using XGBoost model.
     
@@ -1283,8 +1334,13 @@ def predict_fm_grid(temp_grid, rh_grid, ws_grid, hour, month, t_hist=None, rh_hi
     validate_feature_contract(df, {"feature_columns": FEATURES, "feature_schema_version": "1.0.0"})
     dmat = xgb.DMatrix(df[FEATURES])
     preds = FM_MODEL.predict(dmat)
-    preds = run_shadow(df, preds)
-    
+    if shadow_capture is not None:
+        preds, beta_preds = run_shadow(df, preds, return_beta=True)
+        if beta_preds is not None:
+            shadow_capture['beta_preds_2d'] = np.asarray(beta_preds).reshape(shape)
+    else:
+        preds = run_shadow(df, preds)
+
     # 4. Reshape back to the original 2D map
     preds_2d = preds.reshape(shape)
 

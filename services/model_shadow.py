@@ -34,14 +34,20 @@ def _predict(path, frame, metadata):
     return model.predict(xgb.DMatrix(frame[columns], feature_names=columns))
 
 
-def run_shadow(frame, stable_predictions):
-    """Log beta comparisons and always return the caller's stable predictions."""
+def run_shadow(frame, stable_predictions, return_beta: bool = False):
+    """Log beta comparisons and always return the caller's stable predictions.
+
+    When `return_beta` is True, also returns the beta model's raw prediction
+    array (or None if there's no beta candidate, or on any internal failure)
+    as a second value: `stable_predictions, beta_predictions = run_shadow(..., return_beta=True)`.
+    Existing callers that don't pass `return_beta` see no change in behavior.
+    """
     if not _state["enabled"]:
-        return stable_predictions
+        return (stable_predictions, None) if return_beta else stable_predictions
     entry = get_model_entry("fuel_moisture")
     beta = entry.get("beta")
     if not beta:
-        return stable_predictions
+        return (stable_predictions, None) if return_beta else stable_predictions
     started = time.perf_counter()
     try:
         beta_path = load_active_model_path("fuel_moisture", "beta")
@@ -85,6 +91,7 @@ def run_shadow(frame, stable_predictions):
         with LOG_PATH.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record) + "\n")
         _state.update(consecutive_failures=0, last_error=None, last_run=record["timestamp"])
+        return (stable_predictions, beta_pred) if return_beta else stable_predictions
     except Exception as exc:
         _state["consecutive_failures"] += 1; _state["last_error"] = str(exc)
         logger.exception("Beta shadow inference failed; stable output is unchanged")
@@ -94,7 +101,7 @@ def run_shadow(frame, stable_predictions):
                                      "failed": True, "error": str(exc)}) + "\n")
         if _state["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
             _state["enabled"] = False
-    return stable_predictions
+    return (stable_predictions, None) if return_beta else stable_predictions
 
 
 def evaluate_shadow_evidence(path=LOG_PATH, minimum_days=30, minimum_elevated_samples=1):

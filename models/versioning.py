@@ -230,6 +230,17 @@ def validate_promotion_candidate(model_type, candidate):
         shadow = metadata.get("shadow") or {}
         if not shadow.get("passed"):
             blockers.append("shadow validation has not passed")
+        # Operational-stability shadow evidence (above) only checks that beta
+        # didn't crash and stayed roughly close to stable - it never checks
+        # which one was actually closer to reality. This second, independent
+        # check requires real observed-outcome evidence (see
+        # services/shadow_ground_truth.py) before a fuel_moisture candidate can
+        # be promoted. Not extended to fire_danger: no live forecast generator
+        # loads a registry fire_danger model today, so there's nothing to shadow.
+        if model_type == "fuel_moisture" and metadata.get("ground_truth_shadow_required", True):
+            ground_truth = shadow.get("ground_truth") or {}
+            if not ground_truth.get("passed"):
+                blockers.append("ground-truth shadow accuracy has not passed")
     if model_type == "fuel_moisture" and artifact.is_file() and metadata.get("feature_columns"):
         try:
             import pandas as pd

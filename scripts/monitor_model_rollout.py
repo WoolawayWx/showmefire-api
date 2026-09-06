@@ -9,6 +9,14 @@ API_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(API_DIR))
 from models.versioning import get_model_entry, rollback
 
+# Keys used in reports/validation_history.json's "metrics" dict (see
+# forecast/endOfDayReport.py's continuous_variable_map / calculate_categorical_metrics)
+# do not match the model registry's model_type strings - map between them here.
+METRIC_KEY_BY_MODEL_TYPE = {
+    "fuel_moisture": "Fuel Moisture (%)",
+    "fire_danger": "Fire Danger Index",
+}
+
 
 def monitor(model_type="fuel_moisture", history_path=API_DIR / "reports" / "validation_history.json",
             max_mae_regression=0.10, max_bias_regression=0.5, forecast_job_failed=False):
@@ -30,7 +38,8 @@ def monitor(model_type="fuel_moisture", history_path=API_DIR / "reports" / "vali
     if not previous or not path.exists():
         return {"action": "none", "reason": "insufficient comparison evidence"}
     history = json.loads(path.read_text(encoding="utf-8"))
-    latest = (history[-1].get("metrics") or {}).get("fuel_moisture") if history else None
+    metric_key = METRIC_KEY_BY_MODEL_TYPE.get(model_type, model_type)
+    latest = (history[-1].get("metrics") or {}).get(metric_key) if history else None
     baseline = previous.get("performance") or {}
     if not latest or baseline.get("mae") is None or baseline.get("bias") is None:
         return {"action": "none", "reason": "metrics unavailable"}
@@ -42,11 +51,24 @@ def monitor(model_type="fuel_moisture", history_path=API_DIR / "reports" / "vali
     return {"action": "monitor", "reason": "metrics within guardrails"}
 
 
+def monitor_all(model_types=tuple(METRIC_KEY_BY_MODEL_TYPE), **kwargs):
+    """Run the guardrail for every model type with a known validation-history metric key."""
+    return {model_type: monitor(model_type=model_type, **kwargs) for model_type in model_types}
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(); parser.add_argument("--forecast-job-failed", action="store_true")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-type", default=None,
+                        help="Model type to monitor (default: run all of %s)" % ", ".join(METRIC_KEY_BY_MODEL_TYPE))
+    parser.add_argument("--forecast-job-failed", action="store_true")
     parser.add_argument("--max-mae-regression", type=float, default=0.10)
     parser.add_argument("--max-bias-regression", type=float, default=0.5)
     args = parser.parse_args()
-    print(json.dumps(monitor(max_mae_regression=args.max_mae_regression,
+    if args.model_type:
+        result = monitor(model_type=args.model_type, max_mae_regression=args.max_mae_regression,
+                         max_bias_regression=args.max_bias_regression, forecast_job_failed=args.forecast_job_failed)
+    else:
+        result = monitor_all(max_mae_regression=args.max_mae_regression,
                              max_bias_regression=args.max_bias_regression,
-                             forecast_job_failed=args.forecast_job_failed), indent=2))
+                             forecast_job_failed=args.forecast_job_failed)
+    print(json.dumps(result, indent=2))

@@ -47,6 +47,17 @@ fi
 "$PYTHON" forecast/endOfDayReport.py
 "$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta
 
+# Ground-truth shadow verification (registry beta fuel_moisture model, see
+# services/shadow_ground_truth.py). Only produced by DailyForecast.py when a
+# beta candidate exists, so a day with none must not fail this script.
+if compgen -G "archive/forecasts/station_forecasts_model_shadow_${TODAY_COMPACT}_*.json" > /dev/null; then
+	"$PYTHON" forecast/endOfDayReport.py \
+		--forecast-glob "station_forecasts_model_shadow_*.json" \
+		--report-suffix model_shadow
+else
+	echo "WARN: No model-shadow station forecast archive for $TODAY_DASH; skipping ground-truth shadow verification." >&2
+fi
+
 HAS_09Z=false
 if [[ -f "archive/forecasts/station_forecasts_${TODAY_COMPACT}_09.json" ]]; then
 	HAS_09Z=true

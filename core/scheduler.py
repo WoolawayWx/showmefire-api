@@ -29,6 +29,7 @@ from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
 from services.forecast_jobs import trigger_beta_forecast
+from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,28 @@ async def run_drift_check_job():
         await asyncio.to_thread(run_drift_check)
     except Exception as error:
         logger.error("Drift check failed: %s", error, exc_info=True)
+
+
+async def run_post_promotion_monitor_job():
+    """Seven-day post-promotion guardrail: auto-rollback on live metric regression.
+
+    Runs after validateForecast.sh's cron (04:30 UTC, i.e. 22:30-23:30 Central
+    depending on DST) has written reports/validation_history.json, so today's
+    live metrics are available to compare against the replaced model's recorded
+    performance.
+    """
+    try:
+        results = await asyncio.to_thread(monitor_all)
+        for model_type, result in results.items():
+            if result.get("action") == "rollback":
+                logger.warning(
+                    "Post-promotion monitor rolled back %s to %s: %s",
+                    model_type, result.get("version"), result.get("reason"),
+                )
+            else:
+                logger.info("Post-promotion monitor (%s): %s", model_type, result)
+    except Exception as error:
+        logger.error("Post-promotion rollout monitor failed: %s", error, exc_info=True)
 
 
 async def ingest_fire_detections_job():
@@ -416,6 +439,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=4,
         minute=0,
         id='drift_check',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        run_post_promotion_monitor_job,
+        'cron',
+        hour=0,
+        minute=30,
+        id='post_promotion_monitor',
         max_instances=1,
         coalesce=True,
     )

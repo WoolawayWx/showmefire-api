@@ -38,6 +38,9 @@ def main():
     print(f"Current stable: {stable['version'] if stable else '(none)'} "
           f"{stable.get('performance') if stable else ''}")
     print(f"Beta candidate: {beta['version']} {beta.get('performance')}")
+    ground_truth = ((beta.get('metadata') or {}).get('shadow') or {}).get('ground_truth')
+    if args.model == "fuel_moisture" and ground_truth is not None:
+        print(f"Ground-truth shadow evidence: {ground_truth}")
     blockers = validate_promotion_candidate(args.model, beta)
     if blockers:
         print("Promotion blocked:")
