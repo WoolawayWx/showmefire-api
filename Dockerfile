@@ -1,4 +1,7 @@
-FROM python:3.11-slim
+# ---------- Builder stage ----------
+# Installs build tooling + dev headers and builds the venv. Discarded after
+# build - none of this ships in the final image.
+FROM python:3.11-slim AS builder
 
 # Install system dependencies for GIS and PostgreSQL
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,8 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     shared-mime-info \
     sqlite3 \
     curl \
-    gh \
-    cron \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -40,6 +41,36 @@ COPY requirements.pyretechnics.txt .
 RUN python -m pip install --no-cache-dir --no-deps -r requirements.pyretechnics.txt \
     && python -c "import numpy, pyretechnics.surface_fire; assert numpy.__version__ == '2.2.6'"
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
+
+
+# ---------- Runtime stage ----------
+# Only the shared libraries actually dlopen'd at runtime. Most compiled
+# Python deps here (rasterio, pyproj, shapely, netCDF4, h5py, etc.) ship as
+# manylinux wheels that vendor their own copies of GDAL/PROJ/GEOS/HDF5 - the
+# apt -dev packages in the builder stage are only needed to build the few
+# packages installed from sdist (psycopg2, Cartopy), not to run them.
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libpq5 \
+    libgfortran5 \
+    shared-mime-info \
+    sqlite3 \
+    curl \
+    gh \
+    cron \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+COPY --from=builder /opt/venv /opt/venv
+
 COPY . .
 
 
