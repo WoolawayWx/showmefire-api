@@ -74,11 +74,18 @@ def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_pat
         enriched_alerts = enrich_alerts_with_zones(alerts, zones)
         save_json_to_file(enriched_alerts, out_path)
         try:
-            from services.mobile_content import active_fire_weather_alerts
+            from services.mobile_content import active_fire_weather_alerts, record_daily_fire_weather_alerts
             from services.mobile_push import process_fire_weather_alerts
-            process_fire_weather_alerts(active_fire_weather_alerts(Path(out_path)))
+            fire_weather_alerts = active_fire_weather_alerts(Path(out_path))
+            process_fire_weather_alerts(fire_weather_alerts)
+            record_daily_fire_weather_alerts(fire_weather_alerts)
         except Exception as exc:
             print(f"Mobile fire weather notification processing failed: {exc}")
+        try:
+            from services.fire_weather_alert_map import maybe_regenerate_fire_weather_alert_map
+            maybe_regenerate_fire_weather_alert_map()
+        except Exception as exc:
+            print(f"Fire weather alert map regeneration failed: {exc}")
         return True
     return False
 

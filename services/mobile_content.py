@@ -6,10 +6,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import shapefile
 
-from core.database import get_briefing_config, get_latest_forecast
+from core.database import get_briefing_config, get_latest_forecast, record_fire_weather_alert_day
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ACTIVE_ALERTS_PATH = PROJECT_ROOT / "gis" / "active.json"
@@ -18,6 +19,8 @@ ZONE_COUNTY_PATH = PROJECT_ROOT / "core" / "mo_zone_county.json"
 COUNTIES_SHP_PATH = PROJECT_ROOT / "maps" / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
 OPSBRIEF_DIR = PROJECT_ROOT / "files" / "opsbrief"
 FIRE_EVENTS = {"Red Flag Warning", "Fire Weather Watch"}
+FIRE_EVENT_SEVERITY = {"Fire Weather Watch": 1, "Red Flag Warning": 2}
+CENTRAL_TZ = ZoneInfo("America/Chicago")
 PUBLIC_API_BASE_URL = "https://api.showmefire.org"
 PUBLIC_CDN_BASE_URL = "https://cdn.showmefire.org/latest"
 logger = logging.getLogger(__name__)
@@ -133,6 +136,77 @@ def active_fire_weather_alerts(
             "sent": properties.get("sent"),
         })
     return sorted(alerts, key=lambda alert: str(alert.get("onset") or ""))
+
+
+def active_fire_weather_zone_status(
+    path: Path = ACTIVE_ALERTS_PATH,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Zone code (e.g. '077') -> most severe active fire-weather event.
+
+    Used for the static fire-weather-alert map, which draws on the actual
+    NWS zone geometry rather than approximating alerts to county polygons.
+    """
+    now = now or datetime.now(timezone.utc)
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    status: dict[str, str] = {}
+    for feature in document.get("features", []):
+        properties = feature.get("properties") or {}
+        event = properties.get("event")
+        if event not in FIRE_EVENTS:
+            continue
+        expires = _parse_time(properties.get("ends") or properties.get("expires"))
+        if expires and expires <= now:
+            continue
+        for zone_url in properties.get("affectedZones") or []:
+            raw = str(zone_url).rsplit("/", 1)[-1]
+            match = re.fullmatch(r"MOZ(\d{3})", raw.upper())
+            if not match:
+                continue
+            zone = match.group(1)
+            if zone not in status or FIRE_EVENT_SEVERITY[event] > FIRE_EVENT_SEVERITY[status[zone]]:
+                status[zone] = event
+    return status
+
+
+def record_daily_fire_weather_alerts(
+    alerts: list[dict[str, Any]] | None = None,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Persist which counties were under a fire-weather alert today.
+
+    Builds the ground truth needed to later backtest the model's predicted
+    danger/spread-rate against NWS's own Red Flag Warning/Fire Weather Watch
+    calls. Safe to call on every alert poll - recording is idempotent per
+    (date, county, event).
+    """
+    alerts = active_fire_weather_alerts() if alerts is None else alerts
+    alert_date = (now or datetime.now(CENTRAL_TZ)).astimezone(CENTRAL_TZ).date().isoformat()
+    names_by_fips = {c["fips"]: c["name"] for c in county_catalog()}
+
+    recorded = 0
+    for alert in alerts:
+        event = alert.get("event")
+        if event not in FIRE_EVENTS:
+            continue
+        for fips in alert.get("countyFips") or []:
+            was_new = record_fire_weather_alert_day(
+                alert_date,
+                fips,
+                names_by_fips.get(fips, ""),
+                event,
+                alert_id=str(alert.get("id") or ""),
+                onset=str(alert.get("onset") or ""),
+                expires=str(alert.get("expires") or ""),
+            )
+            if was_new:
+                recorded += 1
+    return recorded
 
 
 def _active_opsbrief(api_base_url: str) -> dict[str, Any]:

@@ -762,6 +762,11 @@ def init_database():
     # 19. County burn-ban submissions and moderation
     _ensure_burn_ban_tables(cursor)
 
+    # 20. Daily fire-weather-zone alert history, keyed by county for later
+    # verification (e.g. does the model's predicted danger align with NWS
+    # Red Flag Warning/Fire Weather Watch issuance).
+    _ensure_fire_weather_alert_history_table(cursor)
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {db_path}")
@@ -2862,6 +2867,90 @@ def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
         cursor.execute(
             "ALTER TABLE burn_ban_submissions ADD COLUMN request_type TEXT NOT NULL DEFAULT 'issue'"
         )
+
+
+def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_weather_alert_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_date TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            county_name TEXT NOT NULL DEFAULT '',
+            event TEXT NOT NULL,
+            alert_id TEXT NOT NULL DEFAULT '',
+            onset TEXT NOT NULL DEFAULT '',
+            expires TEXT NOT NULL DEFAULT '',
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(alert_date, county_fips, event)
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_fire_weather_alert_history_county_date '
+        'ON fire_weather_alert_history(county_fips, alert_date)'
+    )
+
+
+def record_fire_weather_alert_day(
+    alert_date: str,
+    county_fips: str,
+    county_name: str,
+    event: str,
+    alert_id: str = "",
+    onset: str = "",
+    expires: str = "",
+) -> bool:
+    """Record that a county was under a fire-weather alert on a given date.
+
+    Idempotent per (alert_date, county_fips, event) so a 5-minute alert poll
+    doesn't create duplicate rows - only the first sighting of the day for
+    that county/event pair is kept.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR IGNORE INTO fire_weather_alert_history
+                (alert_date, county_fips, county_name, event, alert_id, onset, expires)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (alert_date, county_fips, county_name, event, alert_id, onset, expires))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_fire_weather_alert_history(
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    county_fips: Optional[str] = None,
+) -> List[Dict]:
+    """Query recorded fire-weather-alert days, optionally filtered by date range/county."""
+    conditions = []
+    params: List[str] = []
+    if start_date:
+        conditions.append("alert_date >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("alert_date <= ?")
+        params.append(end_date)
+    if county_fips:
+        conditions.append("county_fips = ?")
+        params.append(county_fips)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM fire_weather_alert_history {where_clause} "
+            "ORDER BY alert_date ASC, county_fips ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
