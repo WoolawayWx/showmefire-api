@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from core.executors import get_process_pool
 from core.security import verify_token
 from services.spread_rate import (
     PNG_PATH,
@@ -51,7 +52,9 @@ async def spread_rate_admin_status(token: Optional[str] = None):
 async def spread_rate_admin_generate(token: Optional[str] = None):
     email = _require_admin(token)
     try:
-        result = await __import__("asyncio").to_thread(
+        import asyncio
+        result = await asyncio.get_running_loop().run_in_executor(
+            get_process_pool(),
             run_spread_rate_pipeline,
             raws_station_data if raws_station_data.get("stations") else None,
         )
@@ -64,7 +67,10 @@ async def spread_rate_admin_generate(token: Optional[str] = None):
 async def spread_rate_admin_warmup(payload: WarmupRequest, token: Optional[str] = None):
     email = _require_admin(token)
     try:
-        result = await __import__("asyncio").to_thread(warmup_spread_rate_inputs, payload.days)
+        import asyncio
+        result = await asyncio.get_running_loop().run_in_executor(
+            get_process_pool(), warmup_spread_rate_inputs, payload.days
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"RTMA warm-up failed: {exc}") from exc
     return {"success": True, "requested_by": email, "result": result}

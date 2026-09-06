@@ -72,6 +72,7 @@ from core.scheduler import (
     run_initial_fetches,
     raws_station_data
 )
+from core.executors import shutdown_process_pool
 from services.beta_products import BETA_ROOT
 from core.config import (
     IMAGES_DIR,
@@ -136,6 +137,7 @@ async def lifespan(app: FastAPI):
     if scheduler_local:
         logger.info("Shutting down scheduler...")
         scheduler_local.shutdown()
+        shutdown_process_pool()
 
 app = FastAPI(
     title="Show Me Fire Weather API",
