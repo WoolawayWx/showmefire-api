@@ -336,7 +336,13 @@ def init_database():
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-    
+
+    # Persistent, database-level setting (stored in the file header) so every
+    # future connection from any process uses WAL: readers no longer block
+    # writers and vice versa, which matters since live requests and
+    # APScheduler jobs hit this same file concurrently.
+    conn.execute("PRAGMA journal_mode=WAL")
+
     # FORCED MIGRATION: These will run once and fail silently if already there
     try: conn.execute('ALTER TABLE snapshots ADD COLUMN is_processed INTEGER DEFAULT 0')
     except: pass

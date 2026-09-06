@@ -13,17 +13,17 @@ chmod 755 "$DATA_DIR" || true
 mkdir -p /app/logs
 chmod 755 /app/logs || true
 
-# Initialize the sqlite DB (idempotent)
-python3 - <<'PY'
-try:
-    from core.database import init_database
-    init_database()
-except Exception as e:
-    import sys, traceback
-    print("DB init error:", e, file=sys.stderr)
-    traceback.print_exc()
-PY
+# DB initialization happens in main.py's FastAPI lifespan startup (init_database()
+# is idempotent), which runs on every boot since CMD always launches uvicorn - no
+# separate init needed here.
+
+# Dockerfile.dev doesn't install the cron package; only start it if present so the
+# dev image doesn't crash under `set -e`.
+if [ -x /etc/init.d/cron ]; then
+    service cron start
+else
+    echo "cron not installed, skipping cron start"
+fi
 
 # Exec the main process
-service cron start
 exec "$@"

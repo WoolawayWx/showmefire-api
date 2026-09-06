@@ -5,6 +5,7 @@ Generate map tiles from GeoTIFF files using rio-tiler.
 Provides COG (Cloud Optimized GeoTIFF) endpoints for MapLibre GL.
 """
 
+import asyncio
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -108,25 +109,16 @@ def _transparent_tile_png(size: int = 256) -> bytes:
         return buf.getvalue()
 
 
-@router.get("/cog/info")
-async def cog_info(filename: str = "peak_fire_danger.tif"):
-    """
-    Get GeoTIFF metadata and bounds.
-    
-    Query params:
-    - filename: Name of the GeoTIFF file (default: peak_fire_danger.tif)
-    
-    Returns: Metadata including bounds, zoom levels, band info
-    """
+def _cog_info_sync(filename: str) -> dict:
     tif_path = _safe_gis_path(filename)
-    
+
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
-    
+
     try:
         with Reader(str(tif_path)) as src:
             info = src.info()
-            
+
             return {
                 "bounds": _bounds_list(src.bounds),
                 "minzoom": 4,
@@ -143,35 +135,25 @@ async def cog_info(filename: str = "peak_fire_danger.tif"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/cog/tiles/{z}/{x}/{y}.png")
-async def cog_tile(
-    z: int,
-    x: int,
-    y: int,
-    filename: str = Query("peak_fire_danger.tif", description="GeoTIFF filename"),
-    colormap: str = Query("fire_danger", description="Colormap name"),
-    rescale: str = Query("0,4", description="Min,max values for rescaling")
-):
+@router.get("/cog/info")
+async def cog_info(filename: str = "peak_fire_danger.tif"):
     """
-    Generate a map tile from GeoTIFF.
-    
-    Path params:
-    - z: Zoom level
-    - x: Tile X coordinate
-    - y: Tile Y coordinate
-    
+    Get GeoTIFF metadata and bounds.
+
     Query params:
-    - filename: GeoTIFF filename (default: peak_fire_danger.tif)
-    - colormap: Color ramp to apply (default: fire_danger)
-    - rescale: Min,max values for data rescaling (default: 0,4)
-    
-    Returns: PNG tile image
+    - filename: Name of the GeoTIFF file (default: peak_fire_danger.tif)
+
+    Returns: Metadata including bounds, zoom levels, band info
     """
+    return await asyncio.to_thread(_cog_info_sync, filename)
+
+
+def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale: str) -> Response:
     tif_path = _safe_gis_path(filename)
-    
+
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
-    
+
     try:
         with Reader(str(tif_path)) as src:
             # Read tile data. If source is RGB/RGBA, render bands directly.
@@ -220,29 +202,39 @@ async def cog_tile(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/cog/preview.png")
-async def cog_preview(
+@router.get("/cog/tiles/{z}/{x}/{y}.png")
+async def cog_tile(
+    z: int,
+    x: int,
+    y: int,
     filename: str = Query("peak_fire_danger.tif", description="GeoTIFF filename"),
     colormap: str = Query("fire_danger", description="Colormap name"),
-    rescale: str = Query("0,4", description="Min,max values"),
-    max_size: int = Query(512, description="Max dimension in pixels")
+    rescale: str = Query("0,4", description="Min,max values for rescaling")
 ):
     """
-    Generate a preview image of the entire GeoTIFF.
-    
+    Generate a map tile from GeoTIFF.
+
+    Path params:
+    - z: Zoom level
+    - x: Tile X coordinate
+    - y: Tile Y coordinate
+
     Query params:
     - filename: GeoTIFF filename (default: peak_fire_danger.tif)
     - colormap: Color ramp to apply (default: fire_danger)
-    - rescale: Min,max values (default: 0,4)
-    - max_size: Maximum dimension in pixels (default: 512)
-    
-    Returns: PNG preview image
+    - rescale: Min,max values for data rescaling (default: 0,4)
+
+    Returns: PNG tile image
     """
+    return await asyncio.to_thread(_cog_tile_sync, z, x, y, filename, colormap, rescale)
+
+
+def _cog_preview_sync(filename: str, colormap: str, rescale: str, max_size: int) -> Response:
     tif_path = _safe_gis_path(filename)
-    
+
     if not tif_path.exists():
         raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
-    
+
     try:
         with Reader(str(tif_path)) as src:
             band_count = src.dataset.count
@@ -281,3 +273,24 @@ async def cog_preview(
     except Exception as e:
         logger.error(f"Error generating preview: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/cog/preview.png")
+async def cog_preview(
+    filename: str = Query("peak_fire_danger.tif", description="GeoTIFF filename"),
+    colormap: str = Query("fire_danger", description="Colormap name"),
+    rescale: str = Query("0,4", description="Min,max values"),
+    max_size: int = Query(512, description="Max dimension in pixels")
+):
+    """
+    Generate a preview image of the entire GeoTIFF.
+
+    Query params:
+    - filename: GeoTIFF filename (default: peak_fire_danger.tif)
+    - colormap: Color ramp to apply (default: fire_danger)
+    - rescale: Min,max values (default: 0,4)
+    - max_size: Maximum dimension in pixels (default: 512)
+
+    Returns: PNG preview image
+    """
+    return await asyncio.to_thread(_cog_preview_sync, filename, colormap, rescale, max_size)

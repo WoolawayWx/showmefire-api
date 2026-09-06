@@ -31,10 +31,6 @@ from maps.observed_peak_history import STATE_FILE as OBSERVED_PEAK_STATE_FILE
 from pathlib import Path
 from pytz import timezone
 import pandas as pd
-import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rio_tiler.io import COGReader
-from rio_tiler.colormap import cmap
 from core.database import (
     init_database,
     get_latest_forecast,
