@@ -49,9 +49,10 @@ def _to_float_or_none(value):
     if value is None:
         return None
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    return result if np.isfinite(result) else None
 
 
 def export_verification_history_csv(history, verification_csv_file):
@@ -435,12 +436,15 @@ def calculate_metrics(merged_df, variable_map):
         bias = np.mean(y_pred - y_true)
         # Calculate R^2 for plots if needed, or simple correlation
         corr = np.corrcoef(y_true, y_pred)[0, 1] if len(y_true) > 1 else 0
+        if not np.isfinite(corr):
+            # undefined when a series has zero variance (e.g. all observations equal)
+            corr = None
         metrics[metric_name] = {
             'mae': round(mae, 4),
             'rmse': round(rmse, 4),
             'bias': round(bias, 4),
             'count': len(valid),
-            'correlation': round(corr, 4)
+            'correlation': round(corr, 4) if corr is not None else None
         }
         print(f"{metric_name}: MAE={round(mae, 4)}, RMSE={round(rmse, 4)}, Bias={round(bias, 4)}, Count={len(valid)}, Correlation={round(corr, 4)}")
     return metrics
