@@ -81,6 +81,7 @@ from services.beta_products import BETA_ROOT
 from core.config import (
     IMAGES_DIR,
     GIS_DIR,
+    FORECAST_V1_DIR,
     PUBLIC_DIR,
     REPORTS_DIR,
     LOGS_DIR,
@@ -88,7 +89,8 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin
+from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -122,6 +124,7 @@ async def lifespan(app: FastAPI):
 
     try:
         init_database()
+        ensure_forecast_v1_schema()
     except Exception as exc:
         logger.error("Database initialization failed: %s", exc, exc_info=True)
         raise
@@ -177,15 +180,26 @@ class NoCacheStaticFiles(StaticFiles):
 
         return response
 
+
+class ForecastStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response: Response = await super().get_response(path, scope)
+        if response.status_code == 200 and path.startswith("runs/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
 # A fresh deployment may not have generated maps or reports yet. StaticFiles
 # validates directories at construction time, so create its writable roots
 # before mounting them instead of making API startup depend on old artifacts.
-for static_directory in (IMAGES_DIR, GIS_DIR, REPORTS_DIR, PUBLIC_DIR, BETA_ROOT):
+for static_directory in (IMAGES_DIR, GIS_DIR, FORECAST_V1_DIR, REPORTS_DIR, PUBLIC_DIR, BETA_ROOT):
     static_directory.mkdir(parents=True, exist_ok=True)
 
 # Use this instead of the default StaticFiles
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
+app.mount("/forecast-v1-assets", ForecastStaticFiles(directory=str(FORECAST_V1_DIR)), name="forecast-v1-assets")
 app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
 app.mount("/testbed-assets", NoCacheStaticFiles(directory=str(BETA_ROOT)), name="testbed-assets")
 OPSBRIEF_DIR = Path(__file__).resolve().parent / "files" / "opsbrief"
@@ -216,6 +230,8 @@ app.include_router(forecast_admin.router)
 app.include_router(forecast_admin_09z.router)
 app.include_router(forecast_09z_metrics.router)
 app.include_router(spread_rate_admin.router)
+app.include_router(forecast_v1.router)
+app.include_router(forecast_v1_admin.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

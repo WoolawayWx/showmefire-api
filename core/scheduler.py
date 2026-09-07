@@ -32,6 +32,7 @@ from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
 from services.forecast_jobs import trigger_beta_forecast
+from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast_v1_operational, run_forecast_v1_shadow
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 
@@ -134,6 +135,23 @@ async def run_scheduled_beta_forecast_job():
         logger.info("Scheduled beta forecast skipped: %s", error)
     except Exception as error:
         logger.error("Scheduled beta forecast trigger failed: %s", error, exc_info=True)
+
+
+async def run_forecast_v1_shadow_job():
+    try:
+        runner = run_forecast_v1_shadow if os.getenv("SMF_FORECAST_V1_SOURCE_MODE", "herbie").lower() == "staged" else run_forecast_v1_operational
+        result = await asyncio.to_thread(runner)
+        logger.info("Forecast-v1 shadow run completed: %s", result)
+    except Exception as error:
+        logger.error("Forecast-v1 shadow run failed: %s", error, exc_info=True)
+
+
+async def prune_forecast_v1_hot_storage_job():
+    try:
+        result = await asyncio.to_thread(prune_forecast_v1_hot_storage)
+        logger.info("Forecast-v1 retention completed: %s", result)
+    except Exception as error:
+        logger.error("Forecast-v1 retention failed: %s", error, exc_info=True)
 
 
 async def verify_latest_beta_forecast_job():
@@ -368,6 +386,28 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         max_instances=1,
         coalesce=True,
     )
+
+    if os.getenv("SMF_FORECAST_V1_ENABLED", "false").lower() == "true":
+        # Poll after the configured cycle-age gate. Completed run IDs are
+        # idempotently skipped; incomplete NOAA feeds are retried on the next
+        # tick without replacing the current public pointer.
+        scheduler.add_job(
+            run_forecast_v1_shadow_job,
+            "interval",
+            minutes=max(15, int(os.getenv("SMF_FORECAST_V1_POLL_MINUTES", "30"))),
+            id="run_forecast_v1_shadow",
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            prune_forecast_v1_hot_storage_job,
+            "cron",
+            hour=3,
+            minute=20,
+            id="prune_forecast_v1_hot_storage",
+            max_instances=1,
+            coalesce=True,
+        )
 
     scheduler.add_job(
         verify_latest_beta_forecast_job,
