@@ -20,6 +20,8 @@ from rio_tiler.colormap import cmap as rio_cmap
 from rio_tiler.models import ImageData
 
 from core.config import GIS_DIR
+from forecast_v1.repository import asset_for_layer, ensure_schema as ensure_forecast_v1_schema, transaction as forecast_v1_transaction
+from forecast_v1.contracts import PUBLIC_LAYER_STYLES
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,6 @@ FIRE_DANGER_COLORS = {
     4: (139, 0, 0, 255),
     255: (0, 0, 0, 0),
 }
-
 
 def _safe_gis_path(filename: str) -> Path:
     base = Path(GIS_DIR).resolve()
@@ -294,3 +295,46 @@ async def cog_preview(
     Returns: PNG preview image
     """
     return await asyncio.to_thread(_cog_preview_sync, filename, colormap, rescale, max_size)
+
+
+def _forecast_tile_sync(run_id: str, variable: str, lead_hour: int, z: int, x: int, y: int) -> Response:
+    if variable not in PUBLIC_LAYER_STYLES:
+        raise HTTPException(status_code=404, detail="Forecast layer not found")
+    if not 0 <= lead_hour <= 72:
+        raise HTTPException(status_code=422, detail="lead_hour must be between 0 and 72")
+    ensure_forecast_v1_schema()
+    with forecast_v1_transaction() as connection:
+        asset = asset_for_layer(connection, run_id, variable, "hourly")
+    if not asset or not asset["local_path"]:
+        raise HTTPException(status_code=404, detail="Forecast raster not found")
+    path = Path(asset["local_path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Forecast raster is not available on this server")
+    style = PUBLIC_LAYER_STYLES[variable]
+    colormap_name, scale = str(style["colormap"]), tuple(style["rescale"])
+    try:
+        with Reader(str(path)) as src:
+            image = src.tile(x, y, z, indexes=lead_hour + 1)
+            if variable == "fire_danger":
+                png = _render_classified_png(image)
+            else:
+                image.rescale(in_range=(scale,))
+                try:
+                    color_map = rio_cmap.get(colormap_name)
+                except KeyError:
+                    color_map = rio_cmap.get("viridis")
+                png = image.render(img_format="PNG", colormap=color_map)
+        return Response(content=png, media_type="image/png", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if "outside bounds" in str(exc).lower():
+            return Response(content=_transparent_tile_png(), media_type="image/png", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+        logger.exception("Unable to render forecast-v1 tile")
+        raise HTTPException(status_code=500, detail="Unable to render forecast tile") from exc
+
+
+@router.get("/forecast/{run_id}/{variable}/{lead_hour}/{z}/{x}/{y}.png")
+async def forecast_tile(run_id: str, variable: str, lead_hour: int, z: int, x: int, y: int):
+    """Render one allow-listed band from an immutable forecast-v1 COG."""
+    return await asyncio.to_thread(_forecast_tile_sync, run_id, variable, lead_hour, z, x, y)
