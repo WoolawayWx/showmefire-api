@@ -1798,6 +1798,7 @@ _PUBLIC_EVENT_COLUMNS = (
 )
 
 _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
+    "incident_id",
     "occurred_at_tz_offset_minutes",
     "official_source_system",
     "label_revision", "revised_at", "parent_event_id",
@@ -1930,14 +1931,18 @@ def upsert_detection_event(
     Idempotent upsert for a non-submission fire record (satellite/NGFS
     detections at verification_tier='unverified', or an already-vetted
     official dataset like USFS FPA-FOD at verification_tier=
-    'official_source_confirmed'). Always lands as status='approved'.
+    'official_source_confirmed'). Raw satellite/NGFS detections
+    (source in modis/viirs/ngfs) land as status='pending' and require the
+    same admin moderation as user-submitted reports; already-vetted sources
+    (e.g. official FPA-FOD records) still land as status='approved'.
 
     The ON CONFLICT clause deliberately never touches latitude/longitude/
-    occurred_at/verification_tier/cause_category/acres, so an admin
+    occurred_at/verification_tier/cause_category/acres/status, so an admin
     correction (or, for an official import, a source data correction on
     re-ingest) survives the next ingest cycle rather than being silently
     overwritten - same guarantee the satellite/NGFS callers already rely on.
     """
+    initial_status = "pending" if source in ("modis", "viirs", "ngfs") else "approved"
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1954,7 +1959,7 @@ def upsert_detection_event(
                 occurred_at, occurred_at_precision, frp, confidence, satellite,
                 cause_category, acres, official_source_system, official_source_ref,
                 first_seen_at, last_seen_at
-            ) VALUES (?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(source, external_id) DO UPDATE SET
                 last_seen_at = CURRENT_TIMESTAMP,
                 frp = COALESCE(excluded.frp, fire_events.frp),
@@ -1962,7 +1967,7 @@ def upsert_detection_event(
                 satellite = COALESCE(excluded.satellite, fire_events.satellite),
                 updated_at = CURRENT_TIMESTAMP
         ''', (
-            source, external_id, verification_tier, latitude, longitude, county_fips, county_name,
+            source, external_id, initial_status, verification_tier, latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, frp, confidence, satellite,
             cause_category or "unknown", acres, official_source_system or "", official_source_ref or "",
         ))
@@ -1975,7 +1980,7 @@ def upsert_detection_event(
                 )
                 cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
-                                    to_status="approved", to_tier=verification_tier)
+                                    to_status=initial_status, to_tier=verification_tier)
         conn.commit()
         return {"event_id": event_id, "inserted": is_new, "updated": not is_new}
     finally:
@@ -2096,7 +2101,7 @@ def list_fire_events(
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        safe_limit = max(1, min(limit, 200))
+        safe_limit = max(1, min(limit, 500))
         safe_offset = max(0, offset)
         columns = _ADMIN_EVENT_COLUMNS if admin else _PUBLIC_EVENT_COLUMNS
 
@@ -2106,8 +2111,16 @@ def list_fire_events(
             clauses.append("status = ?")
             params.append(status)
         if source:
-            clauses.append("source = ?")
-            params.append(source)
+            # Accept a comma-separated list (e.g. "modis,viirs,ngfs") so
+            # callers can fetch several sources - like "all satellite
+            # detections" - in a single request.
+            sources = [value.strip() for value in source.split(",") if value.strip()]
+            if len(sources) > 1:
+                clauses.append(f"source IN ({', '.join('?' for _ in sources)})")
+                params.extend(sources)
+            elif sources:
+                clauses.append("source = ?")
+                params.append(sources[0])
         if verification_tier:
             clauses.append("verification_tier = ?")
             params.append(verification_tier)

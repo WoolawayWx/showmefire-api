@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
@@ -10,6 +13,7 @@ from services.synoptic import (
 from services.timeseries import get_timeseries_data, fetchtimeseriesdata
 from services.banner import BannerData, load_banner_config, save_banner_config
 from services.file_manager import list_files, view_file
+from services.log_maintenance import purge_old_logs
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -1215,6 +1219,15 @@ async def view_log(filepath: str, token: Optional[str] = None):
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return view_file(str(LOGS_DIR), filepath, email)
+
+@app.post("/api/admin/logs/cleanup")
+async def cleanup_logs(token: Optional[str] = None):
+    """Run the log purge (delete stale dated logs, truncate oversized ever-growing ones) immediately."""
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    result = await asyncio.to_thread(purge_old_logs)
+    return {"success": True, **result}
 
 @app.get("/api/training/latest-stats")
 async def get_latest_training_stats():

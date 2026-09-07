@@ -24,6 +24,7 @@ from core.database import (
     purge_feedback_throttle_rows,
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
+from services.log_maintenance import purge_old_logs
 from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from services.spread_rate import run_spread_rate_job, run_spread_rate_pipeline
@@ -232,6 +233,15 @@ async def purge_spatial_fm_uncertainty_cache_job():
         logger.error("Spatial FM uncertainty cache purge failed: %s", error, exc_info=True)
 
 
+async def purge_old_logs_job():
+    """Delete stale dated log files and truncate ever-growing cron logs past their size cap."""
+    try:
+        result = await asyncio.to_thread(purge_old_logs)
+        logger.info("Log purge: removed=%d truncated=%d", len(result["removed"]), len(result["truncated"]))
+    except Exception as error:
+        logger.error("Log purge failed: %s", error, exc_info=True)
+
+
 async def purge_fire_report_pii_job():
     """Expire stale pending reports, then purge PII past the retention window."""
     try:
@@ -438,6 +448,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=3,
         minute=15,
         id='purge_spatial_fm_uncertainty_cache',
+    )
+
+    scheduler.add_job(
+        purge_old_logs_job,
+        'cron',
+        hour=3,
+        minute=45,
+        id='purge_old_logs',
     )
 
     scheduler.add_job(
