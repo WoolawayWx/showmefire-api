@@ -400,7 +400,13 @@ def _publish_run_impl(
     if cycle.hour != 12:
         raise ValueError("forecast-v1 public pipeline accepts only the daily 12Z cycle")
     run_id = run_id_for_cycle(cycle)
-    root = Path(publish_root)
+    # Resolved to absolute up front: artifact_record() stores each asset's
+    # local_path via Path.resolve(), and the manifest/promotion steps below
+    # compute paths relative to `staging` - comparing a resolved absolute
+    # path against an unresolved relative one raises
+    # "... is not in the subpath of ... OR one path is relative and the
+    # other is absolute" from Path.relative_to().
+    root = Path(publish_root).resolve()
     staging = root / ".staging" / run_id
     final = root / "runs" / cycle.strftime("%Y/%m/%d") / run_id
     if staging.exists():

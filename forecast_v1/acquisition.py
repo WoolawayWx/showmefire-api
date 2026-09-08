@@ -34,7 +34,11 @@ SURFACE_SEARCHES = (
     r":RH:2 m above ground:",
     r":UGRD:10 m above ground:",
     r":VGRD:10 m above ground:",
-    r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:",
+    # RRFS's 2dfld product carries both an instantaneous TCDC message and a
+    # period-averaged one under the same "entire atmosphere" label; matching
+    # both makes xarray try to merge incompatible time-step shapes ("do not
+    # form a hypercube"). Exclude the averaged variant explicitly.
+    r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:(?!\d+-\d+ hour ave fcst:)",
     r":(?:SOILW|MSTAV):",
     r":(?:HGT:planetary boundary layer|HPBL|MIXHT):",
     r":GUST:(?:surface|10 m above ground):",
