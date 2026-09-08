@@ -89,7 +89,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, fuel_sensor_admin
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -232,6 +232,7 @@ app.include_router(forecast_09z_metrics.router)
 app.include_router(spread_rate_admin.router)
 app.include_router(forecast_v1.router)
 app.include_router(forecast_v1_admin.router)
+app.include_router(fuel_sensor_admin.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -1430,7 +1431,7 @@ async def ingest_fuel_sensor_readings(payload: dict, x_device_key: Optional[str]
 
 @app.get("/api/fuel-sensor/readings")
 def list_fuel_sensor_readings(site_id: Optional[str] = None, device_id: Optional[str] = None, limit: int = 100):
-    """Recent readings from our own dowel sensor hardware, most recent first."""
+    """Recent readings from our own dowel sensor hardware, newest upload first."""
     limit = max(1, min(limit, 1000))
     db_path = get_db_path()
     try:
@@ -1445,7 +1446,9 @@ def list_fuel_sensor_readings(site_id: Optional[str] = None, device_id: Optional
         if device_id:
             query += " AND device_id = ?"
             params.append(device_id)
-        query += " ORDER BY recorded_at DESC LIMIT ?"
+        # ``recorded_at`` is device time and bench firmware currently reports
+        # uptime there. ``received_at`` is the reliable upload ordering.
+        query += " ORDER BY received_at DESC, id DESC LIMIT ?"
         params.append(limit)
         cursor.execute(query, params)
         rows = cursor.fetchall()
