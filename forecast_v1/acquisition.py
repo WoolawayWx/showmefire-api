@@ -89,21 +89,33 @@ def _parse_members(raw: str, *, integer: bool) -> tuple[str | int, ...]:
 
 def default_specs() -> tuple[AcquisitionSpec, ...]:
     """Build source requests, allowing member counts/products to be tuned by env."""
-    refs = _parse_members(os.getenv("SMF_REFS_MEMBERS", "1,2,3,4,5,6,7"), integer=True)
     gefs = _parse_members(
         os.getenv("SMF_GEFS_MEMBERS", "c00," + ",".join(f"p{i:02d}" for i in range(1, 31))),
         integer=False,
     )
-    rrfs_product = os.getenv("SMF_RRFS_PRODUCT", "natlev")
+    rrfs_product = os.getenv("SMF_RRFS_PRODUCT", "2dfld.13km")
     rrfs_domain = os.getenv("SMF_RRFS_DOMAIN", "conus") or None
-    return (
+    specs = [
         AcquisitionSpec("hrrr", "hrrr", "sfc", tuple(range(49)), (None,), required=True),
         AcquisitionSpec("rrfs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), ("control",), domain=rrfs_domain),
-        # REFS members are delivered in the RRFS ensemble feed; keeping the
-        # public source name separate preserves blend and provenance semantics.
-        AcquisitionSpec("refs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), refs, domain=rrfs_domain),
-        AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs),
-    )
+    ]
+    # REFS used to be delivered as raw per-member files in the same RRFS
+    # feed. The operational bucket (which replaced the retired prototype
+    # feed - see patches/rrfs.py) only publishes a pre-computed ensemble
+    # mean ("ensprod/*.avrg.*"), not individual member files, so there is
+    # currently nothing at the per-member paths this used to fetch from.
+    # Reusing the rrfs template for "members" it can't actually address
+    # would silently fetch the same deterministic file N times and pass it
+    # off as N distinct ensemble members. Disabled until REFS is rewired to
+    # consume the mean product directly (a blend_sources change, not just
+    # an acquisition path fix) - opt back in once that's done.
+    if os.getenv("SMF_REFS_ENABLED", "false").lower() == "true":
+        refs = _parse_members(os.getenv("SMF_REFS_MEMBERS", "1,2,3,4,5,6,7"), integer=True)
+        specs.append(
+            AcquisitionSpec("refs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), refs, domain=rrfs_domain)
+        )
+    specs.append(AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs))
+    return tuple(specs)
 
 
 def _sanitize(dataset: xr.Dataset) -> xr.Dataset:

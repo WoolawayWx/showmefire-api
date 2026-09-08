@@ -1,45 +1,58 @@
 """
 Rapid Refresh Forecast System (RRFS)
 
-Updated to match current NOAA S3 bucket structure (2026):
-  rrfs_a/rrfs.YYYYMMDD/HH/rrfs.tHHz.natlev.3km.fFFF.na.grib2
+The prototype feed this used to target (noaa-rrfs-pds/rrfs_a/...,
+product natlev.3km) stopped updating 2026-08-12 when RRFS/REFS entered
+their pre-implementation parallel phase ahead of full operational status
+on 2026-10-06 (NWS Service Change Notice). Every request against it now
+404s. The operational feed lives in a different bucket, without the
+"rrfs_a/" prefix, and splits native-level fields out from the 2D surface
+diagnostics (TMP/DPT/RH/UGRD/VGRD 2m-10m, APCP, DSWRF, WEASD, TCDC, HPBL,
+SOILW/MSTAV) this pipeline actually needs - which now live in "2dfld"
+rather than "natlev":
+  rrfs.YYYYMMDD/HH/rrfs.tHHz.2dfld.13km.fFFF.na.grib2
+Verified directly against the bucket listing and a sample .idx on
+2026-09-08; NOAA may still adjust paths before the Oct 6 cutover.
 """
 
 HELP = r"""
 Herbie(date, model='rrfs', ...)
 
 fxx     : int, forecast hour
-product : {"natlev.3km"}  -- only product currently available
+product : {"2dfld.13km", "natlev.13km"}
 domain  : ignored, always "na" (North America)
 
 Example:
-    Herbie("2026-02-08 12:00", model="rrfs", fxx=1, product="natlev.3km")
+    Herbie("2026-09-08 12:00", model="rrfs", fxx=1, product="2dfld.13km")
 """
 
 
 class rrfs:
     def template(self):
-        self.DESCRIPTION = "Rapid Refresh Forecast System (RRFS)"
+        self.DESCRIPTION = "Rapid Refresh Forecast System (RRFS) - operational"
         self.DETAILS = {
-            "aws product description": "https://registry.opendata.aws/noaa-rrfs/",
+            "aws product description": "https://registry.opendata.aws/noaa-rrfs-ops/",
         }
         self.HELP = HELP
 
         self.PRODUCTS = {
-            "natlev.3km": "Native level, 3km grid, North America",
+            "2dfld.13km": "2D surface diagnostics, 13km grid, North America",
+            "natlev.13km": "Native level, 13km grid, North America",
         }
 
-        # Normalize product aliases
-        if self.product in ("nat", "natlev", "natlev3km"):
-            self.product = "natlev.3km"
+        # Normalize product aliases - "natlev"/"nat" used to mean the only
+        # (3km) product on the retired prototype feed; the operational feed's
+        # surface diagnostics (what this pipeline needs) live in "2dfld".
+        if self.product in ("nat", "natlev", "natlev3km", "natlev.3km", None):
+            self.product = "2dfld.13km"
 
-        base = "https://noaa-rrfs-pds.s3.amazonaws.com"
+        base = "https://noaa-rrfs-ops-pds.s3.amazonaws.com"
         date = self.date
         fxx = self.fxx
 
         self.SOURCES = {
             "aws": (
-                f"{base}/rrfs_a/rrfs.{date:%Y%m%d/%H}/"
+                f"{base}/rrfs.{date:%Y%m%d/%H}/"
                 f"rrfs.t{date:%H}z.{self.product}.f{fxx:03d}.na.grib2"
             ),
         }
