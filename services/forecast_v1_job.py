@@ -73,22 +73,29 @@ def _run_forecast_v1_staged_impl(make_public: bool | None = None) -> dict:
     return {"run_id": manifest["runId"], "warnings": manifest["warnings"]}
 
 
-def _exclusive_run(callback) -> dict:
+def _exclusive_run(func, *args) -> dict:
+    """Run `func(*args)` on the shared process pool while holding the
+    single-run lock for the full duration (matching the old in-process
+    semantics) - so the memory/CPU cost of Herbie downloads + regridding
+    lands on an isolated worker process instead of the API server itself.
+    """
     if not _execution_lock.acquire(blocking=False):
         raise RuntimeError("A scheduled or manually requested forecast-v1 run is already active")
     try:
-        return callback()
+        from core.executors import run_in_process_pool
+
+        return run_in_process_pool(func, *args)
     finally:
         _execution_lock.release()
 
 
 def run_forecast_v1_shadow(make_public: bool | None = None) -> dict:
-    return _exclusive_run(lambda: _run_forecast_v1_staged_impl(make_public))
+    return _exclusive_run(_run_forecast_v1_staged_impl, make_public)
 
 
-def _station_inputs() -> tuple[list[dict], list[dict]]:
-    """Convert the live Synoptic snapshot to public metadata and fuel observations."""
-    raw = get_station_data().get("stations") or []
+def _station_inputs(raw_stations: list[dict] | None) -> tuple[list[dict], list[dict]]:
+    """Convert a live Synoptic snapshot to public metadata and fuel observations."""
+    raw = raw_stations or []
     if not raw:
         raise RuntimeError("live RAWS/ASOS/AWOS station metadata is unavailable")
     stations: list[dict] = []
@@ -121,7 +128,9 @@ def _station_inputs() -> tuple[list[dict], list[dict]]:
     return stations, observations
 
 
-def _run_forecast_v1_operational_impl(now: datetime | None = None, make_public: bool | None = None) -> dict:
+def _run_forecast_v1_operational_impl(
+    now: datetime | None = None, make_public: bool | None = None, raw_stations: list[dict] | None = None,
+) -> dict:
     """Acquire the latest mature 12Z cycle with Herbie and publish one beta run."""
     minimum_age = int(os.getenv("SMF_FORECAST_V1_MIN_CYCLE_AGE_HOURS", "6"))
     cycle = latest_publishable_12z(now, minimum_age_hours=minimum_age)
@@ -144,7 +153,7 @@ def _run_forecast_v1_operational_impl(now: datetime | None = None, make_public: 
         flags = tuple(sorted(set(source.quality_flags).union(result.warnings)))
         native = archive_source_cube(replace(source, quality_flags=flags), publish_root, r2)
         cubes[model] = regrid_to_public(native)
-    stations, observations = _station_inputs()
+    stations, observations = _station_inputs(raw_stations)
     atmosphere = blend_sources(cubes)
     initialization = initialize_fuel_moisture(atmosphere, cycle, observations)
     manifest = publish_run(
@@ -156,7 +165,12 @@ def _run_forecast_v1_operational_impl(now: datetime | None = None, make_public: 
 
 
 def run_forecast_v1_operational(now: datetime | None = None, make_public: bool | None = None) -> dict:
-    return _exclusive_run(lambda: _run_forecast_v1_operational_impl(now, make_public))
+    # Snapshot the live station cache here, in the caller's process, and hand
+    # it to the worker as plain data - the worker is a long-lived forked
+    # process pool member and would otherwise only ever see synoptic.py's
+    # in-memory cache as it was at pool startup.
+    raw_stations = get_station_data().get("stations") or []
+    return _exclusive_run(_run_forecast_v1_operational_impl, now, make_public, raw_stations)
 
 
 def prune_forecast_v1_hot_storage() -> dict:

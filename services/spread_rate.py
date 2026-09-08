@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from core.executors import get_process_pool
+from core.executors import run_in_process_pool_async
 from services.beta_products import BETA_ROOT, load_manifest, save_manifest
 from services.fire_behavior_static import diagnostics as static_diagnostics, load_static_fields
 from services.rtma_capture import (
@@ -627,11 +627,7 @@ def spread_rate_status() -> dict:
 
 async def run_spread_rate_job(raws_payload: dict | None = None):
     try:
-        import asyncio
-
-        result = await asyncio.get_running_loop().run_in_executor(
-            get_process_pool(), run_spread_rate_pipeline, raws_payload
-        )
+        result = await run_in_process_pool_async(run_spread_rate_pipeline, raws_payload)
         logger.info(
             "Spread-rate job finished with status=%s analysis_hour=%s",
             result.get("status"),
