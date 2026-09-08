@@ -126,7 +126,7 @@ def write_static_graphic(
     categorical: bool = False,
     boundary_geojson: str | Path | None = None,
 ) -> tuple[Path, Path]:
-    """Render a consistent 16:9 archival PNG and optimized WebP."""
+    """Render a consistent archival PNG and optimized WebP, sized to the data's own aspect ratio."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -137,8 +137,15 @@ def write_static_graphic(
     webp = Path(webp_path)
     png.parent.mkdir(parents=True, exist_ok=True)
     webp.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots(figsize=(16, 9), dpi=128)
     values = np.asarray(data.values, dtype=float)
+    # The public grid (267x264) is nearly square, not widescreen. A fixed
+    # 16:9 canvas with imshow's default aspect="equal" left most of the
+    # figure blank on the sides padding the mismatch out; size the figure to
+    # the data's real aspect instead so the map fills its panel edge to edge.
+    rows, cols = values.shape[-2:]
+    map_width_in = 10.0
+    figure = plt.figure(figsize=(map_width_in + 2.2, map_width_in * rows / cols + 1.4), dpi=128)
+    axis = figure.add_axes((0.02, 0.14, 0.78, 0.80))
     if categorical:
         values[values == 255] = np.nan
         colors = ["#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000"]
@@ -166,14 +173,16 @@ def write_static_graphic(
             for ring in rings(geometry):
                 projected = [transformer.transform(float(lon), float(lat)) for lon, lat, *_ in ring]
                 columns = [(x - PUBLIC_GRID.west) / PUBLIC_GRID.resolution_m - .5 for x, _ in projected]
-                rows = [(PUBLIC_GRID.north - y) / PUBLIC_GRID.resolution_m - .5 for _, y in projected]
-                axis.plot(columns, rows, color="#111827", linewidth=1.5, alpha=.9)
+                row_positions = [(PUBLIC_GRID.north - y) / PUBLIC_GRID.resolution_m - .5 for _, y in projected]
+                axis.plot(columns, row_positions, color="#111827", linewidth=1.5, alpha=.9)
     axis.set_title(title, fontsize=22, weight="bold", pad=15)
     axis.set_xticks([])
     axis.set_yticks([])
-    axis.text(0, -0.035, f"Valid: {valid_period}", transform=axis.transAxes, ha="left", va="top", fontsize=11)
-    axis.text(1, -0.035, f"12Z run: {run_time}  •  {status}", transform=axis.transAxes, ha="right", va="top", fontsize=11)
-    figure.tight_layout(rect=(0.02, .05, .98, .96))
+    # Two stacked lines rather than same-row left/right: a long valid_period
+    # string (e.g. "2026-09-07 America/Chicago") ran into the right-aligned
+    # run/status text when they shared one baseline.
+    figure.text(0.02, 0.045, f"Valid: {valid_period}", ha="left", va="bottom", fontsize=11)
+    figure.text(0.02, 0.015, f"12Z run: {run_time}  •  {status}", ha="left", va="bottom", fontsize=11)
     figure.savefig(png, format="png", dpi=128, metadata={"Title": title, "Description": f"{valid_period}; {status}"})
     plt.close(figure)
     with PILImage.open(png) as source:
