@@ -65,6 +65,35 @@ def test_herbie_acquisition_normalizes_clips_and_checks_hours(tmp_path):
     assert progress == [{"event": "member_completed", "member": "deterministic", "completed": 1, "total": 1}]
 
 
+def test_hrrr_warm_season_missing_swe_uses_flagged_zero_fallback(tmp_path, monkeypatch):
+    cycle = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    base = source_cube("hrrr", 20, cycle=cycle, hours=2).dataset.isel(member=0, drop=True)
+    aliases = {
+        "temperature_2m": "t2m", "relative_humidity_2m": "r2", "wind_u_10m": "u10",
+        "wind_v_10m": "v10", "wind_gust_10m": "gust", "precipitation_increment": "tp",
+        "shortwave_down": "dswrf", "cloud_cover": "tcc", "mixing_height": "hpbl",
+        "soil_moisture": "soilw",
+    }
+    raw = base.drop_vars("snow_water_equivalent").rename(aliases)
+    raw = raw.assign_coords(
+        latitude=("y", [36.0, 37.0]), longitude=("x", [-94.0, -93.0, -92.0]),
+    )
+
+    class MissingSweHerbie:
+        def __init__(self, **kwargs): pass
+        def xarray(self, search, **kwargs):
+            if "WEASD" in search:
+                raise RuntimeError("message unavailable")
+            return raw
+
+    monkeypatch.setenv("SMF_HERBIE_QUERY_ATTEMPTS", "1")
+    spec = AcquisitionSpec("hrrr", "hrrr", "sfc", (0, 1), (None,), required=True)
+    cube = acquire_source(spec, cycle, tmp_path, fast_herbie_factory=MissingSweHerbie)
+
+    assert float(cube.dataset.snow_water_equivalent.max()) == 0
+    assert "seasonal_swe_assumed_zero" in cube.quality_flags
+
+
 def source_cube(model: str, value: float, *, cycle: datetime | None = None, hours: int = 73) -> SourceCube:
     cycle = cycle or datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
     coords = {

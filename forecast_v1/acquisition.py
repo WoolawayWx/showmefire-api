@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -26,8 +27,13 @@ logger = logging.getLogger(__name__)
 
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
 SURFACE_SEARCHES = (
-    r":(?:TMP|DPT|RH):2 m above ground:",
-    r":(?:UGRD|VGRD):10 m above ground:",
+    # Keep critical fields separate so a cfgrib/read failure for one message
+    # cannot discard temperature, humidity, and dewpoint together.
+    r":TMP:2 m above ground:",
+    r":DPT:2 m above ground:",
+    r":RH:2 m above ground:",
+    r":UGRD:10 m above ground:",
+    r":VGRD:10 m above ground:",
     r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:",
     r":(?:SOILW|MSTAV):",
     r":(?:HGT:planetary boundary layer|HPBL|MIXHT):",
@@ -280,10 +286,20 @@ def _fetch_member(
     groups = []
     errors = []
     for search in SURFACE_SEARCHES:
-        try:
-            groups.append(_merge_herbie_result(client.xarray(search, remove_grib=True), cycle))
-        except Exception as error:
-            errors.append(f"{search}:{type(error).__name__}")
+        attempts = max(1, int(os.getenv("SMF_HERBIE_QUERY_ATTEMPTS", "3")))
+        for attempt in range(1, attempts + 1):
+            try:
+                groups.append(_merge_herbie_result(client.xarray(search, remove_grib=True), cycle))
+                break
+            except Exception as error:
+                if attempt == attempts:
+                    errors.append(f"{search}:{type(error).__name__}")
+                else:
+                    logger.warning(
+                        "%s %s query failed on attempt %d/%d: %s",
+                        spec.public_name, search, attempt, attempts, error,
+                    )
+                    time.sleep(min(attempt, 2))
     if not groups:
         raise RuntimeError("Herbie returned no forecast-v1 surface fields")
     surface = xr.merge(groups, compat="override", join="outer")
@@ -294,7 +310,15 @@ def _fetch_member(
         surface = xr.merge([surface, upper], compat="override", join="outer")
     except Exception as error:
         logger.info("%s optional upper-air fields unavailable for %s: %s", spec.public_name, member, error)
-    return _clip_and_project_axes(_canonicalize_variables(surface))
+    canonical = _canonicalize_variables(surface)
+    flags = []
+    if "weasd" not in canonical and cycle.month in {5, 6, 7, 8, 9} and "t2m" in canonical:
+        canonical["weasd"] = xr.zeros_like(canonical.t2m, dtype="float32")
+        canonical.weasd.attrs.update(units="mm", long_name="seasonal zero-snow fallback")
+        flags.append("seasonal_swe_assumed_zero")
+    if flags:
+        canonical.attrs["acquisition_quality_flags"] = ";".join(flags)
+    return _clip_and_project_axes(canonical)
 
 
 def _hourly_gefs(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
@@ -357,7 +381,18 @@ def acquire_source(
     if spec.public_name == "gefs":
         combined = _hourly_gefs(combined, cycle)
     combined.attrs.update(cycle_time=cycle.isoformat().replace("+00:00", "Z"), acquisition="herbie-indexed-grib")
-    cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
+    try:
+        cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
+    except ValueError as error:
+        query_errors = combined.attrs.get("acquisition_warnings")
+        detail = f"; Herbie query failures: {query_errors}" if query_errors else ""
+        raise ValueError(f"{error}{detail}") from error
+    acquisition_flags = tuple(filter(None, str(combined.attrs.get("acquisition_quality_flags", "")).split(";")))
+    if acquisition_flags:
+        cube = SourceCube(
+            cube.model, cube.cycle_time, cube.dataset, cube.member_ids,
+            tuple(sorted(set(cube.quality_flags).union(acquisition_flags))), cube.checksum, cube.object_key,
+        )
     expected = len(spec.leads) if spec.public_name != "gefs" else HORIZON_HOURS + 1
     if cube.dataset.sizes["time"] != expected:
         raise RuntimeError(f"{spec.public_name} incomplete: expected {expected} valid hours, received {cube.dataset.sizes['time']}")
