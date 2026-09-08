@@ -38,6 +38,10 @@ PUBLIC_GRID: Final = GridDefinition(
 
 HORIZON_HOURS: Final = 72
 TIME_COUNT: Final = 73
+# The v1 extended forecast owns only the second and third forecast days.
+# Day 1 is produced by the operational forecast pipeline and must not be
+# replaced by an extended-run promotion.
+EXTENDED_DAILY_INDICES: Final = (2, 3)
 LOCAL_TIMEZONE: Final = "America/Chicago"
 CONVECTION_ALLOWING_MODELS: Final = frozenset({"hrrr", "rrfs"})
 DETERMINISTIC_MODELS: Final = frozenset({"hrrr", "rrfs"})

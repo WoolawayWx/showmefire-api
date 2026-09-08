@@ -421,7 +421,9 @@ def test_synthetic_publication_writes_73_hour_three_day_contract(tmp_path, monke
         initial_fuel_moisture=10.0, publish_root=tmp_path / "products", db_path=db, make_public=True, r2_store=OfflineArchive(),
     )
     assert manifest["timeCount"] == 73
-    assert len(manifest["staticAssets"]) == 48
+    assert len(manifest["staticAssets"]) == 32
+    assert {asset["day"] for asset in manifest["staticAssets"]} == {2, 3}
+    assert manifest["legacyAliases"] == {}
     hourly_asset = next(layer for layer in manifest["layers"] if layer["variable"] == "fire_danger" and layer["aggregation"] == "hourly")
     assert "{lead_hour}" in hourly_asset["tileUrl"]
     with sqlite3.connect(db) as connection:

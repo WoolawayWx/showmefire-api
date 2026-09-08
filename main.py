@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Header
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
 from services.synoptic import (
@@ -1358,6 +1358,103 @@ async def get_morning_fuel_moisture_debug(
     except Exception as e:
         logger.error(f"Error in debug endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/fuel-sensor/readings")
+async def ingest_fuel_sensor_readings(payload: dict, x_device_key: Optional[str] = Header(None)):
+    """Ingest fuel-moisture readings from our own dowel sensor hardware
+    (SMF_FuelMoistureSensor), not the RAWS network. Devices authenticate
+    with a shared secret in the X-Device-Key header, checked against
+    FUEL_SENSOR_API_KEY, since these are unauthenticated ESP32s posting
+    over the open internet.
+
+    Payload shape:
+    {
+      "site_id": "...", "device_id": "...",
+      "diagnostics": {"battery_v": null, "rssi_dbm": -55, "uptime_s": 1234, "firmware_version": "0.1.0"},
+      "readings": [{"recorded_at": "2026-09-08T14:00:00Z", "air_temp_c": 22.3,
+                     "relative_humidity_pct": 41.2, "fuel_moisture_pct": 9.8}]
+    }
+    """
+    configured_key = os.getenv("FUEL_SENSOR_API_KEY", "").strip()
+    if not configured_key:
+        raise HTTPException(status_code=503, detail="Fuel sensor ingest is not configured (FUEL_SENSOR_API_KEY unset)")
+    if not x_device_key or x_device_key != configured_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Device-Key")
+
+    site_id = (payload.get("site_id") or "").strip()
+    device_id = (payload.get("device_id") or "").strip()
+    if not site_id or not device_id:
+        raise HTTPException(status_code=400, detail="site_id and device_id are required")
+
+    readings = payload.get("readings")
+    if not isinstance(readings, list) or not readings:
+        raise HTTPException(status_code=400, detail="readings must be a non-empty array")
+
+    diagnostics = payload.get("diagnostics") or {}
+    battery_v = diagnostics.get("battery_v")
+    rssi_dbm = diagnostics.get("rssi_dbm")
+    uptime_s = diagnostics.get("uptime_s")
+    firmware_version = diagnostics.get("firmware_version")
+    enclosure_state = diagnostics.get("enclosure_state")
+
+    db_path = get_db_path()
+    stored = 0
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        for reading in readings:
+            recorded_at = reading.get("recorded_at")
+            if not recorded_at:
+                raise HTTPException(status_code=400, detail="each reading requires recorded_at")
+            cursor.execute('''
+                INSERT OR IGNORE INTO fuel_moisture_sensor_readings (
+                    site_id, device_id, recorded_at, air_temp_c, relative_humidity_pct,
+                    fuel_moisture_pct, battery_v, rssi_dbm, uptime_s, firmware_version, enclosure_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                site_id, device_id, recorded_at,
+                reading.get("air_temp_c"), reading.get("relative_humidity_pct"), reading.get("fuel_moisture_pct"),
+                battery_v, rssi_dbm, uptime_s, firmware_version, enclosure_state,
+            ))
+            stored += cursor.rowcount
+        conn.commit()
+        conn.close()
+        return {"success": True, "stored": stored, "received": len(readings)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error ingesting fuel sensor readings from {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/fuel-sensor/readings")
+def list_fuel_sensor_readings(site_id: Optional[str] = None, device_id: Optional[str] = None, limit: int = 100):
+    """Recent readings from our own dowel sensor hardware, most recent first."""
+    limit = max(1, min(limit, 1000))
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        query = "SELECT * FROM fuel_moisture_sensor_readings WHERE 1=1"
+        params: list = []
+        if site_id:
+            query += " AND site_id = ?"
+            params.append(site_id)
+        if device_id:
+            query += " AND device_id = ?"
+            params.append(device_id)
+        query += " ORDER BY recorded_at DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return {"success": True, "readings": [dict(r) for r in rows]}
+    except Exception as e:
+        logger.error(f"Error listing fuel sensor readings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/models/history")
 async def get_model_history():

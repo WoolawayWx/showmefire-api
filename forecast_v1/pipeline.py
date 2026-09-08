@@ -21,7 +21,7 @@ from core.database import get_db_path
 from core.config import FORECAST_V1_DIR, GIS_DIR
 from .adapters import ADAPTERS, SourceCube
 from .artifacts import artifact_record, promote_directory, sha256_file, write_cog, write_manifest, write_netcdf, write_points_parquet, write_static_graphic
-from .contracts import HORIZON_HOURS, PUBLIC_GRID, PUBLIC_LAYER_STYLES, QUALITY_BITS, TIME_COUNT, VARIABLE_UNITS, run_id_for_cycle, utc_rfc3339
+from .contracts import EXTENDED_DAILY_INDICES, HORIZON_HOURS, PUBLIC_GRID, PUBLIC_LAYER_STYLES, QUALITY_BITS, TIME_COUNT, VARIABLE_UNITS, run_id_for_cycle, utc_rfc3339
 from .engine import build_forecast_cube, local_day_slices
 from .repository import ensure_schema, json_text, replace_assets, transaction, upsert_run
 from .r2_store import ForecastR2Store
@@ -454,7 +454,7 @@ def _publish_run_impl(
     for daily_index, (daily_name, public_name) in enumerate(daily_raster_map.items(), 1):
         if progress_callback:
             progress_callback({
-                "phase": "daily_products", "message": f"Rendering Day 1-3 products: {public_name}",
+                "phase": "daily_products", "message": f"Rendering Day 2-3 products: {public_name}",
                 "fraction": 0.35 + 0.35 * daily_index / len(daily_raster_map),
                 "current": daily_index, "total": len(daily_raster_map), "item": public_name,
             })
@@ -463,6 +463,8 @@ def _publish_run_impl(
         path = write_cog(daily[daily_name], staging / "rasters" / "daily" / f"{public_name}.tif", variable=public_name, band_times=daily_dates, categorical=categorical, byte_data=byte_data)
         assets.append(artifact_record(path, run_id=run_id, kind="raster", variable=public_name, aggregation="daily", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/rasters/daily/{public_name}.tif", dtype="uint8" if categorical or byte_data else "float32", unit=VARIABLE_UNITS.get(public_name)))
         for day_index, local_date in enumerate(daily_dates, 1):
+            if day_index not in EXTENDED_DAILY_INDICES:
+                continue
             graphic_root = staging / "graphics" / f"day-{day_index}"
             day_confidence = daily.category_confidence.isel(day=day_index - 1).where(daily.category_confidence.isel(day=day_index - 1) != 255)
             median_confidence = _value(day_confidence.median(skipna=True).values)
@@ -488,16 +490,9 @@ def _publish_run_impl(
     member_path = write_points_parquet(source_member_rows, staging / "points" / "source-members.parquet")
     assets.append(artifact_record(member_path, run_id=run_id, kind="points", variable="source-members", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/points/source-members.parquet", dtype="Parquet/Zstd"))
     layers = [{"variable": a["variable"], "aggregation": a["aggregation"], "unit": a["unit"], "dataType": a["storage_data_type"], "style": PUBLIC_LAYER_STYLES.get(a["variable"]), "tileUrl": f"/tiles/forecast/{run_id}/{a['variable']}/{{lead_hour}}/{{z}}/{{x}}/{{y}}.png" if a["aggregation"] == "hourly" else None} for a in assets if a["kind"] == "raster"]
-    legacy_aliases = {
-        "latest/mo-forecastfiredanger.png": "graphics/day-1/fire_danger.png",
-        "latest/mo-forecastfuelmoisture.png": "graphics/day-1/fuel_moisture_p50.png",
-        "latest/mo-forecastminrh.png": "graphics/day-1/relative_humidity_2m.png",
-        "latest/mo-forecastmaxtemp.png": "graphics/day-1/temperature_2m.png",
-        "latest/mo-forecastmaxwind.png": "graphics/day-1/wind_speed_10m.png",
-        "latest/mo-forecastrainfall.png": "graphics/day-1/precipitation_increment.png",
-    }
-    if "maximum_snow_water_equivalent" in daily_raster_map:
-        legacy_aliases["latest/mo-forecastswe.png"] = "graphics/day-1/snow_water_equivalent.png"
+    # These aliases belong to the operational Day 1 pipeline.  An extended
+    # run must never overwrite them, even when it is marked public.
+    legacy_aliases = {}
     manifest = {
         "schemaVersion": SCHEMA_VERSION, "runId": run_id, "cycleTime": utc_rfc3339(cycle), "issuedAt": now,
         "horizonHours": HORIZON_HOURS, "timeCount": TIME_COUNT,
@@ -534,8 +529,9 @@ def _publish_run_impl(
     for asset in assets:
         relative = Path(asset["local_path"]).relative_to(staging)
         asset["local_path"] = str((final / relative).resolve())
-    if make_public:
-        _update_legacy_aliases(final, root, manifest["legacyAliases"], r2)
+    # Deliberately do not update legacy aliases here.  The v1 extended
+    # pipeline owns its immutable run assets; Day 1 aliases remain owned by
+    # the operational forecast publisher.
     database = db_path or get_db_path()
     ensure_schema(database)
     with transaction(database) as connection:

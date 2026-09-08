@@ -271,6 +271,39 @@ def _ensure_feedback_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_feedback_throttle_updated ON feedback_submission_throttle(updated_at)')
 
 
+def _ensure_fuel_moisture_sensor_tables(cursor: sqlite3.Cursor) -> None:
+    """Field-deployed dowel fuel-moisture sensors (probe-in-dowel design,
+    see SMF_FuelMoistureSensor). Distinct from the observations/station_forecasts
+    tables, which hold RAWS network data, not our own hardware.
+    """
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fuel_moisture_sensor_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            recorded_at TIMESTAMP NOT NULL,
+            air_temp_c REAL,
+            relative_humidity_pct REAL,
+            fuel_moisture_pct REAL,
+            battery_v REAL,
+            rssi_dbm INTEGER,
+            uptime_s INTEGER,
+            firmware_version TEXT,
+            enclosure_state TEXT,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(device_id, recorded_at)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fuel_sensor_site_recorded ON fuel_moisture_sensor_readings(site_id, recorded_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fuel_sensor_device_recorded ON fuel_moisture_sensor_readings(device_id, recorded_at DESC)')
+
+    # Migration: enclosure_state didn't exist in the first version of this table.
+    cursor.execute("PRAGMA table_info(fuel_moisture_sensor_readings)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "enclosure_state" not in columns:
+        cursor.execute("ALTER TABLE fuel_moisture_sensor_readings ADD COLUMN enclosure_state TEXT")
+
+
 def get_db_path():
     # Honor the documented container/local override even before the database
     # file exists. This keeps first-start initialization on the mounted volume.
@@ -766,6 +799,10 @@ def init_database():
     # verification (e.g. does the model's predicted danger align with NWS
     # Red Flag Warning/Fire Weather Watch issuance).
     _ensure_fire_weather_alert_history_table(cursor)
+
+    # 21. Field-deployed dowel fuel-moisture sensor readings (own hardware,
+    # not RAWS). See SMF_FuelMoistureSensor/.
+    _ensure_fuel_moisture_sensor_tables(cursor)
 
     conn.commit()
     conn.close()

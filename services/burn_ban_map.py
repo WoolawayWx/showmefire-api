@@ -74,8 +74,13 @@ def _atomic_copy(source: Path, destination: Path) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-def burn_ban_feature_collection(active=None) -> dict:
-    """Return public active bans joined to county polygons in EPSG:4326."""
+def burn_ban_feature_collection(active=None, *, include_all_counties: bool = False) -> dict:
+    """Join burn bans to Missouri counties in EPSG:4326.
+
+    The public API keeps its compact active-only behavior by default. GIS
+    publication passes ``include_all_counties=True`` so QGIS can show both
+    active and inactive counties consistently.
+    """
     active = list_active_burn_bans() if active is None else active
     counties = gpd.read_file(COUNTIES_SHP).to_crs("EPSG:4326")
     counties["county_fips"] = counties["COUNTYFIPS"].astype(str).str.zfill(3).radd("29")
@@ -85,12 +90,14 @@ def burn_ban_feature_collection(active=None) -> dict:
         "county_fips", "county_name", "effective_at", "expires_at",
         "proof_url", "published_at", "updated_at",
     )
-    for _, county in counties[counties["county_fips"].isin(by_fips)].iterrows():
-        ban = by_fips[county["county_fips"]]
-        properties = {field: ban.get(field) or None for field in public_fields}
+    selected = counties if include_all_counties else counties[counties["county_fips"].isin(by_fips)]
+    for _, county in selected.iterrows():
+        ban = by_fips.get(county["county_fips"])
+        properties = {field: (ban.get(field) or None) if ban else None for field in public_fields}
         properties["county_fips"] = county["county_fips"]
-        properties["county_name"] = ban.get("county_name") or county.get("COUNTYNAME")
-        properties["status"] = "active"
+        properties["county_name"] = (ban.get("county_name") if ban else None) or county.get("COUNTYNAME")
+        properties["status"] = "active" if ban else "inactive"
+        properties["has_burn_ban"] = bool(ban)
         features.append({
             "type": "Feature",
             "geometry": county.geometry.__geo_interface__,
@@ -109,7 +116,7 @@ def burn_ban_feature_collection(active=None) -> dict:
 
 
 def publish_burn_ban_gis(active=None) -> dict:
-    collection = burn_ban_feature_collection(active)
+    collection = burn_ban_feature_collection(active, include_all_counties=True)
     paths = publish_vectors(
         "burn_bans", collection["features"],
         generated_at=collection["metadata"]["generated_at"],

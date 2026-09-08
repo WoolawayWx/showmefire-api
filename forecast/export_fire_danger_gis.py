@@ -6,7 +6,7 @@ Drop-in replacement for the GIS export block in forecastedfiredanger.py.
 Exports peak fire danger as:
   1. GeoTIFF  – single-band uint8, EPSG:32615 on the canonical Missouri grid
   2. GeoJSON  – polygon contour regions (best for MapLibre fill layers)
-  3. GeoJSON  – point grid  (best for QGIS spot checks / agency sharing)
+  3. The operational GIS contract intentionally publishes polygons only.
 
 Usage inside generate_complete_forecast():
     from export_fire_danger_gis import export_all_gis_formats
@@ -50,6 +50,9 @@ DANGER_LEVELS = {
 NODATA_UINT8 = 255   # sentinel for NaN / outside-Missouri cells
 
 CHICAGO_TZ = ZoneInfo("America/Chicago")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATE_BOUNDARY_SHP = PROJECT_ROOT / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
+POLYGON_BUFFER_METERS = 250.0
 
 
 def forecast_peak_local_date(run_date=None) -> str:
@@ -251,8 +254,15 @@ def export_geojson_polygons(peak_risk_smooth: np.ndarray,
                 continue
 
             merged = unary_union(polys)
-            # Simplify to reduce file size while preserving topology
-            merged = merged.simplify(0.001, preserve_topology=True)
+            # Close small grid seams, then trim the result to Missouri. Work
+            # in a projected CRS so the buffer is measured in meters.
+            projected = gpd.GeoSeries([merged], crs="EPSG:4326").to_crs("EPSG:32615")
+            state = gpd.read_file(STATE_BOUNDARY_SHP).to_crs("EPSG:32615")
+            buffered = projected.iloc[0].buffer(POLYGON_BUFFER_METERS, join_style=2)
+            clipped = buffered.intersection(unary_union(state.geometry))
+            merged = gpd.GeoSeries([clipped], crs="EPSG:32615").to_crs("EPSG:4326").iloc[0]
+            # Simplify to reduce file size while preserving topology.
+            merged = merged.simplify(0.0005, preserve_topology=True)
 
             features.append({
                 "type": "Feature",
@@ -262,6 +272,8 @@ def export_geojson_polygons(peak_risk_smooth: np.ndarray,
                     "label":        meta["label"],
                     "color":        meta["color"],
                     "model_run":    run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else None,
+                    "buffer_meters": POLYGON_BUFFER_METERS,
+                    "clipped_to": "Missouri state boundary",
                 }
             })
 
@@ -445,11 +457,6 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     poly_path = out_dir / f'peak_fire_danger_polygons{filename_suffix}.geojson'
     ok = export_geojson_polygons(peak_risk_smooth, lon, lat, poly_path, run_date)
     results['geojson_polygons'] = poly_path if ok else None
-
-    # ── GeoJSON points ────────────────────────────────────────────────────────
-    pts_path = out_dir / f'peak_fire_danger_points{filename_suffix}.geojson'
-    ok = export_geojson_points(peak_risk_smooth, lon, lat, pts_path, run_date, stride=1)
-    results['geojson_points'] = pts_path if ok else None
 
     # ── Summary ───────────────────────────────────────────────────────────────
     for fmt, path in results.items():

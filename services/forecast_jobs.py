@@ -112,7 +112,6 @@ def _update_manifest(job: dict) -> None:
     for filename, name in (
         ("peak_fire_danger.tif", "forecast_peak_tif"),
         ("peak_fire_danger_polygons.geojson", "forecast_peak_polygons"),
-        ("peak_fire_danger_points.geojson", "forecast_peak_points"),
     ):
         if (gis_dir / filename).exists():
             products[name] = {
