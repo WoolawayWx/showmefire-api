@@ -13,16 +13,34 @@ permanently broken - every future submission raises BrokenProcessPool until
 the whole container restarts. `run_in_process_pool`/`run_in_process_pool_async`
 detect that and transparently recreate the pool so scheduled jobs keep
 running on their next tick instead of failing forever.
+
+A worker can also hang instead of crashing - e.g. a stale SQLite WAL/SHM
+handle left over from a prior crash can deadlock a later query forever.
+That looks perfectly healthy to ProcessPoolExecutor (the process is alive,
+just idle), so BrokenProcessPool never fires and `.result()` blocks
+indefinitely - which also permanently occupies the worker's pool slot and
+(for jobs with max_instances=1) blocks every future scheduled tick.
+`run_in_process_pool`/`run_in_process_pool_async` take a `timeout` so a
+hang gets converted into a clean failure: the hung worker is force-killed
+and the pool recreated instead of being abandoned to leak forever.
 """
 import asyncio
 import logging
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 
 logger = logging.getLogger(__name__)
 
 _process_pool: ProcessPoolExecutor | None = None
+
+# Applies whenever a caller doesn't pass its own `timeout` - a safety net so a
+# new call site can't reintroduce an unbounded hang just by omitting it.
+# RTMA/spread-rate grid jobs finish in well under a minute; this is generous
+# for those while still catching a stuck job long before it blocks hours of
+# scheduled ticks. The forecast-v1 pipeline explicitly overrides this with
+# its own (much longer) SMF_FORECAST_V1_JOB_TIMEOUT_SECONDS ceiling.
+DEFAULT_JOB_TIMEOUT_SECONDS = int(os.getenv("SMF_CPU_POOL_JOB_TIMEOUT_SECONDS", "1800"))
 
 
 def get_process_pool() -> ProcessPoolExecutor:
@@ -45,24 +63,54 @@ def shutdown_process_pool():
         _process_pool = None
 
 
-def run_in_process_pool(func, *args, **kwargs):
+def _kill_hung_workers(pool: ProcessPoolExecutor) -> None:
+    """Force-kill a pool's worker processes.
+
+    A hung (not crashed) worker never responds to cancel_futures or a normal
+    shutdown - it's still alive, just stuck. Left alone it leaks as an
+    orphaned process holding whatever stale file/DB handles caused the hang.
+    `_processes` is a private ProcessPoolExecutor attribute; there is no
+    public API for "kill the worker running this future".
+    """
+    for process in list((getattr(pool, "_processes", None) or {}).values()):
+        try:
+            process.kill()
+        except Exception:
+            logger.exception("Failed to kill hung process pool worker pid=%s", getattr(process, "pid", "?"))
+
+
+def run_in_process_pool(func, *args, timeout: float | None = DEFAULT_JOB_TIMEOUT_SECONDS, **kwargs):
     """Blocking submit+result against the shared pool, for callers already off
     the event loop (a background thread). Recreates the pool once if a prior
-    job left it broken."""
+    job left it broken. `timeout` (seconds) bounds how long a single job may
+    run - on expiry the hung worker is killed and the pool recreated so the
+    pool's slot and any future callers aren't blocked forever. Pass
+    `timeout=None` to opt out entirely."""
     try:
-        return get_process_pool().submit(func, *args, **kwargs).result()
+        return get_process_pool().submit(func, *args, **kwargs).result(timeout=timeout)
     except BrokenProcessPool:
         logger.error("Process pool worker died unexpectedly; recreating pool and retrying once")
         shutdown_process_pool()
-        return get_process_pool().submit(func, *args, **kwargs).result()
+        return get_process_pool().submit(func, *args, **kwargs).result(timeout=timeout)
+    except FuturesTimeoutError:
+        logger.error("Process pool job exceeded %ss timeout; killing hung worker(s)", timeout)
+        _kill_hung_workers(get_process_pool())
+        shutdown_process_pool()
+        raise
 
 
-async def run_in_process_pool_async(func, *args):
+async def run_in_process_pool_async(func, *args, timeout: float | None = DEFAULT_JOB_TIMEOUT_SECONDS):
     """Async equivalent of `run_in_process_pool` for callers on the event loop."""
     loop = asyncio.get_running_loop()
+    pool = get_process_pool()
     try:
-        return await loop.run_in_executor(get_process_pool(), func, *args)
+        return await asyncio.wait_for(loop.run_in_executor(pool, func, *args), timeout=timeout)
     except BrokenProcessPool:
         logger.error("Process pool worker died unexpectedly; recreating pool and retrying once")
         shutdown_process_pool()
         return await loop.run_in_executor(get_process_pool(), func, *args)
+    except asyncio.TimeoutError:
+        logger.error("Process pool job exceeded %ss timeout; killing hung worker(s)", timeout)
+        _kill_hung_workers(pool)
+        shutdown_process_pool()
+        raise

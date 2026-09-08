@@ -233,8 +233,9 @@ def _exclusive_run(func, *args) -> dict:
             }
             _write_job(job)
         _report_progress("preparing", "Starting isolated forecast worker", 1)
+        job_timeout = int(os.getenv("SMF_FORECAST_V1_JOB_TIMEOUT_SECONDS", "14400"))
         try:
-            result = run_in_process_pool(_run_with_memory_limit, func, *args)
+            result = run_in_process_pool(_run_with_memory_limit, func, *args, timeout=job_timeout)
         except Exception as error:
             _finish_job("failed", error=error)
             raise
