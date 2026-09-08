@@ -1497,7 +1497,8 @@ def generate_complete_forecast():
     gis_files = export_all_gis_formats(
         peak_risk_smooth, lon, lat,
         run_date=RUN_DATE,
-        out_dir=PROJECT_DIR / 'gis'
+        out_dir=PROJECT_DIR / 'gis',
+        filename_suffix='_rrfs'
     )
     
     # ========== MAP 2: MINIMUM FUEL MOISTURE ==========

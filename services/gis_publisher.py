@@ -120,6 +120,9 @@ def _atomic_json(path: Path, payload: Any) -> None:
             json.dump(payload, handle, indent=2, allow_nan=False)
             handle.write("\n")
         os.replace(temporary, path)
+        # See the matching chmod in commit_staging_root: mkstemp() hard-codes
+        # 0600 regardless of umask, and os.replace() carries that mode through.
+        os.chmod(path, 0o644)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -171,6 +174,13 @@ def commit_staging_root(staging: Path, *, root: Path | None = None) -> None:
             destination = root / source.relative_to(staging)
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
+            # tempfile.mkstemp() (used upstream in _write_raster/publish_raster)
+            # hard-codes new files to mode 0600 regardless of umask, and
+            # os.replace() preserves that mode across the rename. Without this,
+            # every published raster - forecast_*.tif and realtime_*.tif alike -
+            # lands root:root/rw------- and is unreadable by the qgis-server
+            # container, which reads this tree read-only as a different user.
+            os.chmod(destination, 0o644)
     staged_catalog_path = staging / "catalog.json"
     if not staged_catalog_path.is_file():
         raise ValueError("staged publication has no catalog")
