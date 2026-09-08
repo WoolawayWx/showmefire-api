@@ -9,6 +9,7 @@ import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from core.database import get_db_path
@@ -27,12 +28,44 @@ from forecast_v1.pipeline import (
 )
 from forecast_v1.r2_store import ForecastR2Store
 from forecast_v1.repository import ensure_schema, prune_hot_storage, transaction
-from core.config import FORECAST_V1_DIR
+from core.config import FORECAST_V1_DIR, LOGS_DIR
 
 
 JOB_STATE_PATH = FORECAST_V1_DIR / "admin-job.json"
 logger = logging.getLogger(__name__)
 _job_lock = threading.Lock()
+
+
+class _ForecastV1LogFilter(logging.Filter):
+    """Picks out this pipeline's records from the whole app's log stream -
+    everything under the forecast_v1 package/this module, plus the
+    scheduler's own "did the job succeed or fail" line, which otherwise
+    covers every scheduled job and would drown out the signal."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "services.forecast_v1_job" or record.name.startswith("forecast_v1."):
+            return True
+        return record.name == "core.scheduler" and "forecast-v1" in record.getMessage().lower()
+
+
+def _configure_run_log() -> None:
+    """Mirror this pipeline's log records to their own rotating file.
+
+    A hang or failure here previously had to be reconstructed by grepping
+    the whole container's stdout across every other scheduled job - this
+    gives a single chronological file to tail instead. Set up at import
+    time (before the scheduler warms up the process pool) so a forked
+    worker inherits the handler and its acquisition/pipeline-stage logs
+    land here too, not just this module's.
+    """
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(LOGS_DIR / "forecast_v1.log", maxBytes=5 * 1024 * 1024, backupCount=3)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(process)d] %(levelname)s %(name)s: %(message)s"))
+    handler.addFilter(_ForecastV1LogFilter())
+    logging.getLogger().addHandler(handler)
+
+
+_configure_run_log()
 _execution_lock = threading.Lock()
 PHASE_LABELS = {
     "queued": "Waiting to start",
