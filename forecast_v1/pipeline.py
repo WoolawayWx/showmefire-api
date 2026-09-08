@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -121,6 +121,7 @@ def public_coordinates() -> tuple[np.ndarray, np.ndarray]:
 def archive_source_cube(cube: SourceCube, archive_root: str | Path, r2: ForecastR2Store | None = None) -> SourceCube:
     """Pack one already-clipped native-grid source cycle and deduplicate by checksum."""
     root = Path(archive_root)
+    cube.dataset.attrs.setdefault("source_member_count", len(cube.member_ids))
     cycle_path = cube.cycle_time.astimezone(timezone.utc).strftime("%Y%m%d/%H")
     temporary = root / ".staging" / f"{cube.model}-{cube.cycle_time:%Y%m%d%H}.nc"
     write_netcdf(cube.dataset, temporary)
@@ -137,6 +138,31 @@ def archive_source_cube(cube: SourceCube, archive_root: str | Path, r2: Forecast
     if r2 and r2.configured:
         r2.upload_immutable(final, object_key, checksum)
     return SourceCube(cube.model, cube.cycle_time, cube.dataset, cube.member_ids, cube.quality_flags, checksum, object_key)
+
+
+def source_member_count(cube: SourceCube) -> int:
+    return int(cube.dataset.attrs.get("source_member_count", len(cube.member_ids)))
+
+
+def summarize_ensemble_for_public(cube: SourceCube) -> SourceCube:
+    """Preserve ensemble mean/spread while avoiding full-member reprojection."""
+    count = source_member_count(cube)
+    if count <= 2 or "member" not in cube.dataset.dims:
+        return cube
+    variables = {}
+    summary_members = ["ensemble_mean_minus_spread", "ensemble_mean_plus_spread"]
+    for name, data in cube.dataset.data_vars.items():
+        if "member" not in data.dims:
+            variables[name] = data
+            continue
+        mean = data.mean("member", skipna=True).astype("float32")
+        spread = data.std("member", skipna=True).astype("float32")
+        variables[name] = xr.concat([mean - spread, mean + spread], dim="member").assign_coords(member=summary_members).astype("float32")
+    dataset = xr.Dataset(
+        variables,
+        attrs={**cube.dataset.attrs, "source_member_count": count, "public_member_reduction": "mean_plus_minus_population_spread"},
+    )
+    return SourceCube(cube.model, cube.cycle_time, dataset, tuple(summary_members), cube.quality_flags, cube.checksum, cube.object_key)
 
 
 def regrid_to_public(cube: SourceCube) -> SourceCube:
@@ -302,12 +328,13 @@ def extract_station_rows(dataset: xr.Dataset, stations: list[dict], run_id: str)
 
 
 def extract_source_member_rows(cubes: dict[str, SourceCube], stations: list[dict], run_id: str) -> list[dict]:
-    transformer = Transformer.from_crs("EPSG:4326", PUBLIC_GRID.crs, always_xy=True)
     rows: list[dict] = []
     selected = ("temperature_2m", "relative_humidity_2m", "wind_u_10m", "wind_v_10m", "wind_gust_10m", "precipitation_increment")
     for station in stations:
-        px, py = transformer.transform(float(station["longitude"]), float(station["latitude"]))
         for model, cube in cubes.items():
+            source_crs = str(cube.dataset.attrs.get("crs", PUBLIC_GRID.crs))
+            transformer = Transformer.from_crs("EPSG:4326", source_crs, always_xy=True)
+            px, py = transformer.transform(float(station["longitude"]), float(station["latitude"]))
             point = cube.dataset.sel(x=px, y=py, method="nearest")
             for member_index, member in enumerate(point.member.values):
                 for lead in range(point.sizes["time"]):
@@ -341,7 +368,7 @@ def register_source_cycles(cubes: list[SourceCube], archive_root: str | Path, db
             source_path = root / cube.object_key.removeprefix("forecast-v1/")
             connection.execute(
                 "INSERT OR IGNORE INTO source_cycles(model,initialization_time_utc,member_count,variables_json,source_status,object_key,checksum,byte_size,acquisition_json) VALUES(?,?,?,?,?,?,?,?,?)",
-                (cube.model, utc_rfc3339(cube.cycle_time), len(cube.member_ids), json_text(sorted(cube.dataset.data_vars)), "verified", cube.object_key, cube.checksum, source_path.stat().st_size, json_text({"qualityFlags": list(cube.quality_flags)})),
+                (cube.model, utc_rfc3339(cube.cycle_time), source_member_count(cube), json_text(sorted(cube.dataset.data_vars)), "verified", cube.object_key, cube.checksum, source_path.stat().st_size, json_text({"qualityFlags": list(cube.quality_flags)})),
             )
 
 
@@ -366,6 +393,8 @@ def _publish_run_impl(
     confidence_components: dict[str, xr.DataArray | float] | None = None,
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
+    source_member_rows: list[dict] | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     cycle = next(iter(cubes.values())).cycle_time.astimezone(timezone.utc)
     if cycle.hour != 12:
@@ -379,6 +408,8 @@ def _publish_run_impl(
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     now = utc_rfc3339(datetime.now(timezone.utc))
+    if progress_callback:
+        progress_callback({"phase": "forecast_cube", "message": "Calculating the hourly forecast and fire danger", "fraction": 0.03})
     initialization = initial_fuel_moisture
     initial_values = initialization.values if isinstance(initialization, FuelInitialization) else initialization
     forecast, daily = build_forecast_cube(
@@ -399,7 +430,13 @@ def _publish_run_impl(
     valid_times = [utc_rfc3339(datetime.fromisoformat(np.datetime_as_string(value, unit="s")).replace(tzinfo=timezone.utc)) for value in forecast.time.values]
     cube_path = write_netcdf(forecast, staging / "derived" / "forecast_cube.nc")
     assets.append(artifact_record(cube_path, run_id=run_id, kind="cube", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/derived/forecast_cube.nc", dtype="NetCDF4", valid_start=valid_times[0], valid_end=valid_times[-1]))
-    for variable in PUBLIC_RASTER_VARIABLES:
+    for variable_index, variable in enumerate(PUBLIC_RASTER_VARIABLES, 1):
+        if progress_callback:
+            progress_callback({
+                "phase": "hourly_rasters", "message": f"Writing hourly raster: {variable}",
+                "fraction": 0.08 + 0.27 * variable_index / len(PUBLIC_RASTER_VARIABLES),
+                "current": variable_index, "total": len(PUBLIC_RASTER_VARIABLES), "item": variable,
+            })
         categorical = variable == "fire_danger"
         byte_data = variable in {"meteorological_confidence", "category_confidence", "probability_rh_le_25", "probability_gust_ge_30mph", "probability_concurrent"}
         path = write_cog(forecast[variable], staging / "rasters" / "hourly" / f"{variable}.tif", variable=variable, band_times=valid_times, categorical=categorical, byte_data=byte_data)
@@ -408,7 +445,13 @@ def _publish_run_impl(
     daily_raster_map = dict(DAILY_RASTER_MAP)
     if cycle.month in {11, 12, 1, 2, 3}:
         daily_raster_map["maximum_snow_water_equivalent"] = "snow_water_equivalent"
-    for daily_name, public_name in daily_raster_map.items():
+    for daily_index, (daily_name, public_name) in enumerate(daily_raster_map.items(), 1):
+        if progress_callback:
+            progress_callback({
+                "phase": "daily_products", "message": f"Rendering Day 1-3 products: {public_name}",
+                "fraction": 0.35 + 0.35 * daily_index / len(daily_raster_map),
+                "current": daily_index, "total": len(daily_raster_map), "item": public_name,
+            })
         categorical = daily_name == "peak_fire_danger"
         byte_data = daily_name == "category_confidence"
         path = write_cog(daily[daily_name], staging / "rasters" / "daily" / f"{public_name}.tif", variable=public_name, band_times=daily_dates, categorical=categorical, byte_data=byte_data)
@@ -430,10 +473,12 @@ def _publish_run_impl(
             )
             for graphic in (png, webp):
                 assets.append(artifact_record(graphic, run_id=run_id, kind="graphic", variable=public_name, aggregation=f"day-{day_index}-{graphic.suffix[1:]}", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/graphics/day-{day_index}/{graphic.name}", dtype=graphic.suffix[1:].upper(), unit=VARIABLE_UNITS.get(public_name)))
+    if progress_callback:
+        progress_callback({"phase": "station_products", "message": "Writing station forecasts and member extracts", "fraction": 0.73})
     hourly_rows, daily_rows = extract_station_rows(forecast, stations, run_id)
     points_path = write_points_parquet(hourly_rows, staging / "points" / "public.parquet")
     assets.append(artifact_record(points_path, run_id=run_id, kind="points", variable="public", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/points/public.parquet", dtype="Parquet/Zstd"))
-    source_member_rows = extract_source_member_rows(cubes, stations, run_id)
+    source_member_rows = source_member_rows if source_member_rows is not None else extract_source_member_rows(cubes, stations, run_id)
     member_path = write_points_parquet(source_member_rows, staging / "points" / "source-members.parquet")
     assets.append(artifact_record(member_path, run_id=run_id, kind="points", variable="source-members", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/points/source-members.parquet", dtype="Parquet/Zstd"))
     layers = [{"variable": a["variable"], "aggregation": a["aggregation"], "unit": a["unit"], "dataType": a["storage_data_type"], "style": PUBLIC_LAYER_STYLES.get(a["variable"]), "tileUrl": f"/tiles/forecast/{run_id}/{a['variable']}/{{lead_hour}}/{{z}}/{{x}}/{{y}}.png" if a["aggregation"] == "hourly" else None} for a in assets if a["kind"] == "raster"]
@@ -451,7 +496,7 @@ def _publish_run_impl(
         "schemaVersion": SCHEMA_VERSION, "runId": run_id, "cycleTime": utc_rfc3339(cycle), "issuedAt": now,
         "horizonHours": HORIZON_HOURS, "timeCount": TIME_COUNT,
         "grid": {"id": PUBLIC_GRID.id, "crs": PUBLIC_GRID.crs, "width": PUBLIC_GRID.width, "height": PUBLIC_GRID.height, "resolutionMeters": PUBLIC_GRID.resolution_m, "bounds": PUBLIC_GRID.bounds},
-        "sources": [{"model": name, "cycleTime": utc_rfc3339(cube.cycle_time), "members": len(cube.member_ids), "status": "available", "qualityFlags": list(cube.quality_flags)} for name, cube in cubes.items()],
+        "sources": [{"model": name, "cycleTime": utc_rfc3339(cube.cycle_time), "members": source_member_count(cube), "publicSummaryMembers": len(cube.member_ids), "status": "available", "qualityFlags": list(cube.quality_flags)} for name, cube in cubes.items()],
         "modelVersion": model_version, "configVersion": config_version, "warnings": warnings, "layers": layers,
         "confidenceMethod": {
             "meteorological": {"modelAgreement": 0.30, "ensembleSpread": 0.25, "cycleConsistency": 0.20, "rollingVerification": 0.15, "leadTime": 0.10},
@@ -469,8 +514,16 @@ def _publish_run_impl(
     assets.append(artifact_record(manifest_path, run_id=run_id, kind="manifest", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/manifest.json", dtype="JSON"))
     r2 = r2_store or ForecastR2Store()
     if r2.configured:
-        for asset in assets:
+        for asset_index, asset in enumerate(assets, 1):
+            if progress_callback:
+                progress_callback({
+                    "phase": "uploading", "message": f"Uploading {asset['kind']} assets",
+                    "fraction": 0.80 + 0.15 * asset_index / len(assets),
+                    "current": asset_index, "total": len(assets), "item": asset["kind"],
+                })
             r2.upload_immutable(asset["local_path"], asset["object_key"], asset["checksum"])
+    if progress_callback:
+        progress_callback({"phase": "finalizing", "message": "Committing the run index and latest pointers", "fraction": 0.97})
     promote_directory(staging, final)
     for asset in assets:
         relative = Path(asset["local_path"]).relative_to(staging)
@@ -499,7 +552,7 @@ def _publish_run_impl(
                 source_path = root / cube.object_key.removeprefix("forecast-v1/")
                 connection.execute(
                     "INSERT OR IGNORE INTO source_cycles(model,initialization_time_utc,member_count,variables_json,source_status,object_key,checksum,byte_size,acquisition_json) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (cube.model, utc_rfc3339(cube.cycle_time), len(cube.member_ids), json_text(sorted(cube.dataset.data_vars)), "verified", cube.object_key, cube.checksum, source_path.stat().st_size if source_path.exists() else 0, json_text({"qualityFlags": list(cube.quality_flags)})),
+                    (cube.model, utc_rfc3339(cube.cycle_time), source_member_count(cube), json_text(sorted(cube.dataset.data_vars)), "verified", cube.object_key, cube.checksum, source_path.stat().st_size if source_path.exists() else 0, json_text({"qualityFlags": list(cube.quality_flags)})),
                 )
         for station in stations:
             connection.execute(
@@ -521,6 +574,8 @@ def publish_run(
     confidence_components: dict[str, xr.DataArray | float] | None = None,
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
+    source_member_rows: list[dict] | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     """Track staging/failure state around the all-or-nothing publisher."""
     if not cubes:
@@ -547,7 +602,8 @@ def publish_run(
             cubes, stations, initial_fuel_moisture=initial_fuel_moisture, publish_root=publish_root,
             config_version=config_version, model_version=model_version, make_public=make_public, db_path=database,
             r2_store=r2_store, confidence_components=confidence_components, predicted_residuals=predicted_residuals,
-            fuel_quantile_residuals=fuel_quantile_residuals,
+            fuel_quantile_residuals=fuel_quantile_residuals, source_member_rows=source_member_rows,
+            progress_callback=progress_callback,
         )
     except Exception as exc:
         with transaction(database) as connection:
@@ -571,15 +627,12 @@ def main() -> None:
     parser.add_argument("--archive-only", action="store_true", help="Archive a 00Z/06Z/12Z/18Z source cycle without deriving public products")
     args = parser.parse_args()
     cycle = datetime.fromisoformat(args.cycle.replace("Z", "+00:00"))
-    cubes = {}
     archived = []
     r2 = ForecastR2Store()
     for definition in args.source:
         model, path = definition.split("=", 1)
         native = archive_source_cube(ADAPTERS[model]().open(path, cycle), args.publish_root, r2)
         archived.append(native)
-        if not args.archive_only:
-            cubes[model] = regrid_to_public(native)
     if args.archive_only:
         register_source_cycles(archived, args.publish_root)
         print(json.dumps({"cycleTime": utc_rfc3339(cycle), "status": "archived", "sources": sorted(cube.model for cube in archived)}))
@@ -587,7 +640,18 @@ def main() -> None:
     if not args.stations:
         parser.error("--stations is required unless --archive-only is used")
     stations = json.loads(Path(args.stations).read_text(encoding="utf-8"))
-    manifest = publish_run(cubes, stations, initial_fuel_moisture=12.0, publish_root=args.publish_root, make_public=args.public, r2_store=r2)
+    run_id = run_id_for_cycle(cycle)
+    native_cubes = {cube.model: cube for cube in archived}
+    source_member_rows = extract_source_member_rows(native_cubes, stations, run_id)
+    archived.clear()
+    cubes = {}
+    for model in list(native_cubes):
+        native = native_cubes.pop(model)
+        cubes[model] = regrid_to_public(summarize_ensemble_for_public(native))
+    manifest = publish_run(
+        cubes, stations, initial_fuel_moisture=12.0, publish_root=args.publish_root,
+        make_public=args.public, r2_store=r2, source_member_rows=source_member_rows,
+    )
     print(json.dumps({"runId": manifest["runId"], "status": "complete"}))
 
 

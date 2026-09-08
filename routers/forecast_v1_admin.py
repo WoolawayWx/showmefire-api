@@ -62,6 +62,7 @@ def _schedule_status() -> dict:
         "publicationMode": "public" if os.getenv("SMF_FORECAST_V1_PUBLIC", "false").lower() == "true" else "shadow",
         "pollIntervalMinutes": max(15, int(os.getenv("SMF_FORECAST_V1_POLL_MINUTES", "30"))),
         "minimumCycleAgeHours": minimum_age,
+        "memoryLimitGb": float(os.getenv("SMF_FORECAST_V1_MEMORY_LIMIT_GB", "8")),
         "eligibleCycle": utc_rfc3339(eligible_cycle),
         "eligibleAt": utc_rfc3339(eligible_at),
         "eligibleAtCentral": eligible_at.astimezone(central).isoformat(timespec="minutes"),
@@ -69,6 +70,13 @@ def _schedule_status() -> dict:
         "nextCycleEligibleAtCentral": next_eligible.astimezone(central).isoformat(timespec="minutes"),
         "policy": "HRRR through hour 48; RRFS preferred for 49-72; GEFS ensemble-mean fallback when RRFS is unavailable",
     }
+
+
+@router.get("/job")
+def forecast_v1_admin_job(token: Optional[str] = None):
+    """Lightweight endpoint for frequent progress polling during a run."""
+    _require_admin(token)
+    return get_forecast_v1_job_status()
 
 
 @router.get("/status")

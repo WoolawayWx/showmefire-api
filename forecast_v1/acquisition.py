@@ -269,7 +269,7 @@ def _fetch_member(
 ) -> xr.Dataset:
     kwargs = dict(
         DATES=[cycle.replace(tzinfo=None)], fxx=list(spec.leads), model=spec.herbie_model,
-        product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "6")),
+        product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "4")),
         verbose=False,
     )
     if member is not None:
@@ -323,6 +323,7 @@ def acquire_source(
     cache_dir: str | Path,
     *,
     fast_herbie_factory: Callable | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> SourceCube:
     if fast_herbie_factory is None:
         from herbie import FastHerbie
@@ -330,12 +331,22 @@ def acquire_source(
     def fetch(member):
         return member, _fetch_member(spec, cycle, member, Path(cache_dir), fast_herbie_factory)
 
-    workers = min(len(spec.members), max(1, int(os.getenv("SMF_ENSEMBLE_MEMBER_THREADS", "3"))))
+    workers = min(len(spec.members), max(1, int(os.getenv("SMF_ENSEMBLE_MEMBER_THREADS", "2"))))
+    fetched = []
     if workers == 1:
-        fetched = [fetch(spec.members[0])]
+        iterator = map(fetch, spec.members)
     else:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"forecast-{spec.public_name}") as executor:
-            fetched = list(executor.map(fetch, spec.members))
+            iterator = executor.map(fetch, spec.members)
+            for completed, item in enumerate(iterator, 1):
+                fetched.append(item)
+                if progress_callback:
+                    progress_callback({"event": "member_completed", "member": "deterministic" if item[0] is None else str(item[0]), "completed": completed, "total": len(spec.members)})
+    if workers == 1:
+        for completed, item in enumerate(iterator, 1):
+            fetched.append(item)
+            if progress_callback:
+                progress_callback({"event": "member_completed", "member": "deterministic" if item[0] is None else str(item[0]), "completed": completed, "total": len(spec.members)})
     member_datasets = []
     member_names = []
     for member, dataset in fetched:
@@ -359,19 +370,53 @@ def acquire_cycle(
     *,
     specs: Iterable[AcquisitionSpec] | None = None,
     fast_herbie_factory: Callable | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> AcquisitionResult:
     cycle = cycle.astimezone(timezone.utc)
     cubes: dict[str, SourceCube] = {}
     warnings: list[str] = []
-    for spec in specs or default_specs():
+    requested_specs = tuple(specs or default_specs())
+    for source_index, spec in enumerate(requested_specs, 1):
+        def source_progress(update: dict) -> None:
+            if progress_callback:
+                progress_callback({
+                    **update, "model": spec.public_name, "source_index": source_index,
+                    "source_total": len(requested_specs),
+                })
+
+        if progress_callback:
+            progress_callback({
+                "event": "source_started", "model": spec.public_name,
+                "source_index": source_index, "source_total": len(requested_specs),
+                "completed": 0, "total": len(spec.members),
+            })
         if spec.public_name == "refs" and "rrfs" not in cubes:
             warnings.append("source_unavailable:refs:rrfs_feed_unavailable")
+            if progress_callback:
+                progress_callback({
+                    "event": "source_skipped", "model": spec.public_name,
+                    "source_index": source_index, "source_total": len(requested_specs),
+                    "reason": "rrfs_feed_unavailable",
+                })
             continue
         try:
             cubes[spec.public_name] = acquire_source(
-                spec, cycle, cache_dir, fast_herbie_factory=fast_herbie_factory
+                spec, cycle, cache_dir, fast_herbie_factory=fast_herbie_factory,
+                progress_callback=source_progress,
             )
+            if progress_callback:
+                progress_callback({
+                    "event": "source_completed", "model": spec.public_name,
+                    "source_index": source_index, "source_total": len(requested_specs),
+                    "completed": len(spec.members), "total": len(spec.members),
+                })
         except Exception as error:
+            if progress_callback:
+                progress_callback({
+                    "event": "source_failed", "model": spec.public_name,
+                    "source_index": source_index, "source_total": len(requested_specs),
+                    "reason": type(error).__name__,
+                })
             if spec.required:
                 raise RuntimeError(f"required {spec.public_name} acquisition failed: {error}") from error
             warnings.append(f"source_unavailable:{spec.public_name}:{type(error).__name__}")

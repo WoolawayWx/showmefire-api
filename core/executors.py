@@ -28,7 +28,10 @@ _process_pool: ProcessPoolExecutor | None = None
 def get_process_pool() -> ProcessPoolExecutor:
     global _process_pool
     if _process_pool is None:
-        default_workers = max(1, (os.cpu_count() or 2) - 2)
+        # Grid jobs are memory-heavy. Keep the default bounded so a host with
+        # many CPUs does not start enough simultaneous workers to breach the
+        # container memory limit. Deployments can still opt in to more.
+        default_workers = min(2, max(1, (os.cpu_count() or 2) - 2))
         workers = max(1, int(os.getenv("SMF_CPU_POOL_WORKERS", str(default_workers))))
         logger.info("Starting CPU job process pool with %d workers", workers)
         _process_pool = ProcessPoolExecutor(max_workers=workers)

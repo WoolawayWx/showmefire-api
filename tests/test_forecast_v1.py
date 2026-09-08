@@ -17,7 +17,7 @@ from forecast_v1.contracts import GridDefinition
 from forecast_v1.engine import _classify_arrays, apply_corrections, blend_sources, build_forecast_cube, local_day_slices
 from core.fire_danger import calculate_fire_danger, MPS_TO_KNOTS
 from forecast_v1.repository import ensure_schema
-from forecast_v1.pipeline import initialize_fuel_moisture, publish_run
+from forecast_v1.pipeline import initialize_fuel_moisture, publish_run, source_member_count, summarize_ensemble_for_public
 from forecast_v1.verification import evaluate_rrfs_refs_promotion
 
 
@@ -57,10 +57,12 @@ def test_herbie_acquisition_normalizes_clips_and_checks_hours(tmp_path):
             return raw
 
     spec = AcquisitionSpec("hrrr", "hrrr", "sfc", (0, 1), (None,), required=True)
-    cube = acquire_source(spec, cycle, tmp_path, fast_herbie_factory=FakeFastHerbie)
+    progress = []
+    cube = acquire_source(spec, cycle, tmp_path, fast_herbie_factory=FakeFastHerbie, progress_callback=progress.append)
     assert cube.dataset.sizes == {"member": 1, "time": 2, "y": 2, "x": 2}
     assert cube.dataset.attrs["acquisition"] == "herbie-indexed-grib"
     assert float(cube.dataset.temperature_2m.mean()) == pytest.approx(21.85)
+    assert progress == [{"event": "member_completed", "member": "deterministic", "completed": 1, "total": 1}]
 
 
 def source_cube(model: str, value: float, *, cycle: datetime | None = None, hours: int = 73) -> SourceCube:
@@ -82,6 +84,27 @@ def source_cube(model: str, value: float, *, cycle: datetime | None = None, hour
         elif name == "cloud_cover": current = 20.0
         variables[name] = (("member", "time", "y", "x"), np.full((1, hours, 2, 3), current, dtype=np.float32))
     return SourceCube(model, cycle, xr.Dataset(variables, coords=coords), ("control",))
+
+
+def test_public_ensemble_summary_preserves_mean_and_spread_with_two_members():
+    cube = source_cube("gefs", 20, hours=3)
+    member_values = np.arange(31, dtype=np.float32)
+    dataset = xr.concat(
+        [cube.dataset.isel(member=0, drop=True) + value for value in member_values],
+        dim=xr.IndexVariable("member", [f"p{index:02d}" for index in range(31)]),
+    )
+    dataset.attrs["source_member_count"] = 31
+    ensemble = SourceCube("gefs", cube.cycle_time, dataset, tuple(dataset.member.values))
+
+    summary = summarize_ensemble_for_public(ensemble)
+
+    assert summary.dataset.sizes["member"] == 2
+    assert source_member_count(summary) == 31
+    for name in REQUIRED_VARIABLES:
+        original = ensemble.dataset[name]
+        reduced = summary.dataset[name]
+        xr.testing.assert_allclose(reduced.mean("member"), original.mean("member"))
+        xr.testing.assert_allclose(reduced.std("member"), original.std("member"))
 
 
 def test_lead_weights_are_renormalized_when_optional_source_is_missing():
@@ -246,6 +269,7 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
 
     monkeypatch.setattr(forecast_v1_admin, "verify_token", lambda token=None: None)
     assert client.get("/api/admin/forecast-v1/status").status_code == 401
+    assert client.get("/api/admin/forecast-v1/job").status_code == 401
     assert client.post("/api/admin/forecast-v1/run").status_code == 401
 
     monkeypatch.setattr(forecast_v1_admin, "verify_token", lambda token=None: "admin@example.org")
@@ -254,9 +278,38 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
     status_response = client.get("/api/admin/forecast-v1/status")
     assert status_response.status_code == 200
     assert status_response.json()["schedule"]["policy"].startswith("HRRR through hour 48")
+    assert client.get("/api/admin/forecast-v1/job").json() == {"status": "idle"}
     run_response = client.post("/api/admin/forecast-v1/run")
     assert run_response.status_code == 202
     assert run_response.json()["requested_by"] == "admin@example.org"
+
+
+def test_forecast_worker_memory_limit_is_reversible(monkeypatch):
+    import resource
+    from services.forecast_v1_job import _run_with_memory_limit
+
+    previous = resource.getrlimit(resource.RLIMIT_AS)
+    monkeypatch.setenv("SMF_FORECAST_V1_MEMORY_LIMIT_GB", "8")
+    assert _run_with_memory_limit(lambda: "completed") == "completed"
+    assert resource.getrlimit(resource.RLIMIT_AS) == previous
+
+
+def test_forecast_job_progress_records_phase_details_and_history(tmp_path, monkeypatch):
+    from services import forecast_v1_job
+
+    monkeypatch.setattr(forecast_v1_job, "JOB_STATE_PATH", tmp_path / "admin-job.json")
+    forecast_v1_job._write_job({"job_id": "test", "status": "queued", "requested_at": "2026-09-07T12:00:00Z"})
+    forecast_v1_job._report_progress(
+        "acquiring_sources", "Downloading GEFS member p01 (2/31)", 42,
+        model="GEFS", current=2, total=31,
+    )
+    status = forecast_v1_job.get_forecast_v1_job_status()
+
+    assert status["phase_label"] == "Downloading forecast sources"
+    assert status["progress_percent"] == 42
+    assert status["progress"] == {"model": "GEFS", "current": 2, "total": 31}
+    assert status["events"][-1]["message"] == "Downloading GEFS member p01 (2/31)"
+    assert status["memory_limit_gb"] == 8
 
 
 def test_rrfs_refs_promotion_requires_every_documented_gate():
