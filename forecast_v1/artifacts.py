@@ -114,6 +114,56 @@ def write_manifest(payload: dict, path: str | Path) -> Path:
     return target
 
 
+# Same house style every other map on the site uses (forecast/DailyForecast.py
+# et al: create_base_map/add_boundaries/add_title_and_branding). Ported here
+# rather than imported since those live in standalone forecast scripts, not a
+# shared module - kept in sync by eye, not by reference.
+_APP_ROOT = Path("/app") if Path("/app").exists() else Path(__file__).resolve().parent.parent
+_COUNTY_SHAPEFILE = _APP_ROOT / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp"
+_STATE_SHAPEFILE = _APP_ROOT / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
+_LOGO_SVG = _APP_ROOT / "assets/LightBackGroundLogo.svg"
+_FONT_PATHS = (
+    _APP_ROOT / "assets/Montserrat/static/Montserrat-Regular.ttf",
+    _APP_ROOT / "assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf",
+    _APP_ROOT / "assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf",
+)
+_MAP_EXTENT = (-95.8, -89.1, 35.8, 40.8)
+_MAP_PIXELS = (2048, 1152)
+_MAP_DPI = 144
+_FIRE_DANGER_CRITERIA = (
+    "Fire Danger Criteria:\n"
+    "Low:  FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+    "Moderate:  FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+    "Elevated:  FM < 9% WITH (RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)\n"
+    "Critical:  FM < 9% WITH (RH < 25% AND Wind >= 15 kts)\n\n"
+    "Extreme:  FM < 7% WITH (RH < 20% AND Wind >= 25 kts)"
+)
+
+
+def _grid_lonlat():
+    """Pixel-center lon/lat for the public UTM grid, for cartopy plotting."""
+    from pyproj import Transformer
+
+    cols = PUBLIC_GRID.west + (np.arange(PUBLIC_GRID.width) + 0.5) * PUBLIC_GRID.resolution_m
+    rows = PUBLIC_GRID.north - (np.arange(PUBLIC_GRID.height) + 0.5) * PUBLIC_GRID.resolution_m
+    easting, northing = np.meshgrid(cols, rows)
+    transformer = Transformer.from_crs(PUBLIC_GRID.crs, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(easting, northing)
+    return lon, lat
+
+
+def _mask_to_state(values: np.ndarray, lon: np.ndarray, lat: np.ndarray, state_geometry) -> np.ndarray:
+    """NaN out grid cells outside Missouri - the public grid extends a degree
+    past the state as a research buffer, but every other map on the site
+    only ever shows data inside the state line."""
+    import shapely.vectorized
+
+    inside = shapely.vectorized.contains(state_geometry, lon, lat)
+    masked = values.copy()
+    masked[~inside] = np.nan
+    return masked
+
+
 def write_static_graphic(
     data: xr.DataArray,
     png_path: str | Path,
@@ -126,64 +176,109 @@ def write_static_graphic(
     categorical: bool = False,
     boundary_geojson: str | Path | None = None,
 ) -> tuple[Path, Path]:
-    """Render a consistent archival PNG and optimized WebP, sized to the data's own aspect ratio."""
+    """Render one archival PNG/WebP in the same branded style (projection,
+    county/state boundaries, title block, logo) as every other map the site
+    publishes.
+
+    `boundary_geojson` is accepted for backward compatibility but unused -
+    it pointed at GIS_DIR ("/app/gis"), which in production is a separate
+    volume mount that shadows the repo's own gis/ directory at that same
+    container path, so the file was never actually found and masking/the
+    boundary line silently never ran. State/county boundaries now come from
+    maps/shapefiles/, which is plain repo content and always present.
+    """
+    import cartopy.crs as ccrs
+    import geopandas as gpd
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    from matplotlib import font_manager
     from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.offsetbox import AnnotationBbox, OffsetImage
     from PIL import Image as PILImage
 
     png = Path(png_path)
     webp = Path(webp_path)
     png.parent.mkdir(parents=True, exist_ok=True)
     webp.parent.mkdir(parents=True, exist_ok=True)
+
     values = np.asarray(data.values, dtype=float)
-    # The public grid (267x264) is nearly square, not widescreen. A fixed
-    # 16:9 canvas with imshow's default aspect="equal" left most of the
-    # figure blank on the sides padding the mismatch out; size the figure to
-    # the data's real aspect instead so the map fills its panel edge to edge.
-    rows, cols = values.shape[-2:]
-    map_width_in = 10.0
-    figure = plt.figure(figsize=(map_width_in + 2.2, map_width_in * rows / cols + 1.4), dpi=128)
-    axis = figure.add_axes((0.02, 0.14, 0.78, 0.80))
     if categorical:
         values[values == 255] = np.nan
-        colors = ["#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000"]
-        image = axis.imshow(values, cmap=ListedColormap(colors), norm=BoundaryNorm([-0.5, .5, 1.5, 2.5, 3.5, 4.5], 5), interpolation="nearest")
-        colorbar = figure.colorbar(image, ax=axis, ticks=range(5), fraction=.035, pad=.025)
-        colorbar.ax.set_yticklabels(["Low", "Moderate", "Elevated", "Critical", "Extreme"])
-    else:
-        image = axis.imshow(values, cmap="viridis", interpolation="bilinear")
-        figure.colorbar(image, ax=axis, fraction=.035, pad=.025, label=str(data.attrs.get("units", "")))
-    if boundary_geojson and Path(boundary_geojson).is_file():
-        from pyproj import Transformer
-        boundary = json.loads(Path(boundary_geojson).read_text(encoding="utf-8"))
-        transformer = Transformer.from_crs("EPSG:4326", PUBLIC_GRID.crs, always_xy=True)
+    lon, lat = _grid_lonlat()
+    have_boundaries = _COUNTY_SHAPEFILE.is_file() and _STATE_SHAPEFILE.is_file()
+    state = gpd.read_file(_STATE_SHAPEFILE).to_crs(epsg=4326) if have_boundaries else None
+    if state is not None:
+        from shapely.ops import unary_union
 
-        def rings(geometry: dict):
-            if geometry.get("type") == "Polygon":
-                yield from geometry.get("coordinates", [])[:1]
-            elif geometry.get("type") == "MultiPolygon":
-                for polygon in geometry.get("coordinates", []):
-                    yield from polygon[:1]
+        values = _mask_to_state(values, lon, lat, unary_union(state.geometry))
 
-        features = boundary.get("features", []) if boundary.get("type") == "FeatureCollection" else [boundary]
-        for feature in features:
-            geometry = feature.get("geometry", feature)
-            for ring in rings(geometry):
-                projected = [transformer.transform(float(lon), float(lat)) for lon, lat, *_ in ring]
-                columns = [(x - PUBLIC_GRID.west) / PUBLIC_GRID.resolution_m - .5 for x, _ in projected]
-                row_positions = [(PUBLIC_GRID.north - y) / PUBLIC_GRID.resolution_m - .5 for _, y in projected]
-                axis.plot(columns, row_positions, color="#111827", linewidth=1.5, alpha=.9)
-    axis.set_title(title, fontsize=22, weight="bold", pad=15)
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
+    figure = plt.figure(figsize=(_MAP_PIXELS[0] / _MAP_DPI, _MAP_PIXELS[1] / _MAP_DPI), dpi=_MAP_DPI, facecolor="#E8E8E8")
+    axis = plt.axes((0, 0, 1, 1), projection=map_crs)
+    axis.set_frame_on(False)
     axis.set_xticks([])
     axis.set_yticks([])
-    # Two stacked lines rather than same-row left/right: a long valid_period
-    # string (e.g. "2026-09-07 America/Chicago") ran into the right-aligned
-    # run/status text when they shared one baseline.
-    figure.text(0.02, 0.045, f"Valid: {valid_period}", ha="left", va="bottom", fontsize=11)
-    figure.text(0.02, 0.015, f"12Z run: {run_time}  •  {status}", ha="left", va="bottom", fontsize=11)
-    figure.savefig(png, format="png", dpi=128, metadata={"Title": title, "Description": f"{valid_period}; {status}"})
+    axis.set_extent(_MAP_EXTENT, crs=data_crs)
+
+    if categorical:
+        colors = ["#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000"]
+        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+        cmap = ListedColormap(colors)
+        norm = BoundaryNorm(bins, len(colors))
+        image = axis.contourf(lon, lat, values, transform=data_crs, levels=bins, cmap=cmap, norm=norm, alpha=0.85, zorder=7)
+        axis.contour(lon, lat, values, transform=data_crs, levels=bins[1:-1], colors="black", linewidths=0.3, alpha=0.2, zorder=8)
+    else:
+        image = axis.pcolormesh(lon, lat, values, transform=data_crs, cmap="viridis", shading="nearest", alpha=0.85, zorder=7)
+
+    if have_boundaries:
+        counties = gpd.read_file(_COUNTY_SHAPEFILE).to_crs(epsg=4326)
+        axis.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none", linewidth=1, zorder=5)
+        axis.add_geometries(state.geometry, crs=data_crs, edgecolor="#000000", facecolor="none", linewidth=1.5, zorder=9)
+
+    cax = figure.add_axes((0.02, 0.08, 0.02, 0.6))
+    if categorical:
+        colorbar = figure.colorbar(image, cax=cax)
+        colorbar.set_ticks([0, 1, 2, 3, 4])
+        colorbar.set_ticklabels(["Low", "Moderate \nHigh", "Elevated \nHigh", "Critical \n Very High", "Extreme"])
+    else:
+        figure.colorbar(image, cax=cax, label=str(data.attrs.get("units", "")))
+    axis.set_anchor("W")
+    plt.subplots_adjust(left=0.05)
+
+    for font_path in _FONT_PATHS:
+        if font_path.is_file():
+            font_manager.fontManager.addfont(str(font_path))
+    plt.rcParams["font.family"] = "Montserrat"
+    valid_date = valid_period.split(" ", 1)[0]
+    try:
+        run_label = datetime.fromisoformat(run_time.replace("Z", "+00:00")).strftime("%Y-%m-%d %HZ")
+    except ValueError:
+        run_label = run_time
+    subtitle = f"Model Run: {run_label} | Valid: {valid_date}"
+    description = (
+        (_FIRE_DANGER_CRITERIA + "\n\n") if categorical else ""
+    ) + f"{status}\nData Source: HRRR/RRFS/GEFS Blend | ShowMeFire Forecast-V1\nFor More Info, Visit ShowMeFire.org"
+    figure.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans")
+    figure.text(0.99, 0.90, subtitle, fontsize=16, ha="right", va="top", fontname="Montserrat")
+    figure.text(0.99, 0.62, description, fontsize=10, ha="right", va="top", linespacing=1.6, fontname="Montserrat")
+    figure.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat")
+    if _LOGO_SVG.is_file():
+        try:
+            import cairosvg
+            from io import BytesIO
+
+            png_bytes = cairosvg.svg2png(url=str(_LOGO_SVG))
+            image_data = mpimg.imread(BytesIO(png_bytes), format="png")
+            imagebox = OffsetImage(image_data, zoom=0.03)
+            annotation = AnnotationBbox(imagebox, (0.99, 0.01), frameon=False, xycoords="figure fraction", box_alignment=(1, 0))
+            axis.add_artist(annotation)
+        except (ImportError, FileNotFoundError, OSError):
+            pass
+
+    figure.savefig(png, format="png", dpi=_MAP_DPI, metadata={"Title": title, "Description": f"{valid_period}; {status}"})
     plt.close(figure)
     with PILImage.open(png) as source:
         source.save(webp, "WEBP", quality=86, method=6)
