@@ -916,6 +916,17 @@ def admin_refresh_fire_incident_graphics(
     return {"success": True, **result}
 
 
+@router.post("/api/admin/fires/incidents/reanalyze")
+def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, token: Optional[str] = None):
+    """Re-run confidence scoring and regenerate graphics after data changes."""
+    _require_admin(token)
+    from services.fire_confidence import refresh_confidence_shapes
+    from services.fire_incident_graphics import refresh_incident_graphics
+    graphic_result = refresh_incident_graphics(incident_id=incident_id, force=True)
+    confidence_result = refresh_confidence_shapes()
+    return {"success": True, "graphics": graphic_result, "confidence": confidence_result}
+
+
 @router.get("/api/admin/fires/incidents/{incident_id}")
 def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
     """Incident detail, including every member detection for map plotting (admin only)"""
