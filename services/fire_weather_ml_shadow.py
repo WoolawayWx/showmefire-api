@@ -112,7 +112,16 @@ BUNDLE_ASSET_FILENAMES = {
     "contract": "contract.json",
     "metadata": "fire_weather_ml_metadata.json",
     "model": "fire_weather_ml_model.json",
+    "risk_calibration": "fire_weather_ml_risk_calibration.json",
 }
+
+RISK_SCORE_IMAGE_FILENAME = "fire_weather_ml_risk_score_latest.png"
+
+
+def _risk_score_image_path() -> Path:
+    """Same BETA_ROOT/images location as _image_path(), a distinct filename/manifest key - see that function's docstring."""
+    from services.beta_products import BETA_ROOT
+    return BETA_ROOT / "images" / RISK_SCORE_IMAGE_FILENAME
 
 
 def _configured() -> bool:
@@ -139,7 +148,9 @@ def _initial_state() -> dict:
         "model_version": None,
         "last_comparison": None,
         "last_risk_by_category": None,
+        "last_risk_score_summary": None,
         "last_image": None,
+        "last_risk_score_image": None,
         "public_path_unchanged": True,
     }
     try:
@@ -220,6 +231,9 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     booster = xgb.Booster()
     booster.load_model(str(directory / BUNDLE_ASSET_FILENAMES["model"]))
 
+    risk_calibration = json.loads(
+        (directory / BUNDLE_ASSET_FILENAMES["risk_calibration"]).read_text(encoding="utf-8"))
+
     bundle_checksum = hashlib.sha256(
         "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
     ).hexdigest()
@@ -236,7 +250,8 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
         except Exception:
             version = None
 
-    return {"booster": booster, "contract": contract, "bundle_checksum": bundle_checksum, "version": version}
+    return {"booster": booster, "contract": contract, "bundle_checksum": bundle_checksum,
+            "version": version, "risk_calibration": risk_calibration}
 
 
 def _aspect_degrees(aspect_sin: np.ndarray, aspect_cos: np.ndarray) -> np.ndarray:
@@ -338,6 +353,24 @@ def _risk_by_category(predicted: np.ndarray, categories: np.ndarray) -> Dict:
     return breakdown
 
 
+def risk_score_0_100(predicted_ch_per_h: np.ndarray, calibration: Dict) -> np.ndarray:
+    """
+    Maps raw ch/h predictions to the calibrated 0-100 "ML Fire Weather Risk
+    Score" via linear interpolation against the bundle's own percentile
+    table (model-training/fire_weather_ml/model_bundle.py::calibrate_risk_score -
+    same math, duplicated here rather than imported, same independence
+    reason as EXPECTED_FEATURE_COLUMNS/_aspect_degrees above). This score
+    is calibrated against what THIS model actually predicts on real data,
+    not an arbitrary or physics-derived scale - see the calibration
+    function's own docstring for why that matters (Missouri's real
+    distribution is heavily right-skewed; a fixed physics scale would
+    collapse almost everything into one end, same failure as the rule-
+    based public category).
+    """
+    values = np.clip(np.asarray(predicted_ch_per_h, dtype=float), 0.0, None)
+    return np.interp(values, calibration["values_ch_per_h"], calibration["percentiles"])
+
+
 def _correlation_or_none(a: np.ndarray, b: np.ndarray) -> Optional[float]:
     """np.corrcoef divides by each array's stddev - zero variance (e.g. a near-constant sample) makes that a NaN,
     which json.dumps would otherwise emit as the invalid-JSON literal `NaN`. None is the honest "not computable" value."""
@@ -377,6 +410,14 @@ def _render_png(
     """
     import cartopy.crs as ccrs
     import geopandas as gpd
+    import matplotlib
+    # Explicit, not left to auto-detection: this module renders from a
+    # background/server context (never a desktop GUI), and an interactive
+    # backend (this machine defaults to TkAgg) is flaky here - two renders
+    # back to back in the same process intermittently hit a Tcl/Tk
+    # lifecycle error ("invalid command name 'tcl_findLibrary'"). Agg is
+    # the standard headless/non-interactive backend for exactly this.
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
@@ -469,8 +510,110 @@ def _render_png(
         plt.close("all")
 
 
+def _render_risk_score_png(risk_score: np.ndarray, static: dict, bundle: Dict, out_path: Path) -> None:
+    """
+    The standalone ML Fire Weather Risk Score map - NOT the spread-rate
+    comparison graphic above. This is its own product: a continuous 0-100
+    score with its own colormap and legend, no discrete classes, no
+    reference to the rule-based public category or the ROS_CLASS_* scale.
+    Calibrated against this model's own real prediction distribution (see
+    risk_score_0_100's docstring) rather than a borrowed physics scale, so
+    the color spread is meaningful for Missouri's actual conditions instead
+    of collapsing into one end like the rule-based category does.
+
+    Still explicitly labeled shadow/experimental (this is not served
+    publicly), but framed as the model's own answer to "how dangerous,"
+    not as commentary on the existing spread-rate or rule-based products.
+    """
+    import cartopy.crs as ccrs
+    import geopandas as gpd
+    import matplotlib
+    # Explicit, not left to auto-detection: this module renders from a
+    # background/server context (never a desktop GUI), and an interactive
+    # backend (this machine defaults to TkAgg) is flaky here - two renders
+    # back to back in the same process intermittently hit a Tcl/Tk
+    # lifecycle error ("invalid command name 'tcl_findLibrary'"). Agg is
+    # the standard headless/non-interactive backend for exactly this.
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    values = risk_score.astype(np.float32)
+    values[~static["valid_mask"]] = np.nan
+
+    pixel_width, pixel_height, dpi = 2048, 1152, 144
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
+    fig = plt.figure(figsize=(pixel_width / dpi, pixel_height / dpi), dpi=dpi, facecolor="#E8E8E8")
+    ax = fig.add_axes([0.04, 0.04, 0.70, 0.92], projection=map_crs)
+    ax.set_extent((-95.8, -89.1, 35.8, 40.8), crs=data_crs)
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    mesh = ax.pcolormesh(
+        static["lon"], static["lat"], values, transform=data_crs,
+        cmap="YlOrRd", vmin=0, vmax=100, shading="auto", alpha=0.85, zorder=2,
+    )
+
+    maps_dir = Path(__file__).resolve().parent.parent / "maps"
+    county_path = maps_dir / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
+    state_path = maps_dir / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
+    if county_path.is_file():
+        counties = gpd.read_file(county_path).to_crs("EPSG:4326")
+        ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none",
+                          linewidth=0.7, zorder=4)
+    if state_path.is_file():
+        state = gpd.read_file(state_path).to_crs("EPSG:4326")
+        ax.add_geometries(state.geometry, crs=data_crs, edgecolor="#111111", facecolor="none",
+                          linewidth=1.5, zorder=5)
+
+    cax = fig.add_axes([0.02, 0.12, 0.018, 0.58])
+    cbar = fig.colorbar(mesh, cax=cax)
+    cbar.set_label("ML Fire Weather Risk Score (0-100)")
+
+    fig.text(0.5, 0.965, NOT_FOR_OPERATIONS_LABEL, fontsize=22, fontweight="bold",
+             ha="center", va="top", color="#B00000")
+    fig.text(0.98, 0.92, "ML Fire Weather Risk Score", fontsize=25, fontweight="bold", ha="right", va="top")
+    fig.text(0.98, 0.86, f"Model: {MODEL_TYPE}  Version: {bundle.get('version') or 'unknown'}",
+             fontsize=14, ha="right", va="top")
+    finite = values[np.isfinite(values)]
+    max_score = f"{float(np.nanmax(finite)):.1f}" if finite.size else "n/a"
+    fig.text(
+        0.77, 0.66,
+        f"Maximum this run: {max_score}\n\n"
+        "Score is a percentile rank (0-100) against this model's own\n"
+        "predicted rate-of-spread distribution on real historical\n"
+        "Missouri conditions - not a fixed physics scale, and not the\n"
+        "public rule-based fire danger category.\n\n"
+        "0 = calmest conditions observed in training data\n"
+        "100 = most extreme fire-behavior conditions observed",
+        fontsize=12, ha="left", va="top", linespacing=1.5,
+    )
+    fig.text(
+        0.77, 0.30,
+        "Experimental machine-learning output, scored for internal\n"
+        "comparison only. It is NOT reviewed, validated, or approved\n"
+        "for any operational decision, and is not related to the\n"
+        "public Fire Danger category shown elsewhere on this site.",
+        fontsize=11, ha="left", va="top", linespacing=1.4, color="#444444",
+    )
+
+    fd, temporary = tempfile.mkstemp(prefix=".fire_weather_ml_risk_score.", suffix=".png", dir=out_path.parent)
+    os.close(fd)
+    temp_path = Path(temporary)
+    try:
+        fig.savefig(temp_path, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        temp_path.replace(out_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        plt.close("all")
+
+
 def _update_manifest(
     image_path: Path, bundle: Dict, comparison: Dict, risk_by_category: Dict, generated_at: str,
+    *, risk_score_image_path: Optional[Path] = None, risk_score_summary: Optional[Dict] = None,
 ) -> None:
     """Mirrors services/spread_rate.py::_update_manifest's shape, under a distinct product key so it never
     overwrites or is confused with the real spread_rate manifest entry."""
@@ -487,6 +630,17 @@ def _update_manifest(
         "comparison": comparison,
         "fire_weather_risk_by_category": risk_by_category,
     }
+    if risk_score_image_path is not None:
+        manifest["products"]["fire_weather_ml_risk_score"] = {
+            "kind": "raster-preview",
+            "preview": str(risk_score_image_path.relative_to(BETA_ROOT)).replace("\\", "/"),
+            "not_for_operations": True,
+            "model_type": MODEL_TYPE,
+            "model_version": bundle.get("version"),
+            "generated_at": generated_at,
+            "scale": "0-100 percentile rank against this model's own real prediction distribution",
+            "summary": risk_score_summary or {},
+        }
     save_manifest(manifest)
 
 
@@ -509,6 +663,13 @@ def score_for_spread_rate(
         comparison = _compare(predicted, np.asarray(real_grids["ros_ch_per_h"], dtype=float))
         categories = _rule_based_categories(moisture)
         risk_by_category = _risk_by_category(predicted, categories)
+        risk_score = risk_score_0_100(predicted, bundle["risk_calibration"])
+        finite_scores = risk_score[np.isfinite(predicted)]
+        risk_score_summary = (
+            {"mean": float(np.mean(finite_scores)), "max": float(np.max(finite_scores)),
+             "min": float(np.min(finite_scores))}
+            if finite_scores.size else {}
+        )
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         record = {
@@ -517,6 +678,7 @@ def score_for_spread_rate(
             "model_version": bundle.get("version"),
             "comparison": comparison,
             "fire_weather_risk_by_category": risk_by_category,
+            "risk_score_summary": risk_score_summary,
         }
         root = Path(evidence_root or EVIDENCE_ROOT)
         root.mkdir(parents=True, exist_ok=True)
@@ -529,10 +691,16 @@ def score_for_spread_rate(
         # the shadow's own health/auto-disable tracking - the scoring and
         # evidence write above are the part that actually matters.
         image_path = None
+        risk_score_image_path = None
         try:
             image_path = _image_path()
             _render_png(predicted, static, bundle, comparison, risk_by_category, image_path)
-            _update_manifest(image_path, bundle, comparison, risk_by_category, generated_at)
+            risk_score_image_path = _risk_score_image_path()
+            _render_risk_score_png(risk_score, static, bundle, risk_score_image_path)
+            _update_manifest(
+                image_path, bundle, comparison, risk_by_category, generated_at,
+                risk_score_image_path=risk_score_image_path, risk_score_summary=risk_score_summary,
+            )
         except Exception as render_error:
             import logging
             logging.getLogger(__name__).warning(
@@ -547,7 +715,9 @@ def score_for_spread_rate(
             model_version=bundle.get("version"),
             last_comparison=comparison,
             last_risk_by_category=risk_by_category,
+            last_risk_score_summary=risk_score_summary,
             last_image=str(image_path) if image_path else None,
+            last_risk_score_image=str(risk_score_image_path) if risk_score_image_path else None,
         )
         _persist_state()
         return True

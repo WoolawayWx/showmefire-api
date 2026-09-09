@@ -31,6 +31,14 @@ def _write_bundle(directory: Path, *, advisory_only=True, model_family="xgboost_
     booster = xgb.train({"objective": "reg:squarederror"}, xgb.DMatrix(train, label=label), num_boost_round=5)
     booster.save_model(str(directory / "fire_weather_ml_model.json"))
 
+    (directory / "fire_weather_ml_risk_calibration.json").write_text(json.dumps({
+        "percentiles": list(range(101)),
+        "values_ch_per_h": list(np.linspace(0.0, 10.0, 101)),
+        "sample_size": n,
+        "min_ch_per_h": 0.0,
+        "max_ch_per_h": 10.0,
+    }))
+
 
 def _synthetic_static_and_moisture():
     shape = (2, 2)
@@ -61,6 +69,15 @@ class LoadBundleTests(unittest.TestCase):
             self.assertEqual(bundle["contract"]["model_family"], "xgboost_regressor")
             self.assertIsInstance(bundle["bundle_checksum"], str)
             self.assertEqual(bundle["version"], "0.0.1-beta.1")
+            self.assertEqual(len(bundle["risk_calibration"]["values_ch_per_h"]), 101)
+
+    def test_missing_risk_calibration_asset_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            (directory / "fire_weather_ml_risk_calibration.json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                fwms.load_bundle(directory)
 
     def test_missing_registered_version_file_is_not_fatal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +212,20 @@ class RiskByCategoryTests(unittest.TestCase):
         self.assertEqual(fwms._risk_by_category(predicted, categories), {})
 
 
+class RiskScore0100Tests(unittest.TestCase):
+    def _calibration(self):
+        return {"percentiles": list(range(101)), "values_ch_per_h": list(np.linspace(0.0, 10.0, 101))}
+
+    def test_endpoints_map_to_0_and_100(self):
+        calibration = self._calibration()
+        self.assertAlmostEqual(float(fwms.risk_score_0_100(np.array([0.0]), calibration)[0]), 0.0, places=3)
+        self.assertAlmostEqual(float(fwms.risk_score_0_100(np.array([10.0]), calibration)[0]), 100.0, places=3)
+
+    def test_negative_input_clips_to_zero_score(self):
+        calibration = self._calibration()
+        self.assertAlmostEqual(float(fwms.risk_score_0_100(np.array([-3.0]), calibration)[0]), 0.0, places=3)
+
+
 class RenderPngTests(unittest.TestCase):
     def test_writes_a_real_image_file_labeled_with_model_and_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,6 +239,21 @@ class RenderPngTests(unittest.TestCase):
             risk_by_category = fwms._risk_by_category(predicted, categories)
             out_path = directory / "shadow.png"
             fwms._render_png(predicted, static, bundle, comparison, risk_by_category, out_path)
+            self.assertTrue(out_path.is_file())
+            self.assertGreater(out_path.stat().st_size, 0)
+
+
+class RenderRiskScorePngTests(unittest.TestCase):
+    def test_writes_a_real_standalone_risk_score_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            static, moisture = _synthetic_static_and_moisture()
+            predicted = fwms.score_grid(bundle, static, moisture)
+            risk_score = fwms.risk_score_0_100(predicted, bundle["risk_calibration"])
+            out_path = directory / "risk_score.png"
+            fwms._render_risk_score_png(risk_score, static, bundle, out_path)
             self.assertTrue(out_path.is_file())
             self.assertGreater(out_path.stat().st_size, 0)
 
@@ -324,6 +370,15 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         self.assertTrue(manifest["products"]["fire_weather_ml_shadow"]["not_for_operations"])
         self.assertIn("Moderate", manifest["products"]["fire_weather_ml_shadow"]["fire_weather_risk_by_category"])
         self.assertIn("Moderate", state["last_risk_by_category"])
+
+        # The standalone ML Fire Weather Risk Score product - its own
+        # image, its own manifest entry, distinct from the comparison one.
+        risk_score_image_path = Path(self.beta_root_dir.name) / "images" / fwms.RISK_SCORE_IMAGE_FILENAME
+        self.assertTrue(risk_score_image_path.is_file(), "risk score PNG was not written")
+        self.assertEqual(state["last_risk_score_image"], str(risk_score_image_path))
+        self.assertIsNotNone(state["last_risk_score_summary"])
+        self.assertIn("fire_weather_ml_risk_score", manifest["products"])
+        self.assertNotIn("fire_weather_risk_by_category", manifest["products"]["fire_weather_ml_risk_score"])
 
     def test_auto_disables_after_max_consecutive_failures(self):
         static, moisture = _synthetic_static_and_moisture()
