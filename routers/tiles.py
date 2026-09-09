@@ -18,6 +18,7 @@ from PIL import Image
 from rio_tiler.io import Reader
 from rio_tiler.colormap import cmap as rio_cmap
 from rio_tiler.models import ImageData
+from rasterio.warp import transform_bounds
 
 from core.config import GIS_DIR
 from forecast_v1.repository import asset_for_layer, ensure_schema as ensure_forecast_v1_schema, transaction as forecast_v1_transaction
@@ -44,11 +45,17 @@ def _safe_gis_path(filename: str) -> Path:
     return path
 
 
-def _bounds_list(bounds) -> list[float]:
+def _bounds_list(bounds, source_crs=None) -> list[float]:
     if bounds is None:
         return [-95.8, 35.8, -89.1, 40.8]
     if hasattr(bounds, "left"):
-        return [float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top)]
+        values = (float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top))
+        if source_crs and str(source_crs).upper() not in {"EPSG:4326", "CRS84"}:
+            try:
+                return [float(value) for value in transform_bounds(source_crs, "EPSG:4326", *values, densify_pts=21)]
+            except Exception:
+                logger.warning("Unable to transform raster bounds from %s to EPSG:4326", source_crs, exc_info=True)
+        return list(values)
     if isinstance(bounds, dict):
         return [
             float(bounds.get("left", bounds.get("west"))),
@@ -121,7 +128,9 @@ def _cog_info_sync(filename: str) -> dict:
             info = src.info()
 
             return {
-                "bounds": _bounds_list(src.bounds),
+                # MapLibre expects [west, south, east, north] in degrees;
+                # operational rasters are commonly stored in EPSG:32615.
+                "bounds": _bounds_list(src.bounds, src.dataset.crs),
                 "minzoom": 4,
                 "maxzoom": max(int(src.maxzoom or 11), 11),
                 "band_metadata": info.band_metadata,
