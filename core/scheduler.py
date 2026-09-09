@@ -236,6 +236,10 @@ async def ingest_fire_detections_job():
     try:
         await asyncio.to_thread(ingest_detection_files)
         await asyncio.to_thread(publish_fire_detections)
+        from services.fire_incident_graphics import refresh_incident_graphics
+        await asyncio.to_thread(refresh_incident_graphics)
+        from services.fire_confidence import refresh_confidence_shapes
+        await asyncio.to_thread(refresh_confidence_shapes)
     except Exception as error:
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
 

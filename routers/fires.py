@@ -43,10 +43,13 @@ from core.database import (
     export_fire_labels,
     get_fire_event,
     get_fire_incident,
+    get_public_fire_incident,
+    create_fire_incident_feedback,
     get_fire_upload_token_hash,
     is_ip_blocked,
     list_fire_events,
     list_fire_incident_members,
+    list_fire_incident_feedback,
     list_fire_incidents,
     list_nearby_fire_events,
     set_fire_event_status,
@@ -65,6 +68,7 @@ MAX_REPORT_AGE_DAYS = int(os.getenv("FIRE_REPORT_MAX_AGE_DAYS", "14"))
 FUTURE_SKEW_MINUTES = 10
 CONSENT_VERSION = "2026-08-fire-report-v1"
 CENTRAL = ZoneInfo("America/Chicago")
+PUBLIC_API_BASE_URL = os.getenv("PUBLIC_API_BASE_URL", "https://api.showmefire.org").rstrip("/")
 
 # Defaults to distrusting proxy headers everywhere, including production:
 # trusting CF-Connecting-IP/X-Forwarded-For is only safe once the origin is
@@ -362,6 +366,12 @@ class BlocklistCreate(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+class FireIncidentFeedback(BaseModel):
+    classification: Literal["confirmed_fire", "controlled_burn", "not_a_fire", "unsure"]
+    note: str = Field(default="", max_length=2000)
+    contact: str = Field(default="", max_length=120)
+
+
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
     if not bbox:
         return None
@@ -405,6 +415,25 @@ def _event_to_geojson_feature(event: dict) -> dict:
             "ACRES": event.get("acres"),
             "DESCRIPTION": event.get("description"),
             "OUT_OF_ORDINARY": event.get("out_of_ordinary"),
+        },
+    }
+
+
+def _incident_to_geojson_feature(incident: dict) -> dict:
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [incident["centroid_longitude"], incident["centroid_latitude"]]},
+        "properties": {
+            "SOURCE": "SHOWMEFIRE_INCIDENT",
+            "TYPENAME": "incident",
+            "INCIDENT_ID": incident["id"],
+            "INCIDENT_SLUG": incident.get("public_slug"),
+            "DETECTION_COUNT": incident.get("detection_count", 0),
+            "COUNTY": incident.get("county_name"),
+            "FIRST_DETECTED_AT": incident.get("first_detected_at"),
+            "LAST_DETECTED_AT": incident.get("last_detected_at"),
+            "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") else None,
+            "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
         },
     }
 
@@ -703,6 +732,56 @@ def get_public_fire_event(event_id: int, response: Response):
     return {"success": True, "event": event}
 
 
+@router.get("/api/fires/incidents.geojson")
+def list_public_fire_incidents_geojson(response: Response, limit: int = 200, offset: int = 0):
+    """Consolidated satellite detections, one map feature per incident."""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    incidents = list_fire_incidents(limit=limit, offset=offset)
+    return {
+        "type": "FeatureCollection",
+        "features": [_incident_to_geojson_feature(incident) for incident in incidents if incident.get("public_slug")],
+        "metadata": {"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "fire_incidents store"},
+    }
+
+
+@router.get("/api/fires/incidents-confidence.geojson")
+def get_public_fire_incident_confidence_shapes(response: Response):
+    """Confidence circles/polygons for GIS clients and the public map."""
+    from core.config import GIS_DIR
+    path = GIS_DIR / "fire_incident_confidence.geojson"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Confidence shapes are not available yet")
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return FileResponse(path, media_type="application/geo+json")
+
+
+@router.get("/api/fires/incidents/{slug}")
+def get_public_fire_incident_detail(slug: str, response: Response):
+    incident = get_public_fire_incident(slug)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return {"success": True, "incident": incident}
+
+
+@router.post("/api/fires/incidents/{slug}/feedback", status_code=201)
+def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedback, request: Request):
+    incident = get_public_fire_incident(slug)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    ip_hash = _ip_bucket_key(_client_ip(request))
+    quota = consume_fire_submission_quota(
+        f"incident-feedback:{ip_hash}", datetime.now(timezone.utc), 10, 20
+    )
+    if not quota["allowed"]:
+        raise HTTPException(status_code=429, detail="Too many feedback submissions. Please try again later.")
+    create_fire_incident_feedback(
+        incident["id"], payload.classification, _clean_text(payload.note, required=False, field="note"),
+        _clean_text(payload.contact, required=False, field="contact"), ip_hash,
+    )
+    return {"success": True, "message": "Thanks—your fire information was received."}
+
+
 # --- Admin: moderation ---
 
 @router.get("/api/admin/fires/reports")
@@ -822,6 +901,21 @@ def admin_list_fire_incidents(
     return {"success": True, "incidents": incidents, "count": len(incidents)}
 
 
+@router.post("/api/admin/fires/incidents/graphics")
+def admin_refresh_fire_incident_graphics(
+    incident_id: Optional[int] = None,
+    force: bool = True,
+    token: Optional[str] = None,
+):
+    """Regenerate incident PNG cards on demand (admin only)."""
+    _require_admin(token)
+    from services.fire_incident_graphics import refresh_incident_graphics
+    result = refresh_incident_graphics(incident_id=incident_id, force=force)
+    if incident_id is not None and result["rendered"] == 0:
+        raise HTTPException(status_code=404, detail="Incident not found or has no usable detections")
+    return {"success": True, **result}
+
+
 @router.get("/api/admin/fires/incidents/{incident_id}")
 def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
     """Incident detail, including every member detection for map plotting (admin only)"""
@@ -830,4 +924,5 @@ def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
     incident["detections"] = list_fire_incident_members(incident_id)
+    incident["feedback"] = list_fire_incident_feedback(incident_id)
     return {"success": True, "incident": incident}

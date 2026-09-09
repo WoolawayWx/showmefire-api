@@ -5,6 +5,7 @@ import sqlite3
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from pathlib import Path
 from datetime import datetime
@@ -211,9 +212,34 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(fire_incidents)")
+    incident_columns = {row[1] for row in cursor.fetchall()}
+    for name, definition in (
+        ("public_slug", "TEXT"),
+        ("graphic_filename", "TEXT"),
+    ):
+        if name not in incident_columns:
+            cursor.execute(f"ALTER TABLE fire_incidents ADD COLUMN {name} {definition}")
+    cursor.execute("SELECT id FROM fire_incidents WHERE public_slug IS NULL OR public_slug = ''")
+    for (incident_id,) in cursor.fetchall():
+        cursor.execute("UPDATE fire_incidents SET public_slug = ? WHERE id = ?", (secrets.token_urlsafe(9), incident_id))
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_fire_incidents_public_slug ON fire_incidents(public_slug)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_last_detected ON fire_incidents(last_detected_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_centroid ON fire_incidents(centroid_latitude, centroid_longitude)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incidents_county ON fire_incidents(county_fips)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incident_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER NOT NULL,
+            classification TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            contact TEXT NOT NULL DEFAULT '',
+            submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (incident_id) REFERENCES fire_incidents(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_incident ON fire_incident_feedback(incident_id, created_at DESC)')
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -2255,14 +2281,18 @@ def find_or_create_incident_for_detection(
                 first_detected_at = ?, last_detected_at = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (new_lat, new_lon, new_first, new_last, best_row["id"]))
+        cursor.execute(
+            "UPDATE fire_incidents SET public_slug = COALESCE(public_slug, ?) WHERE id = ?",
+            (secrets.token_urlsafe(9), best_row["id"]),
+        )
         return best_row["id"]
 
     cursor.execute('''
         INSERT INTO fire_incidents
             (centroid_latitude, centroid_longitude, first_detected_at, last_detected_at,
-             detection_count, county_fips, county_name)
-        VALUES (?, ?, ?, ?, 1, ?, ?)
-    ''', (latitude, longitude, occurred_at, occurred_at, county_fips, county_name))
+             detection_count, county_fips, county_name, public_slug)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+    ''', (latitude, longitude, occurred_at, occurred_at, county_fips, county_name, secrets.token_urlsafe(9)))
     return cursor.lastrowid
 
 
@@ -2336,6 +2366,12 @@ def list_fire_incidents(
         for row in cursor.fetchall():
             incident = dict(row)
             incident["sources"] = _fire_incident_sources(cursor, incident["id"])
+            counties = cursor.execute(
+                "SELECT DISTINCT county_name FROM fire_events WHERE incident_id = ? AND county_name IS NOT NULL AND county_name != '' ORDER BY county_name",
+                (incident["id"],),
+            ).fetchall()
+            incident["county_names"] = [item[0] for item in counties]
+            incident["county_name"] = ", ".join(incident["county_names"]) or incident.get("county_name")
             incidents.append(incident)
         return incidents
     finally:
@@ -2354,6 +2390,12 @@ def get_fire_incident(incident_id: int) -> Optional[Dict]:
             return None
         incident = dict(row)
         incident["sources"] = _fire_incident_sources(cursor, incident_id)
+        counties = cursor.execute(
+            "SELECT DISTINCT county_name FROM fire_events WHERE incident_id = ? AND county_name IS NOT NULL AND county_name != '' ORDER BY county_name",
+            (incident_id,),
+        ).fetchall()
+        incident["county_names"] = [item[0] for item in counties]
+        incident["county_name"] = ", ".join(incident["county_names"]) or incident.get("county_name")
         return incident
     finally:
         conn.close()
@@ -2374,6 +2416,58 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def get_public_fire_incident(slug: str) -> Optional[Dict]:
+    """Return a public incident and its non-sensitive detection summary."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM fire_incidents WHERE public_slug = ? AND status != 'deleted'",
+            (slug,),
+        ).fetchone()
+        if not row:
+            return None
+        incident = dict(row)
+        incident["sources"] = _fire_incident_sources(conn.cursor(), incident["id"])
+        incident["detections"] = list_fire_incident_members(incident["id"])
+        return incident
+    finally:
+        conn.close()
+
+
+def create_fire_incident_feedback(
+    incident_id: int, classification: str, note: str, contact: str, ip_hash: str,
+) -> Dict:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO fire_incident_feedback
+               (incident_id, classification, note, contact, submitter_ip_hash)
+               VALUES (?, ?, ?, ?, ?)""",
+            (incident_id, classification, note, contact, ip_hash),
+        )
+        conn.commit()
+        return {"id": cursor.lastrowid, "incident_id": incident_id, "classification": classification}
+
+
+def set_fire_incident_graphic(incident_id: int, filename: str) -> None:
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.execute("UPDATE fire_incidents SET graphic_filename = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (filename, incident_id))
+        conn.commit()
+
+
+def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, incident_id, classification, note, contact, created_at FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
+            (incident_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def list_nearby_fire_events(latitude: float, longitude: float, radius_km: float, hours: float) -> List[Dict]:
