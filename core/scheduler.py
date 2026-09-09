@@ -298,6 +298,22 @@ async def burn_ban_maintenance_job():
         logger.error("Burn-ban maintenance failed: %s", error, exc_info=True)
 
 
+async def refresh_burn_ban_static_map_job():
+    """Refresh the public burn-ban PNG and GIS publication every morning.
+
+    Moderation and expiry changes continue to regenerate the map immediately;
+    this scheduled run intentionally republishes even unchanged data so the
+    static map's published timestamp remains current.
+    """
+    try:
+        from services.burn_ban_map import generate_burn_ban_map
+
+        result = await asyncio.to_thread(generate_burn_ban_map)
+        logger.info("Daily burn-ban static-map refresh: %s", result)
+    except Exception as error:
+        logger.error("Daily burn-ban static-map refresh failed: %s", error, exc_info=True)
+
+
 def create_scheduler():
     central_tz = timezone('America/Chicago')
     # Warm up the process pool now, before any to_thread workers accumulate,
@@ -521,6 +537,18 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         'interval',
         hours=3,
         id='burn_ban_maintenance',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Scheduler timezone is America/Chicago, including daylight-saving time.
+    # This refreshes the static PNG/GIS timestamp even when no ban changed.
+    scheduler.add_job(
+        refresh_burn_ban_static_map_job,
+        'cron',
+        hour=7,
+        minute=0,
+        id='refresh_burn_ban_static_map_daily',
         max_instances=1,
         coalesce=True,
     )
