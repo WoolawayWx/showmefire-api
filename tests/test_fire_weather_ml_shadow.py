@@ -149,6 +149,52 @@ class CompareTests(unittest.TestCase):
         self.assertAlmostEqual(result["mean_absolute_error_ch_per_h"], 0.5, places=6)
 
 
+class RuleBasedCategoriesTests(unittest.TestCase):
+    def test_matches_the_real_rule_for_known_inputs(self):
+        # fm=25 (>= low_fm=15) must be Low regardless of RH/wind - the same
+        # "fm alone forces Low" behavior discussed with the project owner.
+        moisture = {
+            "wind_ms": np.array([[20.0, 0.5]]),  # ~38.9 kts, ~1.0 kts
+            "fm10_pct": np.array([[25.0, 25.0]]),
+            "rh": np.array([[10.0, 90.0]]),
+        }
+        categories = fwms._rule_based_categories(moisture)
+        from core.fire_danger import FireDangerCategory
+        self.assertEqual(categories[0, 0], int(FireDangerCategory.LOW))
+        self.assertEqual(categories[0, 1], int(FireDangerCategory.LOW))
+
+    def test_low_fuel_moisture_high_wind_low_humidity_escalates(self):
+        moisture = {
+            "wind_ms": np.array([[15.0]]),  # ~29 kts
+            "fm10_pct": np.array([[5.0]]),
+            "rh": np.array([[10.0]]),
+        }
+        categories = fwms._rule_based_categories(moisture)
+        from core.fire_danger import FireDangerCategory
+        self.assertEqual(categories[0, 0], int(FireDangerCategory.EXTREME))
+
+
+class RiskByCategoryTests(unittest.TestCase):
+    def test_groups_predicted_values_by_real_category_label(self):
+        predicted = np.array([[0.5, 1.0], [8.0, np.nan]])
+        from core.fire_danger import FireDangerCategory
+        categories = np.array([
+            [int(FireDangerCategory.LOW), int(FireDangerCategory.LOW)],
+            [int(FireDangerCategory.EXTREME), int(FireDangerCategory.MODERATE)],
+        ], dtype=object)
+        breakdown = fwms._risk_by_category(predicted, categories)
+        self.assertEqual(set(breakdown), {"Low", "Extreme"})  # Moderate cell was NaN, excluded
+        self.assertEqual(breakdown["Low"]["cells"], 2)
+        self.assertAlmostEqual(breakdown["Low"]["mean_predicted_ch_per_h"], 0.75, places=6)
+        self.assertEqual(breakdown["Extreme"]["cells"], 1)
+        self.assertAlmostEqual(breakdown["Extreme"]["max_predicted_ch_per_h"], 8.0, places=6)
+
+    def test_empty_when_nothing_is_finite(self):
+        predicted = np.full((2, 2), np.nan)
+        categories = np.zeros((2, 2), dtype=object)
+        self.assertEqual(fwms._risk_by_category(predicted, categories), {})
+
+
 class RenderPngTests(unittest.TestCase):
     def test_writes_a_real_image_file_labeled_with_model_and_version(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,8 +204,10 @@ class RenderPngTests(unittest.TestCase):
             static, moisture = _synthetic_static_and_moisture()
             predicted = fwms.score_grid(bundle, static, moisture)
             comparison = fwms._compare(predicted, np.array([[1.0, 2.0], [3.0, np.nan]]))
+            categories = fwms._rule_based_categories(moisture)
+            risk_by_category = fwms._risk_by_category(predicted, categories)
             out_path = directory / "shadow.png"
-            fwms._render_png(predicted, static, bundle, comparison, out_path)
+            fwms._render_png(predicted, static, bundle, comparison, risk_by_category, out_path)
             self.assertTrue(out_path.is_file())
             self.assertGreater(out_path.stat().st_size, 0)
 
@@ -177,13 +225,14 @@ class UpdateManifestTests(unittest.TestCase):
             with patch.object(beta_products, "BETA_ROOT", beta_root), \
                  patch.object(beta_products, "BETA_MANIFEST_PATH", manifest_path):
                 fwms._update_manifest(image_path, {"version": "0.0.1-beta.1"},
-                                      {"compared_cells": 4}, "2026-09-09T00:00:00Z")
+                                      {"compared_cells": 4}, {"Low": {"cells": 4}}, "2026-09-09T00:00:00Z")
                 manifest = beta_products.load_manifest()
 
         entry = manifest["products"]["fire_weather_ml_shadow"]
         self.assertTrue(entry["not_for_operations"])
         self.assertEqual(entry["model_version"], "0.0.1-beta.1")
         self.assertEqual(entry["preview"], f"images/{fwms.IMAGE_FILENAME}")
+        self.assertEqual(entry["fire_weather_risk_by_category"], {"Low": {"cells": 4}})
 
 
 class ScoreForSpreadRateTests(unittest.TestCase):
@@ -249,6 +298,10 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         self.assertEqual(len(written), 1)
         record = json.loads(written[0].read_text())
         self.assertIn("comparison", record)
+        # _synthetic_static_and_moisture's fixed inputs (fm=8, rh=30, ~11.7kts)
+        # land in "Moderate" under the real rule - verifying the real
+        # category name appears, not just that the key exists.
+        self.assertIn("Moderate", record["fire_weather_risk_by_category"])
 
         with self.assertRaises(FileExistsError):
             written[0].open("x")
@@ -269,6 +322,8 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         manifest = beta_products.load_manifest()
         self.assertIn("fire_weather_ml_shadow", manifest.get("products", {}))
         self.assertTrue(manifest["products"]["fire_weather_ml_shadow"]["not_for_operations"])
+        self.assertIn("Moderate", manifest["products"]["fire_weather_ml_shadow"]["fire_weather_risk_by_category"])
+        self.assertIn("Moderate", state["last_risk_by_category"])
 
     def test_auto_disables_after_max_consecutive_failures(self):
         static, moisture = _synthetic_static_and_moisture()

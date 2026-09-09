@@ -138,6 +138,7 @@ def _initial_state() -> dict:
         "bundle_checksum": None,
         "model_version": None,
         "last_comparison": None,
+        "last_risk_by_category": None,
         "last_image": None,
         "public_path_unchanged": True,
     }
@@ -288,6 +289,55 @@ def score_grid(bundle: Dict, static: dict, moisture: dict) -> np.ndarray:
     return predictions
 
 
+def _rule_based_categories(moisture: dict) -> np.ndarray:
+    """
+    The current public rule-based category (core/fire_danger.py, unchanged,
+    imported directly - it's a light, stdlib-only module with no heavy
+    import chain, unlike services/spread_rate.py) for the SAME cells this
+    run scored, from the SAME moisture inputs - not a new/separate
+    computation of RH or wind, just the existing canonical rule applied
+    here so the continuous ML score has the real rule's own output to sit
+    next to.
+    """
+    from core.fire_danger import calculate_fire_danger, meters_per_second_to_knots
+
+    wind_kts = meters_per_second_to_knots(np.asarray(moisture["wind_ms"], dtype=float))
+    fm10 = np.asarray(moisture["fm10_pct"], dtype=float)
+    rh = np.asarray(moisture["rh"], dtype=float)
+    category = np.vectorize(
+        lambda fm, r, w: calculate_fire_danger(fm, r, w, missing_category=None), otypes=[object],
+    )(fm10, rh, wind_kts)
+    return category
+
+
+def _risk_by_category(predicted: np.ndarray, categories: np.ndarray) -> Dict:
+    """
+    For each rule-based category actually present this run: how many
+    cells, and what range of CONTINUOUS ML-predicted spread rate falls
+    inside it. This is the concrete "Fire Weather Risk" comparison - it
+    shows what the bucketed public category is currently hiding (or not),
+    for real, not hypothetically. Purely informational: never gates
+    anything, never changes the public category.
+    """
+    from core.fire_danger import category_label
+
+    breakdown = {}
+    valid = np.isfinite(predicted)
+    for category_id in sorted({c for c in categories[valid] if c is not None}):
+        mask = valid & (categories == category_id)
+        values = predicted[mask]
+        if values.size == 0:
+            continue
+        breakdown[category_label(category_id)] = {
+            "category_id": int(category_id),
+            "cells": int(values.size),
+            "mean_predicted_ch_per_h": float(np.mean(values)),
+            "min_predicted_ch_per_h": float(np.min(values)),
+            "max_predicted_ch_per_h": float(np.max(values)),
+        }
+    return breakdown
+
+
 def _correlation_or_none(a: np.ndarray, b: np.ndarray) -> Optional[float]:
     """np.corrcoef divides by each array's stddev - zero variance (e.g. a near-constant sample) makes that a NaN,
     which json.dumps would otherwise emit as the invalid-JSON literal `NaN`. None is the honest "not computable" value."""
@@ -312,7 +362,10 @@ def _compare(predicted: np.ndarray, real: np.ndarray) -> Dict:
     }
 
 
-def _render_png(predicted: np.ndarray, static: dict, bundle: Dict, comparison: Dict, out_path: Path) -> None:
+def _render_png(
+    predicted: np.ndarray, static: dict, bundle: Dict, comparison: Dict,
+    risk_by_category: Dict, out_path: Path,
+) -> None:
     """
     Same map style/classification as services/spread_rate.py::_render_png
     (reused via lazy import - safe here since this only runs from inside
@@ -379,8 +432,22 @@ def _render_png(predicted: np.ndarray, static: dict, bundle: Dict, comparison: D
     if correlation is not None:
         summary_lines.append(f"Correlation with real output: {correlation:.3f}")
     fig.text(0.77, 0.66, "\n\n".join(summary_lines), fontsize=12, ha="left", va="top", linespacing=1.35)
+
+    # The actual point of this comparison: what does the continuous ML
+    # "Fire Weather Risk" signal look like WITHIN each of the current
+    # rule-based public categories, for real cells scored this run.
+    if risk_by_category:
+        category_lines = ["Fire Weather Risk (continuous) by current rule category:"]
+        for label, stats in risk_by_category.items():
+            category_lines.append(
+                f"  {label}: {stats['cells']} cells, "
+                f"{stats['min_predicted_ch_per_h']:.2f}-{stats['max_predicted_ch_per_h']:.2f} ch/h "
+                f"(mean {stats['mean_predicted_ch_per_h']:.2f})"
+            )
+        fig.text(0.77, 0.48, "\n".join(category_lines), fontsize=11, ha="left", va="top", linespacing=1.5)
+
     fig.text(
-        0.77, 0.30,
+        0.77, 0.24,
         "This is a machine-learning approximation of the real Rothermel\n"
         "calculation, scored for internal comparison only. It is NOT\n"
         "reviewed, validated, or approved for any operational decision.\n"
@@ -402,7 +469,9 @@ def _render_png(predicted: np.ndarray, static: dict, bundle: Dict, comparison: D
         plt.close("all")
 
 
-def _update_manifest(image_path: Path, bundle: Dict, comparison: Dict, generated_at: str) -> None:
+def _update_manifest(
+    image_path: Path, bundle: Dict, comparison: Dict, risk_by_category: Dict, generated_at: str,
+) -> None:
     """Mirrors services/spread_rate.py::_update_manifest's shape, under a distinct product key so it never
     overwrites or is confused with the real spread_rate manifest entry."""
     from services.beta_products import BETA_ROOT, load_manifest, save_manifest
@@ -416,6 +485,7 @@ def _update_manifest(image_path: Path, bundle: Dict, comparison: Dict, generated
         "model_version": bundle.get("version"),
         "generated_at": generated_at,
         "comparison": comparison,
+        "fire_weather_risk_by_category": risk_by_category,
     }
     save_manifest(manifest)
 
@@ -437,6 +507,8 @@ def score_for_spread_rate(
         bundle = load_bundle(bundle_dir)
         predicted = score_grid(bundle, static, moisture)
         comparison = _compare(predicted, np.asarray(real_grids["ros_ch_per_h"], dtype=float))
+        categories = _rule_based_categories(moisture)
+        risk_by_category = _risk_by_category(predicted, categories)
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         record = {
@@ -444,6 +516,7 @@ def score_for_spread_rate(
             "bundle_checksum": bundle["bundle_checksum"],
             "model_version": bundle.get("version"),
             "comparison": comparison,
+            "fire_weather_risk_by_category": risk_by_category,
         }
         root = Path(evidence_root or EVIDENCE_ROOT)
         root.mkdir(parents=True, exist_ok=True)
@@ -458,8 +531,8 @@ def score_for_spread_rate(
         image_path = None
         try:
             image_path = _image_path()
-            _render_png(predicted, static, bundle, comparison, image_path)
-            _update_manifest(image_path, bundle, comparison, generated_at)
+            _render_png(predicted, static, bundle, comparison, risk_by_category, image_path)
+            _update_manifest(image_path, bundle, comparison, risk_by_category, generated_at)
         except Exception as render_error:
             import logging
             logging.getLogger(__name__).warning(
@@ -473,6 +546,7 @@ def score_for_spread_rate(
             bundle_checksum=bundle["bundle_checksum"],
             model_version=bundle.get("version"),
             last_comparison=comparison,
+            last_risk_by_category=risk_by_category,
             last_image=str(image_path) if image_path else None,
         )
         _persist_state()
