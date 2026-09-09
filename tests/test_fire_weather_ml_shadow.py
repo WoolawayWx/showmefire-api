@@ -12,7 +12,7 @@ from services import fire_weather_ml_shadow as fwms
 
 
 def _write_bundle(directory: Path, *, advisory_only=True, model_family="xgboost_regressor",
-                  feature_columns=None) -> None:
+                  feature_columns=None, version="0.0.1-beta.1") -> None:
     feature_columns = list(feature_columns if feature_columns is not None else fwms.EXPECTED_FEATURE_COLUMNS)
     (directory / "contract.json").write_text(json.dumps({
         "advisory_only": advisory_only,
@@ -20,6 +20,9 @@ def _write_bundle(directory: Path, *, advisory_only=True, model_family="xgboost_
         "feature_columns": feature_columns,
     }))
     (directory / "fire_weather_ml_metadata.json").write_text(json.dumps({"feature_columns": feature_columns}))
+    if version is not None:
+        (directory / "registered_version.json").write_text(
+            json.dumps({"model_type": "fire_weather_ml", "version": version}))
 
     rng = np.random.default_rng(0)
     n = 50
@@ -57,6 +60,14 @@ class LoadBundleTests(unittest.TestCase):
             bundle = fwms.load_bundle(directory)
             self.assertEqual(bundle["contract"]["model_family"], "xgboost_regressor")
             self.assertIsInstance(bundle["bundle_checksum"], str)
+            self.assertEqual(bundle["version"], "0.0.1-beta.1")
+
+    def test_missing_registered_version_file_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory, version=None)
+            bundle = fwms.load_bundle(directory)
+            self.assertIsNone(bundle["version"])
 
     def test_non_advisory_bundle_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,6 +105,34 @@ class ScoreGridTests(unittest.TestCase):
         self.assertTrue(np.isfinite(predictions[1, 0]))
         self.assertTrue(np.isnan(predictions[1, 1]))  # masked invalid cell
 
+    def test_never_predicts_a_negative_spread_rate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            # Cold, near-saturated, low-wind conditions - exactly the kind
+            # of near-zero-spread cell that produced a small negative raw
+            # prediction on real data (see docs/fire_weather_ml_plan.md).
+            static, _ = _synthetic_static_and_moisture()
+            moisture = {
+                "temp_c": np.full((2, 2), 5.0), "rh": np.full((2, 2), 95.0), "wind_ms": np.full((2, 2), 0.5),
+                "precip_mm": np.zeros((2, 2)), "fm1_pct": np.full((2, 2), 28.0),
+                "fm10_pct": np.full((2, 2), 28.0), "fm100_pct": np.full((2, 2), 28.0),
+            }
+            predictions = fwms.score_grid(bundle, static, moisture)
+        finite = predictions[np.isfinite(predictions)]
+        self.assertTrue((finite >= 0.0).all(), finite)
+
+
+class ClassifyRosChPerHTests(unittest.TestCase):
+    def test_negative_or_nan_values_are_nodata(self):
+        classes = fwms._classify_ros_ch_per_h(np.array([-1.0, np.nan]))
+        self.assertTrue((classes == fwms.NODATA_CLASS).all())
+
+    def test_buckets_match_class_bounds(self):
+        classes = fwms._classify_ros_ch_per_h(np.array([0.0, 3.0, 100.0]))
+        self.assertEqual(list(classes), [0, 1, 4])  # Very Low, Low, Very High
+
 
 class CompareTests(unittest.TestCase):
     def test_reports_zero_compared_cells_when_nothing_overlaps(self):
@@ -110,6 +149,43 @@ class CompareTests(unittest.TestCase):
         self.assertAlmostEqual(result["mean_absolute_error_ch_per_h"], 0.5, places=6)
 
 
+class RenderPngTests(unittest.TestCase):
+    def test_writes_a_real_image_file_labeled_with_model_and_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            static, moisture = _synthetic_static_and_moisture()
+            predicted = fwms.score_grid(bundle, static, moisture)
+            comparison = fwms._compare(predicted, np.array([[1.0, 2.0], [3.0, np.nan]]))
+            out_path = directory / "shadow.png"
+            fwms._render_png(predicted, static, bundle, comparison, out_path)
+            self.assertTrue(out_path.is_file())
+            self.assertGreater(out_path.stat().st_size, 0)
+
+
+class UpdateManifestTests(unittest.TestCase):
+    def test_writes_a_fire_weather_ml_shadow_product_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            beta_root = Path(tmp)
+            manifest_path = beta_root / "manifest.json"
+            image_path = beta_root / "images" / fwms.IMAGE_FILENAME
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"fake-png")
+
+            from services import beta_products
+            with patch.object(beta_products, "BETA_ROOT", beta_root), \
+                 patch.object(beta_products, "BETA_MANIFEST_PATH", manifest_path):
+                fwms._update_manifest(image_path, {"version": "0.0.1-beta.1"},
+                                      {"compared_cells": 4}, "2026-09-09T00:00:00Z")
+                manifest = beta_products.load_manifest()
+
+        entry = manifest["products"]["fire_weather_ml_shadow"]
+        self.assertTrue(entry["not_for_operations"])
+        self.assertEqual(entry["model_version"], "0.0.1-beta.1")
+        self.assertEqual(entry["preview"], f"images/{fwms.IMAGE_FILENAME}")
+
+
 class ScoreForSpreadRateTests(unittest.TestCase):
     def setUp(self):
         self.bundle_dir = tempfile.TemporaryDirectory()
@@ -124,12 +200,26 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         self.state_path_patch = patch.object(fwms, "STATE_PATH", Path(self.state_dir.name) / "shadow-state.json")
         self.state_path_patch.start()
 
+        # So the render/manifest step (best-effort inside score_for_spread_rate)
+        # actually runs against a throwaway location instead of the real
+        # testbed data dir, letting tests verify it isn't silently swallowed.
+        self.beta_root_dir = tempfile.TemporaryDirectory()
+        from services import beta_products
+        self.beta_root_patch = patch.object(beta_products, "BETA_ROOT", Path(self.beta_root_dir.name))
+        self.beta_root_patch.start()
+        self.beta_manifest_patch = patch.object(
+            beta_products, "BETA_MANIFEST_PATH", Path(self.beta_root_dir.name) / "manifest.json")
+        self.beta_manifest_patch.start()
+
         fwms._state.update(
             enabled=True, consecutive_failures=0, last_error=None, runs=0, successful_runs=0,
             healthy=True, auto_disabled=False, cells_scored=0,
         )
 
     def tearDown(self):
+        self.beta_manifest_patch.stop()
+        self.beta_root_patch.stop()
+        self.beta_root_dir.cleanup()
         self.state_path_patch.stop()
         self.configured_patch.stop()
         self.requested_patch.stop()
@@ -166,6 +256,19 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         state = fwms.diagnostics()
         self.assertTrue(state["healthy"])
         self.assertEqual(state["successful_runs"], 1)
+        self.assertEqual(state["model_version"], "0.0.1-beta.1")
+
+        # The graphic + manifest step is best-effort but should actually
+        # succeed here (not just silently swallow an error) - verify the
+        # real files it should have produced.
+        image_path = Path(self.beta_root_dir.name) / "images" / fwms.IMAGE_FILENAME
+        self.assertTrue(image_path.is_file(), "shadow PNG was not written")
+        self.assertEqual(state["last_image"], str(image_path))
+
+        from services import beta_products
+        manifest = beta_products.load_manifest()
+        self.assertIn("fire_weather_ml_shadow", manifest.get("products", {}))
+        self.assertTrue(manifest["products"]["fire_weather_ml_shadow"]["not_for_operations"])
 
     def test_auto_disables_after_max_consecutive_failures(self):
         static, moisture = _synthetic_static_and_moisture()
