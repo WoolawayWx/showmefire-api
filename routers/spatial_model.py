@@ -8,6 +8,7 @@ from services.v4_shadow import diagnostics as v4_shadow_diagnostics
 from services.v5_shadow import diagnostics as v5_shadow_diagnostics
 from services.risk_fusion_shadow import diagnostics as risk_fusion_shadow_diagnostics
 from services.risk_fusion_glm_shadow import diagnostics as risk_fusion_glm_shadow_diagnostics
+from services.fire_weather_ml_shadow import diagnostics as fire_weather_ml_shadow_diagnostics
 from services import fm_explain
 from services.drift_monitor import diagnostics as drift_diagnostics
 from core.fire_danger import missing_input_diagnostics
@@ -48,6 +49,11 @@ def risk_fusion_shadow_diagnostics_endpoint():
 @router.get("/risk-fusion-glm-shadow-diagnostics")
 def risk_fusion_glm_shadow_diagnostics_endpoint():
     return risk_fusion_glm_shadow_diagnostics()
+
+
+@router.get("/fire-weather-ml-shadow-diagnostics")
+def fire_weather_ml_shadow_diagnostics_endpoint():
+    return fire_weather_ml_shadow_diagnostics()
 
 
 @router.get("/drift-diagnostics")
