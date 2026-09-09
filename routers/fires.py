@@ -432,7 +432,7 @@ def _incident_to_geojson_feature(incident: dict) -> dict:
             "COUNTY": incident.get("county_name"),
             "FIRST_DETECTED_AT": incident.get("first_detected_at"),
             "LAST_DETECTED_AT": incident.get("last_detected_at"),
-            "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") else None,
+            "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") and incident.get("graphic_filename") else None,
             "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
         },
     }

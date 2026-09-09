@@ -45,7 +45,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
         ax.grid(True, alpha=0.25)
     ax.set_title("Satellite detection cluster", loc="left", weight="bold")
     info.axis("off")
-    county_names = sorted({str(row.get("county_name")) for row in rows if row.get("county_name")})
+    county_names = incident.get("county_names") or sorted({str(row.get("county_name")) for row in rows if row.get("county_name")})
     sources = sorted({str(row.get("source")).upper() for row in rows if row.get("source")})
     info.text(0, 0.95, "FIRE DETECTION CLUSTER", fontsize=16, weight="bold", color="#b91c1c")
     info.text(0, 0.87, f"{incident.get('detection_count', len(rows))} detections", fontsize=14, weight="bold")
@@ -53,8 +53,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     info.text(0, 0.69, f"First detected: {incident.get('first_detected_at', 'Unknown')}\nLast detected: {incident.get('last_detected_at', 'Unknown')}", wrap=True)
     info.text(0, 0.55, f"Sources: {', '.join(sources) or 'Unknown'}\nCenter: {incident['centroid_latitude']:.5f}, {incident['centroid_longitude']:.5f}", wrap=True)
     info.text(0, 0.30, "Is this a confirmed fire?\nTell Show Me Fire if this was a wildfire,\ncontrolled burn, or another heat source.", color="#374151")
-    info.add_patch(Patch(facecolor="#ef4444", label="Detection location"))
-    info.legend(loc="lower left", frameon=False)
+    info.legend(handles=[Patch(facecolor="#ef4444", label="Detection location")], loc="lower left", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -64,6 +63,8 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
 def refresh_incident_graphics(incident_id: int | None = None, force: bool = False) -> dict:
     """Render cards only for dense clusters and return a small job summary."""
     rendered = 0
+    failed = 0
+    failed_ids = []
     for incident in list_fire_incidents(limit=200):
         if incident_id is not None and int(incident["id"]) != incident_id:
             continue
@@ -76,5 +77,7 @@ def refresh_incident_graphics(incident_id: int | None = None, force: bool = Fals
             set_fire_incident_graphic(incident["id"], output.name)
             rendered += 1
         except Exception:
+            failed += 1
+            failed_ids.append(int(incident["id"]))
             logger.exception("Could not render incident graphic %s", incident["id"])
-    return {"rendered": rendered}
+    return {"rendered": rendered, "failed": failed, "failed_ids": failed_ids}
