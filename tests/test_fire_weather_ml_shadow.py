@@ -12,14 +12,21 @@ from services import fire_weather_ml_shadow as fwms
 
 
 def _write_bundle(directory: Path, *, advisory_only=True, model_family="xgboost_regressor",
-                  feature_columns=None, version="0.0.1-beta.1") -> None:
+                  feature_columns=None, version="0.0.1-beta.1", feature_ranges=None) -> None:
     feature_columns = list(feature_columns if feature_columns is not None else fwms.EXPECTED_FEATURE_COLUMNS)
     (directory / "contract.json").write_text(json.dumps({
         "advisory_only": advisory_only,
         "model_family": model_family,
         "feature_columns": feature_columns,
     }))
-    (directory / "fire_weather_ml_metadata.json").write_text(json.dumps({"feature_columns": feature_columns}))
+    # Matches the [0, 30) uniform training data generated below, so
+    # _synthetic_static_and_moisture's fixed inputs (all well inside 0-30)
+    # stay in-range by default - tests that want an out-of-range cell pass
+    # their own feature_ranges override.
+    if feature_ranges is None:
+        feature_ranges = {column: {"min": 0.0, "max": 30.0} for column in fwms.EXPECTED_FEATURE_COLUMNS}
+    (directory / "fire_weather_ml_metadata.json").write_text(
+        json.dumps({"feature_columns": feature_columns, "feature_ranges": feature_ranges}))
     if version is not None:
         (directory / "registered_version.json").write_text(
             json.dumps({"model_type": "fire_weather_ml", "version": version}))
@@ -70,6 +77,7 @@ class LoadBundleTests(unittest.TestCase):
             self.assertIsInstance(bundle["bundle_checksum"], str)
             self.assertEqual(bundle["version"], "0.0.1-beta.1")
             self.assertEqual(len(bundle["risk_calibration"]["values_ch_per_h"]), 101)
+            self.assertEqual(bundle["feature_ranges"]["slope_deg"], {"min": 0.0, "max": 30.0})
 
     def test_missing_risk_calibration_asset_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +147,47 @@ class ScoreGridTests(unittest.TestCase):
             predictions = fwms.score_grid(bundle, static, moisture)
         finite = predictions[np.isfinite(predictions)]
         self.assertTrue((finite >= 0.0).all(), finite)
+
+    def test_masks_a_cell_whose_terrain_is_outside_the_training_range(self):
+        # Real, discovered issue: a station-trained model asked to score a
+        # steeper-than-anything-it-trained-on grid cell was silently
+        # extrapolating. slope_deg's range is capped at 30 by _write_bundle
+        # (matching the [0,30) synthetic training data) - 45 is real terrain
+        # outside that, same kind of gap found on the actual Missouri grid.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            static, moisture = _synthetic_static_and_moisture()
+            static = {**static, "slope_deg": np.array([[45.0, 5.0], [5.0, 5.0]])}
+            predictions = fwms.score_grid(bundle, static, moisture)
+        self.assertTrue(np.isnan(predictions[0, 0]))  # out-of-range slope, masked
+        self.assertTrue(np.isfinite(predictions[0, 1]))  # in-range, still scored
+
+    def test_missing_feature_ranges_skips_the_check_rather_than_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            bundle["feature_ranges"] = None
+            static, moisture = _synthetic_static_and_moisture()
+            static = {**static, "slope_deg": np.array([[45.0, 5.0], [5.0, 5.0]])}
+            predictions = fwms.score_grid(bundle, static, moisture)
+        self.assertTrue(np.isfinite(predictions[0, 0]))
+
+
+class OutOfRangeMaskTests(unittest.TestCase):
+    def test_flags_a_row_outside_any_single_feature_range(self):
+        features = pd.DataFrame({"slope_deg": [5.0, 45.0], "wind_ms": [3.0, 3.0]})
+        ranges = {"slope_deg": {"min": 0.0, "max": 30.0}, "wind_ms": {"min": 0.0, "max": 30.0}}
+        mask = fwms._out_of_range_mask(features, ranges)
+        np.testing.assert_array_equal(mask, [False, True])
+
+    def test_ignores_a_range_for_a_column_not_present(self):
+        features = pd.DataFrame({"slope_deg": [5.0]})
+        ranges = {"slope_deg": {"min": 0.0, "max": 30.0}, "some_other_feature": {"min": 0.0, "max": 1.0}}
+        mask = fwms._out_of_range_mask(features, ranges)
+        np.testing.assert_array_equal(mask, [False])
 
 
 class ClassifyRosChPerHTests(unittest.TestCase):
@@ -256,6 +305,18 @@ class RenderRiskScorePngTests(unittest.TestCase):
             fwms._render_risk_score_png(risk_score, static, bundle, out_path)
             self.assertTrue(out_path.is_file())
             self.assertGreater(out_path.stat().st_size, 0)
+
+    def test_accepts_an_out_of_range_fraction_without_erroring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            _write_bundle(directory)
+            bundle = fwms.load_bundle(directory)
+            static, moisture = _synthetic_static_and_moisture()
+            predicted = fwms.score_grid(bundle, static, moisture)
+            risk_score = fwms.risk_score_0_100(predicted, bundle["risk_calibration"])
+            out_path = directory / "risk_score.png"
+            fwms._render_risk_score_png(risk_score, static, bundle, out_path, out_of_range_fraction=0.42)
+            self.assertTrue(out_path.is_file())
 
 
 class UpdateManifestTests(unittest.TestCase):
@@ -379,6 +440,12 @@ class ScoreForSpreadRateTests(unittest.TestCase):
         self.assertIsNotNone(state["last_risk_score_summary"])
         self.assertIn("fire_weather_ml_risk_score", manifest["products"])
         self.assertNotIn("fire_weather_risk_by_category", manifest["products"]["fire_weather_ml_risk_score"])
+
+        # _synthetic_static_and_moisture's fixed inputs are all within the
+        # bundle's default [0, 30) training range - nothing should be
+        # masked out on this real end-to-end run.
+        self.assertEqual(state["last_out_of_range_fraction"], 0.0)
+        self.assertEqual(record["out_of_training_range_cells"], 0)
 
     def test_auto_disables_after_max_consecutive_failures(self):
         static, moisture = _synthetic_static_and_moisture()

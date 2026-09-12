@@ -149,6 +149,7 @@ def _initial_state() -> dict:
         "last_comparison": None,
         "last_risk_by_category": None,
         "last_risk_score_summary": None,
+        "last_out_of_range_fraction": None,
         "last_image": None,
         "last_risk_score_image": None,
         "public_path_unchanged": True,
@@ -234,6 +235,20 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     risk_calibration = json.loads(
         (directory / BUNDLE_ASSET_FILENAMES["risk_calibration"]).read_text(encoding="utf-8"))
 
+    # Per-feature [min, max] actually observed in training (model-training/
+    # fire_weather_ml/model_bundle.py::fit) - real, discovered need: the
+    # model trains on ~18 flat-sited RAWS stations (max slope 0.54 degrees)
+    # but a full-grid score hits real Missouri hillside cells far outside
+    # that range. Missing on an older bundle (not fatal) - score_grid then
+    # can't apply the out-of-range mask and callers should treat every
+    # cell as unchecked, not silently "fine".
+    metadata_path = directory / BUNDLE_ASSET_FILENAMES["metadata"]
+    feature_ranges = None
+    try:
+        feature_ranges = json.loads(metadata_path.read_text(encoding="utf-8")).get("feature_ranges")
+    except Exception:
+        feature_ranges = None
+
     bundle_checksum = hashlib.sha256(
         "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
     ).hexdigest()
@@ -251,7 +266,7 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
             version = None
 
     return {"booster": booster, "contract": contract, "bundle_checksum": bundle_checksum,
-            "version": version, "risk_calibration": risk_calibration}
+            "version": version, "risk_calibration": risk_calibration, "feature_ranges": feature_ranges}
 
 
 def _aspect_degrees(aspect_sin: np.ndarray, aspect_cos: np.ndarray) -> np.ndarray:
@@ -260,12 +275,32 @@ def _aspect_degrees(aspect_sin: np.ndarray, aspect_cos: np.ndarray) -> np.ndarra
     return (np.degrees(np.arctan2(aspect_sin, aspect_cos)) + 360.0) % 360.0
 
 
+def _out_of_range_mask(features: "pd.DataFrame", feature_ranges: Dict) -> np.ndarray:
+    """
+    True where a row has ANY feature outside its training [min, max] - see
+    model_bundle.fit()'s feature_ranges docstring for why this exists. A
+    tree-based model doesn't refuse to extrapolate on its own; this is
+    that refusal, made explicit, rather than silently trusting a
+    prediction the model was never actually tested against.
+    """
+    out_of_range = np.zeros(len(features), dtype=bool)
+    for column, bounds in feature_ranges.items():
+        if column not in features.columns:
+            continue
+        values = features[column].to_numpy()
+        out_of_range |= (values < bounds["min"]) | (values > bounds["max"])
+    return out_of_range
+
+
 def score_grid(bundle: Dict, static: dict, moisture: dict) -> np.ndarray:
     """
     Predicts ros_ch_per_h over the same valid-cell mask
     services/spread_rate.py::compute_spread_rate_grid uses, from the SAME
     static/moisture inputs that function already received this run. Returns
-    a full-shape array with NaN outside the valid mask.
+    a full-shape array with NaN outside the valid mask AND wherever any
+    input feature falls outside the model's real training range (see
+    _out_of_range_mask) - if `bundle["feature_ranges"]` is unavailable
+    (older bundle), that check is skipped, not assumed to pass.
     """
     import pandas as pd
 
@@ -300,7 +335,14 @@ def score_grid(bundle: Dict, static: dict, moisture: dict) -> np.ndarray:
     # near-zero-spread cell (observed on real data: -0.00 to -0.03 ch/h).
     # Clipped here, once, so every consumer (evidence, comparison stats,
     # the rendered graphic) sees the same physically-sane value.
-    predictions[valid] = np.clip(raw, 0.0, None)
+    scored = np.clip(raw, 0.0, None)
+
+    feature_ranges = bundle.get("feature_ranges")
+    if feature_ranges:
+        out_of_range = _out_of_range_mask(features, feature_ranges)
+        scored[out_of_range] = np.nan
+
+    predictions[valid] = scored
     return predictions
 
 
@@ -510,7 +552,10 @@ def _render_png(
         plt.close("all")
 
 
-def _render_risk_score_png(risk_score: np.ndarray, static: dict, bundle: Dict, out_path: Path) -> None:
+def _render_risk_score_png(
+    risk_score: np.ndarray, static: dict, bundle: Dict, out_path: Path,
+    out_of_range_fraction: Optional[float] = None,
+) -> None:
     """
     The standalone ML Fire Weather Risk Score map - NOT the spread-rate
     comparison graphic above. This is its own product: a continuous 0-100
@@ -589,8 +634,17 @@ def _render_risk_score_png(risk_score: np.ndarray, static: dict, bundle: Dict, o
         "100 = most extreme fire-behavior conditions observed",
         fontsize=12, ha="left", va="top", linespacing=1.5,
     )
+    if out_of_range_fraction is not None:
+        fig.text(
+            0.77, 0.38,
+            f"Blank cells: {out_of_range_fraction * 100:.1f}% of the domain has terrain\n"
+            "and/or weather outside anything this model was actually\n"
+            "trained on (e.g. steeper slopes than any training station\n"
+            "ever sat on) - left unscored rather than extrapolated.",
+            fontsize=11, ha="left", va="top", linespacing=1.4, color="#8A4B00",
+        )
     fig.text(
-        0.77, 0.30,
+        0.77, 0.20,
         "Experimental machine-learning output, scored for internal\n"
         "comparison only. It is NOT reviewed, validated, or approved\n"
         "for any operational decision, and is not related to the\n"
@@ -614,6 +668,7 @@ def _render_risk_score_png(risk_score: np.ndarray, static: dict, bundle: Dict, o
 def _update_manifest(
     image_path: Path, bundle: Dict, comparison: Dict, risk_by_category: Dict, generated_at: str,
     *, risk_score_image_path: Optional[Path] = None, risk_score_summary: Optional[Dict] = None,
+    out_of_range_fraction: Optional[float] = None,
 ) -> None:
     """Mirrors services/spread_rate.py::_update_manifest's shape, under a distinct product key so it never
     overwrites or is confused with the real spread_rate manifest entry."""
@@ -640,6 +695,7 @@ def _update_manifest(
             "generated_at": generated_at,
             "scale": "0-100 percentile rank against this model's own real prediction distribution",
             "summary": risk_score_summary or {},
+            "out_of_training_range_fraction": out_of_range_fraction,
         }
     save_manifest(manifest)
 
@@ -670,6 +726,18 @@ def score_for_spread_rate(
              "min": float(np.min(finite_scores))}
             if finite_scores.size else {}
         )
+
+        # Cells masked out by score_grid's out-of-range check (terrain/
+        # weather outside what the model was actually trained on) - real
+        # cells this run, not silently treated as "fine". Recomputed here
+        # from the same cheap valid-mask logic score_grid uses, rather than
+        # rebuilding its full feature frame just to report a count.
+        cell_valid = static["valid_mask"] & np.isfinite(np.asarray(moisture["wind_ms"], dtype=float))
+        valid_cells = int(cell_valid.sum())
+        scored_cells = int(np.isfinite(predicted[cell_valid]).sum()) if valid_cells else 0
+        out_of_range_cells = valid_cells - scored_cells
+        out_of_range_fraction = (out_of_range_cells / valid_cells) if valid_cells else None
+
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         record = {
@@ -679,6 +747,8 @@ def score_for_spread_rate(
             "comparison": comparison,
             "fire_weather_risk_by_category": risk_by_category,
             "risk_score_summary": risk_score_summary,
+            "out_of_training_range_cells": out_of_range_cells,
+            "out_of_training_range_fraction": out_of_range_fraction,
         }
         root = Path(evidence_root or EVIDENCE_ROOT)
         root.mkdir(parents=True, exist_ok=True)
@@ -696,10 +766,11 @@ def score_for_spread_rate(
             image_path = _image_path()
             _render_png(predicted, static, bundle, comparison, risk_by_category, image_path)
             risk_score_image_path = _risk_score_image_path()
-            _render_risk_score_png(risk_score, static, bundle, risk_score_image_path)
+            _render_risk_score_png(risk_score, static, bundle, risk_score_image_path, out_of_range_fraction)
             _update_manifest(
                 image_path, bundle, comparison, risk_by_category, generated_at,
                 risk_score_image_path=risk_score_image_path, risk_score_summary=risk_score_summary,
+                out_of_range_fraction=out_of_range_fraction,
             )
         except Exception as render_error:
             import logging
@@ -716,6 +787,7 @@ def score_for_spread_rate(
             last_comparison=comparison,
             last_risk_by_category=risk_by_category,
             last_risk_score_summary=risk_score_summary,
+            last_out_of_range_fraction=out_of_range_fraction,
             last_image=str(image_path) if image_path else None,
             last_risk_score_image=str(risk_score_image_path) if risk_score_image_path else None,
         )
