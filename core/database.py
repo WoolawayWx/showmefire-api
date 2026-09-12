@@ -800,7 +800,10 @@ def init_database():
     # Red Flag Warning/Fire Weather Watch issuance).
     _ensure_fire_weather_alert_history_table(cursor)
 
-    # 21. Field-deployed dowel fuel-moisture sensor readings (own hardware,
+    # 21. Department static graphics API and publication control plane.
+    _ensure_graphics_tables(cursor)
+
+    # 22. Field-deployed dowel fuel-moisture sensor readings (own hardware,
     # not RAWS). See SMF_FuelMoistureSensor/.
     _ensure_fuel_moisture_sensor_tables(cursor)
 
@@ -2938,6 +2941,107 @@ def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
         'CREATE INDEX IF NOT EXISTS idx_fire_weather_alert_history_county_date '
         'ON fire_weather_alert_history(county_fips, alert_date)'
     )
+
+
+def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
+    """Control-plane tables for department-owned static graphics."""
+    cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS graphic_departments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            slug TEXT NOT NULL UNIQUE,
+            daily_limit INTEGER NOT NULL DEFAULT 100,
+            monthly_limit INTEGER NOT NULL DEFAULT 2000,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS graphic_api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            department_id INTEGER NOT NULL,
+            key_prefix TEXT NOT NULL UNIQUE,
+            key_hash TEXT NOT NULL UNIQUE,
+            scopes_json TEXT NOT NULL DEFAULT '["graphics:write","graphics:read"]',
+            revoked_at TIMESTAMP,
+            last_used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
+        );
+        CREATE TABLE IF NOT EXISTS graphic_bundles (
+            id TEXT PRIMARY KEY,
+            department_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
+        );
+        CREATE TABLE IF NOT EXISTS graphic_assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            department_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            path TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
+        );
+        CREATE TABLE IF NOT EXISTS graphic_jobs (
+            id TEXT PRIMARY KEY,
+            bundle_id TEXT NOT NULL,
+            department_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            source_fingerprint TEXT,
+            manifest_json TEXT NOT NULL DEFAULT '{}',
+            image_url TEXT,
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            FOREIGN KEY (bundle_id) REFERENCES graphic_bundles(id),
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
+        );
+        CREATE TABLE IF NOT EXISTS graphic_usage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            department_id INTEGER NOT NULL,
+            api_key_id INTEGER,
+            job_id TEXT,
+            status TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            latency_ms INTEGER,
+            bytes INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_graphic_jobs_department ON graphic_jobs(department_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_graphic_usage_department ON graphic_usage_events(department_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS graphic_department_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            department_id INTEGER NOT NULL,
+            api_key_id INTEGER NOT NULL UNIQUE,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT,
+            invited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            password_set_at TIMESTAMP,
+            last_login_at TIMESTAMP,
+            FOREIGN KEY (department_id) REFERENCES graphic_departments(id),
+            FOREIGN KEY (api_key_id) REFERENCES graphic_api_keys(id)
+        );
+    ''')
+
+    # Future billing hook: these columns are unused today (subscription_status
+    # stays 'none' for every department) but leave room to wire a low-cost
+    # Stripe subscription onto a department without another schema change.
+    cursor.execute("PRAGMA table_info(graphic_departments)")
+    department_columns = {row[1] for row in cursor.fetchall()}
+    if "stripe_customer_id" not in department_columns:
+        cursor.execute("ALTER TABLE graphic_departments ADD COLUMN stripe_customer_id TEXT")
+    if "subscription_status" not in department_columns:
+        cursor.execute("ALTER TABLE graphic_departments ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'none'")
+    if "plan" not in department_columns:
+        cursor.execute("ALTER TABLE graphic_departments ADD COLUMN plan TEXT")
 
 
 def record_fire_weather_alert_day(
