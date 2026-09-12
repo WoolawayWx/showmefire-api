@@ -532,6 +532,18 @@ def generate_spread_rate(
         grids = compute_spread_rate_grid(static, moisture)
         if not np.isfinite(grids["ros_ch_per_h"]).any():
             raise RuntimeError("Rothermel produced no finite spread-rate cells")
+
+        # fire_weather_ml shadow scoring: read-only, additive, never touches
+        # `grids` or anything derived from it below. See
+        # services/fire_weather_ml_shadow.py - shadow-only via
+        # SMF_FIRE_WEATHER_ML_BUNDLE, same never-raise pattern as
+        # services/risk_fusion_hook.py's calls in forecast/DailyForecast.py.
+        try:
+            from services.fire_weather_ml_shadow import score_for_spread_rate
+            score_for_spread_rate(static, moisture, grids)
+        except Exception as fwml_exc:
+            logger.warning("fire_weather_ml shadow hook failed (non-fatal): %s", fwml_exc)
+
         _write_geotiff(static, grids, TIF_PATH)
         status = _build_status_payload(status="ready", moisture={**moisture, "rtma_cache": rtma_cache}, static=static, grids=grids)
         _render_png(grids, static, PNG_PATH, status)

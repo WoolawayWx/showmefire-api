@@ -43,6 +43,22 @@ REQUIRED_RISK_FUSION_METADATA = {
     "advisory_only",
 }
 
+# fire_weather_ml is a third, independent model family (alongside
+# fuel_moisture and fire_risk_fusion): trained against the same Rothermel
+# calculation services/spread_rate.py runs live, not against fire-
+# occurrence reports - see model-training/docs/fire_weather_ml_plan.md.
+# Like fire_risk_fusion, v1 is advisory-only by design and is not currently
+# promoted through this registry at all - it's scored in shadow only via a
+# raw bundle directory (see services/fire_weather_ml_shadow.py). This
+# metadata set mirrors model-training/fire_weather_ml/register_beta.py's
+# own REQUIRED_METADATA_FIELDS exactly, so a future real promotion pipeline
+# for this model family has a matching gate ready rather than needing one
+# invented from scratch once it exists.
+REQUIRED_FIRE_WEATHER_ML_METADATA = {
+    "feature_module_sha256", "label_module_sha256", "label_column",
+    "model_family", "training_row_count", "split_manifest_sha256", "advisory_only",
+}
+
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
 
 # Static filenames older/ad-hoc scripts still hardcode. promote() keeps these
@@ -209,6 +225,15 @@ def validate_promotion_candidate(model_type, candidate):
         weight = metadata.get("guard_active_row_fraction")
         if metadata.get("model_family") != "glm" and (weight is None or float(weight) < 0.10):
             blockers.append("guard_active_row_fraction must be >= 0.10 unless model_family == 'glm'")
+    if model_type == "fire_weather_ml":
+        missing = sorted(REQUIRED_FIRE_WEATHER_ML_METADATA.difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+        # Same hard v1 boundary as fire_risk_fusion - not a gate that can be
+        # satisfied later, a structural refusal to promote this model
+        # family to anything serving-facing in v1.
+        if metadata.get("advisory_only") is not True:
+            blockers.append("fire_weather_ml candidates must have advisory_only=True in v1")
     precipitation_features = [name for name in metadata.get("feature_columns", [])
                               if name.startswith("precip_") or name == "hours_since_rain"]
     if model_type == "fuel_moisture" and precipitation_features:
