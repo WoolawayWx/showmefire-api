@@ -56,13 +56,6 @@ def get_process_pool() -> ProcessPoolExecutor:
     return _process_pool
 
 
-def shutdown_process_pool():
-    global _process_pool
-    if _process_pool is not None:
-        _process_pool.shutdown(wait=False, cancel_futures=True)
-        _process_pool = None
-
-
 def _kill_hung_workers(pool: ProcessPoolExecutor) -> None:
     """Force-kill a pool's worker processes.
 
@@ -77,6 +70,24 @@ def _kill_hung_workers(pool: ProcessPoolExecutor) -> None:
             process.kill()
         except Exception:
             logger.exception("Failed to kill hung process pool worker pid=%s", getattr(process, "pid", "?"))
+
+
+def shutdown_process_pool():
+    """Tear down the shared pool and make sure its OS processes actually die.
+
+    `ProcessPoolExecutor.shutdown(wait=False)` only stops the pool from
+    accepting new work - it does not signal workers that are still running
+    (or hung on) a task. Once `_process_pool` is reassigned, nothing in the
+    app still references those processes, so a still-running or hung worker
+    is silently orphaned and keeps holding whatever memory it had at fork
+    time forever. Killing every worker here, before dropping the reference,
+    is what actually reclaims that memory.
+    """
+    global _process_pool
+    if _process_pool is not None:
+        _kill_hung_workers(_process_pool)
+        _process_pool.shutdown(wait=False, cancel_futures=True)
+        _process_pool = None
 
 
 def run_in_process_pool(func, *args, timeout: float | None = DEFAULT_JOB_TIMEOUT_SECONDS, **kwargs):
@@ -94,7 +105,6 @@ def run_in_process_pool(func, *args, timeout: float | None = DEFAULT_JOB_TIMEOUT
         return get_process_pool().submit(func, *args, **kwargs).result(timeout=timeout)
     except FuturesTimeoutError:
         logger.error("Process pool job exceeded %ss timeout; killing hung worker(s)", timeout)
-        _kill_hung_workers(get_process_pool())
         shutdown_process_pool()
         raise
 
@@ -111,6 +121,5 @@ async def run_in_process_pool_async(func, *args, timeout: float | None = DEFAULT
         return await loop.run_in_executor(get_process_pool(), func, *args)
     except asyncio.TimeoutError:
         logger.error("Process pool job exceeded %ss timeout; killing hung worker(s)", timeout)
-        _kill_hung_workers(pool)
         shutdown_process_pool()
         raise

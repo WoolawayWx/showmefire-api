@@ -73,6 +73,11 @@ def _atomic_copy(source: Path, destination: Path) -> None:
     try:
         Path(temporary).write_bytes(source.read_bytes())
         os.replace(temporary, destination)
+        # mkstemp() hard-codes new files to mode 0600 regardless of umask, and
+        # os.replace() carries that mode through. Without this, the published
+        # file lands root:root/rw------- and is unreadable by the qgis-server
+        # container, which reads this tree read-only as a different user.
+        os.chmod(destination, 0o644)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
