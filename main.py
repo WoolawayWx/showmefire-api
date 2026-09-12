@@ -89,7 +89,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, fuel_sensor_admin
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, fuel_sensor_admin, graphics
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -233,6 +233,7 @@ app.include_router(spread_rate_admin.router)
 app.include_router(forecast_v1.router)
 app.include_router(forecast_v1_admin.router)
 app.include_router(fuel_sensor_admin.router)
+app.include_router(graphics.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend
@@ -270,6 +271,10 @@ def _clear_auth_cookie(response: Response, name: str) -> None:
     )
 
 app.middleware("http")(admin_cookie_context)
+
+from core.graphics_session import graphics_cookie_context
+
+app.middleware("http")(graphics_cookie_context)
 
 class DevProjectCreate(BaseModel):
     name: str
