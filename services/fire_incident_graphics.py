@@ -151,6 +151,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     info.set_facecolor("#ffffff")
     county_names = incident.get("county_names") or sorted({str(row.get("county_name")) for row in rows if row.get("county_name")})
     sources = sorted({str(row.get("source")).upper() for row in rows if row.get("source")})
+    incident_url = f"{PUBLIC_SITE_URL}/fires/incident/{incident.get('public_slug', '')}"
     # Reuse the forecast-card branding so incident graphics feel like part of
     # the same product family. Failure to rasterize the optional SVG must not
     # prevent the map from being generated.
@@ -169,22 +170,20 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     except Exception:
         logger.debug("Incident graphic logo unavailable", exc_info=True)
 
-    # Put a scannable link beside the footer text. QR generation is optional so
-    # graphics can still render in an older deployment during image rollout.
+    # Put a scannable link beside the footer text.
     try:
         import qrcode
-        qr = qrcode.make(incident_url)
-        qr_ax = fig.add_axes((0.775, 0.045, 0.075, 0.075), zorder=10)
-        qr_ax.imshow(qr, cmap="gray")
+        qr = qrcode.make(incident_url, box_size=8, border=2)
+        qr_ax = fig.add_axes((0.775, 0.035, 0.09, 0.09), zorder=20, facecolor="white")
+        qr_ax.imshow(qr, cmap="gray", interpolation="nearest")
         qr_ax.axis("off")
-        qr_ax.text(0.5, -0.08, "Scan for details", transform=qr_ax.transAxes,
-                   ha="center", va="top", fontsize=5.8, color="#374151")
+        qr_ax.text(0.5, -0.06, "Scan for details", transform=qr_ax.transAxes,
+                   ha="center", va="top", fontsize=6.2, color="#374151")
     except Exception:
-        logger.debug("Incident graphic QR code unavailable", exc_info=True)
+        logger.warning("Incident graphic QR code unavailable", exc_info=True)
 
     center_lat = float(incident["centroid_latitude"])
     center_lon = float(incident["centroid_longitude"])
-    incident_url = f"{PUBLIC_SITE_URL}/fires/incident/{incident.get('public_slug', '')}"
     graphic_updated = _display_time(datetime.now(timezone.utc))
     # Use short, spaced sections rather than densely packed report text. This
     # keeps the card readable when the image is viewed on a phone.
