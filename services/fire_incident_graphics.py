@@ -40,7 +40,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Patch
+    from matplotlib.patches import Patch, Rectangle
     from PIL import Image
 
     rows = list(detections)
@@ -126,16 +126,29 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     center_lat = float(incident["centroid_latitude"])
     center_lon = float(incident["centroid_longitude"])
     incident_url = f"{PUBLIC_SITE_URL}/fires/incident/{incident.get('public_slug', '')}"
+    # Use short, spaced sections rather than densely packed report text. This
+    # keeps the card readable when the image is viewed on a phone.
     info.axhline(0.985, color="#b91c1c", linewidth=4, clip_on=False)
     info.text(0, 0.95, "FIRE DETECTION CLUSTER", fontsize=15, weight="bold", color="#b91c1c")
-    info.text(0, 0.875, f"{incident.get('detection_count', len(rows))} satellite detections", fontsize=14, weight="bold", color="#111827")
-    info.text(0, 0.76, "SUMMARY", fontsize=10, weight="bold", color="#6b7280")
-    info.text(0, 0.705, f"County: {', '.join(county_names) or 'Unknown'}\nSources: {', '.join(sources) or 'Unknown'}\nCenter: {center_lat:.5f}, {center_lon:.5f}", wrap=True)
-    info.text(0, 0.545, "TIMELINE", fontsize=10, weight="bold", color="#6b7280")
-    info.text(0, 0.49, f"First detected\n{_display_time(incident.get('first_detected_at'))}\n\nLast detected\n{_display_time(incident.get('last_detected_at'))}", wrap=True)
-    info.text(0, 0.285, "LEARN MORE", fontsize=10, weight="bold", color="#6b7280")
-    info.text(0, 0.235, f"Incident page:\n{incident_url}", fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)
-    info.text(0, 0.135, "Satellite imagery with roads shown.\nPlease verify this heat signature before treating it as a confirmed fire.", fontsize=8.2, color="#374151", wrap=True)
+    info.text(0, 0.875, f"{incident.get('detection_count', len(rows))} detections", fontsize=16, weight="bold", color="#111827")
+    info.text(0, 0.83, "Automated satellite heat signatures", fontsize=8.5, color="#6b7280")
+
+    # One unified information card keeps the incident details visually
+    # together; the small headings preserve scanability inside the card.
+    info.add_patch(Rectangle((0, 0.08), 1, 0.72, facecolor="#ffffff", edgecolor="#d9dee7", linewidth=1.2, zorder=0))
+    info.text(0.025, 0.755, "LOCATION", fontsize=9, weight="bold", color="#6b7280")
+    info.text(0.025, 0.712, f"{', '.join(county_names) or 'Unknown'} County  ·  {', '.join(sources) or 'Unknown'}\n{center_lat:.5f}, {center_lon:.5f}", fontsize=9.5, color="#111827", linespacing=1.35)
+
+    info.text(0, 0.595, "DETECTION WINDOW", fontsize=9, weight="bold", color="#6b7280")
+    info.text(0, 0.55, "First detected", fontsize=9, weight="bold", color="#111827")
+    info.text(0, 0.515, _display_time(incident.get('first_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
+    info.text(0, 0.425, "Last detected", fontsize=9, weight="bold", color="#111827")
+    info.text(0, 0.39, _display_time(incident.get('last_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
+
+    info.text(0.025, 0.265, "INCIDENT DETAILS", fontsize=9, weight="bold", color="#6b7280")
+    info.text(0.025, 0.225, "Open the incident page for updates and context:", fontsize=8.4, color="#374151")
+    info.text(0.025, 0.18, incident_url, fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)
+    info.text(0.025, 0.115, "Verify this heat signature before treating it as a confirmed fire.", fontsize=8.2, color="#374151", wrap=True)
     info.legend(handles=[Patch(facecolor="#ef4444", label="Detection location")], loc="lower left", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, bbox_inches="tight", facecolor="white")
