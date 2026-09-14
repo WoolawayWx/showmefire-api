@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -17,6 +18,30 @@ MIN_DETECTIONS = int(__import__("os").getenv("FIRE_INCIDENT_GRAPHIC_MIN_DETECTIO
 # and road geometry legible instead of stretching a low-resolution tile.
 INCIDENT_BASEMAP_ZOOM = int(__import__("os").getenv("FIRE_INCIDENT_BASEMAP_ZOOM", "15"))
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "https://showmefire.org").rstrip("/")
+
+
+@lru_cache(maxsize=64)
+def _read_local_roads(path: str, bbox: tuple[float, float, float, float]):
+    """Read only the roads in a map window and cache repeat requests."""
+    import geopandas as gpd
+
+    columns = ["NAME", "DESIGNATION", "geometry"]
+    def fiona_fallback():
+        try:
+            return gpd.read_file(path, bbox=bbox, columns=columns)
+        except TypeError:
+            return gpd.read_file(path, bbox=bbox)
+
+    try:
+        import pyogrio
+        frame = pyogrio.read_dataframe(path, bbox=bbox, columns=columns, use_arrow=True)
+    except (ImportError, TypeError):
+        # GeoPandas/Fiona fallback for older deployments without Pyogrio.
+        frame = fiona_fallback()
+    except Exception:
+        # Some older Pyogrio builds do not support every optional argument.
+        frame = fiona_fallback()
+    return frame.to_crs("EPSG:4326")
 
 
 def _display_time(value) -> str:
@@ -87,10 +112,9 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
                 west, south = to_mercator.transform(min(lons) - margin, min(lats) - margin)
                 east, north = to_mercator.transform(max(lons) + margin, max(lats) + margin)
                 if road_path.parent.name == "MO_MoDOT_Roads_Arcs":
-                    road_frame = gpd.read_file(road_path, bbox=(west, south, east, north))
+                    road_frame = _read_local_roads(str(road_path), (west, south, east, north))
                 else:
-                    road_frame = gpd.read_file(road_path)
-                road_frame = road_frame.to_crs("EPSG:4326")
+                    road_frame = gpd.read_file(road_path).to_crs("EPSG:4326")
                 road_frame = road_frame[road_frame.geometry.notna() & ~road_frame.geometry.is_empty]
                 for geometry in road_frame.geometry:
                     ax.add_geometries([geometry], ccrs.PlateCarree(), facecolor="none",
@@ -148,6 +172,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     center_lat = float(incident["centroid_latitude"])
     center_lon = float(incident["centroid_longitude"])
     incident_url = f"{PUBLIC_SITE_URL}/fires/incident/{incident.get('public_slug', '')}"
+    graphic_updated = _display_time(datetime.now(timezone.utc))
     # Use short, spaced sections rather than densely packed report text. This
     # keeps the card readable when the image is viewed on a phone.
     info.axhline(0.985, color="#b91c1c", linewidth=4, clip_on=False)
@@ -157,7 +182,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
 
     # One unified information card keeps the incident details visually
     # together; the small headings preserve scanability inside the card.
-    info.add_patch(Rectangle((0, 0.08), 1, 0.72, facecolor="#ffffff", edgecolor="#d9dee7", linewidth=1.2, zorder=0))
+    info.add_patch(Rectangle((0, 0.055), 1, 0.745, facecolor="#ffffff", edgecolor="#d9dee7", linewidth=1.2, zorder=0))
     info.text(0.025, 0.755, "LOCATION", fontsize=9, weight="bold", color="#6b7280")
     info.text(0.025, 0.712, f"{', '.join(county_names) or 'Unknown'} County  ·  {', '.join(sources) or 'Unknown'}\n{center_lat:.5f}, {center_lon:.5f}", fontsize=9.5, color="#111827", linespacing=1.35)
 
@@ -171,6 +196,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     info.text(0.025, 0.285, "Open the incident page for updates and context:", fontsize=8.4, color="#374151")
     info.text(0.025, 0.24, incident_url, fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)
     info.text(0.025, 0.14, "Verify this heat signature before treating it as a confirmed fire.", fontsize=8.2, color="#374151", wrap=True)
+    info.text(0.025, 0.095, f"Graphic updated\n{graphic_updated}", fontsize=7.2, color="#6b7280", linespacing=1.25)
     info.legend(handles=[Patch(facecolor="#ef4444", label="Detection location")], loc="lower left", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, bbox_inches="tight", facecolor="white")
