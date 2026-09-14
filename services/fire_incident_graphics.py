@@ -72,7 +72,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
         # Do not add the OSM raster layer here: its labels become faint and
         # unreadable over satellite imagery. The optional local vector layer
         # below can still provide road geometry without adding map text.
-        road_root = Path(__file__).resolve().parents[1] / "maps" / "shapefiles"
+        road_root = Path(os.getenv("SMF_ROADS_DIR", str(Path(__file__).resolve().parents[1] / "maps" / "shapefiles")))
         road_path = road_root / "MO_MoDOT_Roads_Arcs" / "MO_MoDOT_Roads_Arcs.shp"
         if not road_path.is_file():
             road_path = road_root / "MO_TIGER_Primary_Roads" / "MO_TIGER_Primary_Roads.shp"

@@ -13,6 +13,12 @@ chmod 755 "$DATA_DIR" || true
 mkdir -p /app/logs
 chmod 755 /app/logs || true
 
+# The statewide MoDOT road archive is intentionally downloaded at runtime,
+# not committed into Git or copied into the image.
+if [ "${SMF_DOWNLOAD_MODOT_ROADS:-1}" = "1" ]; then
+    python3 /app/scripts/download_modot_roads.py || echo "MoDOT road download unavailable; incident maps will use fallback roads"
+fi
+
 # DB initialization happens in main.py's FastAPI lifespan startup (init_database()
 # is idempotent), which runs on every boot since CMD always launches uvicorn - no
 # separate init needed here.

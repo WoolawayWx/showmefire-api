@@ -12,4 +12,5 @@ data_archive/
 data_archive_day/
 *.log
 logs/
+maps/shapefiles/MO_MoDOT_Roads_Arcs/
 images/

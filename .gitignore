@@ -23,6 +23,7 @@ archive/*
 
 password.py
 *.log
+maps/shapefiles/MO_MoDOT_Roads_Arcs/
 logs/
 cache
 status.json
