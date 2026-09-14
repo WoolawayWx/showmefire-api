@@ -152,7 +152,10 @@ def import_release(model_type, tag, repo, bump="patch"):
             key: meta[key] for key in (
                 "feature_schema_version", "rule_spec_version", "training_window",
                 "data_match_policy", "validation_folds", "class_support",
-                "promotion_gates", "shadow_required", "shadow",
+                "feature_columns", "feature_ranges", "imputation_policy",
+                "clipping_policy", "max_feature_age_minutes",
+                "precipitation_contract_version", "precipitation_contract_sha256",
+                "promotion_gates", "shadow_required", "ground_truth_shadow_required", "shadow",
             ) if key in meta
         }
         if declarations:
