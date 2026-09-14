@@ -75,6 +75,7 @@ jsonschema-specifications==2025.9.1
 kiwisolver==1.4.9
 lxml==6.0.2
 matplotlib==3.10.7
+qrcode==8.2
 MetPy==1.7.1
 morecantile==7.0.3
 multidict==6.7.0

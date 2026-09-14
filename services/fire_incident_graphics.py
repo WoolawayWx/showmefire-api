@@ -66,7 +66,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patheffects as patheffects
-    from matplotlib.patches import Patch, Rectangle
+    from matplotlib.patches import Patch
     from PIL import Image
 
     rows = list(detections)
@@ -169,6 +169,19 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     except Exception:
         logger.debug("Incident graphic logo unavailable", exc_info=True)
 
+    # Put a scannable link beside the footer text. QR generation is optional so
+    # graphics can still render in an older deployment during image rollout.
+    try:
+        import qrcode
+        qr = qrcode.make(incident_url)
+        qr_ax = fig.add_axes((0.775, 0.045, 0.075, 0.075), zorder=10)
+        qr_ax.imshow(qr, cmap="gray")
+        qr_ax.axis("off")
+        qr_ax.text(0.5, -0.08, "Scan for details", transform=qr_ax.transAxes,
+                   ha="center", va="top", fontsize=5.8, color="#374151")
+    except Exception:
+        logger.debug("Incident graphic QR code unavailable", exc_info=True)
+
     center_lat = float(incident["centroid_latitude"])
     center_lon = float(incident["centroid_longitude"])
     incident_url = f"{PUBLIC_SITE_URL}/fires/incident/{incident.get('public_slug', '')}"
@@ -182,7 +195,6 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
 
     # One unified information card keeps the incident details visually
     # together; the small headings preserve scanability inside the card.
-    info.add_patch(Rectangle((0, 0.055), 1, 0.745, facecolor="#ffffff", edgecolor="#d9dee7", linewidth=1.2, zorder=0))
     info.text(0.025, 0.755, "LOCATION", fontsize=9, weight="bold", color="#6b7280")
     info.text(0.025, 0.712, f"{', '.join(county_names) or 'Unknown'} County  ·  {', '.join(sources) or 'Unknown'}\n{center_lat:.5f}, {center_lon:.5f}", fontsize=9.5, color="#111827", linespacing=1.35)
 
