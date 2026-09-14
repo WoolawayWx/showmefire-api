@@ -40,6 +40,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as patheffects
     from matplotlib.patches import Patch, Rectangle
     from PIL import Image
 
@@ -58,7 +59,6 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     try:
         import cartopy.crs as ccrs
         import cartopy.io.img_tiles as cimgt
-        import numpy as np
         # Satellite imagery is the primary context. OSM raster tiles are
         # opaque in Cartopy and can completely cover the imagery, so roads
         # are added below as transparent vector data instead.
@@ -69,30 +69,52 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
         satellite = cimgt.GoogleTiles(style="satellite")
         ax.add_image(satellite, INCIDENT_BASEMAP_ZOOM)
 
-        class TransparentOSM(cimgt.OSM):
-            """Keep dark road/name pixels while removing OSM's opaque base."""
-
-            def get_image(self, tile):
-                image, extent, origin = super().get_image(tile)
-                rgba = np.asarray(image.convert("RGBA")).copy()
-                darkness = 255.0 - rgba[:, :, :3].mean(axis=2)
-                rgba[:, :, 3] = np.clip(darkness * 2.8, 0, 215).astype(np.uint8)
-                return Image.fromarray(rgba, mode="RGBA"), extent, origin
-
-        # This is a transparent road/name layer, not a second opaque map.
-        # It keeps the satellite detail visible while adding orientation cues.
-        ax.add_image(TransparentOSM(), INCIDENT_BASEMAP_ZOOM, alpha=0.9)
-        road_path = Path(__file__).resolve().parents[1] / "maps" / "shapefiles" / "MO_TIGER_Primary_Roads" / "MO_TIGER_Primary_Roads.shp"
+        # Do not add the OSM raster layer here: its labels become faint and
+        # unreadable over satellite imagery. The optional local vector layer
+        # below can still provide road geometry without adding map text.
+        road_root = Path(__file__).resolve().parents[1] / "maps" / "shapefiles"
+        road_path = road_root / "MO_MoDOT_Roads_Arcs" / "MO_MoDOT_Roads_Arcs.shp"
+        if not road_path.is_file():
+            road_path = road_root / "MO_TIGER_Primary_Roads" / "MO_TIGER_Primary_Roads.shp"
         if road_path.is_file():
             try:
                 import geopandas as gpd
-                road_frame = gpd.read_file(road_path).to_crs("EPSG:4326")
+                # MoDOT is Web Mercator. Read only the incident bounding box
+                # so the statewide road file does not need to be loaded in
+                # full for every graphic.
+                from pyproj import Transformer
+                to_mercator = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+                west, south = to_mercator.transform(min(lons) - margin, min(lats) - margin)
+                east, north = to_mercator.transform(max(lons) + margin, max(lats) + margin)
+                if road_path.parent.name == "MO_MoDOT_Roads_Arcs":
+                    road_frame = gpd.read_file(road_path, bbox=(west, south, east, north))
+                else:
+                    road_frame = gpd.read_file(road_path)
+                road_frame = road_frame.to_crs("EPSG:4326")
+                road_frame = road_frame[road_frame.geometry.notna() & ~road_frame.geometry.is_empty]
                 for geometry in road_frame.geometry:
-                    if geometry is not None and not geometry.is_empty:
-                        ax.add_geometries(
-                            [geometry], ccrs.PlateCarree(), facecolor="none",
-                            edgecolor="#f8fafc", linewidth=1.0, alpha=0.78, zorder=4,
-                        )
+                    ax.add_geometries([geometry], ccrs.PlateCarree(), facecolor="none",
+                                      edgecolor="#111827", linewidth=2.4, alpha=0.82, zorder=4)
+                    ax.add_geometries([geometry], ccrs.PlateCarree(), facecolor="none",
+                                      edgecolor="#f8fafc", linewidth=1.0, alpha=0.95, zorder=5)
+
+                # Label only distinct named roads, centered on their geometry.
+                # A white halo keeps dark text legible over both fields and
+                # satellite shadows without adding an opaque map layer.
+                seen_names = set()
+                for _, road in road_frame.iterrows():
+                    name = str(road.get("NAME") or "").strip()
+                    if not name or name.upper() in {"NAN", "NONE"} or name.casefold() in seen_names:
+                        continue
+                    geometry = road.geometry
+                    if geometry.length < 0.001:
+                        continue
+                    point = geometry.representative_point()
+                    seen_names.add(name.casefold())
+                    label = ax.text(point.x, point.y, name, transform=ccrs.PlateCarree(),
+                                    fontsize=6.4, color="#111827", weight="bold",
+                                    ha="center", va="center", zorder=6)
+                    label.set_path_effects([patheffects.withStroke(linewidth=2.8, foreground="white", alpha=0.9)])
             except Exception:
                 logger.debug("Local primary-road overlay unavailable", exc_info=True)
         ax.scatter(lons, lats, s=55, c="#ff3b20", edgecolors="white", linewidths=1, transform=ccrs.PlateCarree(), zorder=5)
@@ -139,16 +161,16 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     info.text(0.025, 0.755, "LOCATION", fontsize=9, weight="bold", color="#6b7280")
     info.text(0.025, 0.712, f"{', '.join(county_names) or 'Unknown'} County  ·  {', '.join(sources) or 'Unknown'}\n{center_lat:.5f}, {center_lon:.5f}", fontsize=9.5, color="#111827", linespacing=1.35)
 
-    info.text(0, 0.595, "DETECTION WINDOW", fontsize=9, weight="bold", color="#6b7280")
-    info.text(0, 0.55, "First detected", fontsize=9, weight="bold", color="#111827")
-    info.text(0, 0.515, _display_time(incident.get('first_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
-    info.text(0, 0.425, "Last detected", fontsize=9, weight="bold", color="#111827")
-    info.text(0, 0.39, _display_time(incident.get('last_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
+    info.text(0.025, 0.635, "DETECTION WINDOW", fontsize=9, weight="bold", color="#6b7280")
+    info.text(0.025, 0.595, "First detected", fontsize=9, weight="bold", color="#111827")
+    info.text(0.025, 0.56, _display_time(incident.get('first_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
+    info.text(0.025, 0.485, "Last detected", fontsize=9, weight="bold", color="#111827")
+    info.text(0.025, 0.45, _display_time(incident.get('last_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
 
-    info.text(0.025, 0.265, "INCIDENT DETAILS", fontsize=9, weight="bold", color="#6b7280")
-    info.text(0.025, 0.225, "Open the incident page for updates and context:", fontsize=8.4, color="#374151")
-    info.text(0.025, 0.18, incident_url, fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)
-    info.text(0.025, 0.115, "Verify this heat signature before treating it as a confirmed fire.", fontsize=8.2, color="#374151", wrap=True)
+    info.text(0.025, 0.32, "INCIDENT DETAILS", fontsize=9, weight="bold", color="#6b7280")
+    info.text(0.025, 0.285, "Open the incident page for updates and context:", fontsize=8.4, color="#374151")
+    info.text(0.025, 0.24, incident_url, fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)
+    info.text(0.025, 0.14, "Verify this heat signature before treating it as a confirmed fire.", fontsize=8.2, color="#374151", wrap=True)
     info.legend(handles=[Patch(facecolor="#ef4444", label="Detection location")], loc="lower left", frameon=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=150, bbox_inches="tight", facecolor="white")
