@@ -19,7 +19,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-CONTRACT_VERSION = "verification-rainfall-v1"
+CONTRACT_VERSION = "verification-rainfall-v2"
 MM_PER_INCH = 25.4
 
 
@@ -28,39 +28,36 @@ class FuelRegime:
     name: str
     threshold_mm: float
     relief_hours: float
-    nlcd_classes: tuple[int, ...]
+    fbfm40_codes: tuple[int, ...]
 
 
 FUEL_REGIMES: tuple[FuelRegime, ...] = (
-    FuelRegime("grass_pasture", 2.5, 18.0, (71, 72, 73, 74, 81)),
-    FuelRegime("agriculture", 5.0, 48.0, (21, 22, 23, 24, 31, 82)),
-    FuelRegime("shrubland", 6.3, 72.0, (51, 52)),
-    FuelRegime("open_woodland", 12.7, 120.0, (90,)),
-    FuelRegime("dense_forest", 38.1, 336.0, (41, 42, 43)),
+    FuelRegime("grass_pasture", 2.5, 18.0, (101, 102, 103, 104, 105, 106, 107, 108, 109)),
+    FuelRegime("agriculture", 5.0, 48.0, (93,)),
+    FuelRegime("shrubland", 6.3, 72.0, (121, 122, 123, 124, 141, 142, 143, 144, 145, 146, 147, 148, 149)),
+    FuelRegime("open_woodland", 12.7, 120.0, (161, 162, 163, 164, 165)),
+    FuelRegime("dense_forest", 38.1, 336.0, (181, 182, 183, 184, 185, 186, 187, 188, 189, 201, 202, 203, 204)),
 )
 
-# The tuples above intentionally document the broad NLCD classes, but a class
-# can only have one operational regime.  This ordered map is the authoritative
-# lookup and avoids ambiguity for forest classes.
-NLCD_TO_REGIME: dict[int, str] = {
-    21: "agriculture", 22: "agriculture", 23: "agriculture", 24: "agriculture",
-    31: "agriculture",
-    41: "dense_forest", 42: "dense_forest", 43: "dense_forest",
-    51: "shrubland", 52: "shrubland",
-    71: "grass_pasture", 72: "grass_pasture", 73: "grass_pasture", 74: "grass_pasture",
-    81: "grass_pasture", 82: "agriculture",
-    90: "open_woodland",
+# LANDFIRE's 40 Scott & Burgan fire behavior fuel models (FBFM40), not raw
+# land cover, is the operational classification: grass (GR), grass-shrub
+# (GS), shrub (SH), timber-understory (TU), timber-litter (TL), and
+# slash-blowdown (SB). Non-burnable codes (urban 91, snow/ice 92, water 98,
+# barren 99) are intentionally absent and resolve to no regime; agricultural
+# non-burnable land (93) keeps an active fuel signal for suppression policy.
+FBFM40_TO_REGIME: dict[int, str] = {
+    code: regime.name for regime in FUEL_REGIMES for code in regime.fbfm40_codes
 }
 
 REGIME_BY_NAME = {item.name: item for item in FUEL_REGIMES}
 
 
-def default_nlcd_raster_path() -> Path:
-    """Return the standard NLCD path used by the acquisition script."""
+def default_fuel_raster_path() -> Path:
+    """Return the standard FBFM40 path used by the acquisition script."""
     return (
-        Path("/app/data/static/nlcd_class.tif")
+        Path("/app/data/static/fbfm40_class.tif")
         if Path("/app").exists()
-        else Path(__file__).resolve().parents[1] / "data" / "static" / "nlcd_class.tif"
+        else Path(__file__).resolve().parents[1] / "data" / "static" / "fbfm40_class.tif"
     )
 
 
@@ -69,7 +66,7 @@ def contract() -> dict[str, Any]:
     return {
         "version": CONTRACT_VERSION,
         "mm_per_inch": MM_PER_INCH,
-        "nlcd_to_regime": dict(NLCD_TO_REGIME),
+        "fbfm40_to_regime": dict(FBFM40_TO_REGIME),
         "regimes": {item.name: asdict(item) for item in FUEL_REGIMES},
         "formula": {
             "rainfall_fraction": "clamp(accumulation_mm / threshold_mm, 0, 1)",
@@ -80,12 +77,12 @@ def contract() -> dict[str, Any]:
     }
 
 
-def regime_for_nlcd(value: Any) -> str | None:
-    """Map a scalar NLCD class to a documented fuel regime."""
+def regime_for_fuel_model(value: Any) -> str | None:
+    """Map a scalar FBFM40 code to a documented fuel regime."""
     try:
         if value is None or not np.isfinite(float(value)):
             return None
-        return NLCD_TO_REGIME.get(int(round(float(value))))
+        return FBFM40_TO_REGIME.get(int(round(float(value))))
     except (TypeError, ValueError):
         return None
 
@@ -159,7 +156,7 @@ def adjust_category(raw_category: Any, suppression: Mapping[str, Any]) -> int | 
 def adjust_grid(
     raw_grid: np.ndarray,
     rainfall_mm: np.ndarray | float | None,
-    nlcd_grid: np.ndarray | None,
+    fuel_grid: np.ndarray | None,
     *,
     hours_since_rain: np.ndarray | float = 0.0,
     relative_humidity: np.ndarray | float | None = None,
@@ -169,7 +166,7 @@ def adjust_grid(
     raw = np.asarray(raw_grid, dtype=float)
     shape = raw.shape
     rain = np.broadcast_to(np.nan if rainfall_mm is None else rainfall_mm, shape)
-    nlcd = np.broadcast_to(np.nan, shape) if nlcd_grid is None else np.broadcast_to(nlcd_grid, shape)
+    fuel = np.broadcast_to(np.nan, shape) if fuel_grid is None else np.broadcast_to(fuel_grid, shape)
     age = np.broadcast_to(hours_since_rain, shape)
     rh = np.broadcast_to(np.nan if relative_humidity is None else relative_humidity, shape)
     wind = np.broadcast_to(np.nan if wind_kts is None else wind_kts, shape)
@@ -178,7 +175,7 @@ def adjust_grid(
     for index in np.ndindex(shape):
         suppression = category_reduction(
             rain[index],
-            regime_for_nlcd(nlcd[index]),
+            regime_for_fuel_model(fuel[index]),
             hours_since_rain=float(age[index]) if np.isfinite(age[index]) else 0.0,
             relative_humidity=float(rh[index]) if np.isfinite(rh[index]) else None,
             wind_kts=float(wind[index]) if np.isfinite(wind[index]) else None,
@@ -236,15 +233,15 @@ def provider_precedence(
     }
 
 
-def load_nlcd_raster() -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    """Load a configured NLCD GeoTIFF or static NetCDF bundle.
+def load_fuel_model_raster() -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Load a configured FBFM40 GeoTIFF or static NetCDF bundle.
 
-    The API never downloads geography.  ``VERIFICATION_NLCD_RASTER`` may point
+    The API never downloads geography.  ``VERIFICATION_FUEL_RASTER`` may point
     to a GeoTIFF; ``VERIFICATION_STATIC_BUNDLE`` may point to a NetCDF bundle
-    containing ``nlcd_class``, ``latitude`` and ``longitude``.
+    containing ``fuel_model``, ``latitude`` and ``longitude``.
     """
-    configured_raster = os.getenv("VERIFICATION_NLCD_RASTER", "").strip()
-    default_raster = default_nlcd_raster_path()
+    configured_raster = os.getenv("VERIFICATION_FUEL_RASTER", "").strip()
+    default_raster = default_fuel_raster_path()
     raster_path = configured_raster or (str(default_raster) if default_raster.is_file() else "")
     bundle_path = os.getenv("VERIFICATION_STATIC_BUNDLE", "").strip()
     if raster_path:
@@ -263,17 +260,17 @@ def load_nlcd_raster() -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, An
         import xarray as xr
 
         with xr.open_dataset(bundle_path) as ds:
-            required = {"nlcd_class", "latitude", "longitude"}
+            required = {"fuel_model", "latitude", "longitude"}
             missing = required - set(ds.variables)
             if missing:
-                raise ValueError(f"NLCD bundle missing {sorted(missing)}")
+                raise ValueError(f"fuel model bundle missing {sorted(missing)}")
             return (
-                np.asarray(ds["nlcd_class"].values),
+                np.asarray(ds["fuel_model"].values),
                 np.asarray(ds["longitude"].values),
                 np.asarray(ds["latitude"].values),
                 {"source": bundle_path, "format": "netcdf"},
             )
-    raise FileNotFoundError("VERIFICATION_NLCD_RASTER or VERIFICATION_STATIC_BUNDLE is not configured")
+    raise FileNotFoundError("VERIFICATION_FUEL_RASTER or VERIFICATION_STATIC_BUNDLE is not configured")
 
 
 def load_mrms_grid(valid_time: datetime) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
@@ -331,16 +328,16 @@ def load_mrms_grid(valid_time: datetime) -> tuple[np.ndarray, np.ndarray, np.nda
 
 def diagnostics() -> dict[str, Any]:
     """Return configuration state without raising during API health checks."""
-    default_raster = default_nlcd_raster_path()
+    default_raster = default_fuel_raster_path()
     configured = bool(
-        os.getenv("VERIFICATION_NLCD_RASTER", "").strip()
+        os.getenv("VERIFICATION_FUEL_RASTER", "").strip()
         or os.getenv("VERIFICATION_STATIC_BUNDLE", "").strip()
         or default_raster.is_file()
     )
     return {
         "contract_version": CONTRACT_VERSION,
-        "nlcd_configured": configured,
-        "nlcd_default_path": str(default_raster),
+        "fuel_configured": configured,
+        "fuel_default_path": str(default_raster),
         "mrms_configured": bool(os.getenv("VERIFICATION_MRMS_ROOT", "").strip()),
         "provider_precedence": ["mrms", "rtma", "station"],
     }

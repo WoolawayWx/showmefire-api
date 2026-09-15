@@ -24,7 +24,7 @@ from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
 from services.rtma_capture import fetch_rtma
 from services.mrms_capture import fetch_mrms, mrms_enabled
-from services.verification_rainfall import adjust_grid, load_mrms_grid, load_nlcd_raster
+from services.verification_rainfall import CONTRACT_VERSION, adjust_grid, load_fuel_model_raster, load_mrms_grid
 
 logger = logging.getLogger(__name__)
 
@@ -229,23 +229,23 @@ def _classify_grid(
     return result, lon, lat
 
 
-def _nlcd_for_grid(nlcd_values, nlcd_lon, nlcd_lat, target_lon, target_lat):
-    """Nearest-neighbour NLCD lookup for the RTMA grid."""
+def _nearest_grid_lookup(source_values, source_lon, source_lat, target_lon, target_lat):
+    """Nearest-neighbour resample of a source grid onto the RTMA grid."""
     from scipy.spatial import cKDTree
 
-    source_lon = np.asarray(nlcd_lon, dtype=float)
-    source_lat = np.asarray(nlcd_lat, dtype=float)
-    values = np.asarray(nlcd_values)
+    source_lon = np.asarray(source_lon, dtype=float)
+    source_lat = np.asarray(source_lat, dtype=float)
+    values = np.asarray(source_values)
     if source_lon.ndim == 1 and source_lat.ndim == 1:
         source_lon, source_lat = np.meshgrid(source_lon, source_lat)
     if values.shape != source_lon.shape:
-        raise ValueError("NLCD values and coordinates have incompatible shapes")
+        raise ValueError("source values and coordinates have incompatible shapes")
     source_lon = source_lon.ravel()
     source_lat = source_lat.ravel()
     values = values.ravel()
     valid = np.isfinite(source_lon) & np.isfinite(source_lat) & np.isfinite(values)
     if not valid.any():
-        raise ValueError("NLCD source contains no valid cells")
+        raise ValueError("source grid contains no valid cells")
     tree = cKDTree(np.column_stack((source_lat[valid], source_lon[valid])))
     indices = tree.query(
         np.column_stack((np.asarray(target_lat).ravel(), np.asarray(target_lon).ravel()))
@@ -406,7 +406,7 @@ def generate_rtma_peak(
     adjusted_peak = None
     lon = lat = None
     cumulative_precip = None
-    nlcd_source = None
+    fuel_source = None
     adjusted_hours = 0
     mrms_hours = 0
     used_hours = []
@@ -425,22 +425,22 @@ def generate_rtma_peak(
                     fuel_observations if use_measurements else None,
                 )
                 adjusted_current = current
-                if nlcd_source is None:
+                if fuel_source is None:
                     try:
-                        nlcd_source = load_nlcd_raster()
+                        fuel_source = load_fuel_model_raster()
                     except Exception as exc:
                         logger.info("Rainfall-adjusted RTMA map unavailable: %s", exc)
-                        nlcd_source = False
-                if nlcd_source:
+                        fuel_source = False
+                if fuel_source:
                     try:
-                        nlcd_grid = _nlcd_for_grid(
-                            nlcd_source[0], nlcd_source[1], nlcd_source[2],
+                        fuel_grid = _nearest_grid_lookup(
+                            fuel_source[0], fuel_source[1], fuel_source[2],
                             current_lon, current_lat,
                         )
                         mrms_used = False
                         try:
                             mrms = load_mrms_grid(hour.replace(tzinfo=None))
-                            precip = _nlcd_for_grid(
+                            precip = _nearest_grid_lookup(
                                 mrms[0], mrms[1], mrms[2], current_lon, current_lat
                             )
                             mrms_hours += 1
@@ -450,7 +450,7 @@ def generate_rtma_peak(
                                 try:
                                     fetch_mrms(hour)
                                     mrms = load_mrms_grid(hour.replace(tzinfo=None))
-                                    precip = _nlcd_for_grid(
+                                    precip = _nearest_grid_lookup(
                                         mrms[0], mrms[1], mrms[2], current_lon, current_lat
                                     )
                                     mrms_hours += 1
@@ -476,7 +476,7 @@ def generate_rtma_peak(
                         adjusted_current, _ = adjust_grid(
                             current,
                             precip,
-                            nlcd_grid,
+                            fuel_grid,
                             relative_humidity=rh_grid,
                             wind_kts=wind_grid,
                         )
@@ -547,7 +547,7 @@ def generate_rtma_peak(
             FUEL_MOISTURE_MODE=fuel_moisture_mode,
             RAWS_MEASURED_HOURS=str(measured_hours),
             RTMA_HOURS_USED=str(len(used_hours)),
-            RAINFALL_ADJUSTMENT_CONTRACT="verification-rainfall-v1",
+            RAINFALL_ADJUSTMENT_CONTRACT=CONTRACT_VERSION,
         )
     shutil.copy2(tif_path, today_tif)
     _render_png(peak, lon, lat, png_path, local_date, fuel_moisture_note)
@@ -565,9 +565,9 @@ def generate_rtma_peak(
             if adjusted_hours else None
         ),
         "rainfall_adjustment": {
-            "contract_version": "verification-rainfall-v1",
+            "contract_version": CONTRACT_VERSION,
             "hours_applied": adjusted_hours,
-            "nlcd_source": nlcd_source[3] if nlcd_source else None,
+            "fuel_source": fuel_source[3] if fuel_source else None,
             "provider": (
                 "mrms"
                 if mrms_hours == len(used_hours) and mrms_hours

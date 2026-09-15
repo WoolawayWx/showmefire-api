@@ -60,7 +60,7 @@ class FireIngestTests(unittest.TestCase):
     def _paths(self):
         return {"satdet": self.satdet_path, "ngfs": self.ngfs_path}
 
-    def test_ingests_viirs_feature_as_approved_unverified(self):
+    def test_ingests_viirs_feature_as_pending_unverified(self):
         self._write(self.satdet_path, [SATDET_FEATURE])
         self._write(self.ngfs_path, [])
         result = fire_ingest.ingest_detection_files(paths=self._paths())
@@ -69,7 +69,9 @@ class FireIngestTests(unittest.TestCase):
         events = database.list_fire_events(admin=True)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["source"], "viirs")
-        self.assertEqual(events[0]["status"], "approved")
+        # Raw satellite detections require admin moderation before they are
+        # public, same as user-submitted reports; see upsert_detection_event.
+        self.assertEqual(events[0]["status"], "pending")
         self.assertEqual(events[0]["verification_tier"], "unverified")
 
     def test_reingesting_is_idempotent(self):

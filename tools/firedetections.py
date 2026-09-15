@@ -28,9 +28,14 @@ LOG_FILE = LOGS_DIR / 'firedetections.log'
 logger = logging.getLogger('firedetections')
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+    try:
+        handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
+    except OSError as exc:
+        logger.addHandler(logging.NullHandler())
+        logging.getLogger(__name__).warning("firedetections file log unavailable at %s: %s", LOG_FILE, exc)
+    else:
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(handler)
 
 # API endpoint for advanced fire detections
 FIRMS_CSV_BASE_TEMPLATE = "https://firms.modaps.eosdis.nasa.gov/usfs/api/area/csv/{key}/{source}/{bbox}/1/"

@@ -2,8 +2,14 @@ import os
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from dotenv import load_dotenv
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+
+# main.py already loads .env before importing this module, but anything
+# else that imports core.security first (scripts, tests, workers) must not
+# silently fall back to the insecure default just because of import order.
+load_dotenv()
 
 # Configuration
 INSECURE_DEVELOPMENT_SECRET = "CHANGE-THIS-TO-A-RANDOM-SECRET-KEY"

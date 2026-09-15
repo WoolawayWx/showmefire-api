@@ -36,49 +36,59 @@ The product filename convention must remain:
 MRMS_<product>_00.00_YYYYMMDD-HH0000.grib2.gz
 ```
 
-## NLCD: infrequent operator download
+## LANDFIRE FBFM40: infrequent operator download
 
-NLCD is static geography and is intentionally not downloaded by the API
-scheduler or during application startup. Run this command when a new annual
-release is needed:
+The fuel model raster is static geography and is intentionally not downloaded
+by the API scheduler or during application startup. Run this command when a
+new release is needed:
 
 ```bash
 cd api
-python scripts/download_nlcd.py \
-  --year 2023 \
-  --output data/static/nlcd_class.tif
+python scripts/download_landfire.py \
+  --output data/static/fbfm40_class.tif
 ```
 
-The default source is the official USGS ScienceBase Annual NLCD Collection 1.0
-archive. The script resolves the requested year from the ScienceBase catalog,
-which avoids the requester-pays S3 endpoint. If USGS/MRLC changes the
-collection or you need another release, provide the official URL explicitly:
+The source is USGS/USFS LANDFIRE's 40 Scott & Burgan Fire Behavior Fuel
+Models (FBFM40) product, retrieved through LFPS (the LANDFIRE Product
+Service). The script submits an async clip-to-AOI job for the buffered
+Missouri bounding box, polls it to completion, and downloads the resulting
+GeoTIFF/ZIP over plain HTTPS — no browser, captcha, or AWS credentials
+required.
 
-```bash
-python scripts/download_nlcd.py \
-  --url "https://official-source.example/nlcd.tif" \
-  --output data/static/nlcd_class.tif
-```
+> USGS ScienceBase's Annual NLCD bulk-download flow was previously used for
+> this raster, but every year's archive is now S3-backed and its
+> captcha-gated `requestDownload` endpoint returns a server-side 500. LFPS was
+> adopted instead because it is genuinely scriptable and because FBFM40's
+> fire-behavior fuel classes are a better fit for this app's fuel-regime
+> policy than generic land-cover classes ever were.
+
+`--layer` selects the LANDFIRE edition (default `LF2023_FBFM40`; also
+available: `LF2024_FBFM40`). Avoid `LF2025_FBFM40` — as of this writing it
+errors for this AOI ("no raster statistics... AOI falls outside input data").
+`--email` is a required LFPS form field that is only format-validated, not
+verified; override it with `VERIFICATION_LANDFIRE_EMAIL` if you want job
+records attributable to a real address.
 
 The script:
 
-1. Resumes a partial download when possible.
-2. Accepts a GeoTIFF or a ZIP containing exactly one GeoTIFF.
+1. Submits the LFPS job and polls `--poll-seconds` apart for up to
+   `--timeout-minutes` (defaults: 10s / 30m).
+2. Accepts the resulting GeoTIFF or a ZIP containing exactly one GeoTIFF.
 3. Clips the source to the buffered Missouri bounding box.
 4. Preserves the source CRS and categorical values.
-5. Writes a SHA-256 manifest beside the output as `nlcd_class.json`.
+5. Writes a SHA-256 manifest beside the output as `fbfm40_class.json`.
 
 The API automatically checks the downloader's default output path:
 
 ```text
-api/data/static/nlcd_class.tif
+api/data/static/fbfm40_class.tif
 ```
 
 No environment variable is needed for that standard location. For a custom
 production mount, override it with:
 
 ```bash
-VERIFICATION_NLCD_RASTER=/app/data/static/nlcd_class.tif
+VERIFICATION_FUEL_RASTER=/app/data/static/fbfm40_class.tif
 ```
 
 The API only reads the raster and validates that it has one band, a CRS, and

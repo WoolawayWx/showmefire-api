@@ -326,6 +326,7 @@ def test_forecast_worker_memory_limit_is_reversible(monkeypatch):
 def test_forecast_job_progress_records_phase_details_and_history(tmp_path, monkeypatch):
     from services import forecast_v1_job
 
+    monkeypatch.delenv("SMF_FORECAST_V1_MEMORY_LIMIT_GB", raising=False)
     monkeypatch.setattr(forecast_v1_job, "JOB_STATE_PATH", tmp_path / "admin-job.json")
     forecast_v1_job._write_job({"job_id": "test", "status": "queued", "requested_at": "2026-09-07T12:00:00Z"})
     forecast_v1_job._report_progress(

@@ -84,7 +84,8 @@ class RegistrySafetyTests(unittest.TestCase):
             "feature_schema_version": "2.0.0", "rule_spec_version": "1.0.0",
             "training_window": {}, "data_match_policy": {}, "validation_folds": [],
             "class_support": {}, "feature_columns": [], "promotion_gates": {"offline": True},
-            "shadow_required": True, "shadow": {"passed": shadow_passed},
+            "shadow_required": True,
+            "shadow": {"passed": shadow_passed, "ground_truth": {"passed": shadow_passed}},
         }
 
     def test_promotion_gate_and_rollback(self):
@@ -98,7 +99,9 @@ class RegistrySafetyTests(unittest.TestCase):
                     channel="beta", metadata=self._metadata(False))
                 with self.assertRaisesRegex(ValueError, "shadow validation"):
                     versioning.promote("fuel_moisture", first_beta)
-                versioning.update_beta_metadata("fuel_moisture", {"shadow": {"passed": True}})
+                versioning.update_beta_metadata(
+                    "fuel_moisture", {"shadow": {"passed": True, "ground_truth": {"passed": True}}}
+                )
                 self.assertEqual(versioning.promote("fuel_moisture", first_beta), "0.0.1")
                 second_beta = versioning.register_trained_model("fuel_moisture", source2,
                     channel="beta", metadata=self._metadata(True))

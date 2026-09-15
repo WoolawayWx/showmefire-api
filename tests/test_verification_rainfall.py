@@ -8,23 +8,23 @@ from services.verification_rainfall import (
     adjust_grid,
     category_reduction,
     combine_category_grids,
-    default_nlcd_raster_path,
+    default_fuel_raster_path,
     provider_precedence,
-    regime_for_nlcd,
+    regime_for_fuel_model,
 )
 
 
-def test_nlcd_classes_map_to_documented_regimes():
-    assert regime_for_nlcd(71) == "grass_pasture"
-    assert regime_for_nlcd(82) == "agriculture"
-    assert regime_for_nlcd(52) == "shrubland"
-    assert regime_for_nlcd(42) == "dense_forest"
-    assert regime_for_nlcd(999) is None
+def test_fbfm40_codes_map_to_documented_regimes():
+    assert regime_for_fuel_model(101) == "grass_pasture"
+    assert regime_for_fuel_model(93) == "agriculture"
+    assert regime_for_fuel_model(142) == "shrubland"
+    assert regime_for_fuel_model(182) == "dense_forest"
+    assert regime_for_fuel_model(999) is None
 
 
-def test_default_nlcd_path_matches_acquisition_location():
-    assert default_nlcd_raster_path().name == "nlcd_class.tif"
-    assert default_nlcd_raster_path().parent.name == "static"
+def test_default_fuel_path_matches_acquisition_location():
+    assert default_fuel_raster_path().name == "fbfm40_class.tif"
+    assert default_fuel_raster_path().parent.name == "static"
 
 
 def test_threshold_event_reduces_danger_by_at_most_two_levels():
@@ -70,7 +70,7 @@ def test_grid_adjustment_and_combination_preserve_nodata():
     adjusted, reductions = adjust_grid(
         np.array([[4, 2], [np.nan, 1]], dtype=float),
         np.array([[5, 0], [5, 5]], dtype=float),
-        np.array([[71, 71], [71, 71]], dtype=float),
+        np.array([[101, 101], [101, 101]], dtype=float),
         relative_humidity=60,
         wind_kts=2,
     )

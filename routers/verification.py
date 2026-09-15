@@ -28,7 +28,7 @@ HISTORY_FILE = Path(REPORTS_DIR) / "validation_history.json"
 
 @router.get("/rainfall/diagnostics")
 async def get_rainfall_verification_diagnostics():
-    """Return the active rainfall/NLCD verification contract state."""
+    """Return the active rainfall/fuel-model verification contract state."""
     return rainfall_diagnostics()
 
 _METRIC_FIELD_MAP = {

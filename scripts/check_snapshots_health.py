@@ -5,23 +5,23 @@ from pathlib import Path
 
 DB_PATH = "data/showmefire.db"
 
-def test_registry_health():
+def check_registry_health():
     print("--- 1. Testing SQLite Connection ---")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # Get all snapshots
-    cursor.execute("SELECT snapshot_date, obs_path, forecast_path FROM snapshots")
+    cursor.execute("SELECT snapshot_date, obs_path, hrrr_filename FROM snapshots")
     rows = cursor.fetchall()
     print(f"Found {len(rows)} snapshots in database.")
 
     for date_str, obs_p, fc_p in rows:
         print(f"\nChecking Snapshot: {date_str}")
-        
+
         # Check if files exist on disk
         obs_exists = Path(obs_p).exists()
         fc_exists = Path(fc_p).exists()
-        
+
         print(f"  - Obs file exists: {obs_exists}")
         print(f"  - Forecast file exists: {fc_exists}")
 
@@ -39,4 +39,4 @@ def test_registry_health():
     conn.close()
 
 if __name__ == "__main__":
-    test_registry_health()
+    check_registry_health()

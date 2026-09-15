@@ -2,12 +2,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from core import security
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(main, "ADMIN_EMAIL", "admin@example.com")
     monkeypatch.setattr(main, "ADMIN_PASSWORD_HASH", "hash")
+    # TestClient talks over plain http; a Secure-flagged cookie (the real
+    # default when ENVIRONMENT=production, as on this deployment's .env)
+    # would be set but never sent back on the next request, which looks
+    # like an auth failure rather than the cookie-jar behavior it is.
+    # core.admin_session reads core.security.AUTH_COOKIE_SECURE live (via a
+    # module reference), while main.py's own logout path imported the value
+    # directly into its own namespace - both bindings need patching.
+    monkeypatch.setattr(main, "AUTH_COOKIE_SECURE", False)
+    monkeypatch.setattr(security, "AUTH_COOKIE_SECURE", False)
     monkeypatch.setattr(main, "verify_password", lambda password, hashed: password == "correct")
     monkeypatch.setattr(main, "init_database", lambda: None)
     monkeypatch.setattr(main, "run_initial_fetches", lambda: _noop())

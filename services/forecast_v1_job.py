@@ -58,8 +58,12 @@ def _configure_run_log() -> None:
     worker inherits the handler and its acquisition/pipeline-stage logs
     land here too, not just this module's.
     """
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(LOGS_DIR / "forecast_v1.log", maxBytes=5 * 1024 * 1024, backupCount=3)
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(LOGS_DIR / "forecast_v1.log", maxBytes=5 * 1024 * 1024, backupCount=3)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("forecast_v1 file log unavailable at %s: %s", LOGS_DIR, exc)
+        return
     handler.setFormatter(logging.Formatter("%(asctime)s [%(process)d] %(levelname)s %(name)s: %(message)s"))
     handler.addFilter(_ForecastV1LogFilter())
     logging.getLogger().addHandler(handler)

@@ -132,7 +132,7 @@ def public_list_posts(tag: Optional[str] = None, category: Optional[str] = None,
 def public_get_post(post_ref: str):
     """Return one public discussion post."""
     try:
-        post = get_post(int(post_ref)) if post_ref.isdigit() else get_post(0, slug=post_ref)
+        post = get_post(int(post_ref)) if str(post_ref).isdigit() else get_post(0, slug=post_ref)
     except Exception as e:
         logger.error(f"Failed to get public post {post_ref}: {e}")
         raise HTTPException(status_code=500, detail="Failed to load post")

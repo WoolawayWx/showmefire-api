@@ -16,11 +16,12 @@ or observed products.
 3. RTMA cache files contain hourly `apcp` in millimetres. The RTMA peak job
    accumulates these values through the 10:00–21:00 Central verification
    window.
-4. NLCD is loaded only from a local, administrator-configured raster or
-   NetCDF static bundle. The API does not download or rebuild geography.
-5. `services.verification_rainfall` maps NLCD classes to fuel regimes, applies
-   the rainfall policy, and reduces the ordinal category by zero, one, or two
-   levels.
+4. The LANDFIRE FBFM40 fuel model raster is loaded only from a local,
+   administrator-configured raster or NetCDF static bundle. The API does not
+   download or rebuild geography.
+5. `services.verification_rainfall` maps FBFM40 fuel model codes to fuel
+   regimes, applies the rainfall policy, and reduces the ordinal category by
+   zero, one, or two levels.
 6. `services.verification_artifacts` aligns the adjusted RTMA raster with the
    station raster and writes the combined GeoTIFF.
 
@@ -41,31 +42,34 @@ validation/provenance. A missing provider never becomes zero rain.
 The following settings are optional:
 
 ```bash
-# Either a categorical NLCD GeoTIFF...
-VERIFICATION_NLCD_RASTER=/data/static/nlcd_class.tif
+# Either a categorical FBFM40 GeoTIFF...
+VERIFICATION_FUEL_RASTER=/data/static/fbfm40_class.tif
 
-# ...or a NetCDF bundle containing nlcd_class, latitude, longitude.
+# ...or a NetCDF bundle containing fuel_model, latitude, longitude.
 VERIFICATION_STATIC_BUNDLE=/data/static/static_bundle.nc
 
 # Optional directory of administrator-provided MRMS NetCDF/GeoTIFF files.
 VERIFICATION_MRMS_ROOT=/data/mrms
 ```
 
-If neither NLCD setting is configured, the raw maps continue to work and the
-rainfall-adjusted RTMA/combined artifacts are reported as unavailable.
+If neither fuel-raster setting is configured, the raw maps continue to work
+and the rainfall-adjusted RTMA/combined artifacts are reported as
+unavailable.
 
-## NLCD regimes and thresholds
+## FBFM40 regimes and thresholds
 
-The current contract is `verification-rainfall-v1`. Values are millimetres of
-accumulated rain:
+The current contract is `verification-rainfall-v2`. Values are millimetres of
+accumulated rain. Codes are LANDFIRE's 40 Scott & Burgan Fire Behavior Fuel
+Models (FBFM40); non-burnable urban/snow-ice/water/barren codes (91, 92, 98,
+99) are intentionally unmapped and never produce a regime:
 
-| Regime | NLCD classes | Threshold | Relief e-folding period |
+| Regime | FBFM40 codes | Threshold | Relief e-folding period |
 | --- | --- | ---: | ---: |
-| Grass/pasture | 71–74, 81 | 2.5 mm | 18 hours |
-| Agriculture | 21–24, 31, 82 | 5.0 mm | 48 hours |
-| Shrubland | 51–52 | 6.3 mm | 72 hours |
-| Open woodland/woody wetland | 90 | 12.7 mm | 120 hours |
-| Dense forest | 41–43 | 38.1 mm | 336 hours |
+| Grass/pasture | 101–109 (GR1–GR9) | 2.5 mm | 18 hours |
+| Agriculture | 93 (NB3) | 5.0 mm | 48 hours |
+| Shrubland | 121–124 (GS1–GS4), 141–149 (SH1–SH9) | 6.3 mm | 72 hours |
+| Open woodland | 161–165 (TU1–TU5) | 12.7 mm | 120 hours |
+| Dense forest | 181–189 (TL1–TL9), 201–204 (SB1–SB4) | 38.1 mm | 336 hours |
 
 The dense-forest threshold is the midpoint of the requested 25–50+ mm range.
 It is intentionally a documented policy value, not a claim that all timber
@@ -86,8 +90,8 @@ adjusted_category = max(0, raw_category - category_reduction)
 ```
 
 The adjustment is bounded to two ordinal levels. Rain alone cannot create a
-Low observation from an unknown or invalid input, and missing NLCD/rainfall
-returns zero reduction with an explicit reason. High wind and low humidity
+Low observation from an unknown or invalid input, and a missing fuel model or
+rainfall value returns zero reduction with an explicit reason. High wind and low humidity
 reduce the effective relief. The current implementation does not model
 rainfall intensity, runoff, soil infiltration, or green-up rebound; those
 require additional validated inputs.
@@ -99,7 +103,7 @@ For a completed date `YYYY-MM-DD`, the API may expose:
 - `rtma_peak/archive/YYYY-MM-DD.tif`: original RTMA peak.
 - `observed_peak/archive/YYYY-MM-DD.tif`: original station-observed peak.
 - `rtma_peak_rainfall_adjusted/archive/YYYY-MM-DD.tif`: rainfall-adjusted
-  RTMA peak, when NLCD and RTMA APCP were usable.
+  RTMA peak, when the fuel model raster and RTMA APCP were usable.
 - `station_peak_rainfall_adjusted/archive/YYYY-MM-DD.tif`: station peak after
   transferring the spatial rainfall reduction diagnosed from raw versus
   adjusted RTMA. The station danger remains the source category.
@@ -116,7 +120,8 @@ fallback diagnostics.
 ## Reruns and troubleshooting
 
 The RTMA peak generation is performed before a verification rerun. Re-run the
-date after placing the required NLCD bundle in the configured path. Check:
+date after placing the required fuel model raster/bundle in the configured
+path. Check:
 
 ```text
 GET /verification/report/YYYY-MM-DD
@@ -125,7 +130,7 @@ GET /verification/report/YYYY-MM-DD
 Inspect `rainfall_suppression.artifacts.fallback_reason` and
 `rainfall_suppression.report_metadata`. Common reasons are:
 
-- `nlcd_configured` is false: configure one of the NLCD settings.
+- `fuel_configured` is false: configure one of the fuel raster settings.
 - `station_or_adjusted_rtma_raster_unavailable`: one raw input or adjusted
   RTMA artifact has not been generated.
 - `artifact_generation_failed:*`: inspect API logs for raster CRS/shape errors.

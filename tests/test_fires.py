@@ -275,6 +275,7 @@ class FiresRouterTests(unittest.TestCase):
         png = UploadFile(
             filename="fire.png",
             file=BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32),
+            headers=Headers({"content-type": "image/png"}),
         )
         uploaded = asyncio.run(fires_router.upload_fire_report_media(
             report["id"], report["upload_token"], png

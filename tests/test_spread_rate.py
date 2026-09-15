@@ -128,6 +128,7 @@ def test_generate_spread_rate_publishes_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(spread_rate, "STATUS_PATH", tmp_path / "testbed" / "spread_rate" / "status.json")
     monkeypatch.setattr(spread_rate, "TIF_PATH", tmp_path / "testbed" / "gis" / "spread_rate" / "spread_rate_latest.tif")
     monkeypatch.setattr(spread_rate, "PNG_PATH", tmp_path / "testbed" / "images" / "spread_rate_latest.png")
+    monkeypatch.setattr("services.beta_products.BETA_MANIFEST_PATH", tmp_path / "testbed" / "manifest.json")
 
     with xr.open_dataset(bundle_path) as ds:
         lat = np.asarray(ds.latitude.values, dtype=float)
@@ -151,6 +152,7 @@ def test_generate_spread_rate_reports_warming_without_history(tmp_path, monkeypa
     monkeypatch.setenv("FIRE_BEHAVIOR_STATIC_BUNDLE", str(bundle_path))
     monkeypatch.setattr(spread_rate, "BETA_ROOT", tmp_path / "testbed")
     monkeypatch.setattr(spread_rate, "STATUS_PATH", tmp_path / "testbed" / "spread_rate" / "status.json")
+    monkeypatch.setattr("services.beta_products.BETA_MANIFEST_PATH", tmp_path / "testbed" / "manifest.json")
     monkeypatch.setattr("services.spread_rate_moisture._root", lambda: tmp_path)
     monkeypatch.setattr("services.spread_rate.is_analysis_hour_cached", lambda *_args, **_kwargs: True)
     result = generate_spread_rate(allow_warming=True)
@@ -163,6 +165,7 @@ def test_generate_spread_rate_waits_for_uncached_rtma(tmp_path, monkeypatch):
     monkeypatch.setenv("FIRE_BEHAVIOR_STATIC_BUNDLE", str(bundle_path))
     monkeypatch.setattr(spread_rate, "BETA_ROOT", tmp_path / "testbed")
     monkeypatch.setattr(spread_rate, "STATUS_PATH", tmp_path / "testbed" / "spread_rate" / "status.json")
+    monkeypatch.setattr("services.beta_products.BETA_MANIFEST_PATH", tmp_path / "testbed" / "manifest.json")
     end = datetime(2026, 8, 30, 14, tzinfo=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr("services.spread_rate.is_analysis_hour_cached", lambda *_args, **_kwargs: False)
     result = generate_spread_rate(analysis_hour=end, allow_warming=False)
