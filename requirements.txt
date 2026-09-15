@@ -51,6 +51,7 @@ exceptiongroup==1.3.1
 fastapi==0.124.0
 fckitlib==0.14.1.8
 feedgen==1.0.0
+faster-whisper==1.2.0
 findlibs==0.1.2
 flexcache==0.3
 flexparser==0.4

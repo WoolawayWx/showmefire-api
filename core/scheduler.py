@@ -35,6 +35,8 @@ from services.forecast_jobs import trigger_beta_forecast
 from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast_v1_operational, run_forecast_v1_shadow
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
+from services.transcription import poll_bcfy_calls, recover_bcfy_jobs, purge_bcfy_audio
+from core.database import get_bcfy_config
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +304,33 @@ async def burn_ban_maintenance_job():
         logger.error("Burn-ban maintenance failed: %s", error, exc_info=True)
 
 
+async def bcfy_transcription_job():
+    """Poll and process configured Broadcastify calls without blocking the API."""
+    try:
+        result = await poll_bcfy_calls()
+        logger.info("BCFY transcription poll: %s", result)
+    except Exception as error:
+        logger.error("BCFY transcription poll failed: %s", error, exc_info=True)
+
+
+async def recover_bcfy_transcription_jobs():
+    try:
+        recovered = await asyncio.to_thread(recover_bcfy_jobs)
+        if recovered:
+            logger.warning("Requeued %d stale BCFY transcription jobs", recovered)
+    except Exception as error:
+        logger.error("BCFY transcription recovery failed: %s", error, exc_info=True)
+
+
+async def purge_bcfy_transcription_audio():
+    try:
+        removed = await asyncio.to_thread(purge_bcfy_audio, int(get_bcfy_config().get("retention_days", 7)))
+        if removed:
+            logger.info("BCFY transcription retention removed %d audio files", removed)
+    except Exception as error:
+        logger.error("BCFY transcription retention failed: %s", error, exc_info=True)
+
+
 async def refresh_burn_ban_static_map_job():
     """Refresh the public burn-ban PNG and GIS publication every morning.
 
@@ -553,6 +582,31 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=7,
         minute=0,
         id='refresh_burn_ban_static_map_daily',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        bcfy_transcription_job,
+        "interval",
+        minutes=max(1, int(os.getenv("BCFY_POLL_MINUTES", "5"))),
+        id="bcfy_transcription",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        recover_bcfy_transcription_jobs,
+        "interval",
+        minutes=10,
+        id="bcfy_transcription_recovery",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        purge_bcfy_transcription_audio,
+        "cron",
+        hour=3,
+        minute=35,
+        id="bcfy_transcription_retention",
         max_instances=1,
         coalesce=True,
     )

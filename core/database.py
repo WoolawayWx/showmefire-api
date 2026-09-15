@@ -14,6 +14,115 @@ from typing import Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _ensure_bcfy_transcription_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bcfy_transcription_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            channel_id TEXT NOT NULL DEFAULT '6847-24421',
+            department_name TEXT NOT NULL DEFAULT 'Central Crossing Fire Protection District - Shell Knob',
+            feed_id TEXT NOT NULL DEFAULT '30217',
+            group_id TEXT NOT NULL DEFAULT '6847-24421',
+            poll_minutes INTEGER NOT NULL DEFAULT 5,
+            model_name TEXT NOT NULL DEFAULT 'small.en',
+            classification_threshold REAL NOT NULL DEFAULT 0.65,
+            retention_days INTEGER NOT NULL DEFAULT 7,
+            last_pos INTEGER,
+            updated_by TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO bcfy_transcription_config (id, channel_id)
+        VALUES (1, '6847-24421')
+    ''')
+    cursor.execute("PRAGMA table_info(bcfy_transcription_config)")
+    config_columns = {row[1] for row in cursor.fetchall()}
+    for name, definition in (
+        ("department_name", "TEXT NOT NULL DEFAULT 'Central Crossing Fire Protection District - Shell Knob'"),
+        ("feed_id", "TEXT NOT NULL DEFAULT '30217'"),
+        ("group_id", "TEXT NOT NULL DEFAULT '6847-24421'"),
+        ("last_pos", "INTEGER"),
+    ):
+        if name not in config_columns:
+            cursor.execute(f"ALTER TABLE bcfy_transcription_config ADD COLUMN {name} {definition}")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bcfy_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            external_id TEXT NOT NULL UNIQUE,
+            channel_id TEXT NOT NULL,
+            started_at TEXT,
+            duration_seconds REAL,
+            audio_url TEXT NOT NULL DEFAULT '',
+            audio_path TEXT NOT NULL DEFAULT '',
+            audio_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'discovered',
+            transcript TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT '',
+            model_name TEXT NOT NULL DEFAULT '',
+            classification TEXT NOT NULL DEFAULT 'pending',
+            confidence REAL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            error TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            review_state TEXT NOT NULL DEFAULT 'pending',
+            fire_signal_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bcfy_calls_status ON bcfy_calls(status, updated_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bcfy_calls_classification ON bcfy_calls(classification, started_at DESC)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bcfy_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_pos INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("SELECT COUNT(*) FROM bcfy_channels")
+    if cursor.fetchone()[0] == 0:
+        existing = cursor.execute(
+            "SELECT group_id, channel_id, department_name FROM bcfy_transcription_config WHERE id = 1"
+        ).fetchone()
+        if existing:
+            seed_group_id = existing[0] or existing[1] or "6847-24421"
+            cursor.execute(
+                "INSERT OR IGNORE INTO bcfy_channels (group_id, label) VALUES (?, ?)",
+                (seed_group_id, existing[2] or ""),
+            )
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bcfy_job_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (call_id) REFERENCES bcfy_calls(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bcfy_job_events_call ON bcfy_job_events(call_id, created_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bcfy_fire_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            call_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            location_text TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '',
+            confidence REAL,
+            reviewed_by TEXT NOT NULL DEFAULT '',
+            reviewed_at TIMESTAMP,
+            linked_fire_event_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (call_id) REFERENCES bcfy_calls(id)
+        )
+    ''')
+
+
 def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS discord_admin_settings (
@@ -602,6 +711,8 @@ def init_database():
 
     # 10. Discord admin settings (singleton config row for website control panel)
     _ensure_discord_settings_table(cursor)
+    # 10a. Broadcastify call transcription pipeline
+    _ensure_bcfy_transcription_tables(cursor)
 
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_valid_time ON forecasts(valid_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_date ON snapshots(snapshot_date)')
@@ -3854,5 +3965,252 @@ def purge_burn_ban_throttle_rows(older_than_hours: int = 48) -> int:
         purged = cursor.rowcount
         conn.commit()
         return purged
+    finally:
+        conn.close()
+
+
+def _bcfy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(get_db_path(), timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def get_bcfy_config() -> Dict:
+    conn = _bcfy_conn()
+    try:
+        row = conn.execute("SELECT * FROM bcfy_transcription_config WHERE id = 1").fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def update_bcfy_config(**values) -> Dict:
+    allowed = {
+        "enabled", "channel_id", "department_name", "feed_id", "group_id",
+        "poll_minutes", "model_name",
+        "classification_threshold", "retention_days", "updated_by", "last_pos",
+    }
+    updates = {key: value for key, value in values.items() if key in allowed and value is not None}
+    if not updates:
+        return get_bcfy_config()
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            f"UPDATE bcfy_transcription_config SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+            (*updates.values(),),
+        )
+        conn.commit()
+        return get_bcfy_config()
+    finally:
+        conn.close()
+
+
+def list_bcfy_channels(enabled_only: bool = False) -> List[Dict]:
+    conn = _bcfy_conn()
+    try:
+        query = "SELECT * FROM bcfy_channels"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY id ASC"
+        return [dict(row) for row in conn.execute(query).fetchall()]
+    finally:
+        conn.close()
+
+
+def get_bcfy_channel(channel_id: int) -> Optional[Dict]:
+    conn = _bcfy_conn()
+    try:
+        row = conn.execute("SELECT * FROM bcfy_channels WHERE id = ?", (channel_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def add_bcfy_channel(group_id: str, label: str = "") -> Dict:
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            "INSERT INTO bcfy_channels (group_id, label) VALUES (?, ?)",
+            (group_id.strip(), label.strip()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bcfy_channels WHERE group_id = ?", (group_id.strip(),)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def update_bcfy_channel(channel_id: int, **values) -> Optional[Dict]:
+    allowed = {"label", "enabled", "last_pos"}
+    updates = {key: value for key, value in values.items() if key in allowed and value is not None}
+    if not updates:
+        return get_bcfy_channel(channel_id)
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            f"UPDATE bcfy_channels SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (*updates.values(), channel_id),
+        )
+        conn.commit()
+        return get_bcfy_channel(channel_id)
+    finally:
+        conn.close()
+
+
+def delete_bcfy_channel(channel_id: int) -> bool:
+    conn = _bcfy_conn()
+    try:
+        cursor = conn.execute("DELETE FROM bcfy_channels WHERE id = ?", (channel_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def create_bcfy_call(call: Dict) -> Optional[Dict]:
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO bcfy_calls
+                (external_id, channel_id, started_at, duration_seconds, audio_url)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                call["external_id"], call.get("channel_id", ""),
+                call.get("started_at"), call.get("duration_seconds"),
+                call.get("audio_url", ""),
+            ),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bcfy_calls WHERE external_id = ?", (call["external_id"],)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_bcfy_call(call_id: int) -> Optional[Dict]:
+    conn = _bcfy_conn()
+    try:
+        row = conn.execute("SELECT * FROM bcfy_calls WHERE id = ?", (call_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_bcfy_calls(limit: int = 50, offset: int = 0, status: Optional[str] = None) -> List[Dict]:
+    conn = _bcfy_conn()
+    try:
+        params: list = []
+        query = "SELECT * FROM bcfy_calls"
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, min(limit, 200)), max(0, offset)])
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def update_bcfy_call(call_id: int, **values) -> Optional[Dict]:
+    allowed = {
+        "audio_path", "audio_sha256", "status", "transcript", "language",
+        "model_name", "classification", "confidence", "evidence_json",
+        "error", "attempts", "review_state", "fire_signal_id",
+    }
+    updates = {key: value for key, value in values.items() if key in allowed}
+    if not updates:
+        return get_bcfy_call(call_id)
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            f"UPDATE bcfy_calls SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (*updates.values(), call_id),
+        )
+        conn.commit()
+        return get_bcfy_call(call_id)
+    finally:
+        conn.close()
+
+
+def add_bcfy_job_event(call_id: int, state: str, message: str = "") -> None:
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            "INSERT INTO bcfy_job_events (call_id, state, message) VALUES (?, ?, ?)",
+            (call_id, state, message[:1000]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_bcfy_job_events(call_id: int) -> List[Dict]:
+    conn = _bcfy_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM bcfy_job_events WHERE call_id = ? ORDER BY id ASC", (call_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def reclaim_bcfy_stale_calls() -> int:
+    conn = _bcfy_conn()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE bcfy_calls SET status = 'discovered', error = 'Requeued after API restart',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('downloading', 'transcribing', 'classifying')
+            """
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def create_bcfy_fire_signal(call_id: int, confidence: Optional[float], evidence: str) -> Dict:
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO bcfy_fire_signals (call_id, confidence, evidence)
+            VALUES (?, ?, ?)
+            ON CONFLICT(call_id) DO UPDATE SET confidence = excluded.confidence,
+                evidence = excluded.evidence
+            """,
+            (call_id, confidence, evidence[:2000]),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bcfy_fire_signals WHERE call_id = ?", (call_id,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def review_bcfy_fire_signal(signal_id: int, status: str, reviewer: str, linked_fire_event_id: Optional[int] = None) -> Optional[Dict]:
+    if status not in {"confirmed", "rejected"}:
+        raise ValueError("status must be confirmed or rejected")
+    conn = _bcfy_conn()
+    try:
+        conn.execute(
+            """
+            UPDATE bcfy_fire_signals
+            SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP,
+                linked_fire_event_id = ?
+            WHERE id = ?
+            """,
+            (status, reviewer, linked_fire_event_id, signal_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bcfy_fire_signals WHERE id = ?", (signal_id,)).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()

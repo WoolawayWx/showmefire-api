@@ -14,6 +14,19 @@ LOGS_DIR = Path("logs")
 ARCHIVE_DIR = Path("archive")
 ARCHIVE_RAW_DATA_DIR = ARCHIVE_DIR / "raw_data"
 DATA_DIR = Path("data")
+BCFY_DATA_DIR = Path(os.getenv("BCFY_DATA_DIR", str(DATA_DIR / "bcfy")))
+BCFY_AUDIO_DIR = BCFY_DATA_DIR / "audio"
+BCFY_TRANSCRIPT_DIR = BCFY_DATA_DIR / "transcripts"
+
+# BCFY_KEY_ID is the API Key ID (JWT "kid"), BCFY_KEY_SECRET is the API Key
+# itself (the HMAC-SHA256 signing secret), and BCFY_ISSUER is the Application
+# ID (JWT "iss"). Broadcastify's Calls API authenticates with a self-signed
+# JWT minted locally per request -- there is no token-exchange HTTP call.
+BCFY_KEY_ID = os.getenv("BCFY_KEYID", "").strip()
+BCFY_KEY_SECRET = os.getenv("BCFY_KEYSECRET", "").strip()
+BCFY_ISSUER = os.getenv("BCFY_ISSUER", "").strip()
+BCFY_API_BASE_URL = os.getenv("BCFY_API_BASE_URL", "https://api.bcfy.io").rstrip("/")
+BCFY_CALLS_URL = os.getenv("BCFY_CALLS_URL", "").strip()
 
 # File Paths
 MISSOURI_FIRES_JSON = DATA_DIR / "missouri_fires_coords.json"
