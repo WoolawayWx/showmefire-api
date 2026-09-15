@@ -49,8 +49,10 @@ python scripts/download_nlcd.py \
   --output data/static/nlcd_class.tif
 ```
 
-The default source is the USGS Annual NLCD Collection 1.0 CONUS mosaic. If
-USGS/MRLC changes the collection path, provide the official URL explicitly:
+The default source is the official USGS ScienceBase Annual NLCD Collection 1.0
+archive. The script resolves the requested year from the ScienceBase catalog,
+which avoids the requester-pays S3 endpoint. If USGS/MRLC changes the
+collection or you need another release, provide the official URL explicitly:
 
 ```bash
 python scripts/download_nlcd.py \
