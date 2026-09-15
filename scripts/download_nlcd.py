@@ -4,8 +4,9 @@ This is an explicit operator command, not an API startup task:
 
     python scripts/download_nlcd.py --year 2023 --output data/static/nlcd_class.tif
 
-Use ``--url`` when USGS changes the collection/version path.  The default is
-the documented USGS Annual NLCD Collection 1.0 CONUS mosaic URL.
+Use ``--url`` for another official release. The default resolves the
+year-specific archive through the official USGS ScienceBase catalog, avoiding
+the requester-pays S3 endpoint.
 """
 from __future__ import annotations
 
@@ -25,10 +26,7 @@ from rasterio.windows import from_bounds
 from rasterio.warp import transform_bounds
 
 BBOX = (-96.8, 34.8, -88.1, 41.8)  # west, south, east, north
-DEFAULT_URL = (
-    "https://usgs-landcover.s3.us-west-2.amazonaws.com/"
-    "annual-nlcd/c1/v0/cu/mosaic/Annual_NLCD_Land_Cover_{year}_CU_C1V0.tif"
-)
+SCIENCEBASE_ITEM_URL = "https://www.sciencebase.gov/catalog/item/664e0d2bd34e702fe8744536?format=json"
 
 
 def sha256(path: Path) -> str:
@@ -52,6 +50,20 @@ def download(url: str, target: Path) -> None:
                 if chunk:
                     output.write(chunk)
     partial.replace(target)
+
+
+def resolve_sciencebase_url(year: str) -> tuple[str, str]:
+    """Resolve the official year-specific NLCD archive file."""
+    filename = f"Annual_NLCD_LndCov_{year}_CU_C1V0.zip"
+    response = requests.get(SCIENCEBASE_ITEM_URL, timeout=60)
+    response.raise_for_status()
+    files = response.json().get("files", [])
+    match = next((item for item in files if item.get("name") == filename), None)
+    if not match or not match.get("downloadUri"):
+        raise RuntimeError(
+            f"ScienceBase does not list {filename}; pass --url for another official release"
+        )
+    return match["downloadUri"], filename
 
 
 def materialize(path: Path, directory: Path) -> Path:
@@ -119,10 +131,13 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("data/static/nlcd_class.tif"))
     parser.add_argument("--release", default="Annual NLCD Collection 1.0")
     args = parser.parse_args()
-    url = args.url or DEFAULT_URL.format(year=args.year)
+    if args.url:
+        url = args.url
+        source_name = Path(url.split("?")[0]).name or "nlcd_source.zip"
+    else:
+        url, source_name = resolve_sciencebase_url(str(args.year))
 
     with tempfile.TemporaryDirectory(prefix="nlcd-") as temp:
-        source_name = Path(url.split("?")[0]).name or "nlcd_source.tif"
         downloaded = Path(temp) / source_name
         download(url, downloaded)
         source = materialize(downloaded, Path(temp))
