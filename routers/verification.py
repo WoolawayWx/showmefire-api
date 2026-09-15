@@ -16,12 +16,20 @@ from fastapi import APIRouter, HTTPException, Query
 from services.verification_metrics import directional_metrics
 
 from core.config import ARCHIVE_RAW_DATA_DIR, ARCHIVE_DIR, GIS_DIR, IMAGES_DIR, REPORTS_DIR
+from services.verification_artifacts import build_combined_verification_artifacts
+from services.verification_rainfall import diagnostics as rainfall_diagnostics
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/verification", tags=["verification"])
 
 HISTORY_FILE = Path(REPORTS_DIR) / "validation_history.json"
+
+
+@router.get("/rainfall/diagnostics")
+async def get_rainfall_verification_diagnostics():
+    """Return the active rainfall/NLCD verification contract state."""
+    return rainfall_diagnostics()
 
 _METRIC_FIELD_MAP = {
     "temp_mae": "Temperature (C)",
@@ -150,6 +158,18 @@ def _rtma_peak_png_path(date: str) -> Path:
     return Path(IMAGES_DIR) / "rtma_peak" / "archive" / f"{date}.png"
 
 
+def _rainfall_adjusted_rtma_tif_path(date: str) -> Path:
+    return Path(GIS_DIR) / "rtma_peak_rainfall_adjusted" / "archive" / f"{date}.tif"
+
+
+def _combined_tif_path(date: str) -> Path:
+    return Path(GIS_DIR) / "verification_combined" / "archive" / f"{date}.tif"
+
+
+def _rainfall_adjusted_station_tif_path(date: str) -> Path:
+    return Path(GIS_DIR) / "station_peak_rainfall_adjusted" / "archive" / f"{date}.tif"
+
+
 def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:
     value = entry.get("metrics", {}).get(metric_label, {}).get("mae")
     return value if isinstance(value, (int, float)) else None
@@ -204,6 +224,7 @@ async def get_verification_report(date: str):
     forecast_peak_png_path = _forecast_peak_png_path(date)
     rtma_peak_tif_path = _rtma_peak_tif_path(date)
     rtma_peak_png_path = _rtma_peak_png_path(date)
+    artifact_result = build_combined_verification_artifacts(date)
 
     return {
         "date": summary.get("date", date),
@@ -235,6 +256,23 @@ async def get_verification_report(date: str):
             "rtma_peak_png": (
                 f"rtma_peak/archive/{date}.png" if rtma_peak_png_path.exists() else None
             ),
+            "rainfall_adjusted_rtma_tif": (
+                f"rtma_peak_rainfall_adjusted/archive/{date}.tif"
+                if _rainfall_adjusted_rtma_tif_path(date).exists() else None
+            ),
+            "combined_verification_tif": (
+                f"verification_combined/archive/{date}.tif"
+                if _combined_tif_path(date).exists() else None
+            ),
+            "rainfall_adjusted_station_tif": (
+                f"station_peak_rainfall_adjusted/archive/{date}.tif"
+                if _rainfall_adjusted_station_tif_path(date).exists() else None
+            ),
+        },
+        "rainfall_suppression": {
+            **rainfall_diagnostics(),
+            "artifacts": artifact_result,
+            "report_metadata": summary.get("rainfall_suppression", {}),
         },
     }
 

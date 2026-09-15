@@ -14,6 +14,7 @@ from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
+from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
@@ -186,6 +187,17 @@ async def capture_latest_rtma():
             logger.error("RTMA capture succeeded but retention cleanup failed: %s", cleanup_error, exc_info=True)
     except Exception as e:
         logger.error("RTMA capture failed: %s", e, exc_info=True)
+
+
+async def capture_latest_mrms():
+    """Cache the latest complete MRMS QPE when explicitly enabled."""
+    if not mrms_enabled():
+        return
+    try:
+        await asyncio.to_thread(fetch_mrms)
+        await asyncio.to_thread(cleanup_mrms_cache)
+    except Exception as error:
+        logger.error("MRMS capture failed: %s", error, exc_info=True)
 
 
 async def verify_v5_shadow_observations():
@@ -381,6 +393,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         'interval',
         minutes=spread_rate_poll,
         id='rtma_spread_rate_pipeline',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        capture_latest_mrms,
+        'interval',
+        minutes=15,
+        id='capture_latest_mrms',
         max_instances=1,
         coalesce=True,
     )

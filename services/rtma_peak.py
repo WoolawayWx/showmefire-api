@@ -23,6 +23,8 @@ from core.fire_danger import calculate_fire_danger
 from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
 from services.rtma_capture import fetch_rtma
+from services.mrms_capture import fetch_mrms, mrms_enabled
+from services.verification_rainfall import adjust_grid, load_mrms_grid, load_nlcd_raster
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ RTMA_PEAK_TODAY_TIF = Path(GIS_DIR) / "rtma_peak_today.tif"
 RTMA_PEAK_IMAGE_DIR = Path(IMAGES_DIR) / "rtma_peak"
 RTMA_PEAK_IMAGE_ARCHIVE_DIR = RTMA_PEAK_IMAGE_DIR / "archive"
 RTMA_PEAK_TODAY_PNG = Path(IMAGES_DIR) / "mo-rtma-observedpeakfiredanger.png"
+RTMA_ADJUSTED_PEAK_DIR = Path(GIS_DIR) / "rtma_peak_rainfall_adjusted"
 
 # Same fire-weather window as DailyForecast peak maps and endOfDayReport.
 PEAK_WINDOW_START_HOUR = 10
@@ -226,6 +229,30 @@ def _classify_grid(
     return result, lon, lat
 
 
+def _nlcd_for_grid(nlcd_values, nlcd_lon, nlcd_lat, target_lon, target_lat):
+    """Nearest-neighbour NLCD lookup for the RTMA grid."""
+    from scipy.spatial import cKDTree
+
+    source_lon = np.asarray(nlcd_lon, dtype=float)
+    source_lat = np.asarray(nlcd_lat, dtype=float)
+    values = np.asarray(nlcd_values)
+    if source_lon.ndim == 1 and source_lat.ndim == 1:
+        source_lon, source_lat = np.meshgrid(source_lon, source_lat)
+    if values.shape != source_lon.shape:
+        raise ValueError("NLCD values and coordinates have incompatible shapes")
+    source_lon = source_lon.ravel()
+    source_lat = source_lat.ravel()
+    values = values.ravel()
+    valid = np.isfinite(source_lon) & np.isfinite(source_lat) & np.isfinite(values)
+    if not valid.any():
+        raise ValueError("NLCD source contains no valid cells")
+    tree = cKDTree(np.column_stack((source_lat[valid], source_lon[valid])))
+    indices = tree.query(
+        np.column_stack((np.asarray(target_lat).ravel(), np.asarray(target_lon).ravel()))
+    )[1]
+    return values[valid][indices].reshape(np.asarray(target_lat).shape)
+
+
 def _missouri_mask(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
     import geopandas as gpd
     from shapely.geometry import Point
@@ -376,7 +403,12 @@ def generate_rtma_peak(
     fuel_archive = _load_fuel_moisture_archive(local_date, fuel_moisture_archive_dir)
 
     peak = None
+    adjusted_peak = None
     lon = lat = None
+    cumulative_precip = None
+    nlcd_source = None
+    adjusted_hours = 0
+    mrms_hours = 0
     used_hours = []
     measured_hours = 0
     measured_station_observations = 0
@@ -392,11 +424,72 @@ def generate_rtma_peak(
                     "score" if experimental else None,
                     fuel_observations if use_measurements else None,
                 )
+                adjusted_current = current
+                if nlcd_source is None:
+                    try:
+                        nlcd_source = load_nlcd_raster()
+                    except Exception as exc:
+                        logger.info("Rainfall-adjusted RTMA map unavailable: %s", exc)
+                        nlcd_source = False
+                if nlcd_source:
+                    try:
+                        nlcd_grid = _nlcd_for_grid(
+                            nlcd_source[0], nlcd_source[1], nlcd_source[2],
+                            current_lon, current_lat,
+                        )
+                        mrms_used = False
+                        try:
+                            mrms = load_mrms_grid(hour.replace(tzinfo=None))
+                            precip = _nlcd_for_grid(
+                                mrms[0], mrms[1], mrms[2], current_lon, current_lat
+                            )
+                            mrms_hours += 1
+                            mrms_used = True
+                        except (FileNotFoundError, ValueError):
+                            if mrms_enabled():
+                                try:
+                                    fetch_mrms(hour)
+                                    mrms = load_mrms_grid(hour.replace(tzinfo=None))
+                                    precip = _nlcd_for_grid(
+                                        mrms[0], mrms[1], mrms[2], current_lon, current_lat
+                                    )
+                                    mrms_hours += 1
+                                    mrms_used = True
+                                except Exception:
+                                    logger.info("MRMS unavailable for %s; using RTMA APCP", hour)
+                        if not mrms_used:
+                            apcp = _squeeze2d(np.asarray(ds["apcp"].values, dtype=float))
+                            if apcp.shape != current.shape:
+                                raise ValueError("RTMA APCP shape does not match danger grid")
+                            precip = apcp
+                        if precip.shape != current.shape:
+                            raise ValueError("realized precipitation shape does not match danger grid")
+                        cumulative_precip = (
+                            precip if cumulative_precip is None else cumulative_precip + precip
+                        )
+                        precip = cumulative_precip
+                        rh_grid = _squeeze2d(np.asarray(ds["r2"].values, dtype=float))
+                        wind_grid = np.hypot(
+                            _squeeze2d(np.asarray(ds["u10"].values, dtype=float)),
+                            _squeeze2d(np.asarray(ds["v10"].values, dtype=float)),
+                        ) * 1.9438444924406
+                        adjusted_current, _ = adjust_grid(
+                            current,
+                            precip,
+                            nlcd_grid,
+                            relative_humidity=rh_grid,
+                            wind_kts=wind_grid,
+                        )
+                        adjusted_hours += 1
+                    except Exception:
+                        logger.exception("Unable to apply rainfall suppression for RTMA hour %s", hour)
                 if peak is None:
                     peak = current
+                    adjusted_peak = adjusted_current
                     lon, lat = current_lon, current_lat
                 elif current.shape == peak.shape and np.allclose(current_lon, lon) and np.allclose(current_lat, lat):
                     peak = np.fmax(peak, current)
+                    adjusted_peak = np.fmax(adjusted_peak, adjusted_current)
                 else:
                     logger.warning("Skipping RTMA hour %s because its grid does not match the first hour", hour)
                     continue
@@ -409,6 +502,8 @@ def generate_rtma_peak(
 
     if peak is None or not np.isfinite(peak).any():
         raise RuntimeError(f"No usable RTMA analyses found for {local_date}")
+    if adjusted_peak is None:
+        adjusted_peak = peak
 
     if measured_hours:
         fuel_moisture_mode = "rh_estimate_calibrated_with_raws"
@@ -430,11 +525,21 @@ def generate_rtma_peak(
     tif_dir = gis_dir / "rtma_peak" / "archive"
     png_dir = image_dir / "rtma_peak" / "archive"
     tif_path = tif_dir / f"{local_date.isoformat()}.tif"
+    adjusted_tif_path = gis_dir / "rtma_peak_rainfall_adjusted" / "archive" / f"{local_date.isoformat()}.tif"
     png_path = png_dir / f"{local_date.isoformat()}.png"
     metadata_path = tif_dir / f"{local_date.isoformat()}.json"
     today_tif.parent.mkdir(parents=True, exist_ok=True)
     if not export_geotiff(peak, lon, lat, tif_path, run_date=datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ)):
         raise RuntimeError(f"Failed to write RTMA peak GeoTIFF for {local_date}")
+    adjusted_tif_path.parent.mkdir(parents=True, exist_ok=True)
+    if not export_geotiff(
+        adjusted_peak,
+        lon,
+        lat,
+        adjusted_tif_path,
+        run_date=datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ),
+    ):
+        logger.warning("Failed to write rainfall-adjusted RTMA GeoTIFF for %s", local_date)
     import rasterio
     with rasterio.open(tif_path, "r+") as destination:
         destination.update_tags(
@@ -442,6 +547,7 @@ def generate_rtma_peak(
             FUEL_MOISTURE_MODE=fuel_moisture_mode,
             RAWS_MEASURED_HOURS=str(measured_hours),
             RTMA_HOURS_USED=str(len(used_hours)),
+            RAINFALL_ADJUSTMENT_CONTRACT="verification-rainfall-v1",
         )
     shutil.copy2(tif_path, today_tif)
     _render_png(peak, lon, lat, png_path, local_date, fuel_moisture_note)
@@ -454,6 +560,23 @@ def generate_rtma_peak(
         "peak_class": int(np.nanmax(peak)),
         "tif": f"rtma_peak/archive/{local_date.isoformat()}.tif",
         "png": f"rtma_peak/archive/{local_date.isoformat()}.png",
+        "rainfall_adjusted_tif": (
+            f"rtma_peak_rainfall_adjusted/archive/{local_date.isoformat()}.tif"
+            if adjusted_hours else None
+        ),
+        "rainfall_adjustment": {
+            "contract_version": "verification-rainfall-v1",
+            "hours_applied": adjusted_hours,
+            "nlcd_source": nlcd_source[3] if nlcd_source else None,
+            "provider": (
+                "mrms"
+                if mrms_hours == len(used_hours) and mrms_hours
+                else "mrms_then_rtma" if mrms_hours
+                else "rtma"
+            ),
+            "mrms_hours": mrms_hours,
+            "rtma_fallback_hours": max(0, adjusted_hours - mrms_hours),
+        },
         "experimental": experimental,
         "fuel_moisture": {
             "mode": fuel_moisture_mode,

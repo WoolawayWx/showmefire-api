@@ -18,6 +18,7 @@ from core.fire_danger import calculate_fire_danger as canonical_fire_danger
 from core.fire_danger import CATEGORY_LABELS, RULE_SPEC
 from core.ignored_stations import get_ignored_stations
 from core import observation_qc
+from services.verification_rainfall import CONTRACT_VERSION, provider_precedence
 
 # Configure logging
 logging.basicConfig(
@@ -358,6 +359,13 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
         rhs = obs.get('relative_humidity_set_1', []) or obs.get('relative_humidity', [])
         winds = obs.get('wind_speed_set_1', []) or obs.get('wind_speed', [])
         fms = obs.get('fuel_moisture_set_1', []) or obs.get('fuel_moisture', [])
+        precip = (
+            obs.get('precip_accumulated_set_1')
+            or obs.get('precip_accum_set_1')
+            or obs.get('precip_accum')
+            or obs.get('precipitation')
+            or []
+        )
         min_len = len(times)
         for i in range(min_len):
             try:
@@ -373,13 +381,19 @@ def get_observation_dataframe(raw_data, target_date_start, target_date_end):
                         wind_val = knots_to_ms(wind_val)
                     rh_val = rhs[i] if i < len(rhs) and rhs[i] is not None else None
                     fm_val = fms[i] if i < len(fms) and fms[i] is not None else None
+                    precip_val = precip[i] if i < len(precip) and precip[i] is not None else None
+                    # Synoptic is requested in English units, so precipitation
+                    # accumulation is inches and the suppression contract is mm.
+                    if precip_val is not None:
+                        precip_val = float(precip_val) * 25.4
                     records.append({
                         'stid': stid,
                         'timestamp': base_time,
                         'obs_temp': temp_val,
                         'obs_rh': rh_val,
                         'obs_wind': wind_val,
-                        'obs_fm': fm_val
+                        'obs_fm': fm_val,
+                        'obs_precip_mm': precip_val,
                     })
             except (ValueError, IndexError, TypeError):
                 continue
@@ -884,6 +898,12 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
         'stations_count': merged['stidnunique'] if 'stidnunique' in dir(merged) else merged['stid'].nunique(),
         'record_count': len(merged),
         'qc_exclusions': qc_exclusions,
+        'rainfall_suppression': {
+            'contract_version': CONTRACT_VERSION,
+            'station_observations_with_precipitation': int(merged['obs_precip_mm'].notna().sum())
+            if 'obs_precip_mm' in merged else 0,
+            'provider_precedence': ['mrms', 'rtma', 'station'],
+        },
     }
 
     comparison_rows = []
@@ -897,6 +917,7 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
                 'wind_speed_ms': _to_float_or_none(row.get('pred_wind')),
                 'fuel_moisture_pct': _to_float_or_none(row.get('pred_fm')),
                 'fire_danger': _to_float_or_none(row.get('pred_fire_danger')),
+                'precipitation_mm': _to_float_or_none(row.get('pred_precip_mm')),
             },
             'observed': {
                 'temperature_c': _to_float_or_none(row.get('obs_temp')),
@@ -904,7 +925,11 @@ def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffi
                 'wind_speed_ms': _to_float_or_none(row.get('obs_wind')),
                 'fuel_moisture_pct': _to_float_or_none(row.get('obs_fm')),
                 'fire_danger': _to_float_or_none(row.get('obs_fire_danger')),
+                'precipitation_mm': _to_float_or_none(row.get('obs_precip_mm')),
             },
+            'rainfall_provenance': provider_precedence(
+                station_mm=_to_float_or_none(row.get('obs_precip_mm')),
+            ),
         })
     report['comparison_rows'] = comparison_rows
     from services.verification_metrics import directional_metrics
