@@ -30,7 +30,7 @@ def _initial_state():
              "consecutive_failures": 0, "last_error": None, "last_success": None,
              "runs": 0, "successful_runs": 0, "public_forecast_failures": 0,
              "fallback_rows": 0, "unavailable": 0, "latency_ms": None,
-             "rows": 0, "bundle_checksum": None, "observation_verification_status": "pending"}
+             "rows": 0, "bundle_checksum": None, "model_version": None, "observation_verification_status": "pending"}
     try:
         if STATE_PATH.exists():
             stored = json.loads(STATE_PATH.read_text())
@@ -96,6 +96,12 @@ def validate_bundle(directory=None):
     for filename, field in direct.items():
         if _sha(directory / filename) != contract.get(field): raise ValueError(f"V5 checksum mismatch: {filename}")
     contract["bundle_sha256"] = _sha(directory / "shadow_bundle_manifest.json")
+    version_path = directory / "registered_version.json"
+    if version_path.is_file():
+        try:
+            contract["registered_version"] = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+        except Exception:
+            contract["registered_version"] = None
     return contract
 
 
@@ -132,6 +138,7 @@ def record_predictions(run_id, row_keys, stable_fm, base_fm, v5_fm, intervals,
                       last_success=datetime.now(timezone.utc).isoformat(), runs=_state["runs"] + 1,
                       successful_runs=_state.get("successful_runs", 0) + 1, latency_ms=latency_ms,
                       rows=_state.get("rows", 0) + len(v5_fm), bundle_checksum=contract["bundle_sha256"],
+                      model_version=contract.get("registered_version"),
                       fallback_rows=_state["fallback_rows"] + int(np.sum(weights == 0)),
                       unavailable=_state["unavailable"] + unavailable)
         _persist_state()

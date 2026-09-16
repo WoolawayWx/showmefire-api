@@ -117,6 +117,7 @@ def _initial_state() -> dict:
         "counties_scored": 0,
         "county_days_recorded": 0,
         "bundle_checksum": None,
+        "model_version": None,
         "uncertainty_available": False,
         "advisory_published": False,
         "public_path_unchanged": True,
@@ -201,7 +202,14 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     ).hexdigest()
     uncertainty_path = directory / UNCERTAINTY_ASSET_FILENAME
     uncertainty = json.loads(uncertainty_path.read_text(encoding="utf-8")) if uncertainty_path.exists() else None
-    return {**assets, "bundle_checksum": bundle_checksum, "uncertainty": uncertainty}
+    version_path = directory / "registered_version.json"
+    version = None
+    if version_path.is_file():
+        try:
+            version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+        except Exception:
+            version = None
+    return {**assets, "bundle_checksum": bundle_checksum, "uncertainty": uncertainty, "version": version}
 
 
 def _standardized_dot(fit: Dict, feature_values: Dict[str, float]) -> float:
@@ -299,6 +307,7 @@ def score_glm_for_forecast(
             runs=_state["runs"] + 1, successful_runs=_state.get("successful_runs", 0) + 1,
             counties_scored=n, county_days_recorded=_state.get("county_days_recorded", 0) + n,
             bundle_checksum=bundle["bundle_checksum"],
+            model_version=bundle.get("version"),
             uncertainty_available=bundle.get("uncertainty") is not None,
         )
         _persist_state()

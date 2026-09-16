@@ -16,7 +16,7 @@ BUNDLE_ENV = "SMF_V4_SHADOW_BUNDLE"
 EVIDENCE_ROOT = Path(__file__).resolve().parent.parent / "logs" / "v4_shadow"
 MAX_FAILURES = int(os.getenv("V4_SHADOW_MAX_FAILURES", "3"))
 _state = {"enabled": True, "consecutive_failures": 0, "last_error": None,
-          "runs": 0, "unavailable": 0}
+          "runs": 0, "unavailable": 0, "model_version": None}
 
 
 def diagnostics(): return dict(_state)
@@ -45,6 +45,12 @@ def validate_bundle(directory=None):
               "lead_guard.json": "lead_guard_sha256"}
     for filename, field in assets.items():
         if _sha(directory / filename) != contract.get(field): raise ValueError(f"V4 checksum mismatch: {filename}")
+    version_path = directory / "registered_version.json"
+    if version_path.is_file():
+        try:
+            contract["registered_version"] = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+        except Exception:
+            contract["registered_version"] = None
     return contract
 
 
@@ -79,7 +85,8 @@ def record_predictions(run_id, row_keys, stable_fm, quantiles, rh, wind_kts,
         path = evidence_root / f"{run_id}.prediction.json"
         with path.open("x", encoding="utf-8") as stream: json.dump(record, stream, indent=2)
         _state.update(consecutive_failures=0, last_error=None, runs=_state["runs"] + 1,
-                      unavailable=_state["unavailable"] + unavailable)
+                      unavailable=_state["unavailable"] + unavailable,
+                      model_version=contract.get("registered_version"))
         return True
     except Exception as error:
         _state["consecutive_failures"] += 1; _state["last_error"] = str(error)

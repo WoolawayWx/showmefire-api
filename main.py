@@ -129,6 +129,12 @@ async def lifespan(app: FastAPI):
         logger.error("Database initialization failed: %s", exc, exc_info=True)
         raise
 
+    try:
+        from models.shadow_bundles import reapply_active_env_vars
+        reapply_active_env_vars()
+    except Exception as exc:
+        logger.warning("Failed to reapply guarded-shadow active bundle pointers (non-fatal): %s", exc)
+
     if run_scheduler:
         logger.info("Starting scheduler...")
         scheduler_local = create_scheduler()

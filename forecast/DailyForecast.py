@@ -1655,6 +1655,18 @@ def generate_complete_forecast():
         )
     except Exception as _risk_fusion_glm_exc:
         logger.warning("risk_fusion Phase B GLM shadow hook failed (non-fatal): %s", _risk_fusion_glm_exc)
+    try:
+        # fire_weather_index: numeric, non-rule fire-weather danger score,
+        # shadow-only via SMF_FIRE_WEATHER_INDEX_BUNDLE - see
+        # services/fire_weather_index_shadow.py.
+        from services.fire_weather_index_hook import run_fire_weather_index_shadow_for_forecast
+        run_fire_weather_index_shadow_for_forecast(
+            hourly_rh, hourly_ws, hourly_temp, hourly_precip,
+            run_id=_risk_fusion_run_id,
+            valid_local_date=_risk_fusion_valid_date,
+        )
+    except Exception as _fire_weather_index_exc:
+        logger.warning("fire_weather_index shadow hook failed (non-fatal): %s", _fire_weather_index_exc)
 
     # --- Extract and process precipitation data ---
     logger.info("Extracting precipitation data from HRRR...")

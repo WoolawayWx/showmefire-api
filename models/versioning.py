@@ -59,6 +59,16 @@ REQUIRED_FIRE_WEATHER_ML_METADATA = {
     "model_family", "training_row_count", "split_manifest_sha256", "advisory_only",
 }
 
+# fire_weather_index is a fourth, independent model family: a continuous,
+# weighted fire-WEATHER-conditions score (not fit to any label - see
+# model-training/fire_weather_index/__init__.py), scored in shadow only via
+# a raw bundle directory (services/fire_weather_index_shadow.py), not
+# currently promoted through this registry at all - same v1 boundary as
+# fire_weather_ml, ready for a future real promotion pipeline.
+REQUIRED_FIRE_WEATHER_INDEX_METADATA = {
+    "model_family", "advisory_only",
+}
+
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
 
 # Static filenames older/ad-hoc scripts still hardcode. promote() keeps these
@@ -234,6 +244,13 @@ def validate_promotion_candidate(model_type, candidate):
         # family to anything serving-facing in v1.
         if metadata.get("advisory_only") is not True:
             blockers.append("fire_weather_ml candidates must have advisory_only=True in v1")
+    if model_type == "fire_weather_index":
+        missing = sorted(REQUIRED_FIRE_WEATHER_INDEX_METADATA.difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+        # Same hard v1 boundary as fire_risk_fusion/fire_weather_ml.
+        if metadata.get("advisory_only") is not True:
+            blockers.append("fire_weather_index candidates must have advisory_only=True in v1")
     precipitation_features = [name for name in metadata.get("feature_columns", [])
                               if name.startswith("precip_") or name == "hours_since_rain"]
     if model_type == "fuel_moisture" and precipitation_features:
