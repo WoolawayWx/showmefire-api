@@ -3044,6 +3044,7 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
             slug TEXT NOT NULL UNIQUE,
+            contact_email TEXT,
             daily_limit INTEGER NOT NULL DEFAULT 100,
             monthly_limit INTEGER NOT NULL DEFAULT 2000,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -3158,6 +3159,8 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE graphic_departments ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'none'")
     if "plan" not in department_columns:
         cursor.execute("ALTER TABLE graphic_departments ADD COLUMN plan TEXT")
+    if "contact_email" not in department_columns:
+        cursor.execute("ALTER TABLE graphic_departments ADD COLUMN contact_email TEXT")
 
 
 def record_fire_weather_alert_day(

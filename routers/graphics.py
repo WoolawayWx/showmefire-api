@@ -63,11 +63,17 @@ EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 class DepartmentCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,63}$")
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=254)
 
     @field_validator("slug")
     @classmethod
     def valid_slug(cls, value):
         return value
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return value.strip().lower()
 
 
 class InviteCreate(BaseModel):
@@ -423,15 +429,170 @@ def graphics_logout(response: Response):
     return {"success": True}
 
 
+def _ensure_department_user(db, department_id: int, email: str) -> bool:
+    """Authorize an email for a department; return True when newly created."""
+    existing = db.execute(
+        "SELECT id,department_id FROM graphic_department_users WHERE lower(email)=lower(?)",
+        (email,),
+    ).fetchone()
+    if existing and existing["department_id"] != department_id:
+        raise HTTPException(status_code=409, detail="That email is already assigned to another department")
+    if existing:
+        return False
+    secret = "smf_session_" + secrets.token_urlsafe(32)
+    cursor = db.execute(
+        """INSERT INTO graphic_api_keys(department_id,key_prefix,key_hash,scopes_json)
+           VALUES (?,?,?,'[\"graphics:session\"]')""",
+        (department_id, secret[:20], hashlib.sha256(secret.encode()).hexdigest()),
+    )
+    db.execute(
+        "INSERT INTO graphic_department_users(department_id,api_key_id,email) VALUES (?,?,?)",
+        (department_id, cursor.lastrowid, email),
+    )
+    return True
+
+
 @router.post("/admin/departments")
 def create_department(payload: DepartmentCreate, token: Optional[str] = None):
     _admin(token)
     with _db() as db:
+        existing = db.execute(
+            "SELECT id,name,slug FROM graphic_departments WHERE lower(slug)=lower(?) OR lower(name)=lower(?)",
+            (payload.slug, payload.name),
+        ).fetchone()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Department already exists: {existing['name']} ({existing['slug']})",
+            )
         try:
-            cursor = db.execute("INSERT INTO graphic_departments(name,slug) VALUES (?,?)", (payload.name, payload.slug))
+            cursor = db.execute(
+                "INSERT INTO graphic_departments(name,slug,contact_email) VALUES (?,?,?)",
+                (payload.name, payload.slug, payload.email),
+            )
+            _ensure_department_user(db, cursor.lastrowid, payload.email)
         except sqlite3.IntegrityError:
-            raise HTTPException(status_code=409, detail="Department slug already exists")
-    return {"id": cursor.lastrowid, "name": payload.name, "slug": payload.slug}
+            raise HTTPException(status_code=409, detail="Department name or slug already exists")
+    return {"id": cursor.lastrowid, "name": payload.name, "slug": payload.slug, "email": payload.email}
+
+
+@router.get("/admin/departments")
+def list_departments(token: Optional[str] = None):
+    """List graphics departments so setup can resume after initial creation."""
+    _admin(token)
+    with _db() as db:
+        rows = db.execute(
+            """SELECT d.id,d.name,d.slug,d.contact_email,d.daily_limit,d.monthly_limit,d.created_at,
+                      COUNT(DISTINCT u.id) AS user_count,
+                      COUNT(DISTINCT b.id) AS bundle_count
+               FROM graphic_departments d
+               LEFT JOIN graphic_department_users u ON u.department_id=d.id
+               LEFT JOIN graphic_bundles b ON b.department_id=d.id AND b.active=1
+               GROUP BY d.id
+               ORDER BY d.name COLLATE NOCASE"""
+        ).fetchall()
+    return {"departments": [dict(row) for row in rows]}
+
+
+@router.put("/admin/departments/{department_id}")
+def update_department(department_id: int, payload: DepartmentCreate, token: Optional[str] = None):
+    """Update department identity and ensure its contact email can sign in."""
+    _admin(token)
+    with _db() as db:
+        department = db.execute(
+            "SELECT id FROM graphic_departments WHERE id=?", (department_id,),
+        ).fetchone()
+        if not department:
+            raise HTTPException(status_code=404, detail="Department not found")
+        conflict = db.execute(
+            """SELECT id,name,slug FROM graphic_departments
+               WHERE id<>? AND (lower(slug)=lower(?) OR lower(name)=lower(?))""",
+            (department_id, payload.slug, payload.name),
+        ).fetchone()
+        if conflict:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Department already exists: {conflict['name']} ({conflict['slug']})",
+            )
+        db.execute(
+            "UPDATE graphic_departments SET name=?,slug=?,contact_email=? WHERE id=?",
+            (payload.name, payload.slug, payload.email, department_id),
+        )
+        email_added = _ensure_department_user(db, department_id, payload.email)
+    return {
+        "id": department_id, "name": payload.name, "slug": payload.slug,
+        "email": payload.email, "email_authorized": True, "email_added": email_added,
+    }
+
+
+@router.delete("/admin/departments/{department_id}")
+async def delete_department(department_id: int, confirm: str, token: Optional[str] = None):
+    """Permanently remove a department and all department-owned graphics data."""
+    _admin(token)
+    with _db() as db:
+        department = db.execute(
+            "SELECT id,name,slug FROM graphic_departments WHERE id=?", (department_id,),
+        ).fetchone()
+        if not department:
+            raise HTTPException(status_code=404, detail="Department not found")
+        if not hmac.compare_digest(confirm, department["slug"]):
+            raise HTTPException(status_code=400, detail="Confirmation slug does not match")
+        active_jobs = db.execute(
+            "SELECT COUNT(*) FROM graphic_jobs WHERE department_id=? AND status IN ('queued','running')",
+            (department_id,),
+        ).fetchone()[0]
+        if active_jobs:
+            raise HTTPException(status_code=409, detail="Wait for active department renders to finish before deleting")
+        asset_paths = [
+            row["path"] for row in db.execute(
+                "SELECT path FROM graphic_assets WHERE department_id=?", (department_id,),
+            ).fetchall()
+        ]
+        bundle_ids = [
+            row["id"] for row in db.execute(
+                "SELECT id FROM graphic_bundles WHERE department_id=?", (department_id,),
+            ).fetchall()
+        ]
+        db.execute(
+            """DELETE FROM graphic_login_codes WHERE user_id IN
+               (SELECT id FROM graphic_department_users WHERE department_id=?)""",
+            (department_id,),
+        )
+        db.execute("DELETE FROM graphic_usage_events WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_jobs WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_assets WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_bundles WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_department_users WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_api_keys WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_departments WHERE id=?", (department_id,))
+
+    asset_root = ASSET_ROOT.resolve()
+    for stored_path in asset_paths:
+        try:
+            path = Path(stored_path).resolve()
+            if path.is_relative_to(asset_root) and path.is_file():
+                path.unlink()
+        except OSError:
+            logger.warning("Unable to remove deleted department asset %s", stored_path, exc_info=True)
+
+    r2_deleted = False
+    if bundle_ids and all(os.getenv(name) for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")):
+        objects = [{"Key": f"imggen/{bundle_id}/image.png"} for bundle_id in bundle_ids]
+        try:
+            await asyncio.to_thread(
+                _r2_client().delete_objects,
+                Bucket=os.getenv("R2_BUCKET", "cdn-showmefire"),
+                Delete={"Objects": objects, "Quiet": True},
+            )
+            for bundle_id in bundle_ids:
+                _purge_cdn(f"imggen/{bundle_id}/image.png")
+            r2_deleted = True
+        except Exception:
+            logger.warning("Department deleted, but one or more R2 graphics could not be removed", exc_info=True)
+    return {
+        "deleted": True, "department_id": department_id, "name": department["name"],
+        "bundles_deleted": len(bundle_ids), "r2_deleted": r2_deleted,
+    }
 
 
 @router.post("/admin/departments/{department_id}/keys")
@@ -451,27 +612,10 @@ async def invite_department_user(
     department_id: int, payload: InviteCreate, request: Request, token: Optional[str] = None,
 ):
     _admin(token)
-    secret = "smf_session_" + secrets.token_urlsafe(32)
-    prefix = secret[:12]
     with _db() as db:
         if not db.execute("SELECT 1 FROM graphic_departments WHERE id=?", (department_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Department not found")
-        existing = db.execute(
-            "SELECT id,department_id FROM graphic_department_users WHERE lower(email)=?",
-            (payload.email,),
-        ).fetchone()
-        if existing and existing["department_id"] != department_id:
-            raise HTTPException(status_code=409, detail="That email is already assigned to another department")
-        if not existing:
-            cursor = db.execute(
-                """INSERT INTO graphic_api_keys(department_id,key_prefix,key_hash,scopes_json)
-                   VALUES (?,?,?,'[\"graphics:session\"]')""",
-                (department_id, prefix, hashlib.sha256(secret.encode()).hexdigest()),
-            )
-            db.execute(
-                "INSERT INTO graphic_department_users(department_id,api_key_id,email) VALUES (?,?,?)",
-                (department_id, cursor.lastrowid, payload.email),
-            )
+        _ensure_department_user(db, department_id, payload.email)
     sent = await _issue_login_code(payload.email, request)
     return {
         "email": payload.email,

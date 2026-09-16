@@ -41,7 +41,9 @@ class GraphicsTests(unittest.TestCase):
 
     def _access(self):
         with patch.object(graphics, "verify_token", return_value="admin@example.com"):
-            department = graphics.create_department(graphics.DepartmentCreate(name="Test Department", slug="test-department"), "admin")
+            department = graphics.create_department(graphics.DepartmentCreate(
+                name="Test Department", slug="test-department", email="contact@test.gov",
+            ), "admin")
             issued = graphics.issue_key(department["id"], "admin")
         return department, issued["key"]
 
@@ -132,6 +134,44 @@ class GraphicsTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "Invalid or revoked API key"):
             graphics.list_bundles("Bearer not-a-real-key")
 
+    def test_admin_can_resume_existing_department_setup(self):
+        department, _ = self._access()
+        with patch.object(graphics, "verify_token", return_value="admin@example.com"):
+            result = graphics.list_departments("admin")
+            with self.assertRaisesRegex(Exception, "Department already exists"):
+                graphics.create_department(
+                    graphics.DepartmentCreate(
+                        name="Test Department", slug="different-slug", email="other@test.gov",
+                    ), "admin",
+                )
+        listed = next(item for item in result["departments"] if item["id"] == department["id"])
+        self.assertEqual(listed["slug"], "test-department")
+        self.assertEqual(listed["contact_email"], "contact@test.gov")
+        self.assertEqual(listed["user_count"], 1)
+        self.assertEqual(listed["bundle_count"], 0)
+
+    def test_admin_can_edit_and_delete_department(self):
+        department, _ = self._access()
+        with patch.object(graphics, "verify_token", return_value="admin@example.com"):
+            updated = graphics.update_department(
+                department["id"],
+                graphics.DepartmentCreate(
+                    name="Renamed Department", slug="renamed-department", email="new-contact@test.gov",
+                ),
+                "admin",
+            )
+            self.assertTrue(updated["email_added"])
+            with self.assertRaisesRegex(Exception, "Confirmation slug"):
+                asyncio.run(graphics.delete_department(department["id"], "wrong-slug", "admin"))
+            with patch.dict("os.environ", {
+                "R2_ACCOUNT_ID": "", "R2_ACCESS_KEY_ID": "", "R2_SECRET_ACCESS_KEY": "",
+            }):
+                deleted = asyncio.run(graphics.delete_department(
+                    department["id"], "renamed-department", "admin",
+                ))
+            self.assertTrue(deleted["deleted"])
+            self.assertFalse(graphics.list_departments("admin")["departments"])
+
     def test_missing_auth_prompts_sign_in_instead_of_bearer_key(self):
         with self.assertRaisesRegex(Exception, "Sign in required"):
             graphics.list_bundles(None)
@@ -217,7 +257,9 @@ class GraphicsAccountTests(unittest.TestCase):
         init_database()
         with patch.object(graphics, "verify_token", return_value="admin@example.com"):
             self.department = graphics.create_department(
-                graphics.DepartmentCreate(name="Invite Department", slug="invite-department"), "admin",
+                graphics.DepartmentCreate(
+                    name="Invite Department", slug="invite-department", email="contact@invite.gov",
+                ), "admin",
             )
 
     def tearDown(self):
