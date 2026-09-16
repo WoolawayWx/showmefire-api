@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -14,7 +16,7 @@ import uuid
 import zipfile
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,18 +35,18 @@ from core.security import (
     GRAPHICS_ACCESS_COOKIE_NAME,
     GRAPHICS_REFRESH_COOKIE_NAME,
     REFRESH_TOKEN_EXPIRE_DAYS,
+    SECRET_KEY,
     create_graphics_access_token,
     create_graphics_refresh_token,
-    hash_password,
-    password_strength_error,
     verify_graphics_token,
-    verify_password,
     verify_token,
 )
 from services.archive_bundler import _r2_client
+from services.graphics_email import send_graphics_login_code
 from services.graphic_renderer import PRODUCT_IDS, center_zoom_for_bounds, render_graphic
 
 router = APIRouter(prefix="/api/graphics", tags=["graphics"])
+logger = logging.getLogger(__name__)
 _executor = None
 ASSET_ROOT = Path(os.getenv("SMF_GRAPHICS_ASSET_ROOT", "data/graphics/assets"))
 CDN_BASE_URL = os.getenv("CDN_BASE_URL", "https://cdn.showmefire.org").rstrip("/")
@@ -71,21 +73,29 @@ class DepartmentCreate(BaseModel):
 class InviteCreate(BaseModel):
     email: str = Field(pattern=EMAIL_PATTERN, max_length=254)
 
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return value.strip().lower()
 
-class InviteVerify(BaseModel):
+
+class LoginCodeRequest(BaseModel):
     email: str = Field(pattern=EMAIL_PATTERN, max_length=254)
-    token: str = Field(min_length=8, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return value.strip().lower()
 
 
-class PasswordSet(BaseModel):
+class LoginCodeVerify(BaseModel):
     email: str = Field(pattern=EMAIL_PATTERN, max_length=254)
-    token: str = Field(min_length=8, max_length=200)
-    password: str = Field(min_length=1, max_length=200)
+    code: str = Field(pattern=r"^\d{6}$")
 
-
-class PasswordLogin(BaseModel):
-    email: str = Field(pattern=EMAIL_PATTERN, max_length=254)
-    password: str = Field(min_length=1, max_length=200)
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value):
+        return value.strip().lower()
 
 
 class BundleCreate(BaseModel):
@@ -100,8 +110,18 @@ class BundleCreate(BaseModel):
     zoom: float = Field(default=7.5, ge=1, le=14)
     # Legacy compatibility for bundles created before center/zoom support.
     map_extent: Optional[tuple[float, float, float, float]] = None
-    background_color: str = Field(default="#e8e8e8", pattern=r"^#[0-9a-fA-F]{6}$")
+    background_color: str = Field(default="#e8edf2", pattern=r"^#[0-9a-fA-F]{6}$")
     basemap_style: str = "rastertiles/voyager"
+    header_background_color: str = Field(default="#0f172a", pattern=r"^#[0-9a-fA-F]{6}$")
+    header_text_color: str = Field(default="#f8fafc", pattern=r"^#[0-9a-fA-F]{6}$")
+    accent_color: str = Field(default="#f97316", pattern=r"^#[0-9a-fA-F]{6}$")
+    legend_background_color: str = Field(default="#ffffff", pattern=r"^#[0-9a-fA-F]{6}$")
+    legend_text_color: str = Field(default="#172033", pattern=r"^#[0-9a-fA-F]{6}$")
+    border_color: str = Field(default="#ffffff", pattern=r"^#[0-9a-fA-F]{6}$")
+    border_width: float = Field(default=1.0, ge=0, le=5)
+    outlook_opacity: float = Field(default=0.72, ge=0.1, le=1)
+    show_town_labels: bool = True
+    town_label_size: str = "medium"
 
     @field_validator("product_id")
     @classmethod
@@ -127,8 +147,15 @@ class BundleCreate(BaseModel):
     @field_validator("basemap_style")
     @classmethod
     def valid_basemap(cls, value):
-        if value not in {"rastertiles/voyager", "light_all", "dark_all"}:
+        if value not in {"rastertiles/voyager", "light_all", "dark_all", "none"}:
             raise ValueError("unsupported basemap style")
+        return value
+
+    @field_validator("town_label_size")
+    @classmethod
+    def valid_town_label_size(cls, value):
+        if value not in {"small", "medium", "large"}:
+            raise ValueError("town label size must be small, medium, or large")
         return value
 
 
@@ -239,50 +266,140 @@ def graphics_session(authorization: Optional[str] = Header(default=None)):
     }
 
 
-def _find_invited_user(db, email: str, token: str):
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    return db.execute(
-        """SELECT u.*, k.key_hash, k.revoked_at FROM graphic_department_users u
-           JOIN graphic_api_keys k ON k.id = u.api_key_id
-           WHERE u.email=? AND k.key_hash=?""",
-        (email, digest),
-    ).fetchone()
+def _request_ip(request: Request) -> str:
+    if os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true":
+        connecting = request.headers.get("CF-Connecting-IP", "").strip()
+        if connecting:
+            return connecting
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+        if forwarded:
+            return forwarded
+    return (request.client.host if request.client else "") or "unknown"
 
 
-@router.post("/auth/verify-invite")
-def verify_invite(payload: InviteVerify):
+def _login_digest(user_id: int, code: str) -> str:
+    return hmac.new(
+        SECRET_KEY.encode(), f"{user_id}:{code}".encode(), hashlib.sha256,
+    ).hexdigest()
+
+
+def _ip_digest(request: Request) -> str:
+    return hmac.new(
+        SECRET_KEY.encode(), _request_ip(request).encode(), hashlib.sha256,
+    ).hexdigest()
+
+
+async def _issue_login_code(email: str, request: Request) -> bool:
+    """Issue a code for an authorized user; return whether an email was sent."""
+    ip_hash = _ip_digest(request)
     with _db() as db:
-        row = _find_invited_user(db, payload.email, payload.token)
-    if not row or row["revoked_at"] is not None or row["password_hash"] is not None:
-        raise HTTPException(status_code=401, detail="This invite link is invalid, expired, or already used")
-    return {"valid": True}
-
-
-@router.post("/auth/set-password")
-def set_password(payload: PasswordSet, response: Response):
-    with _db() as db:
-        row = _find_invited_user(db, payload.email, payload.token)
-        if not row or row["revoked_at"] is not None or row["password_hash"] is not None:
-            raise HTTPException(status_code=401, detail="This invite link is invalid, expired, or already used")
-        strength_error = password_strength_error(payload.password)
-        if strength_error:
-            raise HTTPException(status_code=400, detail=strength_error)
+        # Remove old authentication metadata while retaining a short audit and
+        # rate-limit window.
+        db.execute("DELETE FROM graphic_login_codes WHERE created_at < datetime('now','-7 days')")
+        user = db.execute(
+            """SELECT u.id,u.department_id,u.email FROM graphic_department_users u
+               JOIN graphic_api_keys k ON k.id=u.api_key_id
+               WHERE lower(u.email)=? AND k.revoked_at IS NULL""",
+            (email,),
+        ).fetchone()
+        if not user:
+            return False
+        recent = db.execute(
+            "SELECT created_at FROM graphic_login_codes WHERE user_id=? ORDER BY created_at DESC LIMIT 1",
+            (user["id"],),
+        ).fetchone()
+        if recent and db.execute(
+            "SELECT datetime(?) > datetime('now','-60 seconds')", (recent["created_at"],)
+        ).fetchone()[0]:
+            return False
+        hourly_user = db.execute(
+            "SELECT COUNT(*) FROM graphic_login_codes WHERE user_id=? AND created_at >= datetime('now','-1 hour')",
+            (user["id"],),
+        ).fetchone()[0]
+        hourly_ip = db.execute(
+            "SELECT COUNT(*) FROM graphic_login_codes WHERE requested_ip_hash=? AND created_at >= datetime('now','-1 hour')",
+            (ip_hash,),
+        ).fetchone()[0]
+        if hourly_user >= 5 or hourly_ip >= 20:
+            return False
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        code_id = str(uuid.uuid4())
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
         db.execute(
-            "UPDATE graphic_department_users SET password_hash=?, password_set_at=CURRENT_TIMESTAMP, last_login_at=CURRENT_TIMESTAMP WHERE id=?",
-            (hash_password(payload.password), row["id"]),
+            "UPDATE graphic_login_codes SET consumed_at=CURRENT_TIMESTAMP WHERE user_id=? AND consumed_at IS NULL",
+            (user["id"],),
         )
-    _set_graphics_cookies(response, payload.email, row["department_id"], row["id"])
-    return {"success": True}
+        db.execute(
+            """INSERT INTO graphic_login_codes
+               (id,user_id,code_hash,requested_ip_hash,expires_at) VALUES (?,?,?,?,?)""",
+            (code_id, user["id"], _login_digest(user["id"], code), ip_hash, expires_at),
+        )
+    try:
+        await asyncio.to_thread(send_graphics_login_code, user["email"], code)
+        return True
+    except Exception:
+        with _db() as db:
+            db.execute(
+                "UPDATE graphic_login_codes SET consumed_at=CURRENT_TIMESTAMP WHERE id=?",
+                (code_id,),
+            )
+        logger.error("Unable to send graphics login code", exc_info=True)
+        return False
 
 
-@router.post("/auth/login")
-def graphics_login(payload: PasswordLogin, response: Response):
+@router.post("/auth/request-code")
+async def request_login_code(payload: LoginCodeRequest, request: Request):
+    await _issue_login_code(payload.email, request)
+    # Always return the same response to prevent account enumeration and keep
+    # rate-limit state private.
+    return {"success": True, "message": "If that email is authorized, a sign-in code has been sent."}
+
+
+@router.post("/auth/verify-code")
+def verify_login_code(payload: LoginCodeVerify, response: Response):
+    authenticated_user = None
+    invalid = False
     with _db() as db:
-        row = db.execute("SELECT * FROM graphic_department_users WHERE email=?", (payload.email,)).fetchone()
-        if not row or not row["password_hash"] or not verify_password(payload.password, row["password_hash"]):
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-        db.execute("UPDATE graphic_department_users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
-    _set_graphics_cookies(response, payload.email, row["department_id"], row["id"])
+        user = db.execute(
+            """SELECT u.id,u.department_id,u.email FROM graphic_department_users u
+               JOIN graphic_api_keys k ON k.id=u.api_key_id
+               WHERE lower(u.email)=? AND k.revoked_at IS NULL""",
+            (payload.email,),
+        ).fetchone()
+        challenge = db.execute(
+            """SELECT * FROM graphic_login_codes
+               WHERE user_id=? AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+               ORDER BY created_at DESC LIMIT 1""",
+            (user["id"],),
+        ).fetchone() if user else None
+        if not user or not challenge or challenge["attempts"] >= 5:
+            invalid = True
+        elif not hmac.compare_digest(
+            challenge["code_hash"], _login_digest(user["id"], payload.code),
+        ):
+            attempts = challenge["attempts"] + 1
+            db.execute(
+                """UPDATE graphic_login_codes SET attempts=?,
+                   consumed_at=CASE WHEN ? >= 5 THEN CURRENT_TIMESTAMP ELSE consumed_at END
+                   WHERE id=?""",
+                (attempts, attempts, challenge["id"]),
+            )
+            invalid = True
+        else:
+            db.execute(
+                "UPDATE graphic_login_codes SET consumed_at=CURRENT_TIMESTAMP WHERE user_id=? AND consumed_at IS NULL",
+                (user["id"],),
+            )
+            db.execute(
+                "UPDATE graphic_department_users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?",
+                (user["id"],),
+            )
+            authenticated_user = user
+    if invalid or not authenticated_user:
+        raise HTTPException(status_code=401, detail="Invalid or expired sign-in code")
+    _set_graphics_cookies(
+        response, authenticated_user["email"], authenticated_user["department_id"], authenticated_user["id"],
+    )
     return {"success": True}
 
 
@@ -330,27 +447,38 @@ def issue_key(department_id: int, token: Optional[str] = None):
 
 
 @router.post("/admin/departments/{department_id}/invite")
-def invite_department_user(department_id: int, payload: InviteCreate, token: Optional[str] = None):
+async def invite_department_user(
+    department_id: int, payload: InviteCreate, request: Request, token: Optional[str] = None,
+):
     _admin(token)
-    secret = "smf_" + secrets.token_urlsafe(32)
+    secret = "smf_session_" + secrets.token_urlsafe(32)
     prefix = secret[:12]
     with _db() as db:
         if not db.execute("SELECT 1 FROM graphic_departments WHERE id=?", (department_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Department not found")
-        if db.execute("SELECT 1 FROM graphic_department_users WHERE email=?", (payload.email,)).fetchone():
-            raise HTTPException(status_code=409, detail="An account already exists for this email")
-        cursor = db.execute(
-            "INSERT INTO graphic_api_keys(department_id,key_prefix,key_hash) VALUES (?,?,?)",
-            (department_id, prefix, hashlib.sha256(secret.encode()).hexdigest()),
-        )
-        db.execute(
-            "INSERT INTO graphic_department_users(department_id,api_key_id,email) VALUES (?,?,?)",
-            (department_id, cursor.lastrowid, payload.email),
-        )
+        existing = db.execute(
+            "SELECT id,department_id FROM graphic_department_users WHERE lower(email)=?",
+            (payload.email,),
+        ).fetchone()
+        if existing and existing["department_id"] != department_id:
+            raise HTTPException(status_code=409, detail="That email is already assigned to another department")
+        if not existing:
+            cursor = db.execute(
+                """INSERT INTO graphic_api_keys(department_id,key_prefix,key_hash,scopes_json)
+                   VALUES (?,?,?,'[\"graphics:session\"]')""",
+                (department_id, prefix, hashlib.sha256(secret.encode()).hexdigest()),
+            )
+            db.execute(
+                "INSERT INTO graphic_department_users(department_id,api_key_id,email) VALUES (?,?,?)",
+                (department_id, cursor.lastrowid, payload.email),
+            )
+    sent = await _issue_login_code(payload.email, request)
     return {
         "email": payload.email,
-        "token": secret,
-        "warning": "Give this token to the department now; it cannot be shown again.",
+        "authorized": True,
+        "email_sent": sent,
+        "message": "The user is authorized. A sign-in code was sent." if sent else
+                   "The user is authorized but the sign-in email could not be sent yet.",
     }
 
 
@@ -516,11 +644,18 @@ async def upload_logo(upload: UploadFile = File(...), authorization: Optional[st
     return {"asset_id": cursor.lastrowid, "filename": filename, "sha256": digest}
 
 
-async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: int):
+async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Optional[int]):
     started = time.monotonic()
     with _db() as db:
         db.execute("UPDATE graphic_jobs SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
     try:
+        with _db() as db:
+            department = db.execute(
+                "SELECT name FROM graphic_departments WHERE id=?", (department_id,),
+            ).fetchone()
+        if not department:
+            raise ValueError("department no longer exists")
+        bundle["department_name"] = department["name"]
         asset_id = bundle.get("jurisdiction_asset_id")
         if asset_id is not None:
             with _db() as db:

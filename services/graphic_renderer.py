@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WIDTH, HEIGHT, DPI = 1920, 1080, 120
-RENDERER_VERSION = "graphics-gis-v8"
+RENDERER_VERSION = "graphics-gis-v9"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MISSOURI_STATE_BOUNDARY = PROJECT_ROOT / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
 MISSOURI_COUNTY_BOUNDARIES = PROJECT_ROOT / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp"
@@ -52,6 +52,15 @@ def _fetch(url: str) -> bytes:
     })
     response.raise_for_status()
     return response.content
+
+
+def fetch_spc_product(product_id: str) -> bytes:
+    """Fetch one supported SPC outlook as GIS data."""
+    try:
+        url = PRODUCT_URLS[product_id]
+    except KeyError as exc:
+        raise ValueError(f"unsupported SPC product: {product_id}") from exc
+    return _fetch(url)
 
 
 def _load_alert_bytes() -> tuple[bytes, str]:
@@ -118,56 +127,114 @@ def _legend_entries(frames):
     return [(label, color) for (label, color), _ in sorted(entries.items(), key=lambda item: item[1])][:9]
 
 
-def _add_powered_by(fig):
+def _load_show_me_fire_logo(width=420):
     logo_path = PROJECT_ROOT / "assets/LightBackGroundLogo.svg"
     if not logo_path.is_file():
-        return
+        return None
     try:
         import cairosvg
-        logo_bytes = cairosvg.svg2png(url=str(logo_path), output_width=420)
-        logo = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
-        backing = FancyBboxPatch((0.012, 0.012), 0.12, 0.087, boxstyle="round,pad=0.004,rounding_size=0.007", transform=fig.transFigure, facecolor="#ffffff", edgecolor="#d1d5db", linewidth=0.7, alpha=0.94, zorder=70)
-        fig.patches.append(backing)
-        fig.text(0.072, 0.083, "Powered by", ha="center", va="center", fontsize=9, fontweight="bold", color="#374151", zorder=80)
-        logo_ax = fig.add_axes((0.021, 0.02, 0.102, 0.05), zorder=80)
-        logo_ax.imshow(logo)
-        logo_ax.axis("off")
+        logo_bytes = cairosvg.svg2png(url=str(logo_path), output_width=width)
+        return Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
     except Exception:
-        return
+        return None
 
 
-def _add_department_logo(fig, logo_path: str | None):
-    if not logo_path or not Path(logo_path).is_file():
-        return 0.0
-    try:
-        logo = Image.open(logo_path).convert("RGBA")
-        # Keep a consistent height while sizing the header slot to the PNG's
-        # actual aspect ratio. Figure coordinates must account for 16:9 pixels.
-        logo.thumbnail((190, 76), Image.Resampling.LANCZOS)
-        logo_height = 0.07
-        logo_width = min(0.20, logo_height * (HEIGHT / WIDTH) * (logo.width / logo.height))
-        logo_ax = fig.add_axes((0.032, 0.902, logo_width, logo_height), zorder=65)
-        logo_ax.imshow(logo)
+def _add_branding(fig, department_name: str, logo_path: str | None, accent_color: str):
+    """Draw a responsive lower-left identity card with department and SMF branding."""
+    department_logo = None
+    if logo_path and Path(logo_path).is_file():
+        try:
+            department_logo = Image.open(logo_path).convert("RGBA")
+        except (OSError, ValueError):
+            department_logo = None
+    smf_logo = _load_show_me_fire_logo()
+    name = department_name or "Department weather graphics"
+    # Let the card grow for a wide department logo/name while keeping enough
+    # room for the source card on the opposite side.
+    logo_width = 0.0
+    if department_logo:
+        logo_width = min(0.105, 0.066 * (HEIGHT / WIDTH) * (department_logo.width / max(department_logo.height, 1)))
+    name_width = min(0.21, max(0.105, len(name) * 0.0062))
+    card_width = min(0.49, 0.043 + logo_width + name_width + 0.12)
+    card = FancyBboxPatch(
+        (0.016, 0.016), card_width, 0.105,
+        boxstyle="round,pad=0.004,rounding_size=0.012",
+        transform=fig.transFigure, facecolor="#ffffff", edgecolor="#d7dee8",
+        linewidth=0.9, alpha=0.97, zorder=70,
+    )
+    fig.patches.append(card)
+    fig.patches.append(FancyBboxPatch(
+        (0.016, 0.016), 0.005, 0.105,
+        boxstyle="round,pad=0,rounding_size=0.004",
+        transform=fig.transFigure, facecolor=accent_color, edgecolor=accent_color,
+        linewidth=0, zorder=75,
+    ))
+    cursor = 0.029
+    if department_logo:
+        logo_ax = fig.add_axes((cursor, 0.031, logo_width, 0.075), zorder=80)
+        logo_ax.imshow(department_logo)
         logo_ax.axis("off")
-        return logo_width
-    except (OSError, ValueError):
-        return 0.0
+        cursor += logo_width + 0.012
+    fig.text(cursor, 0.082, name, ha="left", va="center", fontsize=12.5,
+             fontweight="bold", color="#172033", zorder=80)
+    divider_x = card_width - 0.105
+    fig.add_artist(plt.Line2D(
+        [divider_x, divider_x], [0.032, 0.105], transform=fig.transFigure,
+        color="#d7dee8", linewidth=0.8, zorder=80,
+    ))
+    fig.text(divider_x + 0.051, 0.094, "POWERED BY", ha="center", va="center",
+             fontsize=6.5, fontweight="bold", color="#64748b", zorder=80)
+    if smf_logo:
+        smf_ax = fig.add_axes((divider_x + 0.012, 0.035, 0.078, 0.047), zorder=80)
+        smf_ax.imshow(smf_logo)
+        smf_ax.axis("off")
 
 
-def _add_legend(fig, frames):
+def _add_header(fig, config: dict, product_label: str):
+    """Modern, compact map header with a configurable palette."""
+    background = config.get("header_background_color", "#0f172a")
+    foreground = config.get("header_text_color", "#f8fafc")
+    accent = config.get("accent_color", "#f97316")
+    header = FancyBboxPatch(
+        (0.018, 0.875), 0.735, 0.105,
+        boxstyle="round,pad=0.006,rounding_size=0.014",
+        transform=fig.transFigure, facecolor=background, edgecolor=accent,
+        linewidth=1.0, alpha=0.96, zorder=50,
+    )
+    fig.patches.append(header)
+    fig.patches.append(FancyBboxPatch(
+        (0.026, 0.889), 0.0055, 0.077,
+        boxstyle="round,pad=0,rounding_size=0.003",
+        transform=fig.transFigure, facecolor=accent, edgecolor=accent,
+        linewidth=0, zorder=55,
+    ))
+    subtitle = (config.get("subtitle") or product_label).upper()
+    fig.text(0.043, 0.951, subtitle, ha="left", va="top", fontsize=8.5,
+             fontweight="bold", color=accent, zorder=60)
+    fig.text(0.043, 0.925, config.get("header_text") or "Show Me Fire Weather Graphics",
+             ha="left", va="center", fontsize=24, fontweight="bold",
+             color=foreground, zorder=60)
+    # A quiet product chip adds hierarchy without competing with the map.
+    fig.text(0.735, 0.927, product_label.upper(), ha="right", va="center",
+             fontsize=8, fontweight="bold", color=foreground, zorder=60,
+             bbox={"boxstyle": "round,pad=0.48", "facecolor": accent,
+                   "edgecolor": accent, "linewidth": 0.6, "alpha": 0.92})
+
+
+def _add_legend(fig, frames, background="#ffffff", foreground="#172033"):
     entries = _legend_entries(frames)
     if not entries:
         entries = [("No active areas", "#d1d5db")]
     handles = [Patch(facecolor=color, edgecolor="#f9fafb", linewidth=0.7, label=label) for label, color in entries]
     legend = fig.legend(handles=handles, title="Legend", loc="upper right", bbox_to_anchor=(0.985, 0.975), frameon=True, ncol=1, fontsize=10, title_fontsize=11, borderpad=0.8, labelspacing=0.45)
     legend.set_zorder(90)
-    legend.get_frame().set_facecolor("#111827")
-    legend.get_frame().set_edgecolor("#374151")
-    legend.get_frame().set_alpha(0.94)
-    legend.get_title().set_color("#f9fafb")
+    legend.get_frame().set_facecolor(background)
+    legend.get_frame().set_edgecolor("#cbd5e1")
+    legend.get_frame().set_alpha(0.97)
+    legend.get_title().set_color(foreground)
     legend.get_title().set_fontweight("bold")
     for text in legend.get_texts():
-        text.set_color("#f9fafb")
+        text.set_color(foreground)
 
 
 def _world_pixel(lon: float, lat: float, zoom: int):
@@ -226,14 +293,15 @@ def _tile_zoom(extent, width: int, height: int):
     return 1
 
 
-def _basemap(extent, width=1600, height=800, style="voyager", transparent=False, url_template=None):
-    zoom = _tile_zoom(extent, width, height)
+def _basemap(extent, width=1600, height=800, style="voyager", transparent=False,
+             url_template=None, zoom_bias=0, background_color="#e5e7eb"):
+    zoom = max(1, min(18, _tile_zoom(extent, width, height) + int(zoom_bias)))
     left, top = _world_pixel(extent[0], extent[3], zoom)
     right, bottom = _world_pixel(extent[1], extent[2], zoom)
     min_x, max_x = math.floor(left / 256), math.floor((right - 1) / 256)
     min_y, max_y = math.floor(top / 256), math.floor((bottom - 1) / 256)
     mode = "RGBA" if transparent else "RGB"
-    background = (0, 0, 0, 0) if transparent else "#e5e7eb"
+    background = (0, 0, 0, 0) if transparent else background_color
     mosaic = Image.new(mode, ((max_x - min_x + 1) * 256, (max_y - min_y + 1) * 256), background)
     template = url_template or os.getenv("SMF_GRAPHICS_BASEMAP_URL", "https://a.basemaps.cartocdn.com/{style}/{z}/{x}/{y}.png")
     key = None if url_template else (os.getenv("CARTO_API_KEY") or os.getenv("NUXT_CARTO_KEY") or os.getenv("NUXT_PUBLIC_CARTO_KEY"))
@@ -259,8 +327,9 @@ def _basemap(extent, width=1600, height=800, style="voyager", transparent=False,
 
 
 def _draw_frame(ax, frame: gpd.GeoDataFrame, title: str, extent, basemap, reference_overlay,
-                reference_boundaries, jurisdiction_path: str | None = None):
-    ax.set_facecolor("#e5e7eb")
+                reference_boundaries, jurisdiction_path: str | None = None, config=None):
+    config = config or {}
+    ax.set_facecolor(config.get("background_color", "#e8edf2"))
     west, south = _mercator(extent[0], extent[2])
     east, north = _mercator(extent[1], extent[3])
     ax.imshow(basemap, extent=(west, east, south, north), origin="upper", zorder=0)
@@ -272,20 +341,28 @@ def _draw_frame(ax, frame: gpd.GeoDataFrame, title: str, extent, basemap, refere
         sortable["_dn"] = sortable.apply(lambda row: float(_property(row, "dn", default=0) or 0), axis=1)
         for _, row in sortable.sort_values("_dn").iterrows():
             gpd.GeoSeries([row.geometry], crs="EPSG:3857").plot(
-                ax=ax, facecolor=_color(row), edgecolor=str(_property(row, "stroke", default="#374151")), linewidth=0.8, alpha=0.72,
+                ax=ax, facecolor=_color(row), edgecolor=str(_property(row, "stroke", default="#374151")),
+                linewidth=0.8, alpha=float(config.get("outlook_opacity", 0.72)),
             )
     # Borders remain above weather polygons, while city/town labels are the
     # uppermost map-data layer so no boundary line obscures a place name.
     state_boundary, county_boundaries = reference_boundaries
     if not county_boundaries.empty:
-        county_boundaries.boundary.plot(ax=ax, color="#ffffff", linewidth=0.55, alpha=0.72, zorder=16)
+        county_boundaries.boundary.plot(
+            ax=ax, color=config.get("border_color", "#ffffff"),
+            linewidth=max(0.1, float(config.get("border_width", 1.0)) * 0.55), alpha=0.76, zorder=16,
+        )
     if not state_boundary.empty:
-        state_boundary.boundary.plot(ax=ax, color="#ffffff", linewidth=2.8, alpha=0.95, zorder=17)
+        state_boundary.boundary.plot(
+            ax=ax, color=config.get("border_color", "#ffffff"),
+            linewidth=max(0.1, float(config.get("border_width", 1.0)) * 2.8), alpha=0.95, zorder=17,
+        )
         state_boundary.boundary.plot(ax=ax, color="#374151", linewidth=1.0, alpha=0.9, zorder=18)
     if jurisdiction_path and Path(jurisdiction_path).is_file():
         gpd.read_file(jurisdiction_path).to_crs("EPSG:3857").boundary.plot(ax=ax, color="#ffffff", linewidth=4.2, zorder=20)
         gpd.read_file(jurisdiction_path).to_crs("EPSG:3857").boundary.plot(ax=ax, color="#111827", linewidth=1.6, zorder=21)
-    ax.imshow(reference_overlay, extent=(west, east, south, north), origin="upper", zorder=30)
+    if config.get("show_town_labels", True):
+        ax.imshow(reference_overlay, extent=(west, east, south, north), origin="upper", zorder=30)
     # The extent was derived in Web Mercator for this exact viewport ratio.
     # Equal axis scaling preserves Missouri's shape instead of stretching it.
     ax.set_aspect("equal", adjustable="box")
@@ -317,7 +394,7 @@ def _render_sources(config: dict):
             payload, source = _load_alert_bytes()
         else:
             source = PRODUCT_URLS[product_id]
-            payload = _fetch(source)
+            payload = fetch_spc_product(product_id)
         payloads.append(payload); urls.append(source); frames.append(_as_frame(payload))
     return product_ids, payloads, urls, frames
 
@@ -357,28 +434,50 @@ def render_graphic(config: dict) -> dict:
     if len(extent) != 4 or extent[0] >= extent[1] or extent[2] >= extent[3]:
         raise ValueError("invalid map extent")
     configured_style = config.get("basemap_style", "rastertiles/voyager")
-    base_style, reference_style = BASEMAP_LAYERS.get(configured_style, BASEMAP_LAYERS["rastertiles/voyager"])
-    basemap, base_tile_count = _basemap(extent, map_width, map_height, base_style)
-    reference_overlay, reference_tile_count = _basemap(extent, map_width, map_height, reference_style, transparent=True)
+    background_color = config.get("background_color", "#e8edf2")
+    if configured_style == "none":
+        base_style, reference_style = None, "light_only_labels"
+        basemap = Image.new("RGB", (map_width, map_height), background_color)
+        base_tile_count = 0
+    else:
+        base_style, reference_style = BASEMAP_LAYERS.get(
+            configured_style, BASEMAP_LAYERS["rastertiles/voyager"],
+        )
+        basemap, base_tile_count = _basemap(
+            extent, map_width, map_height, base_style, background_color=background_color,
+        )
+    # CARTO's place labels are rasterized. Requesting an adjacent tile zoom and
+    # resampling it to the same geographic viewport provides useful small/large
+    # label choices while preserving exact alignment with the GIS layers.
+    if config.get("show_town_labels", True):
+        label_bias = {"small": 1, "medium": 0, "large": -1}.get(config.get("town_label_size"), 0)
+        reference_overlay, reference_tile_count = _basemap(
+            extent, map_width, map_height, reference_style, transparent=True,
+            zoom_bias=label_bias, background_color=background_color,
+        )
+    else:
+        reference_overlay = Image.new("RGBA", (map_width, map_height), (0, 0, 0, 0))
+        reference_tile_count = 0
     tile_count = base_tile_count + reference_tile_count
     reference_boundaries = _reference_boundaries()
-    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI), dpi=DPI, facecolor=config.get("background_color", "#e8e8e8"))
-    header_box = FancyBboxPatch((0.018, 0.89), 0.72, 0.09, boxstyle="round,pad=0.008,rounding_size=0.012", transform=fig.transFigure, facecolor="#111827", edgecolor="#374151", linewidth=1.2, alpha=0.94, zorder=50)
-    fig.patches.append(header_box)
-    department_logo_width = _add_department_logo(fig, config.get("department_logo_path"))
-    header_left = 0.032 + department_logo_width + 0.018 if department_logo_width else 0.035
-    fig.text(header_left, 0.956, config.get("header_text") or "Show Me Fire Weather Graphics", ha="left", va="top", fontsize=23, fontweight="bold", color="#f9fafb", zorder=60)
-    if config.get("subtitle"):
-        fig.text(header_left, 0.915, config["subtitle"], ha="left", va="top", fontsize=12, color="#d1d5db", zorder=60)
+    fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI), dpi=DPI, facecolor=background_color)
     labels = {"spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_wind": "Day 1 Wind", "spc_hail": "Day 1 Hail", "mo_alerts": "Missouri Weather Alerts"}
     positions = ([(0.025, 0.51, 0.46, 0.35), (0.515, 0.51, 0.46, 0.35), (0.025, 0.12, 0.46, 0.35), (0.515, 0.12, 0.46, 0.35)] if config["product_id"] == "spc_four_panel" else [(0, 0, 1, 1)])
     for product_id, frame, position in zip(product_ids, frames, positions):
         panel_title = labels[product_id] if config["product_id"] == "spc_four_panel" else ""
         _draw_frame(fig.add_axes(position), frame, panel_title, extent, basemap, reference_overlay,
-                    reference_boundaries, config.get("jurisdiction_path"))
+                    reference_boundaries, config.get("jurisdiction_path"), config)
+    product_label = "Day 1 Four Panel" if config["product_id"] == "spc_four_panel" else labels[config["product_id"]]
+    _add_header(fig, config, product_label)
     fig.text(0.985, 0.018, "Sources: NOAA/NWS SPC, weather.gov, OpenStreetMap & CARTO", ha="right", va="bottom", fontsize=9, fontweight="bold", color="#374151", zorder=80, bbox={"boxstyle": "round,pad=0.4", "facecolor": "#ffffff", "edgecolor": "#d1d5db", "linewidth": 0.7, "alpha": 0.94})
-    _add_powered_by(fig)
-    _add_legend(fig, frames)
+    _add_branding(
+        fig, config.get("department_name", ""), config.get("department_logo_path"),
+        config.get("accent_color", "#f97316"),
+    )
+    _add_legend(
+        fig, frames, config.get("legend_background_color", "#ffffff"),
+        config.get("legend_text_color", "#172033"),
+    )
     output = io.BytesIO()
     fig.savefig(output, format="png", dpi=DPI, facecolor=fig.get_facecolor())
     plt.close(fig)

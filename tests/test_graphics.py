@@ -8,10 +8,13 @@ from unittest.mock import patch
 
 from PIL import Image
 from starlette.datastructures import Headers, UploadFile
+from starlette.requests import Request
 
 from core.database import init_database
 from routers import graphics
 from services import graphic_renderer
+from services import graphics_email
+from services import spc_graphics_watcher
 
 
 SAMPLE_GEOJSON = json.dumps({
@@ -59,12 +62,27 @@ class GraphicsTests(unittest.TestCase):
             })
         image = Image.open(io.BytesIO(result["bytes"]))
         self.assertEqual(image.size, (1920, 1080))
-        self.assertEqual(result["renderer_version"], "graphics-gis-v8")
+        self.assertEqual(result["renderer_version"], "graphics-gis-v9")
         self.assertEqual(len(result["source_urls"]), 4)
         self.assertEqual(basemap.call_count, 2)
         self.assertEqual(basemap.call_args_list[0].args[3], "rastertiles/voyager_nolabels")
         self.assertEqual(basemap.call_args_list[1].args[3], "rastertiles/voyager_only_labels")
         self.assertTrue(basemap.call_args_list[1].kwargs["transparent"])
+        self.assertEqual(basemap.call_args_list[1].kwargs["zoom_bias"], 0)
+
+    def test_bundle_supports_custom_graphic_theme(self):
+        bundle = graphics.BundleCreate(
+            id="theme-bundle", name="Theme Bundle", product_id="spc_cat",
+            basemap_style="none", header_background_color="#102a43",
+            header_text_color="#f0f4f8", accent_color="#2cb1bc",
+            legend_background_color="#ffffff", legend_text_color="#102a43",
+            border_color="#f0f4f8", border_width=1.8, outlook_opacity=0.65,
+            show_town_labels=False, town_label_size="large",
+        )
+        self.assertEqual(bundle.basemap_style, "none")
+        self.assertEqual(bundle.town_label_size, "large")
+        self.assertFalse(bundle.show_town_labels)
+        self.assertAlmostEqual(bundle.outlook_opacity, 0.65)
 
     def test_png_logo_upload_is_bound_to_bundle(self):
         department, api_key = self._access()
@@ -118,6 +136,77 @@ class GraphicsTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "Sign in required"):
             graphics.list_bundles(None)
 
+    def test_resend_login_email_uses_configured_sender(self):
+        with patch.dict("os.environ", {
+            "RESEND_API_KEY": "test-key",
+            "GRAPHICS_EMAIL_FROM": "Show Me Fire <accounts@notify.showmefire.org>",
+            "GRAPHICS_EMAIL_REPLY_TO": "support@showmefire.org",
+        }), patch.object(graphics_email.requests, "post") as request:
+            request.return_value.json.return_value = {"id": "email-id"}
+            message_id = graphics_email.send_graphics_login_code("chief@example.gov", "123456")
+        self.assertEqual(message_id, "email-id")
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload["to"], ["chief@example.gov"])
+        self.assertEqual(payload["reply_to"], "support@showmefire.org")
+        self.assertIn("123456", payload["text"])
+        request.return_value.raise_for_status.assert_called_once()
+
+    def test_spc_update_fans_out_only_affected_active_bundles(self):
+        department, api_key = self._access()
+        for bundle_id, product_id in (
+            ("cat-bundle", "spc_cat"),
+            ("wind-bundle", "spc_wind"),
+            ("panel-bundle", "spc_four_panel"),
+            ("alerts-bundle", "mo_alerts"),
+        ):
+            graphics.create_bundle(graphics.BundleCreate(
+                id=bundle_id, name=bundle_id, product_id=product_id,
+            ), f"Bearer {api_key}")
+
+        # Establish the previous observation for every source, then change
+        # only the categorical product.
+        previous = {product_id: f"old-{product_id}" for product_id in graphic_renderer.PRODUCT_URLS}
+        payload_by_product = {
+            product_id: (b"new-cat" if product_id == "spc_cat" else f"old-{product_id}".encode())
+            for product_id in graphic_renderer.PRODUCT_URLS
+        }
+
+        async def complete_job(job_id, bundle, department_id, api_key_id):
+            with graphics._db() as db:
+                db.execute(
+                    "UPDATE graphic_jobs SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (job_id,),
+                )
+
+        observed_hashes = {
+            product_id: spc_graphics_watcher._fingerprint(payload)
+            for product_id, payload in payload_by_product.items()
+        }
+        spc_graphics_watcher._record_processed(
+            {product_id: spc_graphics_watcher._fingerprint(f"old-{product_id}".encode()) for product_id in previous},
+            set(previous),
+        )
+        with patch.object(
+            spc_graphics_watcher,
+            "fetch_spc_product",
+            side_effect=lambda product_id: payload_by_product[product_id],
+        ), patch.object(graphics, "_run_job", side_effect=complete_job):
+            result = asyncio.run(spc_graphics_watcher.refresh_spc_graphics())
+
+        self.assertEqual(result["changed_products"], ["spc_cat"])
+        self.assertEqual(result["queued"], 2)
+        with graphics._db() as db:
+            queued_bundles = {
+                row[0] for row in db.execute(
+                    "SELECT bundle_id FROM graphic_jobs ORDER BY bundle_id"
+                ).fetchall()
+            }
+            state = db.execute(
+                "SELECT source_fingerprint FROM graphic_source_state WHERE product_id='spc_cat'"
+            ).fetchone()[0]
+        self.assertEqual(queued_bundles, {"cat-bundle", "panel-bundle"})
+        self.assertEqual(state, observed_hashes["spc_cat"])
+
 
 class GraphicsAccountTests(unittest.TestCase):
     def setUp(self):
@@ -135,68 +224,75 @@ class GraphicsAccountTests(unittest.TestCase):
         self.environment.stop()
         self.temporary.cleanup()
 
-    def _invite(self, email="chief@department.gov"):
-        with patch.object(graphics, "verify_token", return_value="admin@example.com"):
-            return graphics.invite_department_user(
-                self.department["id"], graphics.InviteCreate(email=email), "admin",
-            )
+    def _request(self, ip="127.0.0.1"):
+        return Request({
+            "type": "http", "method": "POST", "path": "/", "query_string": b"",
+            "headers": [], "client": (ip, 12345), "server": ("testserver", 80),
+            "scheme": "http",
+        })
 
-    def test_invite_then_set_password_then_login(self):
+    def _authorize(self, email="chief@department.gov"):
+        with patch.object(graphics, "verify_token", return_value="admin@example.com"), patch.object(
+            graphics, "send_graphics_login_code", return_value="email-id",
+        ) as sender:
+            result = asyncio.run(graphics.invite_department_user(
+                self.department["id"], graphics.InviteCreate(email=email), self._request(), "admin",
+            ))
+        return result, sender.call_args.args[1]
+
+    def test_authorize_then_verify_emailed_code(self):
         from fastapi import Response
 
-        invite = self._invite()
-        self.assertTrue(invite["token"].startswith("smf_"))
-
-        verified = graphics.verify_invite(graphics.InviteVerify(email=invite["email"], token=invite["token"]))
-        self.assertTrue(verified["valid"])
-
+        invite, code = self._authorize()
+        self.assertTrue(invite["authorized"])
+        self.assertTrue(invite["email_sent"])
+        self.assertRegex(code, r"^\d{6}$")
         response = Response()
-        result = graphics.set_password(
-            graphics.PasswordSet(email=invite["email"], token=invite["token"], password="correct-horse-battery9"),
-            response,
+        result = graphics.verify_login_code(
+            graphics.LoginCodeVerify(email=invite["email"], code=code), response,
         )
         self.assertTrue(result["success"])
         cookie_headers = [value.decode() for name, value in response.raw_headers if name == b"set-cookie"]
         self.assertTrue(any(header.startswith("graphics_access=") for header in cookie_headers))
         self.assertTrue(any(header.startswith("graphics_refresh=") for header in cookie_headers))
 
-        # The token is now claimed: verifying it again must fail.
-        with self.assertRaisesRegex(Exception, "invalid, expired, or already used"):
-            graphics.verify_invite(graphics.InviteVerify(email=invite["email"], token=invite["token"]))
-
-        login_response = Response()
-        logged_in = graphics.graphics_login(
-            graphics.PasswordLogin(email=invite["email"], password="correct-horse-battery9"), login_response,
-        )
-        self.assertTrue(logged_in["success"])
-
-        with self.assertRaisesRegex(Exception, "Invalid email or password"):
-            graphics.graphics_login(graphics.PasswordLogin(email=invite["email"], password="wrong-password-123"), Response())
-
-    def test_weak_password_is_rejected(self):
-        from fastapi import Response
-
-        invite = self._invite("weak@department.gov")
-        with self.assertRaisesRegex(Exception, "at least 12 characters"):
-            graphics.set_password(
-                graphics.PasswordSet(email=invite["email"], token=invite["token"], password="short1"), Response(),
+        # Codes are single-use.
+        with self.assertRaisesRegex(Exception, "Invalid or expired"):
+            graphics.verify_login_code(
+                graphics.LoginCodeVerify(email=invite["email"], code=code), Response(),
             )
 
-    def test_duplicate_invite_email_is_rejected(self):
-        self._invite("duplicate@department.gov")
-        with self.assertRaisesRegex(Exception, "already exists"):
-            self._invite("duplicate@department.gov")
+    def test_unknown_email_gets_generic_request_response(self):
+        with patch.object(graphics, "send_graphics_login_code") as sender:
+            result = asyncio.run(graphics.request_login_code(
+                graphics.LoginCodeRequest(email="unknown@example.com"), self._request(),
+            ))
+        self.assertTrue(result["success"])
+        sender.assert_not_called()
+
+    def test_code_locks_after_five_bad_attempts(self):
+        from fastapi import Response
+
+        invite, code = self._authorize("attempts@department.gov")
+        for _ in range(5):
+            with self.assertRaisesRegex(Exception, "Invalid or expired"):
+                graphics.verify_login_code(
+                    graphics.LoginCodeVerify(email=invite["email"], code="999999"), Response(),
+                )
+        with self.assertRaisesRegex(Exception, "Invalid or expired"):
+            graphics.verify_login_code(
+                graphics.LoginCodeVerify(email=invite["email"], code=code), Response(),
+            )
 
     def test_session_cookie_authorizes_department_endpoints(self):
         from fastapi import Response
 
         from core import security
 
-        invite = self._invite("session@department.gov")
+        invite, code = self._authorize("session@department.gov")
         response = Response()
-        graphics.set_password(
-            graphics.PasswordSet(email=invite["email"], token=invite["token"], password="correct-horse-battery9"),
-            response,
+        graphics.verify_login_code(
+            graphics.LoginCodeVerify(email=invite["email"], code=code), response,
         )
         # Simulate the cookie-renewal middleware exposing the freshly issued
         # access token to the request context, the way graphics_session.py does.

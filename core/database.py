@@ -3123,6 +3123,28 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             FOREIGN KEY (department_id) REFERENCES graphic_departments(id),
             FOREIGN KEY (api_key_id) REFERENCES graphic_api_keys(id)
         );
+        CREATE TABLE IF NOT EXISTS graphic_source_state (
+            product_id TEXT PRIMARY KEY,
+            source_url TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL,
+            observed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS graphic_login_codes (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            requested_ip_hash TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            expires_at TIMESTAMP NOT NULL,
+            consumed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES graphic_department_users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_graphic_login_codes_user
+            ON graphic_login_codes(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_graphic_login_codes_ip
+            ON graphic_login_codes(requested_ip_hash, created_at DESC);
     ''')
 
     # Future billing hook: these columns are unused today (subscription_status

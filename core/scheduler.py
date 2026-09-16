@@ -36,6 +36,7 @@ from services.forecast_jobs import trigger_beta_forecast
 from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast_v1_operational, run_forecast_v1_shadow
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
+from services.spc_graphics_watcher import refresh_spc_graphics_job
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     )
     scheduler.add_job(fetch_and_store_afds, 'interval', minutes=AFD_POLL_MINUTES, id='fetch_afds')
     scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
+    if os.getenv("SMF_GRAPHICS_SPC_AUTO_REFRESH", "true").lower() == "true":
+        scheduler.add_job(
+            refresh_spc_graphics_job,
+            'interval',
+            minutes=max(1, int(os.getenv("SMF_GRAPHICS_SPC_POLL_MINUTES", "2"))),
+            id='refresh_spc_department_graphics',
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
     scheduler.add_job(
         purge_delivery_records,

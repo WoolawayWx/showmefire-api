@@ -4,11 +4,10 @@ from core import security
 # These routes explicitly manage authentication and must not get an implicit
 # renewal (especially logout, which must be the last writer of its cookies).
 AUTH_ACTIONS = {
-    '/api/graphics/auth/login',
+    '/api/graphics/auth/request-code',
+    '/api/graphics/auth/verify-code',
     '/api/graphics/auth/logout',
     '/api/graphics/auth/refresh',
-    '/api/graphics/auth/verify-invite',
-    '/api/graphics/auth/set-password',
 }
 
 
