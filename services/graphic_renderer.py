@@ -226,7 +226,7 @@ def _tile_zoom(extent, width: int, height: int):
     return 1
 
 
-def _basemap(extent, width=1600, height=800, style="voyager", transparent=False):
+def _basemap(extent, width=1600, height=800, style="voyager", transparent=False, url_template=None):
     zoom = _tile_zoom(extent, width, height)
     left, top = _world_pixel(extent[0], extent[3], zoom)
     right, bottom = _world_pixel(extent[1], extent[2], zoom)
@@ -235,8 +235,8 @@ def _basemap(extent, width=1600, height=800, style="voyager", transparent=False)
     mode = "RGBA" if transparent else "RGB"
     background = (0, 0, 0, 0) if transparent else "#e5e7eb"
     mosaic = Image.new(mode, ((max_x - min_x + 1) * 256, (max_y - min_y + 1) * 256), background)
-    template = os.getenv("SMF_GRAPHICS_BASEMAP_URL", "https://a.basemaps.cartocdn.com/{style}/{z}/{x}/{y}.png")
-    key = os.getenv("CARTO_API_KEY") or os.getenv("NUXT_CARTO_KEY") or os.getenv("NUXT_PUBLIC_CARTO_KEY")
+    template = url_template or os.getenv("SMF_GRAPHICS_BASEMAP_URL", "https://a.basemaps.cartocdn.com/{style}/{z}/{x}/{y}.png")
+    key = None if url_template else (os.getenv("CARTO_API_KEY") or os.getenv("NUXT_CARTO_KEY") or os.getenv("NUXT_PUBLIC_CARTO_KEY"))
     fetched = 0
     for tile_x in range(min_x, max_x + 1):
         for tile_y in range(min_y, max_y + 1):

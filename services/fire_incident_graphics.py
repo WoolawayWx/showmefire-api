@@ -59,6 +59,76 @@ def _display_time(value) -> str:
         return str(value)
 
 
+def _locator_extent(detail_extent):
+    """Regional context, at least 50 km tall and four times the detail view."""
+    from services.graphic_renderer import _mercator
+
+    west, south = _mercator(detail_extent[0], detail_extent[2])
+    east, north = _mercator(detail_extent[1], detail_extent[3])
+    center_x, center_y = (west + east) / 2, (south + north) / 2
+    # Mercator distances near Missouri are about 1.25 times ground distance.
+    half_height = max(32000, (north - south) * 2, (east - west) * 2 / 1.25)
+    half_width = half_height * 1.25
+    import math
+    from services.graphic_renderer import WEB_MERCATOR_RADIUS as radius
+
+    def lon(x):
+        return math.degrees(x / radius)
+
+    def lat(y):
+        return math.degrees(math.atan(math.sinh(y / radius)))
+
+    return (lon(center_x - half_width), lon(center_x + half_width),
+            lat(center_y - half_height), lat(center_y + half_height))
+
+
+def _add_locator_map(ax, detail_extent, lons, lats):
+    """Opaque labeled street map above the satellite imagery, in its corner."""
+    from matplotlib.patches import Rectangle
+    from services.graphic_renderer import _basemap, _mercator
+
+    extent = _locator_extent(detail_extent)
+    west, south = _mercator(extent[0], extent[2])
+    east, north = _mercator(extent[1], extent[3])
+    locator = ax.inset_axes([0.61, 0.665, 0.37, 0.315], zorder=30)
+    locator.set_facecolor("#e5e7eb")
+    available = False
+    try:
+        basemap, fetched = _basemap(
+            extent, width=500, height=400,
+            url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        )
+        if fetched:
+            locator.imshow(basemap, extent=(west, east, south, north), origin="upper", zorder=0)
+            available = True
+    except Exception:
+        logger.info("Incident locator basemap unavailable", exc_info=True)
+    detail_west, detail_south = _mercator(detail_extent[0], detail_extent[2])
+    detail_east, detail_north = _mercator(detail_extent[1], detail_extent[3])
+    locator.add_patch(Rectangle(
+        (detail_west, detail_south), detail_east - detail_west, detail_north - detail_south,
+        facecolor="#ef4444", edgecolor="#b91c1c", alpha=0.35, linewidth=1.5, zorder=3,
+    ))
+    points = [_mercator(lon, lat) for lon, lat in zip(lons, lats)]
+    locator.scatter(*zip(*points), s=18, c="#ff3b20", edgecolors="white", linewidths=0.6, zorder=4)
+    locator.set_xlim(west, east)
+    locator.set_ylim(south, north)
+    locator.set_aspect("equal", adjustable="box")
+    locator.set_xticks([])
+    locator.set_yticks([])
+    for spine in locator.spines.values():
+        spine.set_edgecolor("#ffffff")
+        spine.set_linewidth(2)
+    if not available:
+        locator.text(0.5, 0.18, "Town / road basemap unavailable", transform=locator.transAxes,
+                     ha="center", fontsize=6, color="#374151", zorder=6)
+    else:
+        locator.text(0.99, 0.01, "© OpenStreetMap contributors",
+                     transform=locator.transAxes, ha="right", va="bottom", fontsize=4.5,
+                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1), zorder=6)
+    return locator
+
+
 def render_incident_graphic(incident: dict, detections: Iterable[dict], output: Path) -> Path:
     """Create a map-left/info-right PNG. Basemap downloads are optional; the
     graphic remains useful in restricted/offline environments."""
@@ -73,6 +143,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     lats = [float(row["latitude"]) for row in rows]
     lons = [float(row["longitude"]) for row in rows]
     margin = max(0.015, max(max(lats) - min(lats), max(lons) - min(lons)) * 0.35)
+    detail_extent = (min(lons) - margin, max(lons) + margin, min(lats) - margin, max(lats) + margin)
     fig, (ax, info) = plt.subplots(
         1, 2, figsize=(14, 8), gridspec_kw={"width_ratios": [1.7, 1]},
         facecolor="#f5f7fa",
@@ -146,7 +217,7 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
         logger.info("Incident basemap unavailable: %s", exc)
         ax.scatter(lons, lats, s=55, c="#e53935", edgecolors="white", linewidths=1, zorder=5)
         ax.grid(True, alpha=0.25)
-    ax.set_title("Satellite detection cluster · satellite imagery and roads", loc="left", weight="bold", pad=8)
+    _add_locator_map(ax, detail_extent, lons, lats)
     info.axis("off")
     info.set_facecolor("#ffffff")
     county_names = incident.get("county_names") or sorted({str(row.get("county_name")) for row in rows if row.get("county_name")})
