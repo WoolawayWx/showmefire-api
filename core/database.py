@@ -3078,6 +3078,8 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             content_type TEXT NOT NULL,
             sha256 TEXT NOT NULL,
             path TEXT NOT NULL,
+            cdn_key TEXT,
+            cdn_url TEXT,
             version INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (department_id) REFERENCES graphic_departments(id)
@@ -3121,6 +3123,8 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             invited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             password_set_at TIMESTAMP,
             last_login_at TIMESTAMP,
+            terms_version INTEGER NOT NULL DEFAULT 0,
+            terms_accepted_at TIMESTAMP,
             FOREIGN KEY (department_id) REFERENCES graphic_departments(id),
             FOREIGN KEY (api_key_id) REFERENCES graphic_api_keys(id)
         );
@@ -3146,6 +3150,15 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             ON graphic_login_codes(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_graphic_login_codes_ip
             ON graphic_login_codes(requested_ip_hash, created_at DESC);
+        CREATE TABLE IF NOT EXISTS graphic_terms_events (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            department_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            terms_version INTEGER NOT NULL,
+            decision TEXT NOT NULL CHECK(decision IN ('accepted','declined')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
 
     # Future billing hook: these columns are unused today (subscription_status
@@ -3161,6 +3174,22 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE graphic_departments ADD COLUMN plan TEXT")
     if "contact_email" not in department_columns:
         cursor.execute("ALTER TABLE graphic_departments ADD COLUMN contact_email TEXT")
+
+    cursor.execute("PRAGMA table_info(graphic_assets)")
+    asset_columns = {row[1] for row in cursor.fetchall()}
+    if "cdn_key" not in asset_columns:
+        cursor.execute("ALTER TABLE graphic_assets ADD COLUMN cdn_key TEXT")
+    if "cdn_url" not in asset_columns:
+        cursor.execute("ALTER TABLE graphic_assets ADD COLUMN cdn_url TEXT")
+
+    cursor.execute("PRAGMA table_info(graphic_department_users)")
+    user_columns = {row[1] for row in cursor.fetchall()}
+    if "terms_version" not in user_columns:
+        cursor.execute(
+            "ALTER TABLE graphic_department_users ADD COLUMN terms_version INTEGER NOT NULL DEFAULT 0"
+        )
+    if "terms_accepted_at" not in user_columns:
+        cursor.execute("ALTER TABLE graphic_department_users ADD COLUMN terms_accepted_at TIMESTAMP")
 
 
 def record_fire_weather_alert_day(

@@ -94,7 +94,18 @@ class GraphicsTests(unittest.TestCase):
             io.BytesIO(logo_bytes.getvalue()), filename="department.png",
             headers=Headers({"content-type": "image/png"}),
         )
-        asset = asyncio.run(graphics.upload_logo(upload, f"Bearer {api_key}"))
+        with patch.object(graphics, "_r2_configured", return_value=True), patch.object(
+            graphics, "_r2_client",
+        ) as r2:
+            asset = asyncio.run(graphics.upload_logo(upload, f"Bearer {api_key}"))
+        upload_call = r2.return_value.put_object.call_args.kwargs
+        self.assertEqual(
+            upload_call["Key"],
+            f"assets/departmentuploads/test-department/department-{asset['sha256'][:12]}.png",
+        )
+        self.assertEqual(upload_call["CacheControl"], "public,max-age=31536000,immutable")
+        self.assertEqual(asset["url"], f"https://cdn.showmefire.org/{upload_call['Key']}")
+        self.assertEqual(asyncio.run(graphics.list_logos(f"Bearer {api_key}"))["logos"][0]["asset_id"], asset["asset_id"])
         created = graphics.create_bundle(graphics.BundleCreate(
             id="logo-bundle", name="Logo Bundle", product_id="spc_cat",
             department_logo_asset_id=asset["asset_id"],
@@ -347,6 +358,53 @@ class GraphicsAccountTests(unittest.TestCase):
         try:
             session = graphics.graphics_session(None)
             self.assertEqual(session["department"]["name"], "Invite Department")
+        finally:
+            security.reset_graphics_request_token(context)
+
+    def test_existing_user_must_accept_versioned_terms_and_can_remove_access(self):
+        from fastapi import Response
+        from core import security
+
+        invite, code = self._authorize("terms@department.gov")
+        login_response = Response()
+        graphics.verify_login_code(
+            graphics.LoginCodeVerify(email=invite["email"], code=code), login_response,
+        )
+        access_cookie = next(
+            header.decode() for name, header in login_response.raw_headers
+            if name == b"set-cookie" and header.decode().startswith("graphics_access=")
+        )
+        token_value = access_cookie.split("graphics_access=", 1)[1].split(";", 1)[0]
+        context = security.set_graphics_request_token(token_value)
+        try:
+            self.assertFalse(graphics.graphics_session(None)["terms"]["accepted"])
+            with self.assertRaisesRegex(Exception, "terms acceptance required"):
+                graphics.list_bundles(None)
+            terms = graphics.graphics_terms(None)
+            self.assertEqual(terms["version"], graphics.GRAPHICS_TERMS_VERSION)
+            self.assertGreaterEqual(len(terms["sections"]), 4)
+            self.assertTrue(graphics.accept_graphics_terms(None)["accepted"])
+            self.assertEqual(graphics.list_bundles(None)["bundles"], [])
+
+            with self.assertRaisesRegex(Exception, "REMOVE MY ACCESS"):
+                graphics.decline_graphics_terms(
+                    graphics.TermsDecline(confirmation="no"), Response(), None,
+                )
+            decline_response = Response()
+            removed = graphics.decline_graphics_terms(
+                graphics.TermsDecline(confirmation="REMOVE MY ACCESS"), decline_response, None,
+            )
+            self.assertTrue(removed["access_removed"])
+            with graphics._db() as db:
+                self.assertIsNone(db.execute(
+                    "SELECT id FROM graphic_department_users WHERE lower(email)=lower(?)",
+                    (invite["email"],),
+                ).fetchone())
+                event = db.execute(
+                    "SELECT decision FROM graphic_terms_events WHERE lower(email)=lower(?) AND decision='declined'",
+                    (invite["email"],),
+                ).fetchone()
+            self.assertEqual(event["decision"], "declined")
         finally:
             security.reset_graphics_request_token(context)
 

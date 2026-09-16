@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -43,7 +44,9 @@ from core.security import (
 )
 from services.archive_bundler import _r2_client
 from services.graphics_email import send_graphics_login_code
-from services.graphic_renderer import PRODUCT_IDS, center_zoom_for_bounds, render_graphic
+from services.graphic_renderer import (
+    PRODUCT_IDS, center_zoom_for_bounds, fetch_spc_product, render_graphic,
+)
 
 router = APIRouter(prefix="/api/graphics", tags=["graphics"])
 logger = logging.getLogger(__name__)
@@ -51,10 +54,63 @@ _executor = None
 ASSET_ROOT = Path(os.getenv("SMF_GRAPHICS_ASSET_ROOT", "data/graphics/assets"))
 CDN_BASE_URL = os.getenv("CDN_BASE_URL", "https://cdn.showmefire.org").rstrip("/")
 GRAPHICS_CDN_BASE_URL = os.getenv("SMF_GRAPHICS_CDN_BASE_URL", f"{CDN_BASE_URL}/imggen").rstrip("/")
+GRAPHICS_TERMS_VERSION = 1
+GRAPHICS_TERMS = {
+    "version": GRAPHICS_TERMS_VERSION,
+    "title": "Show Me Fire Graphics Service Terms",
+    "updated": "September 16, 2026",
+    "sections": [
+        {
+            "heading": "Uploaded assets and promotional use",
+            "body": (
+                "You represent that you are authorized to upload and use each asset you provide. "
+                "You grant Show Me Fire a non-exclusive, worldwide, royalty-free license to host, "
+                "copy, adapt, display, publish, and distribute those assets as needed to operate the "
+                "graphics service and to promote, market, explain, or demonstrate Show Me Fire and "
+                "participating departments."
+            ),
+        },
+        {
+            "heading": "Availability and operational priority",
+            "body": (
+                "This service may be changed, limited, paused, suspended, or discontinued at any time, "
+                "for any reason, with or without advance notice. Operational and public-safety Show Me "
+                "Fire processes take priority over image creation, so graphics may be delayed or skipped."
+            ),
+        },
+        {
+            "heading": "Generated content and existing rights",
+            "body": (
+                "To the extent permitted by law, Show Me Fire owns the graphics service, templates, "
+                "layouts, rendering software, and the original composition of generated graphics. "
+                "Generated graphics are Copyright Show Me Fire, except for incorporated department "
+                "assets, government data, basemaps, and other third-party material, which remain subject "
+                "to their existing rights and licenses."
+            ),
+        },
+        {
+            "heading": "Informational use",
+            "body": (
+                "Generated graphics are provided as-is for informational purposes. They may be delayed, "
+                "incomplete, or unavailable and are not a replacement for official warnings, forecasts, "
+                "or emergency communications."
+            ),
+        },
+    ],
+}
 
 
 def _image_url(bundle_id: str) -> str:
     return f"{GRAPHICS_CDN_BASE_URL}/{bundle_id}/image.png"
+
+
+def _logo_object_key(department_slug: str, filename: str, digest: str) -> str:
+    stem = re.sub(r"[^a-z0-9-]+", "-", Path(filename).stem.lower()).strip("-") or "logo"
+    return f"assets/departmentuploads/{department_slug}/{stem}-{digest[:12]}.png"
+
+
+def _r2_configured() -> bool:
+    return all(os.getenv(name) for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"))
 
 
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
@@ -102,6 +158,10 @@ class LoginCodeVerify(BaseModel):
     @classmethod
     def normalize_email(cls, value):
         return value.strip().lower()
+
+
+class TermsDecline(BaseModel):
+    confirmation: str
 
 
 class BundleCreate(BaseModel):
@@ -210,12 +270,13 @@ def _clear_graphics_cookies(response: Response) -> None:
         )
 
 
-def _department_key(authorization: Optional[str]):
+def _department_key(authorization: Optional[str], require_terms: bool = True):
     if authorization and authorization.lower().startswith("bearer "):
         supplied = authorization[7:].strip()
         digest = hashlib.sha256(supplied.encode()).hexdigest()
         with _db() as db:
-            row = db.execute("""SELECT k.*, d.name department_name, d.daily_limit, d.monthly_limit
+            row = db.execute("""SELECT k.*, d.name department_name, d.slug department_slug,
+                d.daily_limit, d.monthly_limit
                 FROM graphic_api_keys k JOIN graphic_departments d ON d.id=k.department_id
                 WHERE k.key_hash=? AND k.revoked_at IS NULL""", (digest,)).fetchone()
             if not row:
@@ -226,13 +287,17 @@ def _department_key(authorization: Optional[str]):
     if not payload:
         raise HTTPException(status_code=401, detail="Sign in required")
     with _db() as db:
-        row = db.execute("""SELECT k.*, d.name department_name, d.daily_limit, d.monthly_limit
+        row = db.execute("""SELECT k.*, d.name department_name, d.slug department_slug,
+            d.daily_limit, d.monthly_limit, u.id graphics_user_id, u.email graphics_user_email,
+            u.terms_version, u.terms_accepted_at
             FROM graphic_department_users u
             JOIN graphic_api_keys k ON k.id = u.api_key_id
             JOIN graphic_departments d ON d.id = u.department_id
             WHERE u.id=? AND k.revoked_at IS NULL""", (payload["user_id"],)).fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Sign in required")
+        if require_terms and row["terms_version"] < GRAPHICS_TERMS_VERSION:
+            raise HTTPException(status_code=451, detail="Graphics service terms acceptance required")
         db.execute("UPDATE graphic_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
     return row
 
@@ -249,9 +314,25 @@ def products():
     ]}
 
 
+@router.get("/preview-data/{product_id}")
+async def preview_data(product_id: str):
+    """Short-lived GIS proxy used by the browser's non-authoritative live preview."""
+    if product_id not in {"spc_cat", "spc_tor", "spc_wind", "spc_hail"}:
+        raise HTTPException(status_code=404, detail="Preview data is not available for this product")
+    try:
+        payload = await asyncio.to_thread(fetch_spc_product, product_id)
+    except Exception as exc:
+        logger.warning("Unable to load %s preview data", product_id, exc_info=True)
+        raise HTTPException(status_code=502, detail="The live SPC preview is temporarily unavailable") from exc
+    return Response(
+        content=payload, media_type="application/geo+json",
+        headers={"Cache-Control": "public,max-age=120,stale-while-revalidate=300"},
+    )
+
+
 @router.get("/me")
 def graphics_session(authorization: Optional[str] = Header(default=None)):
-    key = _department_key(authorization)
+    key = _department_key(authorization, require_terms=False)
     with _db() as db:
         department = db.execute(
             "SELECT id,name,slug,daily_limit,monthly_limit FROM graphic_departments WHERE id=?",
@@ -265,11 +346,72 @@ def graphics_session(authorization: Optional[str] = Header(default=None)):
             "SELECT COUNT(*) FROM graphic_usage_events WHERE department_id=? AND created_at >= date('now','start of month')",
             (key["department_id"],),
         ).fetchone()[0]
+    browser_user = "graphics_user_id" in key.keys()
     return {
         "department": dict(department),
         "token_prefix": key["key_prefix"],
         "usage": {"today": today, "month": month},
+        "terms": {
+            "version": GRAPHICS_TERMS_VERSION,
+            "accepted": (not browser_user) or key["terms_version"] >= GRAPHICS_TERMS_VERSION,
+            "accepted_at": key["terms_accepted_at"] if browser_user else None,
+        },
     }
+
+
+@router.get("/terms")
+def graphics_terms(authorization: Optional[str] = Header(default=None)):
+    key = _department_key(authorization, require_terms=False)
+    if "graphics_user_id" not in key.keys():
+        return {**GRAPHICS_TERMS, "accepted": True}
+    return {
+        **GRAPHICS_TERMS,
+        "accepted": key["terms_version"] >= GRAPHICS_TERMS_VERSION,
+        "accepted_at": key["terms_accepted_at"],
+    }
+
+
+@router.post("/terms/accept")
+def accept_graphics_terms(authorization: Optional[str] = Header(default=None)):
+    key = _department_key(authorization, require_terms=False)
+    if "graphics_user_id" not in key.keys():
+        raise HTTPException(status_code=400, detail="Terms are accepted through a signed-in graphics account")
+    with _db() as db:
+        db.execute(
+            """UPDATE graphic_department_users SET terms_version=?,terms_accepted_at=CURRENT_TIMESTAMP
+               WHERE id=?""",
+            (GRAPHICS_TERMS_VERSION, key["graphics_user_id"]),
+        )
+        db.execute(
+            """INSERT INTO graphic_terms_events
+               (id,user_id,department_id,email,terms_version,decision) VALUES (?,?,?,?,?,'accepted')""",
+            (str(uuid.uuid4()), key["graphics_user_id"], key["department_id"],
+             key["graphics_user_email"], GRAPHICS_TERMS_VERSION),
+        )
+    return {"accepted": True, "version": GRAPHICS_TERMS_VERSION}
+
+
+@router.post("/terms/decline")
+def decline_graphics_terms(
+    payload: TermsDecline, response: Response, authorization: Optional[str] = Header(default=None),
+):
+    key = _department_key(authorization, require_terms=False)
+    if "graphics_user_id" not in key.keys():
+        raise HTTPException(status_code=400, detail="Only a signed-in graphics account can decline")
+    if not hmac.compare_digest(payload.confirmation.strip(), "REMOVE MY ACCESS"):
+        raise HTTPException(status_code=400, detail='Type "REMOVE MY ACCESS" to confirm')
+    with _db() as db:
+        db.execute(
+            """INSERT INTO graphic_terms_events
+               (id,user_id,department_id,email,terms_version,decision) VALUES (?,?,?,?,?,'declined')""",
+            (str(uuid.uuid4()), key["graphics_user_id"], key["department_id"],
+             key["graphics_user_email"], GRAPHICS_TERMS_VERSION),
+        )
+        db.execute("DELETE FROM graphic_login_codes WHERE user_id=?", (key["graphics_user_id"],))
+        db.execute("DELETE FROM graphic_department_users WHERE id=?", (key["graphics_user_id"],))
+        db.execute("DELETE FROM graphic_api_keys WHERE id=?", (key["id"],))
+    _clear_graphics_cookies(response)
+    return {"access_removed": True}
 
 
 def _request_ip(request: Request) -> str:
@@ -543,11 +685,11 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
         ).fetchone()[0]
         if active_jobs:
             raise HTTPException(status_code=409, detail="Wait for active department renders to finish before deleting")
-        asset_paths = [
-            row["path"] for row in db.execute(
-                "SELECT path FROM graphic_assets WHERE department_id=?", (department_id,),
-            ).fetchall()
-        ]
+        asset_rows = db.execute(
+            "SELECT path,cdn_key FROM graphic_assets WHERE department_id=?", (department_id,),
+        ).fetchall()
+        asset_paths = [row["path"] for row in asset_rows]
+        asset_cdn_keys = [row["cdn_key"] for row in asset_rows if row["cdn_key"]]
         bundle_ids = [
             row["id"] for row in db.execute(
                 "SELECT id FROM graphic_bundles WHERE department_id=?", (department_id,),
@@ -559,6 +701,7 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
             (department_id,),
         )
         db.execute("DELETE FROM graphic_usage_events WHERE department_id=?", (department_id,))
+        db.execute("DELETE FROM graphic_terms_events WHERE department_id=?", (department_id,))
         db.execute("DELETE FROM graphic_jobs WHERE department_id=?", (department_id,))
         db.execute("DELETE FROM graphic_assets WHERE department_id=?", (department_id,))
         db.execute("DELETE FROM graphic_bundles WHERE department_id=?", (department_id,))
@@ -576,8 +719,11 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
             logger.warning("Unable to remove deleted department asset %s", stored_path, exc_info=True)
 
     r2_deleted = False
-    if bundle_ids and all(os.getenv(name) for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")):
-        objects = [{"Key": f"imggen/{bundle_id}/image.png"} for bundle_id in bundle_ids]
+    if (bundle_ids or asset_cdn_keys) and _r2_configured():
+        objects = (
+            [{"Key": f"imggen/{bundle_id}/image.png"} for bundle_id in bundle_ids]
+            + [{"Key": key} for key in asset_cdn_keys]
+        )
         try:
             await asyncio.to_thread(
                 _r2_client().delete_objects,
@@ -586,6 +732,8 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
             )
             for bundle_id in bundle_ids:
                 _purge_cdn(f"imggen/{bundle_id}/image.png")
+            for asset_key in asset_cdn_keys:
+                _purge_cdn(asset_key)
             r2_deleted = True
         except Exception:
             logger.warning("Department deleted, but one or more R2 graphics could not be removed", exc_info=True)
@@ -754,7 +902,7 @@ async def upload_asset(upload: UploadFile = File(...), authorization: Optional[s
 
 @router.post("/assets/logos")
 async def upload_logo(upload: UploadFile = File(...), authorization: Optional[str] = Header(default=None)):
-    """Store a validated department PNG for optional placement in the header."""
+    """Store a validated department PNG locally and in the public asset CDN."""
     key = _department_key(authorization)
     filename = Path(upload.filename or "logo.png").name
     content = await upload.read()
@@ -777,15 +925,94 @@ async def upload_logo(upload: UploadFile = File(...), authorization: Optional[st
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid department logo: {exc}")
     digest = hashlib.sha256(content).hexdigest()
+    object_key = _logo_object_key(key["department_slug"], filename, digest)
+    cdn_url = f"{CDN_BASE_URL}/{object_key}"
+    if not _r2_configured():
+        raise HTTPException(status_code=503, detail="Logo storage is not configured")
     ASSET_ROOT.mkdir(parents=True, exist_ok=True)
     path = ASSET_ROOT / f"{key['department_id']}-{digest[:16]}.png"
+    path_existed = path.exists()
     path.write_bytes(content)
-    with _db() as db:
-        cursor = db.execute(
-            "INSERT INTO graphic_assets(department_id,filename,content_type,sha256,path) VALUES (?,?,?,?,?)",
-            (key["department_id"], filename, "image/png", digest, str(path)),
+    try:
+        await asyncio.to_thread(
+            _r2_client().put_object,
+            Bucket=os.getenv("R2_BUCKET", "cdn-showmefire"), Key=object_key, Body=content,
+            ContentType="image/png", CacheControl="public,max-age=31536000,immutable",
         )
-    return {"asset_id": cursor.lastrowid, "filename": filename, "sha256": digest}
+    except Exception as exc:
+        if not path_existed:
+            path.unlink(missing_ok=True)
+        logger.error("Unable to cache department logo in R2", exc_info=True)
+        raise HTTPException(status_code=502, detail="Unable to store the logo in the graphics CDN") from exc
+    with _db() as db:
+        existing = db.execute(
+            """SELECT id,filename,sha256,cdn_key,cdn_url,created_at FROM graphic_assets
+               WHERE department_id=? AND content_type='image/png' AND sha256=?
+               ORDER BY id DESC LIMIT 1""",
+            (key["department_id"], digest),
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE graphic_assets SET cdn_key=?,cdn_url=? WHERE id=?",
+                (object_key, cdn_url, existing["id"]),
+            )
+            return {
+                "asset_id": existing["id"], "filename": existing["filename"],
+                "sha256": digest, "url": cdn_url, "cdn_key": object_key,
+            }
+        cursor = db.execute(
+            """INSERT INTO graphic_assets
+               (department_id,filename,content_type,sha256,path,cdn_key,cdn_url) VALUES (?,?,?,?,?,?,?)""",
+            (key["department_id"], filename, "image/png", digest, str(path), object_key, cdn_url),
+        )
+    return {
+        "asset_id": cursor.lastrowid, "filename": filename, "sha256": digest,
+        "url": cdn_url, "cdn_key": object_key,
+    }
+
+
+@router.get("/assets/logos")
+async def list_logos(authorization: Optional[str] = Header(default=None)):
+    """List reusable PNG logos and backfill older local assets into the CDN."""
+    key = _department_key(authorization)
+    with _db() as db:
+        rows = db.execute(
+            """SELECT id AS asset_id,filename,sha256,path,cdn_key,cdn_url AS url,created_at
+               FROM graphic_assets
+               WHERE department_id=? AND content_type='image/png'
+               ORDER BY created_at DESC,id DESC""",
+            (key["department_id"],),
+        ).fetchall()
+    logos = [dict(row) for row in rows]
+    if _r2_configured():
+        for logo in logos:
+            if logo["url"]:
+                continue
+            path = Path(logo["path"])
+            if not path.is_file():
+                continue
+            object_key = _logo_object_key(key["department_slug"], logo["filename"], logo["sha256"])
+            cdn_url = f"{CDN_BASE_URL}/{object_key}"
+            try:
+                await asyncio.to_thread(
+                    _r2_client().put_object,
+                    Bucket=os.getenv("R2_BUCKET", "cdn-showmefire"), Key=object_key,
+                    Body=path.read_bytes(), ContentType="image/png",
+                    CacheControl="public,max-age=31536000,immutable",
+                )
+                with _db() as db:
+                    db.execute(
+                        "UPDATE graphic_assets SET cdn_key=?,cdn_url=? WHERE id=?",
+                        (object_key, cdn_url, logo["asset_id"]),
+                    )
+                logo["cdn_key"] = object_key
+                logo["url"] = cdn_url
+            except Exception:
+                logger.warning("Unable to backfill graphics logo %s to R2", logo["asset_id"], exc_info=True)
+    for logo in logos:
+        logo.pop("path", None)
+        logo.pop("cdn_key", None)
+    return {"logos": logos}
 
 
 async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Optional[int]):
