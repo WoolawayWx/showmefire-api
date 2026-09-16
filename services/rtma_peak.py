@@ -18,7 +18,7 @@ import xarray as xr
 from zoneinfo import ZoneInfo
 
 from core.config import ARCHIVE_RAW_DATA_DIR, GIS_DIR, IMAGES_DIR
-from core.executors import run_in_process_pool_async
+from core.executors import get_rtma_job_lock, run_in_process_pool_async
 from core.fire_danger import calculate_fire_danger
 from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
@@ -606,7 +606,8 @@ def generate_rtma_peak_for_verification(target_date: str | date | None = None) -
 
 async def run_rtma_peak_job():
     try:
-        result = await run_in_process_pool_async(generate_rtma_peak)
+        async with get_rtma_job_lock():
+            result = await run_in_process_pool_async(generate_rtma_peak)
         logger.info("RTMA peak generated: %s", result)
     except Exception:
         logger.exception("Scheduled RTMA peak generation failed")

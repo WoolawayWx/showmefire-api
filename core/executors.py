@@ -33,6 +33,7 @@ from concurrent.futures.process import BrokenProcessPool
 logger = logging.getLogger(__name__)
 
 _process_pool: ProcessPoolExecutor | None = None
+_rtma_job_lock: asyncio.Lock | None = None
 
 # Applies whenever a caller doesn't pass its own `timeout` - a safety net so a
 # new call site can't reintroduce an unbounded hang just by omitting it.
@@ -54,6 +55,24 @@ def get_process_pool() -> ProcessPoolExecutor:
         logger.info("Starting CPU job process pool with %d workers", workers)
         _process_pool = ProcessPoolExecutor(max_workers=workers)
     return _process_pool
+
+
+def get_rtma_job_lock() -> asyncio.Lock:
+    """Serialize the RTMA/spread-rate scheduled jobs against each other.
+
+    These are the only scheduled jobs that submit memory-heavy grid work
+    (RTMA peak, testbed RTMA peak, spread-rate pipeline) to the 2-worker pool.
+    Their schedules can coincidentally land on the same tick (e.g. the
+    15-minute spread-rate interval drifting onto the 22:20 peak cron), and
+    running two of them at once has been enough to push the container past
+    its memory limit and get a worker OOM-killed, breaking the pool for both.
+    Callers should hold this for the duration of their `run_in_process_pool*`
+    call so at most one such job occupies the pool at a time.
+    """
+    global _rtma_job_lock
+    if _rtma_job_lock is None:
+        _rtma_job_lock = asyncio.Lock()
+    return _rtma_job_lock
 
 
 def _kill_hung_workers(pool: ProcessPoolExecutor) -> None:

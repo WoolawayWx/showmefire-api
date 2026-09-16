@@ -51,6 +51,16 @@ FBFM40_TO_REGIME: dict[int, str] = {
 
 REGIME_BY_NAME = {item.name: item for item in FUEL_REGIMES}
 
+# The FBFM40 GeoTIFF is native 30 m LANDFIRE resolution (~695M pixels over the
+# Missouri-buffered domain). It only ever feeds a nearest-neighbor lookup onto
+# the RTMA analysis grid (~2.5 km) in rtma_peak._nearest_grid_lookup, which
+# also rebuilds a cKDTree over every raster point once per analysis hour.
+# Reading it at full resolution OOM-killed the production RTMA peak job
+# (2026-09-15 22:20 CT) the night the FBFM40 switch shipped. Capping the read
+# here keeps resolution far finer than the RTMA grid needs while bounding
+# memory and cKDTree build cost.
+FUEL_RASTER_MAX_DIMENSION_PX = 1000
+
 
 def default_fuel_raster_path() -> Path:
     """Return the standard FBFM40 path used by the acquisition script."""
@@ -246,12 +256,24 @@ def load_fuel_model_raster() -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[s
     bundle_path = os.getenv("VERIFICATION_STATIC_BUNDLE", "").strip()
     if raster_path:
         import rasterio
+        from rasterio.enums import Resampling
         from rasterio.warp import transform
 
         with rasterio.open(raster_path) as src:
-            values = src.read(1)
+            longest_side = max(src.height, src.width)
+            scale = max(1, -(-longest_side // FUEL_RASTER_MAX_DIMENSION_PX))
+            out_height = max(1, src.height // scale)
+            out_width = max(1, src.width // scale)
+            values = src.read(
+                1,
+                out_shape=(out_height, out_width),
+                resampling=Resampling.nearest,
+            )
+            out_transform = src.transform * src.transform.scale(
+                src.width / values.shape[-1], src.height / values.shape[-2]
+            )
             rows, cols = np.indices(values.shape)
-            xs, ys = rasterio.transform.xy(src.transform, rows, cols)
+            xs, ys = rasterio.transform.xy(out_transform, rows, cols)
             lon, lat = transform(src.crs, "EPSG:4326", np.asarray(xs).ravel(), np.asarray(ys).ravel())
         return values, np.asarray(lon).reshape(values.shape), np.asarray(lat).reshape(values.shape), {
             "source": raster_path, "format": "geotiff"
