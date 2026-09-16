@@ -73,6 +73,6 @@ def test_rtma_classification_falls_back_to_rh_estimate_without_measurements():
         "u10": (("y", "x"), np.full((2, 2), 10.0)),
         "v10": (("y", "x"), np.zeros((2, 2))),
     })
-    result, _, _ = _classify_grid(ds)
+    result, _, _, _ = _classify_grid(ds)
     assert result.shape == (2, 2)
     assert np.isfinite(result).all()

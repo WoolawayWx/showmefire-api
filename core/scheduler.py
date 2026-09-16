@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-from core.executors import get_process_pool, run_in_process_pool_async
+from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
 from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data
 from services.timeseries import fetchtimeseriesdata
 from tools.nfgs_firedetect import main as firedetect
@@ -83,9 +83,10 @@ async def publish_gis_observations_job():
 async def refresh_testbed_rtma_job():
     """Build an isolated continuous-score RTMA peak after the production run."""
     try:
-        result = await run_in_process_pool_async(
-            functools.partial(generate_rtma_peak, None, output_root=BETA_ROOT, experimental=True),
-        )
+        async with get_rtma_job_lock():
+            result = await run_in_process_pool_async(
+                functools.partial(generate_rtma_peak, None, output_root=BETA_ROOT, experimental=True),
+            )
         manifest = load_manifest()
         manifest["rtma_updated_at"] = datetime.now().isoformat()
         manifest.setdefault("products", {})["rtma_peak"] = {
@@ -109,10 +110,11 @@ async def refresh_testbed_spread_rate_job():
 async def rtma_spread_rate_pipeline_job():
     """Ensure latest RTMA is cached on the server, then refresh spread-rate."""
     try:
-        await run_in_process_pool_async(
-            run_spread_rate_pipeline,
-            raws_station_data if raws_station_data.get("stations") else None,
-        )
+        async with get_rtma_job_lock():
+            await run_in_process_pool_async(
+                run_spread_rate_pipeline,
+                raws_station_data if raws_station_data.get("stations") else None,
+            )
         try:
             await asyncio.to_thread(cleanup_rtma_cache)
         except Exception as cleanup_error:

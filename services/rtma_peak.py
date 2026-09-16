@@ -18,7 +18,7 @@ import xarray as xr
 from zoneinfo import ZoneInfo
 
 from core.config import ARCHIVE_RAW_DATA_DIR, GIS_DIR, IMAGES_DIR
-from core.executors import run_in_process_pool_async
+from core.executors import get_rtma_job_lock, run_in_process_pool_async
 from core.fire_danger import calculate_fire_danger
 from core.beta_fire_danger import score_fire_danger
 from forecast.export_fire_danger_gis import export_geotiff
@@ -40,6 +40,23 @@ RTMA_PEAK_IMAGE_DIR = Path(IMAGES_DIR) / "rtma_peak"
 RTMA_PEAK_IMAGE_ARCHIVE_DIR = RTMA_PEAK_IMAGE_DIR / "archive"
 RTMA_PEAK_TODAY_PNG = Path(IMAGES_DIR) / "mo-rtma-observedpeakfiredanger.png"
 RTMA_ADJUSTED_PEAK_DIR = Path(GIS_DIR) / "rtma_peak_rainfall_adjusted"
+
+RTMA_FUEL_MOISTURE_DIR = Path(GIS_DIR) / "rtma_fuel_moisture"
+RTMA_FUEL_MOISTURE_ARCHIVE_DIR = RTMA_FUEL_MOISTURE_DIR / "archive"
+RTMA_FUEL_MOISTURE_IMAGE_DIR = Path(IMAGES_DIR) / "rtma_fuel_moisture"
+RTMA_FUEL_MOISTURE_IMAGE_ARCHIVE_DIR = RTMA_FUEL_MOISTURE_IMAGE_DIR / "archive"
+RTMA_FUEL_MOISTURE_TODAY_TIF = Path(GIS_DIR) / "rtma_fuel_moisture_today.tif"
+RTMA_FUEL_MOISTURE_TODAY_PNG = Path(IMAGES_DIR) / "mo-rtma-fuelmoisture.png"
+FUEL_MOISTURE_RANGE = (1.0, 40.0)  # matches _calibrate_fuel_moisture's clip bounds
+
+RTMA_REDUCTION_ARCHIVE_DIR = Path(GIS_DIR) / "rtma_rainfall_reduction" / "archive"
+RTMA_IMPACT_DIR = Path(GIS_DIR) / "rtma_rainfall_impact"
+RTMA_IMPACT_ARCHIVE_DIR = RTMA_IMPACT_DIR / "archive"
+RTMA_IMPACT_IMAGE_DIR = Path(IMAGES_DIR) / "rtma_rainfall_impact"
+RTMA_IMPACT_IMAGE_ARCHIVE_DIR = RTMA_IMPACT_IMAGE_DIR / "archive"
+RTMA_IMPACT_TODAY_TIF = Path(GIS_DIR) / "rtma_rainfall_impact_today.tif"
+RTMA_IMPACT_TODAY_PNG = Path(IMAGES_DIR) / "mo-rtma-rainfallimpact.png"
+RTMA_IMPACT_DEFAULT_DAYS = 7
 
 # Same fire-weather window as DailyForecast peak maps and endOfDayReport.
 PEAK_WINDOW_START_HOUR = 10
@@ -199,8 +216,8 @@ def _classify_grid(
     scorer=calculate_fire_danger,
     score_key: str | None = None,
     fuel_moisture_observations: list[dict] | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return class grid and -180/180 lon/lat meshes for one RTMA hour."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return class grid, -180/180 lon/lat meshes, and the calibrated fuel-moisture grid for one RTMA hour."""
     lon, lat = _lon_lat_meshes(ds["longitude"].values, ds["latitude"].values)
     rh = _squeeze2d(np.asarray(ds["r2"].values, dtype=float))
     wind = np.hypot(
@@ -226,7 +243,7 @@ def _classify_grid(
     else:
         classify = np.vectorize(scorer, otypes=[float])
     result[valid] = classify(fuel_moisture[valid], rh[valid], wind[valid])
-    return result, lon, lat
+    return result, lon, lat, fuel_moisture
 
 
 def _nearest_grid_lookup(source_values, source_lon, source_lat, target_lon, target_lat):
@@ -387,6 +404,269 @@ def _render_png(
     return out_path
 
 
+def _load_boundary_layers(proj4_init: str):
+    """County/state outlines reprojected to the map's CRS, shared by every branded render."""
+    import geopandas as gpd
+
+    counties = gpd.read_file(MAPS_DIR / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp")
+    if counties.crs and counties.crs != proj4_init:
+        counties = counties.to_crs(proj4_init)
+    missouriborder = gpd.read_file(MAPS_DIR / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp")
+    if missouriborder.crs and missouriborder.crs != proj4_init:
+        missouriborder = missouriborder.to_crs(proj4_init)
+    return counties, missouriborder
+
+
+def _apply_branding_fonts():
+    import matplotlib.font_manager as font_manager
+    import matplotlib.pyplot as plt
+
+    for font_path in (
+        ASSETS_DIR / "Montserrat/static/Montserrat-Regular.ttf",
+        ASSETS_DIR / "Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf",
+        ASSETS_DIR / "Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf",
+    ):
+        if font_path.exists():
+            font_manager.fontManager.addfont(str(font_path))
+    plt.rcParams["font.family"] = "Montserrat"
+
+
+def _draw_logo(ax):
+    import matplotlib.image as mpimg
+    from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+
+    svg_path = ASSETS_DIR / "LightBackGroundLogo.svg"
+    try:
+        import cairosvg
+        png_bytes = cairosvg.svg2png(url=str(svg_path))
+        logo = mpimg.imread(BytesIO(png_bytes), format="png")
+        ax.add_artist(AnnotationBbox(OffsetImage(logo, zoom=0.03), (0.99, 0.01), frameon=False, xycoords="figure fraction", box_alignment=(1, 0)))
+    except Exception:
+        pass
+
+
+def _export_generic_geotiff(
+    grid: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    out_path: Path,
+    *,
+    categorical: bool,
+    dtype: str,
+    nodata: float,
+    band_description: str,
+    run_date: datetime,
+) -> None:
+    """Write a single-band GeoTIFF on the canonical EPSG:32615 Missouri grid.
+
+    Unlike export_fire_danger_gis.export_geotiff, this does not bin values
+    into the 0-4 danger-category scale - it's for auxiliary continuous (fuel
+    moisture) or small-integer (rainfall reduction) products.
+    """
+    import rasterio
+    from services.gis_publisher import canonical_grid, regrid_lonlat
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    projected = regrid_lonlat(grid, lon, lat, categorical=categorical)
+    regridded = np.where(np.isfinite(projected), projected, nodata).astype(dtype)
+    grid_spec = canonical_grid()
+    with rasterio.open(
+        out_path, "w",
+        driver="GTiff",
+        height=grid_spec["height"],
+        width=grid_spec["width"],
+        count=1,
+        dtype=dtype,
+        crs=grid_spec["crs"],
+        transform=grid_spec["transform"],
+        nodata=nodata,
+        compress="lzw",
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    ) as dst:
+        dst.write(regridded, 1)
+        dst.update_tags(BAND_1=band_description, GENERATED=run_date.isoformat())
+
+
+def _raster_lon_lat_mesh(transform, crs, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Derive lon/lat meshes (EPSG:4326) from a regular projected raster's transform."""
+    import rasterio
+    from pyproj import Transformer
+
+    rows, cols = np.indices(shape)
+    xs, ys = rasterio.transform.xy(transform, rows, cols)
+    transformer = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(np.asarray(xs), np.asarray(ys))
+    return np.asarray(lon).reshape(shape), np.asarray(lat).reshape(shape)
+
+
+def _render_fuel_moisture_png(
+    grid: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    out_path: Path,
+    target_date: date,
+    fuel_moisture_note: str,
+) -> Path:
+    """Render the day's driest calibrated fuel-moisture estimate.
+
+    "Merged" in the sense that it's the RTMA RH-based estimate bias-corrected
+    against RAWS station fuel-moisture observations where available - see
+    _calibrate_fuel_moisture. Shows the driest (most fire-prone) hour of the
+    day, the natural fuel-moisture counterpart to the danger peak product.
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    mask, lon_mesh, lat_mesh = _missouri_mask(lon, lat)
+    masked = np.where(mask, grid, np.nan) if mask.shape == grid.shape else grid
+    if not np.isfinite(masked).any():
+        logger.warning("Missouri mask dropped every RTMA cell; drawing the unmasked fuel-moisture grid")
+        masked = grid
+
+    pixelw, pixelh, mapdpi = 2048, 1152, 144
+    extent = (-95.8, -89.1, 35.8, 40.8)
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
+
+    vmin, vmax = FUEL_MOISTURE_RANGE
+    cmap = plt.get_cmap("BrBG")
+
+    fig = plt.figure(figsize=(pixelw / mapdpi, pixelh / mapdpi), dpi=mapdpi, facecolor="#E8E8E8")
+    ax = plt.axes([0, 0, 1, 1], projection=map_crs)
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_extent(extent, crs=data_crs)
+
+    cs = ax.contourf(
+        lon_mesh, lat_mesh, masked, transform=data_crs,
+        levels=np.linspace(vmin, vmax, 21), cmap=cmap, vmin=vmin, vmax=vmax,
+        alpha=0.75, zorder=7, antialiased=True, extend="both",
+    )
+
+    counties, missouriborder = _load_boundary_layers(data_crs.proj4_init)
+    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none", linewidth=1, zorder=5)
+    ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", facecolor="none", linewidth=1.5, zorder=6)
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    plt.colorbar(cs, cax=cax, label="Fuel Moisture (%)")
+    ax.set_anchor("W")
+    fig.subplots_adjust(left=0.05)
+
+    _apply_branding_fonts()
+
+    fig.text(0.99, 0.97, "Missouri Fuel Moisture (RTMA + RAWS)", fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans")
+    fig.text(
+        0.99, 0.90,
+        f"Driest calibrated estimate | Valid: {target_date.isoformat()} 10:00–21:00 CT",
+        fontsize=16, ha="right", va="top", fontname="Montserrat",
+    )
+    fig.text(
+        0.99, 0.75,
+        "RTMA RH-based fuel moisture, bias-corrected against nearby\n"
+        "RAWS station observations where available. Shows the driest\n"
+        "(most fire-prone) hour of the 10:00–21:00 CT window.\n\n"
+        f"Fuel moisture: {fuel_moisture_note}\n"
+        "Data Source: NOAA RTMA (t2m/r2) + RAWS stations\n"
+        "For More Info, Visit ShowMeFire.org",
+        fontsize=10, ha="right", va="top", linespacing=1.6, fontname="Montserrat",
+    )
+    fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat")
+
+    _draw_logo(ax)
+    fig.savefig(out_path, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    return out_path
+
+
+def _render_rainfall_impact_png(
+    grid: np.ndarray,
+    lon: np.ndarray,
+    lat: np.ndarray,
+    out_path: Path,
+    end_date: date,
+    window_days: int,
+    days_available: int,
+) -> Path:
+    """Render the worst rainfall-driven fire-danger suppression seen in the trailing window."""
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    mask, lon_mesh, lat_mesh = _missouri_mask(lon, lat)
+    masked = np.where(mask, grid, np.nan) if mask.shape == grid.shape else grid
+    if not np.isfinite(masked).any():
+        logger.warning("Missouri mask dropped every RTMA cell; drawing the unmasked rainfall-impact grid")
+        masked = grid
+
+    pixelw, pixelh, mapdpi = 2048, 1152, 144
+    extent = (-95.8, -89.1, 35.8, 40.8)
+    data_crs = ccrs.PlateCarree()
+    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
+
+    colors = ["#F0F0F0", "#9EC9E2", "#2166AC"]
+    labels = ["No suppression", "-1 category", "-2 categories"]
+    bins = [-0.5, 0.5, 1.5, 2.5]
+    cmap = ListedColormap(colors)
+    norm = BoundaryNorm(bins, len(colors))
+
+    fig = plt.figure(figsize=(pixelw / mapdpi, pixelh / mapdpi), dpi=mapdpi, facecolor="#E8E8E8")
+    ax = plt.axes([0, 0, 1, 1], projection=map_crs)
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_extent(extent, crs=data_crs)
+
+    cs = ax.contourf(
+        lon_mesh, lat_mesh, masked, transform=data_crs,
+        levels=bins, cmap=cmap, norm=norm, alpha=0.75, zorder=7, antialiased=True,
+    )
+    ax.contour(
+        lon_mesh, lat_mesh, masked, transform=data_crs,
+        levels=bins[1:-1], colors="black", linewidths=0.3, alpha=0.2, zorder=8,
+    )
+
+    counties, missouriborder = _load_boundary_layers(data_crs.proj4_init)
+    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none", linewidth=1, zorder=5)
+    ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", facecolor="none", linewidth=1.5, zorder=6)
+
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = plt.colorbar(cs, cax=cax, label="Rainfall-Driven Danger Suppression")
+    cbar.set_ticks([0, 1, 2])
+    cbar.set_ticklabels(labels)
+    ax.set_anchor("W")
+    fig.subplots_adjust(left=0.05)
+
+    _apply_branding_fonts()
+
+    fig.text(0.99, 0.97, "Missouri Rainfall Impact on Fire Danger", fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans")
+    fig.text(
+        0.99, 0.90,
+        f"Trailing {window_days}-day window | Through {end_date.isoformat()} ({days_available}/{window_days} days available)",
+        fontsize=16, ha="right", va="top", fontname="Montserrat",
+    )
+    fig.text(
+        0.99, 0.75,
+        "Worst same-day fire-danger category reduction that realized\n"
+        "rainfall, fuel type, RH, and wind produced at each pixel over\n"
+        "the trailing window.\n\n"
+        "Data Source: NOAA RTMA + ShowMeFire fuel-moisture analysis\n"
+        "For More Info, Visit ShowMeFire.org",
+        fontsize=10, ha="right", va="top", linespacing=1.6, fontname="Montserrat",
+    )
+    fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat")
+
+    _draw_logo(ax)
+    fig.savefig(out_path, dpi=mapdpi, bbox_inches=None, pad_inches=0)
+    plt.close(fig)
+    return out_path
+
+
 def generate_rtma_peak(
     target_date: str | date | None = None,
     *,
@@ -412,19 +692,22 @@ def generate_rtma_peak(
     used_hours = []
     measured_hours = 0
     measured_station_observations = 0
+    fuel_moisture_min = None
+    peak_reduction = None
     for hour in _hours_for_local_date(local_date):
         try:
             path = fetch_rtma(hour)
             with xr.open_dataset(path) as ds:
                 fuel_observations = _fuel_moisture_observations(fuel_archive, hour)
                 use_measurements = len(fuel_observations) >= MINIMUM_FUEL_MOISTURE_STATIONS
-                current, current_lon, current_lat = _classify_grid(
+                current, current_lon, current_lat, hour_fuel_moisture = _classify_grid(
                     ds,
                     score_fire_danger if experimental else calculate_fire_danger,
                     "score" if experimental else None,
                     fuel_observations if use_measurements else None,
                 )
                 adjusted_current = current
+                hour_reduction = None
                 if fuel_source is None:
                     try:
                         fuel_source = load_fuel_model_raster()
@@ -473,7 +756,7 @@ def generate_rtma_peak(
                             _squeeze2d(np.asarray(ds["u10"].values, dtype=float)),
                             _squeeze2d(np.asarray(ds["v10"].values, dtype=float)),
                         ) * 1.9438444924406
-                        adjusted_current, _ = adjust_grid(
+                        adjusted_current, hour_reduction = adjust_grid(
                             current,
                             precip,
                             fuel_grid,
@@ -493,6 +776,15 @@ def generate_rtma_peak(
                 else:
                     logger.warning("Skipping RTMA hour %s because its grid does not match the first hour", hour)
                     continue
+                fuel_moisture_min = (
+                    hour_fuel_moisture if fuel_moisture_min is None
+                    else np.fmin(fuel_moisture_min, hour_fuel_moisture)
+                )
+                if hour_reduction is not None:
+                    peak_reduction = (
+                        hour_reduction.astype(float) if peak_reduction is None
+                        else np.fmax(peak_reduction, hour_reduction)
+                    )
                 used_hours.append(hour.isoformat())
                 if use_measurements:
                     measured_hours += 1
@@ -553,6 +845,59 @@ def generate_rtma_peak(
     _render_png(peak, lon, lat, png_path, local_date, fuel_moisture_note)
     today_png.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(png_path, today_png)
+
+    run_datetime = datetime.combine(local_date, datetime.min.time(), tzinfo=CHICAGO_TZ)
+
+    fuel_moisture_tif_dir = gis_dir / "rtma_fuel_moisture" / "archive"
+    fuel_moisture_png_dir = image_dir / "rtma_fuel_moisture" / "archive"
+    fuel_moisture_today_tif = (
+        RTMA_FUEL_MOISTURE_TODAY_TIF if output_root is None else gis_dir / "rtma_fuel_moisture_today.tif"
+    )
+    fuel_moisture_today_png = (
+        RTMA_FUEL_MOISTURE_TODAY_PNG if output_root is None else image_dir / "rtma_fuel_moisture_today.png"
+    )
+    fuel_moisture_map = None
+    try:
+        fuel_moisture_tif_path = fuel_moisture_tif_dir / f"{local_date.isoformat()}.tif"
+        fuel_moisture_png_path = fuel_moisture_png_dir / f"{local_date.isoformat()}.png"
+        _export_generic_geotiff(
+            fuel_moisture_min, lon, lat, fuel_moisture_tif_path,
+            categorical=False, dtype="float32", nodata=-9999.0,
+            band_description="RTMA RH-based fuel moisture (%), RAWS-calibrated where available; daily minimum",
+            run_date=run_datetime,
+        )
+        fuel_moisture_today_tif.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fuel_moisture_tif_path, fuel_moisture_today_tif)
+        _render_fuel_moisture_png(fuel_moisture_min, lon, lat, fuel_moisture_png_path, local_date, fuel_moisture_note)
+        fuel_moisture_today_png.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fuel_moisture_png_path, fuel_moisture_today_png)
+        fuel_moisture_map = {
+            "tif": f"rtma_fuel_moisture/archive/{local_date.isoformat()}.tif",
+            "png": f"rtma_fuel_moisture/archive/{local_date.isoformat()}.png",
+        }
+    except Exception:
+        logger.exception("Fuel moisture map export failed for %s", local_date)
+
+    rainfall_reduction_tif = None
+    if peak_reduction is not None:
+        try:
+            reduction_archive_dir = gis_dir / "rtma_rainfall_reduction" / "archive"
+            reduction_tif_path = reduction_archive_dir / f"{local_date.isoformat()}.tif"
+            _export_generic_geotiff(
+                peak_reduction, lon, lat, reduction_tif_path,
+                categorical=True, dtype="uint8", nodata=255,
+                band_description="Worst same-day rainfall-driven danger category reduction: 0-2",
+                run_date=run_datetime,
+            )
+            rainfall_reduction_tif = f"rtma_rainfall_reduction/archive/{local_date.isoformat()}.tif"
+        except Exception:
+            logger.exception("Rainfall reduction export failed for %s", local_date)
+    rainfall_impact_map = None
+    try:
+        rainfall_impact_map = generate_rainfall_impact_map(local_date, output_root=output_root)
+    except Exception:
+        logger.exception("Rainfall impact map generation failed for %s", local_date)
+
     result = {
         "date": local_date.isoformat(),
         "hours_used": len(used_hours),
@@ -585,12 +930,121 @@ def generate_rtma_peak(
             "station_observations_used": measured_station_observations,
             "minimum_stations_per_hour": MINIMUM_FUEL_MOISTURE_STATIONS,
         },
+        "fuel_moisture_map": fuel_moisture_map,
+        "rainfall_reduction_tif": rainfall_reduction_tif,
+        "rainfall_impact_map": rainfall_impact_map,
     }
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_metadata_path = metadata_path.with_suffix(".json.tmp")
     temporary_metadata_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     temporary_metadata_path.replace(metadata_path)
     return result
+
+
+def generate_rainfall_impact_map(
+    end_date: str | date | None = None,
+    days: int = RTMA_IMPACT_DEFAULT_DAYS,
+    output_root: Path | None = None,
+) -> dict:
+    """Combine the trailing `days` of daily rainfall-suppression grids into one map.
+
+    Each day's grid (written by generate_rtma_peak as rtma_rainfall_reduction)
+    already holds the worst same-day category reduction rainfall produced;
+    this takes the elementwise max across the window so a pixel that got
+    relief on any recent day still shows it, even after that day stops being
+    "today". Missing days (job didn't run, or predate this feature) are
+    skipped - resumable/best-effort like generate_rtma_peak itself.
+    """
+    import rasterio
+
+    local_date = _parse_local_date(end_date)
+    if output_root is None:
+        gis_dir = Path(GIS_DIR)
+        image_dir = Path(IMAGES_DIR)
+        today_tif = RTMA_IMPACT_TODAY_TIF
+        today_png = RTMA_IMPACT_TODAY_PNG
+    else:
+        gis_dir = Path(output_root) / "gis"
+        image_dir = Path(output_root) / "images"
+        today_tif = gis_dir / "rtma_rainfall_impact_today.tif"
+        today_png = image_dir / "rtma_rainfall_impact_today.png"
+    reduction_archive_dir = gis_dir / "rtma_rainfall_reduction" / "archive"
+
+    combined = None
+    transform = crs = None
+    dates_used = []
+    for offset in range(days):
+        day = local_date - timedelta(days=offset)
+        path = reduction_archive_dir / f"{day.isoformat()}.tif"
+        if not path.is_file():
+            continue
+        try:
+            with rasterio.open(path) as src:
+                band = src.read(1).astype(float)
+                band[band == src.nodata] = np.nan
+                if combined is None:
+                    combined = band
+                    transform, crs = src.transform, src.crs
+                elif band.shape == combined.shape:
+                    combined = np.fmax(combined, band)
+                else:
+                    logger.warning("Skipping %s in rainfall impact window: grid shape mismatch", path)
+                    continue
+            dates_used.append(day.isoformat())
+        except Exception:
+            logger.exception("Unable to read rainfall reduction grid %s", path)
+
+    if combined is None:
+        raise RuntimeError(
+            f"No rainfall-reduction grids available in the trailing {days} days through {local_date}"
+        )
+
+    tif_dir = gis_dir / "rtma_rainfall_impact" / "archive"
+    png_dir = image_dir / "rtma_rainfall_impact" / "archive"
+    tif_path = tif_dir / f"{local_date.isoformat()}.tif"
+    png_path = png_dir / f"{local_date.isoformat()}.png"
+    tif_dir.mkdir(parents=True, exist_ok=True)
+    png_dir.mkdir(parents=True, exist_ok=True)
+
+    regridded = np.where(np.isfinite(combined), combined, 255).astype("uint8")
+    with rasterio.open(
+        tif_path, "w",
+        driver="GTiff",
+        height=regridded.shape[0],
+        width=regridded.shape[1],
+        count=1,
+        dtype="uint8",
+        crs=crs,
+        transform=transform,
+        nodata=255,
+        compress="lzw",
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+    ) as dst:
+        dst.write(regridded, 1)
+        dst.update_tags(
+            BAND_1="Worst rainfall-driven fire-danger category reduction over trailing window: 0-2",
+            WINDOW_DAYS=str(days),
+            DAYS_AVAILABLE=str(len(dates_used)),
+            THROUGH_DATE=local_date.isoformat(),
+        )
+    today_tif.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tif_path, today_tif)
+
+    lon_mesh, lat_mesh = _raster_lon_lat_mesh(transform, crs, regridded.shape)
+    _render_rainfall_impact_png(combined, lon_mesh, lat_mesh, png_path, local_date, days, len(dates_used))
+    today_png.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(png_path, today_png)
+
+    return {
+        "date": local_date.isoformat(),
+        "window_days": days,
+        "days_available": len(dates_used),
+        "dates_used": dates_used,
+        "tif": f"rtma_rainfall_impact/archive/{local_date.isoformat()}.tif",
+        "png": f"rtma_rainfall_impact/archive/{local_date.isoformat()}.png",
+    }
 
 
 def generate_rtma_peak_for_verification(target_date: str | date | None = None) -> dict | None:
@@ -606,7 +1060,8 @@ def generate_rtma_peak_for_verification(target_date: str | date | None = None) -
 
 async def run_rtma_peak_job():
     try:
-        result = await run_in_process_pool_async(generate_rtma_peak)
+        async with get_rtma_job_lock():
+            result = await run_in_process_pool_async(generate_rtma_peak)
         logger.info("RTMA peak generated: %s", result)
     except Exception:
         logger.exception("Scheduled RTMA peak generation failed")
