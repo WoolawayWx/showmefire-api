@@ -8,11 +8,11 @@ from pytz import timezone
 from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
 from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data
 from services.timeseries import fetchtimeseriesdata
-from tools.nfgs_firedetect import main as firedetect
+from tools.ngfs_ogc_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
-from services.archive_bundler import run_end_of_day_archive
+from services.archive_bundler import run_end_of_day_archive, run_ngfs_raw_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
@@ -20,6 +20,7 @@ from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
 from services.drift_monitor import run_drift_check
 from services.fire_ingest import ingest_detection_files
+from services.recurring_source_detector import run_recurring_source_scan
 from core.database import (
     expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows,
     purge_feedback_throttle_rows,
@@ -219,6 +220,15 @@ async def run_drift_check_job():
         logger.error("Drift check failed: %s", error, exc_info=True)
 
 
+async def recurring_source_detector_job():
+    """Flag candidate recurring non-fire detection sources (mills, flares,
+    kilns...) for admin review - never auto-confirms/suppresses anything."""
+    try:
+        await asyncio.to_thread(run_recurring_source_scan)
+    except Exception as error:
+        logger.error("Recurring source detector failed: %s", error, exc_info=True)
+
+
 async def run_post_promotion_monitor_job():
     """Seven-day post-promotion guardrail: auto-rollback on live metric regression.
 
@@ -250,6 +260,11 @@ async def ingest_fire_detections_job():
     """
     try:
         await asyncio.to_thread(ingest_detection_files)
+        # Per-detection ML confidence (0-100%, detection-pattern features
+        # only) - distinct from and complementary to the incident-cluster
+        # confidence below, which scores a group of detections together.
+        from services.detection_confidence import refresh_detection_confidence
+        await asyncio.to_thread(refresh_detection_confidence)
         await asyncio.to_thread(publish_fire_detections)
         from services.fire_incident_graphics import refresh_incident_graphics
         await asyncio.to_thread(refresh_incident_graphics)
@@ -383,10 +398,12 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     )
     
     scheduler.add_job(
-        firedetect, 
-        'cron', 
-        minute='0,5,10,15,20,25,30,35,40,45,50,55',
-        hour='10-22',
+        firedetect,
+        'cron',
+        # GOES/NGFS scans continuously (geostationary), unlike the
+        # polar-orbiting VIIRS/MODIS passes fetch_advanced_fire_detections
+        # is limited to below - no daylight/hour restriction needed here.
+        minute='0,10,20,30,40,50',
         id='fetch_fire_detections'
     )
     
@@ -479,6 +496,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     )
 
     scheduler.add_job(
+        run_ngfs_raw_archive,
+        'cron',
+        hour=3,
+        minute=15,
+        id='archive_stale_ngfs_detections',
+        max_instances=1,
+        coalesce=True
+    )
+
+    scheduler.add_job(
         run_rtma_peak_job,
         'cron',
         hour=22,
@@ -554,6 +581,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=4,
         minute=0,
         id='drift_check',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        recurring_source_detector_job,
+        'cron',
+        hour=4,
+        minute=20,
+        id='recurring_source_detector',
         max_instances=1,
         coalesce=True,
     )

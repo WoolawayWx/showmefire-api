@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -278,6 +279,78 @@ def run_archive_bundle():
     """Sync entry point - safe to run standalone (e.g. against the backlog)."""
     from services.archive_store import ArchiveStore
     return ArchiveStore().sync(prune=os.getenv('SMF_ARCHIVE_PRUNE', 'false').lower() == 'true')
+
+
+NGFS_RAW_DIR = ROOT_DIR / "archive" / "raw_data" / "ngfs_ogc"
+NGFS_ARCHIVE_OUTPUT_DIR = ROOT_DIR / "archive" / "raw_data" / "ngfs_ogc_zips"
+NGFS_ARCHIVE_PREFIX = "ngfs-ogc-raw"
+
+
+def _ngfs_r2_key_for_date(date):
+    return f"{NGFS_ARCHIVE_PREFIX}/{date}.zip"
+
+
+def archive_stale_ngfs_raw(cutoff_days: int = 7):
+    """Zip, upload, and remove NGFS OGC raw-capture day folders older than
+    cutoff_days - the last `cutoff_days` worth stay on local disk
+    uncompressed for fast access/debugging. Deliberately delayed version of
+    the same zip/verify/upload/remove pattern process_date uses above,
+    scoped to its own output dir and R2 prefix so it never touches the
+    HRRR/forecast daily bundle."""
+    if not NGFS_RAW_DIR.is_dir():
+        return {"archived": []}
+
+    cutoff_date = (datetime.utcnow() - timedelta(days=cutoff_days)).strftime("%Y%m%d")
+    archived = []
+    for day_dir in sorted(NGFS_RAW_DIR.iterdir()):
+        if not day_dir.is_dir() or not DATE_RE.fullmatch(day_dir.name) or day_dir.name >= cutoff_date:
+            continue
+
+        paths = sorted(p for p in day_dir.iterdir() if p.is_file())
+        if not paths:
+            day_dir.rmdir()
+            continue
+
+        NGFS_ARCHIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        zip_path = NGFS_ARCHIVE_OUTPUT_DIR / f"{day_dir.name}.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for path in paths:
+                zf.write(path, arcname=path.name, compress_type=zipfile.ZIP_DEFLATED)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            if zf.testzip() is not None:
+                logger.error(f"ngfs raw archive {day_dir.name}: verification FAILED; leaving originals in place")
+                zip_path.unlink()
+                continue
+
+        if _r2_credentials_present():
+            try:
+                s3 = _r2_client()
+                s3.upload_file(str(zip_path), R2_BUCKET, _ngfs_r2_key_for_date(day_dir.name), ExtraArgs={"ContentType": "application/zip"})
+                zip_path.unlink()
+            except Exception as e:
+                logger.error(f"ngfs raw archive {day_dir.name}: R2 upload failed, leaving zip at {zip_path}: {e}")
+                continue
+        else:
+            logger.warning(f"ngfs raw archive {day_dir.name}: R2 credentials not configured; leaving zip at {zip_path}")
+
+        for path in paths:
+            path.unlink()
+        day_dir.rmdir()
+        archived.append(day_dir.name)
+        logger.info(f"ngfs raw archive: archived {day_dir.name} ({len(paths)} files)")
+
+    return {"archived": archived}
+
+
+async def run_ngfs_raw_archive():
+    """Async entry point for the scheduler - offloads zip/upload IO to a
+    thread, same as run_end_of_day_archive below."""
+    try:
+        cutoff_days = int(os.getenv("SMF_NGFS_RAW_RETENTION_DAYS", "7"))
+        await asyncio.to_thread(archive_stale_ngfs_raw, cutoff_days)
+    except Exception as e:
+        logger.error(f"NGFS raw archive run failed: {e}", exc_info=True)
 
 
 async def run_end_of_day_archive():

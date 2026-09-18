@@ -119,6 +119,23 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    fire_events_columns = {row[1] for row in cursor.execute("PRAGMA table_info(fire_events)").fetchall()}
+    for column_name, column_type in (
+        ("bright_t7", "REAL"),
+        ("bright_t13", "REAL"),
+        ("pixel_area", "REAL"),
+        ("quality_flag", "INTEGER"),
+        ("solar_zenith_angle", "REAL"),
+        ("satellite_zenith_angle", "REAL"),
+        ("daynight", "TEXT"),
+        ("land_cover", "TEXT"),
+        ("detection_confidence_pct", "REAL"),
+        ("footprint_geojson", "TEXT"),
+        ("recurring_source_id", "INTEGER"),
+    ):
+        if column_name not in fire_events_columns:
+            cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {column_name} {column_type}")
+
     cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_fire_events_source_external ON fire_events(source, external_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_status_occurred ON fire_events(status, occurred_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_events_bbox ON fire_events(latitude, longitude)')
@@ -240,6 +257,36 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_incident ON fire_incident_feedback(incident_id, created_at DESC)')
+
+
+def _ensure_recurring_fire_source_tables(cursor: sqlite3.Cursor) -> None:
+    """Fixed industrial heat sources (mills, flares, kilns, plants) that
+    repeatedly trigger satellite fire detections at the same location.
+    Detected as 'candidate' rows by services/recurring_source_detector.py;
+    a human must promote a row to 'confirmed' before it suppresses future
+    detections (see find_confirmed_recurring_source/upsert_detection_event) -
+    never suppressed automatically."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS recurring_fire_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT 'unknown',
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            radius_km REAL NOT NULL DEFAULT 1.5,
+            status TEXT NOT NULL DEFAULT 'candidate',
+            detection_count INTEGER NOT NULL DEFAULT 0,
+            distinct_day_count INTEGER NOT NULL DEFAULT 0,
+            first_detected_at TEXT,
+            last_detected_at TEXT,
+            reviewed_by TEXT NOT NULL DEFAULT '',
+            reviewed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_fire_sources_status ON recurring_fire_sources(status)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_fire_sources_centroid ON recurring_fire_sources(latitude, longitude)')
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -811,6 +858,7 @@ def init_database():
     # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
     _ensure_fire_event_tables(cursor)
     _ensure_fire_incident_tables(cursor)
+    _ensure_recurring_fire_source_tables(cursor)
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)
@@ -1859,6 +1907,9 @@ _PUBLIC_EVENT_COLUMNS = (
     "acres", "acres_is_estimate", "cause_category",
     "description", "out_of_ordinary",
     "frp", "confidence", "satellite",
+    "bright_t7", "bright_t13", "pixel_area", "quality_flag",
+    "solar_zenith_angle", "satellite_zenith_angle", "daynight", "land_cover",
+    "detection_confidence_pct",
     "official_source_ref",
     "created_at", "updated_at",
 )
@@ -1992,6 +2043,15 @@ def upsert_detection_event(
     acres: Optional[float] = None,
     official_source_system: Optional[str] = None,
     official_source_ref: Optional[str] = None,
+    bright_t7: Optional[float] = None,
+    bright_t13: Optional[float] = None,
+    pixel_area: Optional[float] = None,
+    quality_flag: Optional[int] = None,
+    solar_zenith_angle: Optional[float] = None,
+    satellite_zenith_angle: Optional[float] = None,
+    daynight: Optional[str] = None,
+    land_cover: Optional[str] = None,
+    footprint_geojson: Optional[str] = None,
 ) -> Dict:
     """
     Idempotent upsert for a non-submission fire record (satellite/NGFS
@@ -2023,32 +2083,147 @@ def upsert_detection_event(
                 source, external_id, status, verification_tier,
                 latitude, longitude, county_fips, county_name,
                 occurred_at, occurred_at_precision, frp, confidence, satellite,
+                bright_t7, bright_t13, pixel_area, quality_flag,
+                solar_zenith_angle, satellite_zenith_angle, daynight, land_cover, footprint_geojson,
                 cause_category, acres, official_source_system, official_source_ref,
                 first_seen_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(source, external_id) DO UPDATE SET
                 last_seen_at = CURRENT_TIMESTAMP,
                 frp = COALESCE(excluded.frp, fire_events.frp),
                 confidence = COALESCE(excluded.confidence, fire_events.confidence),
                 satellite = COALESCE(excluded.satellite, fire_events.satellite),
+                bright_t7 = COALESCE(excluded.bright_t7, fire_events.bright_t7),
+                bright_t13 = COALESCE(excluded.bright_t13, fire_events.bright_t13),
+                pixel_area = COALESCE(excluded.pixel_area, fire_events.pixel_area),
+                quality_flag = COALESCE(excluded.quality_flag, fire_events.quality_flag),
+                solar_zenith_angle = COALESCE(excluded.solar_zenith_angle, fire_events.solar_zenith_angle),
+                satellite_zenith_angle = COALESCE(excluded.satellite_zenith_angle, fire_events.satellite_zenith_angle),
+                daynight = COALESCE(excluded.daynight, fire_events.daynight),
+                land_cover = COALESCE(excluded.land_cover, fire_events.land_cover),
+                footprint_geojson = COALESCE(excluded.footprint_geojson, fire_events.footprint_geojson),
                 updated_at = CURRENT_TIMESTAMP
         ''', (
             source, external_id, initial_status, verification_tier, latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, frp, confidence, satellite,
+            bright_t7, bright_t13, pixel_area, quality_flag,
+            solar_zenith_angle, satellite_zenith_angle, daynight, land_cover, footprint_geojson,
             cause_category or "unknown", acres, official_source_system or "", official_source_ref or "",
         ))
         cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
         event_id = cursor.fetchone()[0]
         if is_new:
             if source in ("modis", "viirs", "ngfs"):
-                incident_id = find_or_create_incident_for_detection(
-                    cursor, latitude, longitude, occurred_at, county_fips, county_name
-                )
-                cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
+                recurring_source = _find_confirmed_recurring_source(cursor, latitude, longitude)
+                if recurring_source is not None:
+                    # A known non-fire source (mill/flare/kiln/...) - store the
+                    # raw read, but skip incident clustering entirely so it
+                    # never triggers ML scoring or incident-graphic regeneration.
+                    cursor.execute(
+                        'UPDATE fire_events SET recurring_source_id = ? WHERE id = ?',
+                        (recurring_source["id"], event_id),
+                    )
+                    _bump_recurring_source_detection(cursor, recurring_source["id"], occurred_at)
+                else:
+                    incident_id = find_or_create_incident_for_detection(
+                        cursor, latitude, longitude, occurred_at, county_fips, county_name
+                    )
+                    cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
                                     to_status=initial_status, to_tier=verification_tier)
         conn.commit()
         return {"event_id": event_id, "inserted": is_new, "updated": not is_new}
+    finally:
+        conn.close()
+
+
+def update_detection_confidence(event_id: int, confidence_pct: float) -> None:
+    """Write the per-detection ML confidence score (0-100). Separate from
+    upsert_detection_event because scoring runs as its own pass after
+    ingest, once a detection's full feature set is committed."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            'UPDATE fire_events SET detection_confidence_pct = ? WHERE id = ?',
+            (confidence_pct, event_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_detection_footprints(limit: int = 500) -> List[Dict]:
+    """Recent satellite detections that carry a stored pixel-footprint
+    polygon (currently only NGFS - see fire_ingest.py's _ingest_ngfs_feature),
+    newest first, for the map's optional 'Pixel Footprints' layer."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''SELECT id, incident_id, source, frp, confidence, satellite, occurred_at,
+                      bright_t7, detection_confidence_pct, footprint_geojson
+               FROM fire_events
+               WHERE footprint_geojson IS NOT NULL
+               ORDER BY occurred_at DESC
+               LIMIT ?''',
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_detection_events_for_scoring(limit: int = 2000) -> List[Dict]:
+    """Rows the per-detection confidence model can score: satellite-sourced
+    detections that haven't been scored yet, newest first. Excludes
+    detections already attributed to a confirmed recurring non-fire source -
+    scoring a known mill's "confidence" would be wasted compute."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''SELECT id, source, frp, confidence, satellite, bright_t7, bright_t13,
+                      pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
+                      daynight, land_cover
+               FROM fire_events
+               WHERE source IN ('modis', 'viirs', 'ngfs') AND detection_confidence_pct IS NULL
+                 AND recurring_source_id IS NULL
+               ORDER BY id DESC
+               LIMIT ?''',
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_labeled_detection_events(limit: int = 5000) -> List[Dict]:
+    """Reviewed fire_events rows usable as training labels for the
+    detection-confidence model - same bootstrap set fire_confidence.py's
+    incident-level scorer already draws on."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            '''SELECT id, source, frp, confidence, satellite, bright_t7, bright_t13,
+                      pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
+                      daynight, land_cover, cause_category
+               FROM fire_events
+               WHERE source IN ('modis', 'viirs', 'ngfs')
+                 AND verification_tier IN ('admin_reviewed', 'official_source_confirmed')
+                 AND cause_category != 'unknown'
+               ORDER BY id DESC
+               LIMIT ?''',
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -2299,6 +2474,154 @@ def find_or_create_incident_for_detection(
     return cursor.lastrowid
 
 
+def _find_confirmed_recurring_source(cursor: sqlite3.Cursor, latitude: float, longitude: float) -> Optional[Dict]:
+    """Nearest CONFIRMED recurring non-fire source within its own radius_km
+    of this point, or None. Only 'confirmed' rows suppress anything -
+    'candidate'/'dismissed' rows never affect ingestion. Takes the caller's
+    own cursor (same transaction as upsert_detection_event) rather than a
+    separate connection, to avoid lock contention with the write in progress."""
+    from core.geo import haversine_km
+
+    cursor.execute(
+        "SELECT id, latitude, longitude, radius_km FROM recurring_fire_sources WHERE status = 'confirmed'"
+    )
+    best_row, best_distance = None, None
+    for row in cursor.fetchall():
+        distance = haversine_km(latitude, longitude, row["latitude"], row["longitude"])
+        if distance <= row["radius_km"] and (best_distance is None or distance < best_distance):
+            best_row, best_distance = row, distance
+    return dict(best_row) if best_row is not None else None
+
+
+def find_confirmed_recurring_source(latitude: float, longitude: float) -> Optional[Dict]:
+    """Standalone-connection variant of _find_confirmed_recurring_source for
+    read-only callers outside an existing transaction (e.g. tests, other
+    services)."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        return _find_confirmed_recurring_source(cursor, latitude, longitude)
+    finally:
+        conn.close()
+
+
+def _bump_recurring_source_detection(cursor: sqlite3.Cursor, source_id: int, occurred_at: str) -> None:
+    """Caller-owned-transaction stats bump for a suppressed detection - same
+    convention as the incident centroid update in
+    find_or_create_incident_for_detection above."""
+    cursor.execute(
+        '''UPDATE recurring_fire_sources
+           SET detection_count = detection_count + 1,
+               last_detected_at = MAX(COALESCE(last_detected_at, ?), ?),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?''',
+        (occurred_at, occurred_at, source_id),
+    )
+
+
+def list_recurring_sources(status: Optional[str] = None) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute('SELECT * FROM recurring_fire_sources WHERE status = ? ORDER BY detection_count DESC', (status,))
+        else:
+            cursor.execute('SELECT * FROM recurring_fire_sources ORDER BY status, detection_count DESC')
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def find_recurring_source_near(latitude: float, longitude: float, radius_km: float) -> Optional[Dict]:
+    """Any existing recurring_fire_sources row (any status) within radius_km -
+    used by the detector job to dedupe candidates across grid-cell edges
+    rather than creating a near-duplicate row next to one that already exists."""
+    from core.geo import haversine_km
+
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id, latitude, longitude FROM recurring_fire_sources')
+        best_row, best_distance = None, None
+        for row in cursor.fetchall():
+            distance = haversine_km(latitude, longitude, row["latitude"], row["longitude"])
+            if distance <= radius_km and (best_distance is None or distance < best_distance):
+                best_row, best_distance = row, distance
+        return dict(best_row) if best_row is not None else None
+    finally:
+        conn.close()
+
+
+def create_recurring_source_candidate(
+    latitude: float, longitude: float, detection_count: int, distinct_day_count: int,
+    first_detected_at: str, last_detected_at: str, radius_km: float = 1.5,
+) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.execute(
+            '''INSERT INTO recurring_fire_sources
+                   (latitude, longitude, radius_km, detection_count, distinct_day_count,
+                    first_detected_at, last_detected_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (latitude, longitude, radius_km, detection_count, distinct_day_count, first_detected_at, last_detected_at),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def update_recurring_source_stats(
+    source_id: int, detection_count: int, distinct_day_count: int, first_detected_at: str, last_detected_at: str,
+) -> None:
+    """Refresh a candidate/confirmed source's rolling stats without
+    touching its status - the detector job never promotes/demotes a row,
+    only a human via set_recurring_source_status can."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            '''UPDATE recurring_fire_sources
+               SET detection_count = ?, distinct_day_count = ?,
+                   first_detected_at = MIN(first_detected_at, ?),
+                   last_detected_at = MAX(last_detected_at, ?),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?''',
+            (detection_count, distinct_day_count, first_detected_at, last_detected_at, source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, label: Optional[str] = None, source_type: Optional[str] = None) -> Optional[Dict]:
+    if status not in ("candidate", "confirmed", "dismissed"):
+        raise ValueError(f"invalid recurring source status: {status}")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            '''UPDATE recurring_fire_sources
+               SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                   label = COALESCE(?, label), source_type = COALESCE(?, source_type)
+               WHERE id = ?''',
+            (status, reviewed_by, label, source_type, source_id),
+        )
+        conn.commit()
+        row = conn.execute('SELECT * FROM recurring_fire_sources WHERE id = ?', (source_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def list_unclustered_satellite_events() -> List[Dict]:
     """Satellite-sourced fire_events rows with no incident_id yet, oldest first."""
     db_path = get_db_path()
@@ -2411,7 +2734,8 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source
+            SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source,
+                   bright_t7, land_cover, detection_confidence_pct
             FROM fire_events
             WHERE incident_id = ?
             ORDER BY occurred_at ASC

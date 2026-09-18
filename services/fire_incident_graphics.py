@@ -274,6 +274,11 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     info.text(0.025, 0.485, "Last detected", fontsize=9, weight="bold", color="#111827")
     info.text(0.025, 0.45, _display_time(incident.get('last_detected_at')), fontsize=8.8, color="#374151", linespacing=1.3)
 
+    confidence_values = [row.get("detection_confidence_pct") for row in rows if row.get("detection_confidence_pct") is not None]
+    if confidence_values:
+        info.text(0.025, 0.395, "ML CONFIDENCE", fontsize=9, weight="bold", color="#6b7280")
+        info.text(0.025, 0.36, f"{max(confidence_values):.0f}% (highest-confidence detection in this cluster)", fontsize=9, color="#111827")
+
     info.text(0.025, 0.32, "INCIDENT DETAILS", fontsize=9, weight="bold", color="#6b7280")
     info.text(0.025, 0.285, "Open the incident page for updates and context:", fontsize=8.4, color="#374151")
     info.text(0.025, 0.24, incident_url, fontsize=8.2, color="#b91c1c", weight="bold", wrap=True)

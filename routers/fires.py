@@ -47,7 +47,10 @@ from core.database import (
     create_fire_incident_feedback,
     get_fire_upload_token_hash,
     is_ip_blocked,
+    list_detection_footprints,
     list_fire_events,
+    list_recurring_sources,
+    set_recurring_source_status,
     list_fire_incident_members,
     list_fire_incident_feedback,
     list_fire_incidents,
@@ -334,6 +337,11 @@ class FireReportRejection(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
 
+class RecurringSourceConfirmation(BaseModel):
+    label: str = Field(default="", max_length=200)
+    source_type: str = Field(default="unknown", max_length=50)
+
+
 class FireEventUpdate(BaseModel):
     latitude: Optional[float] = Field(default=None, ge=MO_LAT_MIN, le=MO_LAT_MAX)
     longitude: Optional[float] = Field(default=None, ge=MO_LON_MIN, le=MO_LON_MAX)
@@ -405,12 +413,13 @@ def _event_to_geojson_feature(event: dict) -> dict:
             "COUNTRY": "United States",
             "ACQ_DATE_TIME": event.get("occurred_at"),
             "FRP": event.get("frp"),
-            "BRIGHT_T7": None,
+            "BRIGHT_T7": event.get("bright_t7"),
             "CONFIDENCE": _confidence_for_tier(tier),
             "SATELLITE": event.get("satellite"),
             "TYPE_DESCRIPTION": "Public fire report" if event.get("source") == "user_submission" else "Fire detection",
             "FUEL": ", ".join(event.get("fuel_types") or []),
-            "LAND_COVER": "Unknown",
+            "LAND_COVER": event.get("land_cover") or "Unknown",
+            "DETECTION_CONFIDENCE_PCT": event.get("detection_confidence_pct"),
             "VERIFICATION_TIER": tier,
             "ACRES": event.get("acres"),
             "DESCRIPTION": event.get("description"),
@@ -420,6 +429,14 @@ def _event_to_geojson_feature(event: dict) -> dict:
 
 
 def _incident_to_geojson_feature(incident: dict) -> dict:
+    # list_fire_incident_members orders oldest-first; the popup shows the
+    # latest detection's own readings rather than incident-level aggregates,
+    # since FRP/brightness/confidence are properties of a single pass, not
+    # the cluster as a whole.
+    members = list_fire_incident_members(incident["id"])
+    latest = members[-1] if members else {}
+    confidence_values = [m.get("detection_confidence_pct") for m in members if m.get("detection_confidence_pct") is not None]
+
     return {
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [incident["centroid_longitude"], incident["centroid_latitude"]]},
@@ -432,6 +449,14 @@ def _incident_to_geojson_feature(incident: dict) -> dict:
             "COUNTY": incident.get("county_name"),
             "FIRST_DETECTED_AT": incident.get("first_detected_at"),
             "LAST_DETECTED_AT": incident.get("last_detected_at"),
+            "ACQ_DATE_TIME": latest.get("occurred_at") or incident.get("last_detected_at"),
+            "FRP": latest.get("frp"),
+            "BRIGHT_T7": latest.get("bright_t7"),
+            "CONFIDENCE": latest.get("confidence"),
+            "SATELLITE": latest.get("satellite"),
+            "TYPE_DESCRIPTION": "Fire detection",
+            "LAND_COVER": latest.get("land_cover") or "Unknown",
+            "DETECTION_CONFIDENCE_PCT": max(confidence_values) if confidence_values else None,
             "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") and incident.get("graphic_filename") else None,
             "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
         },
@@ -744,6 +769,46 @@ def list_public_fire_incidents_geojson(response: Response, limit: int = 200, off
     }
 
 
+def _footprint_to_geojson_feature(row: dict) -> dict:
+    try:
+        geometry = json.loads(row["footprint_geojson"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return {
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": {
+            "SOURCE": "SHOWMEFIRE_STORE",
+            "EVENT_ID": row["id"],
+            "INCIDENT_ID": row.get("incident_id"),
+            "TYPENAME": row.get("source", "unknown"),
+            "ACQ_DATE_TIME": row.get("occurred_at"),
+            "FRP": row.get("frp"),
+            "BRIGHT_T7": row.get("bright_t7"),
+            "CONFIDENCE": row.get("confidence"),
+            "SATELLITE": row.get("satellite"),
+            "DETECTION_CONFIDENCE_PCT": row.get("detection_confidence_pct"),
+        },
+    }
+
+
+@router.get("/api/fires/detections-footprints.geojson")
+def list_public_fire_detection_footprints_geojson(response: Response, limit: int = 500):
+    """Individual satellite detection pixel footprints (currently NGFS only
+    - see fire_ingest.py) as Polygon features, for an optional map overlay
+    showing actual sensor pixel size/shape rather than a point marker.
+    Unmoderated by design, same as /api/fires/incidents.geojson: these are
+    raw satellite reads, not user submissions."""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    rows = list_detection_footprints(limit=limit)
+    features = [f for f in (_footprint_to_geojson_feature(row) for row in rows) if f]
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "fire_events store"},
+    }
+
+
 @router.get("/api/fires/incidents-confidence.geojson")
 def get_public_fire_incident_confidence_shapes(response: Response):
     """Confidence circles/polygons for GIS clients and the public map."""
@@ -937,3 +1002,41 @@ def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
     incident["detections"] = list_fire_incident_members(incident_id)
     incident["feedback"] = list_fire_incident_feedback(incident_id)
     return {"success": True, "incident": incident}
+
+
+# --- Admin: recurring non-fire detection sources ---
+# Candidates are found automatically overnight (services/recurring_source_
+# detector.py); only these two endpoints ever change a source's status, and
+# only 'confirmed' sources suppress anything at ingest (core.database.
+# upsert_detection_event) - never automatic.
+
+@router.get("/api/admin/fires/recurring-sources")
+def admin_list_recurring_sources(status: Optional[str] = None, token: Optional[str] = None):
+    """List recurring non-fire source candidates/confirmed/dismissed rows (admin only)"""
+    _require_admin(token)
+    sources = list_recurring_sources(status=status)
+    return {"success": True, "sources": sources, "count": len(sources)}
+
+
+@router.post("/api/admin/fires/recurring-sources/{source_id}/confirm")
+def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfirmation, token: Optional[str] = None):
+    """Confirm a candidate as a real non-fire source - from this point new
+    detections within its radius are suppressed from incident clustering,
+    ML confidence scoring, and graphics regeneration (admin only)."""
+    actor = _require_admin(token)
+    source = set_recurring_source_status(source_id, "confirmed", reviewed_by=actor, label=payload.label, source_type=payload.source_type)
+    if not source:
+        raise HTTPException(status_code=404, detail="Recurring source not found")
+    return {"success": True, "source": source}
+
+
+@router.post("/api/admin/fires/recurring-sources/{source_id}/dismiss")
+def admin_dismiss_recurring_source(source_id: int, token: Optional[str] = None):
+    """Dismiss a candidate - staff reviewed it and it's not actually a
+    persistent non-fire source (e.g. a real recurring wildfire-prone area).
+    The detector will keep refreshing its stats but won't change its status (admin only)."""
+    actor = _require_admin(token)
+    source = set_recurring_source_status(source_id, "dismissed", reviewed_by=actor)
+    if not source:
+        raise HTTPException(status_code=404, detail="Recurring source not found")
+    return {"success": True, "source": source}

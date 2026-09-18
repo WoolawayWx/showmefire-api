@@ -74,23 +74,31 @@ def _ingest_satdet_feature(feature: Dict[str, Any]) -> Optional[Dict]:
 
 
 def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
-    coords = _extract_coordinates(feature)
-    if coords is None:
-        return None
-    lat, lon = coords
-    props = feature.get("properties") or {}
-    external_id = props.get("event_id")
-    occurred_at_raw = props.get("event_datetime")
-    if not external_id or not occurred_at_raw:
-        return None
+    """Maps a NOAA NESDIS NGFS OGC API detection pixel (flat properties -
+    see api/tools/ngfs_ogc_firedetect.py) into the unified fire_events store.
 
-    occurred_at = occurred_at_raw
-    if isinstance(occurred_at, str) and not occurred_at.endswith("Z"):
-        occurred_at = f"{occurred_at.rstrip()}Z" if "T" in occurred_at else occurred_at
+    Unlike satdet (FIRMS), this feature's geometry is the pixel's Polygon
+    footprint, not a Point - _extract_coordinates() would reject it (it
+    expects a flat [lon, lat] pair). The centroid lat/lon is already given
+    directly in properties, so read it from there instead.
+    """
+    props = feature.get("properties") or {}
+    lat, lon = props.get("latitude"), props.get("longitude")
+    if lat is None or lon is None:
+        return None
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None
+    external_id = props.get("id")
+    occurred_at = props.get("acq_date_time")
+    if external_id is None or not occurred_at:
+        return None
 
     county_fips, county_name = county_for_point(lat, lon)
-    location = props.get("location") or {}
-    fire_info = props.get("fire_info") or {}
+    geometry = feature.get("geometry")
+    footprint_geojson = json.dumps(geometry, separators=(",", ":")) if geometry and geometry.get("type") == "Polygon" else None
+
     return upsert_detection_event(
         source="ngfs",
         external_id=str(external_id),
@@ -98,8 +106,19 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         longitude=lon,
         occurred_at=occurred_at,
         county_fips=county_fips,
-        county_name=county_name or location.get("county"),
-        frp=fire_info.get("frp"),
+        county_name=county_name or props.get("county"),
+        frp=props.get("frp"),
+        confidence=props.get("confidence"),
+        satellite=props.get("satellite"),
+        bright_t7=props.get("bright_t7"),
+        bright_t13=props.get("bright_t13"),
+        pixel_area=props.get("pixel_area"),
+        quality_flag=props.get("quality_flag"),
+        solar_zenith_angle=props.get("solar_zenith_angle"),
+        satellite_zenith_angle=props.get("satellite_zenith_angle"),
+        footprint_geojson=footprint_geojson,
+        daynight=props.get("daynight"),
+        land_cover=props.get("land_cover"),
     )
 
 
@@ -108,7 +127,7 @@ def _satdet_sort_key(feature: Dict[str, Any]) -> str:
 
 
 def _ngfs_sort_key(feature: Dict[str, Any]) -> str:
-    return (feature.get("properties") or {}).get("event_datetime") or ""
+    return (feature.get("properties") or {}).get("acq_date_time") or ""
 
 
 def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: bool = False) -> Dict[str, Any]:
