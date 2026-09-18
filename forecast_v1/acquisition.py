@@ -119,6 +119,10 @@ def default_specs() -> tuple[AcquisitionSpec, ...]:
             AcquisitionSpec("refs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), refs, domain=rrfs_domain)
         )
     specs.append(AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs))
+    # Local import: registry.py imports AcquisitionSpec from this module, so a
+    # module-level import here would be circular.
+    from .registry import extra_specs
+    specs.extend(extra_specs())
     return tuple(specs)
 
 
@@ -455,6 +459,9 @@ def acquire_cycle(
                 spec, cycle, cache_dir, fast_herbie_factory=fast_herbie_factory,
                 progress_callback=source_progress,
             )
+            if spec.public_name not in ("hrrr", "rrfs", "refs", "gefs"):
+                from .registry import mark_acquired
+                mark_acquired(spec.public_name)
             if progress_callback:
                 progress_callback({
                     "event": "source_completed", "model": spec.public_name,

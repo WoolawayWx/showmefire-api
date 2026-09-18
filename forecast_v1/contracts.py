@@ -43,7 +43,7 @@ TIME_COUNT: Final = 73
 # replaced by an extended-run promotion.
 EXTENDED_DAILY_INDICES: Final = (2, 3)
 LOCAL_TIMEZONE: Final = "America/Chicago"
-CONVECTION_ALLOWING_MODELS: Final = frozenset({"hrrr", "rrfs"})
+CONVECTION_ALLOWING_MODELS: Final = frozenset({"hrrr", "rrfs", "fv3hires"})
 DETERMINISTIC_MODELS: Final = frozenset({"hrrr", "rrfs"})
 
 REQUIRED_VARIABLES: Final = (
@@ -147,7 +147,7 @@ CORRECTION_LIMITS: Final = {
     "wind_gust_10m": 2.25,
 }
 
-SOURCE_BITS: Final = {"hrrr": 1, "rrfs": 2, "refs": 4, "gefs": 8, "rtma": 16, "observations": 32}
+SOURCE_BITS: Final = {"hrrr": 1, "rrfs": 2, "refs": 4, "gefs": 8, "rtma": 16, "observations": 32, "fv3hires": 64}
 QUALITY_BITS: Final = {
     "source_degraded": 1,
     "optional_field_missing": 2,

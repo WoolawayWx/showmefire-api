@@ -181,4 +181,18 @@ class GEFSAdapter(DatasetAdapter):
     def __init__(self): super().__init__("gefs", strict_required=False)
 
 
-ADAPTERS = {"hrrr": HRRRAdapter, "rrfs": RRFSAdapter, "refs": REFSAdapter, "gefs": GEFSAdapter}
+class FV3HiresAdapter(DatasetAdapter):
+    """HiResW FV3 (NOMADS-only, no backfill).
+
+    No native 2m instantaneous temperature (only 80m TMP + 2m TMAX/TMIN) and
+    no gust field - strict_required=False NaN-fills those, which _available_for_hour
+    in engine.py then excludes from the blend, so temperature/gust fall back
+    to whichever other active model covers that hour rather than being guessed.
+    """
+    def __init__(self): super().__init__("fv3hires", strict_required=False)
+
+
+ADAPTERS = {
+    "hrrr": HRRRAdapter, "rrfs": RRFSAdapter, "refs": REFSAdapter, "gefs": GEFSAdapter,
+    "fv3hires": FV3HiresAdapter,
+}

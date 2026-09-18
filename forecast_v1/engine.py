@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -21,6 +22,8 @@ from .contracts import (
     correction_multiplier,
     weights_for_lead,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,9 @@ def blend_sources(cubes: dict[str, SourceCube], horizon: int = HORIZON_HOURS) ->
     """Blend normalized sources. Missing model weights are renormalized per hour/cell."""
     if not CONVECTION_ALLOWING_MODELS.intersection(cubes):
         raise ValueError("at least one convection-allowing deterministic source is required")
+    non_core_models = [model for model in cubes if model not in ("hrrr", "rrfs", "refs", "gefs")]
+    metric_rows: list[tuple[str, datetime, str, int, bool, float | None]] = []
+    cycle_for_metrics = next(iter(cubes.values())).cycle_time.astimezone(timezone.utc) if non_core_models else None
     output: dict[str, xr.DataArray] = {}
     quality: list[xr.DataArray] = []
     source_masks: list[xr.DataArray] = []
@@ -55,6 +61,11 @@ def blend_sources(cubes: dict[str, SourceCube], horizon: int = HORIZON_HOURS) ->
         for lead in range(horizon + 1):
             values = _available_for_hour(cubes, variable, lead, include_gefs=lead >= 49)
             expected = weights_for_lead(lead)
+            if non_core_models:
+                # Local import: registry.py depends on core.database, which this
+                # module has no other reason to import.
+                from .registry import weight_overlay
+                expected = weight_overlay(expected, lead)
             convection_sources = CONVECTION_ALLOWING_MODELS.intersection(values).intersection(expected)
             coarse_fallback = lead >= 49 and not convection_sources and "gefs" in values
             if not convection_sources and not coarse_fallback:
@@ -67,6 +78,8 @@ def blend_sources(cubes: dict[str, SourceCube], horizon: int = HORIZON_HOURS) ->
                 if variable == REQUIRED_VARIABLES[0]:
                     quality.append(xr.full_like(template, QUALITY_BITS["source_degraded"], dtype="uint16"))
                     source_masks.append(xr.zeros_like(template, dtype="uint16"))
+                for model in non_core_models:
+                    metric_rows.append((model, cycle_for_metrics, variable, lead, model in values, None))
                 continue
             active = {"gefs": 1.0} if coarse_fallback else {name: weight for name, weight in expected.items() if name in values}
             total = sum(active.values())
@@ -83,6 +96,10 @@ def blend_sources(cubes: dict[str, SourceCube], horizon: int = HORIZON_HOURS) ->
                 quality.append(xr.full_like(template, quality_value, dtype="uint16"))
                 mask_value = sum(SOURCE_BITS[name] for name in active)
                 source_masks.append(xr.full_like(template, mask_value, dtype="uint16"))
+            for model in non_core_models:
+                present = model in values
+                diff = float(abs(values[model] - hourly[-1]).mean(skipna=True)) if present else None
+                metric_rows.append((model, cycle_for_metrics, variable, lead, present, diff))
         output[variable] = xr.concat(hourly, dim="time")
         if times is None:
             cycle = next(iter(cubes.values())).cycle_time.astimezone(timezone.utc)
@@ -98,6 +115,13 @@ def blend_sources(cubes: dict[str, SourceCube], horizon: int = HORIZON_HOURS) ->
     dataset["precipitation_accumulated"] = dataset.precipitation_increment.fillna(0).cumsum("time").where(dataset.precipitation_increment.notnull())
     dataset["wind_speed_10m"] = np.hypot(dataset.wind_u_10m, dataset.wind_v_10m).astype("float32")
     dataset["wind_direction_10m"] = ((270 - np.degrees(np.arctan2(dataset.wind_v_10m, dataset.wind_u_10m))) % 360).astype("float32")
+    if metric_rows:
+        # Best-effort: a metrics-logging failure should never fail a forecast run.
+        try:
+            from .registry import record_metrics_bulk
+            record_metrics_bulk(metric_rows)
+        except Exception:
+            logger.warning("Failed to log forecast source model metrics", exc_info=True)
     return dataset
 
 

@@ -3159,7 +3159,75 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             decision TEXT NOT NULL CHECK(decision IN ('accepted','declined')),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS graphic_render_tokens (
+            token TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_graphic_render_tokens_expires
+            ON graphic_render_tokens(expires_at);
+        CREATE TABLE IF NOT EXISTS forecast_source_models (
+            key TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            adapter_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'disabled' CHECK(status IN ('disabled','shadow','active')),
+            weight_profile_json TEXT,
+            schedule_minutes INTEGER,
+            last_acquired_at TIMESTAMP,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            promoted_at TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS forecast_source_model_events (
+            id TEXT PRIMARY KEY,
+            model_key TEXT NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('added','promoted','demoted','disabled','updated')),
+            detail TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS forecast_source_model_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_key TEXT NOT NULL,
+            cycle_time TIMESTAMP NOT NULL,
+            variable TEXT NOT NULL,
+            lead_hour INTEGER NOT NULL,
+            available INTEGER NOT NULL,
+            mean_abs_diff_from_blend REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_forecast_source_model_metrics_key
+            ON forecast_source_model_metrics(model_key, cycle_time DESC);
     ''')
+
+    # Seed the forecast-source-model registry once. hrrr/rrfs/refs/gefs are
+    # marked 'active' with no weight_profile_json override (they keep using
+    # contracts.BLEND_WEIGHTS as before - this table only carries an *overlay*
+    # for models beyond those four). fv3hires starts 'shadow': acquired every
+    # run and measured against the live hrrr/rrfs blend (forecast_source_model_metrics),
+    # but contributes zero weight to what's actually served until someone
+    # reviews that performance and explicitly promotes it to 'active' with a
+    # weight through the admin UI - so this seed alone changes no live output.
+    cursor.execute("SELECT COUNT(*) FROM forecast_source_models")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany(
+            "INSERT INTO forecast_source_models(key,display_name,adapter_key,status,promoted_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP)",
+            [
+                ("hrrr", "HRRR", "hrrr", "active"),
+                ("rrfs", "RRFS", "rrfs", "active"),
+                ("refs", "REFS (RRFS ensemble)", "refs", "active"),
+                ("gefs", "GEFS (coarse fallback)", "gefs", "active"),
+            ],
+        )
+        cursor.execute(
+            "INSERT INTO forecast_source_models(key,display_name,adapter_key,status,notes) VALUES (?,?,?,?,?)",
+            ("fv3hires", "FV3-HIRES (HiResW FV3)", "fv3hires", "shadow",
+             "No native 2m temperature (only 80m TMP + 2m TMAX/TMIN) and no gust field - those "
+             "variables fall back to whichever other active model covers the hour. NOMADS-only, "
+             "short retention, forward-only capture. Beta: acquired + measured against the live "
+             "blend every run, zero weight in production output until promoted."),
+        )
 
     # Future billing hook: these columns are unused today (subscription_status
     # stays 'none' for every department) but leave room to wire a low-cost

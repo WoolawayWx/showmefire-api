@@ -45,8 +45,9 @@ from core.security import (
 from services.archive_bundler import _r2_client
 from services.graphics_email import send_graphics_login_code
 from services.graphic_renderer import (
-    PRODUCT_IDS, center_zoom_for_bounds, fetch_spc_product, render_graphic,
+    PRODUCT_IDS, _load_alert_bytes, center_zoom_for_bounds, fetch_spc_product, render_graphic,
 )
+from services.graphic_renderer_browser import render_graphic_browser_async
 
 router = APIRouter(prefix="/api/graphics", tags=["graphics"])
 logger = logging.getLogger(__name__)
@@ -316,11 +317,14 @@ def products():
 
 @router.get("/preview-data/{product_id}")
 async def preview_data(product_id: str):
-    """Short-lived GIS proxy used by the browser's non-authoritative live preview."""
-    if product_id not in {"spc_cat", "spc_tor", "spc_wind", "spc_hail"}:
+    """Short-lived GIS proxy used by the browser's live preview and screenshot render."""
+    if product_id not in {"spc_cat", "spc_tor", "spc_wind", "spc_hail", "mo_alerts"}:
         raise HTTPException(status_code=404, detail="Preview data is not available for this product")
     try:
-        payload = await asyncio.to_thread(fetch_spc_product, product_id)
+        if product_id == "mo_alerts":
+            payload, _source = await asyncio.to_thread(_load_alert_bytes)
+        else:
+            payload = await asyncio.to_thread(fetch_spc_product, product_id)
     except Exception as exc:
         logger.warning("Unable to load %s preview data", product_id, exc_info=True)
         raise HTTPException(status_code=502, detail="The live SPC preview is temporarily unavailable") from exc
@@ -328,6 +332,27 @@ async def preview_data(product_id: str):
         content=payload, media_type="application/geo+json",
         headers={"Cache-Control": "public,max-age=120,stale-while-revalidate=300"},
     )
+
+
+@router.get("/render-config/{token}")
+def render_config(token: str):
+    """Fetch a short-lived render config by token.
+
+    Used by graphics/render.vue - the headless page Playwright screenshots for the
+    GRAPHICS_RENDERER=browser path. That page is served from Cloudflare Pages, a
+    different origin than the API, so the config is fetched back by token instead
+    of being carried through the URL; it holds no secrets (product, colors,
+    department name, logo URL), same as what a department already sees while
+    editing, so an unauthenticated but token-gated, time-boxed read is fine here.
+    """
+    with _db() as db:
+        row = db.execute(
+            "SELECT payload_json FROM graphic_render_tokens WHERE token=? AND expires_at > CURRENT_TIMESTAMP",
+            (token,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Render config not found or expired")
+    return Response(content=row["payload_json"], media_type="application/json")
 
 
 @router.get("/me")
@@ -1038,13 +1063,17 @@ async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Op
         if logo_asset_id is not None:
             with _db() as db:
                 logo_asset = db.execute(
-                    "SELECT path FROM graphic_assets WHERE id=? AND department_id=? AND content_type='image/png'",
+                    "SELECT path,cdn_url FROM graphic_assets WHERE id=? AND department_id=? AND content_type='image/png'",
                     (logo_asset_id, department_id),
                 ).fetchone()
             if not logo_asset:
                 raise ValueError("configured department logo asset no longer exists")
             bundle["department_logo_path"] = logo_asset["path"]
-        result = await asyncio.get_running_loop().run_in_executor(_get_executor(), render_graphic, bundle)
+            bundle["department_logo_url"] = logo_asset["cdn_url"]
+        if os.getenv("GRAPHICS_RENDERER", "matplotlib") == "browser":
+            result = await render_graphic_browser_async(bundle)
+        else:
+            result = await asyncio.get_running_loop().run_in_executor(_get_executor(), render_graphic, bundle)
         data = result["bytes"]
         if len(data) < 1000:
             raise ValueError("rendered image failed content validation")
