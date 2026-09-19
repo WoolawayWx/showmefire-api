@@ -58,8 +58,12 @@ def _load_features(path: Path, source: str) -> list[dict]:
             continue
         properties = dict(feature.get("properties") or {})
         # GeoPackage scalar fields cannot contain nested JSON structures.
+        # Keys are lowercased so the FIRMS feed's UPPERCASE property names
+        # (e.g. LATITUDE) and the NGFS feed's lowercase ones (latitude)
+        # collapse into a single column - GeoPackage's SQLite backend is
+        # case-insensitive for field names and rejects adding both.
         properties = {
-            key: json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else value
+            key.lower(): json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else value
             for key, value in properties.items()
         }
         properties["source_feed"] = source
