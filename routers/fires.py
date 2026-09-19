@@ -39,7 +39,9 @@ from core.database import (
     consume_fire_submission_quota,
     count_fire_event_media,
     create_fire_report,
+    create_fire_exclusion_zone,
     delete_fire_event,
+    delete_fire_incident,
     export_fire_labels,
     get_fire_event,
     get_fire_incident,
@@ -49,8 +51,11 @@ from core.database import (
     is_ip_blocked,
     list_detection_footprints,
     list_fire_events,
+    list_fire_exclusion_zones,
+    list_fire_incidents_in_geometry,
     list_recurring_sources,
     set_recurring_source_status,
+    set_fire_exclusion_zone_status,
     list_fire_incident_members,
     list_fire_incident_feedback,
     list_fire_incidents,
@@ -340,6 +345,14 @@ class FireReportRejection(BaseModel):
 class RecurringSourceConfirmation(BaseModel):
     label: str = Field(default="", max_length=200)
     source_type: str = Field(default="unknown", max_length=50)
+
+
+class ExclusionZoneCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    notes: str = Field(default="", max_length=2000)
+    # A single GeoJSON Polygon/MultiPolygon geometry (as Geoman's
+    # exportGeoJson produces per-feature) - not a full Feature/FeatureCollection.
+    geometry: Dict
 
 
 class FireEventUpdate(BaseModel):
@@ -767,10 +780,12 @@ def get_public_fire_event(event_id: int, response: Response):
 
 
 @router.get("/api/fires/incidents.geojson")
-def list_public_fire_incidents_geojson(response: Response, limit: int = 200, offset: int = 0):
-    """Consolidated satellite detections, one map feature per incident."""
+def list_public_fire_incidents_geojson(response: Response, since: Optional[str] = None, limit: int = 200, offset: int = 0):
+    """Consolidated satellite detections, one map feature per incident.
+    `since` (ISO timestamp) filters to incidents last detected at/after it -
+    the frontend's Active (last 24h) / Archive (last 7 days) toggle."""
     response.headers["Cache-Control"] = "public, max-age=60"
-    incidents = list_fire_incidents(limit=limit, offset=offset)
+    incidents = list_fire_incidents(since=since, limit=limit, offset=offset)
     return {
         "type": "FeatureCollection",
         "features": [_incident_to_geojson_feature(incident) for incident in incidents if incident.get("public_slug")],
@@ -958,14 +973,15 @@ def admin_add_to_blocklist(payload: BlocklistCreate, token: Optional[str] = None
 # --- Admin: satellite detection incidents ---
 
 @router.get("/api/fires/incident-shapes.geojson")
-def list_public_fire_incident_shapes_geojson(response: Response, limit: int = 200, offset: int = 0):
+def list_public_fire_incident_shapes_geojson(response: Response, since: Optional[str] = None, limit: int = 200, offset: int = 0):
     """ML-extracted irregular incident shapes (radar-style feature ID over
     the NGFS Microphysics composite, merged with stored pixel footprints -
     see services/incident_shape_extractor.py). Only incidents with a
     computed shape are included; everything else keeps using the point
-    marker from /api/fires/incidents.geojson."""
+    marker from /api/fires/incidents.geojson. `since` matches the point
+    endpoint's Active/Archive filter."""
     response.headers["Cache-Control"] = "public, max-age=60"
-    incidents = list_fire_incidents(limit=limit, offset=offset)
+    incidents = list_fire_incidents(since=since, limit=limit, offset=offset)
     features = []
     for incident in incidents:
         if not incident.get("shape_geojson") or not incident.get("public_slug"):
@@ -1081,3 +1097,42 @@ def admin_dismiss_recurring_source(source_id: int, token: Optional[str] = None):
     if not source:
         raise HTTPException(status_code=404, detail="Recurring source not found")
     return {"success": True, "source": source}
+
+
+# --- Admin: fire detection exclusion zones ---
+# Staff-drawn polygons over areas that repeatedly produce false-positive
+# satellite fire signatures (e.g. a flare stack or quarry). Unlike recurring
+# sources, an arbitrary shape rather than a point+radius, and there's no
+# candidate/review step - a zone suppresses new detections at ingest
+# (core.database.upsert_detection_event) the moment it's created.
+
+@router.get("/api/admin/fires/exclusion-zones")
+def admin_list_exclusion_zones(status: Optional[str] = "active", token: Optional[str] = None):
+    """List exclusion zones (admin only). Defaults to active zones; pass status=None (empty) for all."""
+    _require_admin(token)
+    zones = list_fire_exclusion_zones(status=status or None)
+    return {"success": True, "zones": zones, "count": len(zones)}
+
+
+@router.post("/api/admin/fires/exclusion-zones")
+def admin_create_exclusion_zone(payload: ExclusionZoneCreate, token: Optional[str] = None):
+    """Create a new exclusion zone and immediately hide any existing active
+    incidents whose centroid falls inside it (admin only)."""
+    actor = _require_admin(token)
+    geometry_geojson = json.dumps(payload.geometry)
+    zone = create_fire_exclusion_zone(payload.name, geometry_geojson, created_by=actor, notes=payload.notes)
+    hidden_incidents = list_fire_incidents_in_geometry(geometry_geojson)
+    for incident in hidden_incidents:
+        delete_fire_incident(incident["id"], reason=f"inside exclusion zone {zone['id']}")
+    return {"success": True, "zone": zone, "hidden_incident_count": len(hidden_incidents)}
+
+
+@router.delete("/api/admin/fires/exclusion-zones/{zone_id}")
+def admin_delete_exclusion_zone(zone_id: int, token: Optional[str] = None):
+    """Soft-delete a zone - stops it suppressing new detections. Does not
+    restore any incidents it previously hid (admin only)."""
+    _require_admin(token)
+    zone = set_fire_exclusion_zone_status(zone_id, "deleted")
+    if not zone:
+        raise HTTPException(status_code=404, detail="Exclusion zone not found")
+    return {"success": True, "zone": zone}

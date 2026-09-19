@@ -132,6 +132,7 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         ("detection_confidence_pct", "REAL"),
         ("footprint_geojson", "TEXT"),
         ("recurring_source_id", "INTEGER"),
+        ("exclusion_zone_id", "INTEGER"),
     ):
         if column_name not in fire_events_columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {column_name} {column_type}")
@@ -289,6 +290,29 @@ def _ensure_recurring_fire_source_tables(cursor: sqlite3.Cursor) -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_fire_sources_status ON recurring_fire_sources(status)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_recurring_fire_sources_centroid ON recurring_fire_sources(latitude, longitude)')
+
+
+def _ensure_fire_exclusion_zone_tables(cursor: sqlite3.Cursor) -> None:
+    """Admin-drawn polygons marking areas where satellite fire detections are
+    known false positives (e.g. a flare stack or quarry that keeps lighting
+    up NGFS/VIIRS). Unlike recurring_fire_sources (a point+radius, one
+    location at a time), a zone is an arbitrary shape. Any 'active' zone
+    suppresses new detections at ingest (see _find_matching_exclusion_zone/
+    upsert_detection_event) the moment it's created - no review step,
+    since a staff member drew it deliberately."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_exclusion_zones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            geometry_geojson TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_exclusion_zones_status ON fire_exclusion_zones(status)')
 
 
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
@@ -861,6 +885,7 @@ def init_database():
     _ensure_fire_event_tables(cursor)
     _ensure_fire_incident_tables(cursor)
     _ensure_recurring_fire_source_tables(cursor)
+    _ensure_fire_exclusion_zone_tables(cursor)
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)
@@ -2116,8 +2141,17 @@ def upsert_detection_event(
         event_id = cursor.fetchone()[0]
         if is_new:
             if source in ("modis", "viirs", "ngfs"):
-                recurring_source = _find_confirmed_recurring_source(cursor, latitude, longitude)
-                if recurring_source is not None:
+                exclusion_zone = _find_matching_exclusion_zone(cursor, latitude, longitude)
+                recurring_source = _find_confirmed_recurring_source(cursor, latitude, longitude) if exclusion_zone is None else None
+                if exclusion_zone is not None:
+                    # Staff drew a zone over a known false-positive area - store
+                    # the raw read, but skip incident clustering entirely so it
+                    # never becomes a published incident anywhere.
+                    cursor.execute(
+                        'UPDATE fire_events SET exclusion_zone_id = ? WHERE id = ?',
+                        (exclusion_zone["id"], event_id),
+                    )
+                elif recurring_source is not None:
                     # A known non-fire source (mill/flare/kiln/...) - store the
                     # raw read, but skip incident clustering entirely so it
                     # never triggers ML scoring or incident-graphic regeneration.
@@ -2476,6 +2510,27 @@ def find_or_create_incident_for_detection(
     return cursor.lastrowid
 
 
+def _find_matching_exclusion_zone(cursor: sqlite3.Cursor, latitude: float, longitude: float) -> Optional[Dict]:
+    """Active admin-drawn exclusion zone containing this point, or None. Only
+    'active' rows suppress anything - a 'deleted' zone stops affecting new
+    detections immediately but (like recurring sources) doesn't retroactively
+    restore anything. Takes the caller's own cursor (same transaction as
+    upsert_detection_event) rather than a separate connection."""
+    import json as _json
+    from shapely.geometry import Point, shape
+
+    cursor.execute("SELECT id, name, geometry_geojson FROM fire_exclusion_zones WHERE status = 'active'")
+    point = Point(longitude, latitude)
+    for row in cursor.fetchall():
+        try:
+            polygon = shape(_json.loads(row["geometry_geojson"]))
+        except (TypeError, ValueError):
+            continue
+        if polygon.contains(point):
+            return dict(row)
+    return None
+
+
 def _find_confirmed_recurring_source(cursor: sqlite3.Cursor, latitude: float, longitude: float) -> Optional[Dict]:
     """Nearest CONFIRMED recurring non-fire source within its own radius_km
     of this point, or None. Only 'confirmed' rows suppress anything -
@@ -2620,6 +2675,78 @@ def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, l
         conn.commit()
         row = conn.execute('SELECT * FROM recurring_fire_sources WHERE id = ?', (source_id,)).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_fire_exclusion_zones(status: Optional[str] = "active") -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute('SELECT * FROM fire_exclusion_zones WHERE status = ? ORDER BY created_at DESC', (status,))
+        else:
+            cursor.execute('SELECT * FROM fire_exclusion_zones ORDER BY status, created_at DESC')
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def create_fire_exclusion_zone(name: str, geometry_geojson: str, created_by: str, notes: str = "") -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            '''INSERT INTO fire_exclusion_zones (name, notes, geometry_geojson, created_by)
+               VALUES (?, ?, ?, ?)''',
+            (name, notes, geometry_geojson, created_by),
+        )
+        conn.commit()
+        row = conn.execute('SELECT * FROM fire_exclusion_zones WHERE id = ?', (cursor.lastrowid,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def set_fire_exclusion_zone_status(zone_id: int, status: str) -> Optional[Dict]:
+    if status not in ("active", "deleted"):
+        raise ValueError(f"invalid exclusion zone status: {status}")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE fire_exclusion_zones SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, zone_id),
+        )
+        conn.commit()
+        row = conn.execute('SELECT * FROM fire_exclusion_zones WHERE id = ?', (zone_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_fire_incidents_in_geometry(geometry_geojson: str) -> List[Dict]:
+    """Active (non-deleted) incidents whose centroid falls inside the given
+    GeoJSON polygon/multipolygon - used to retroactively hide existing
+    incidents the moment a new exclusion zone is drawn over them."""
+    import json as _json
+    from shapely.geometry import Point, shape
+
+    polygon = shape(_json.loads(geometry_geojson))
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, centroid_latitude, centroid_longitude FROM fire_incidents WHERE status != 'deleted'")
+        return [
+            dict(row) for row in cursor.fetchall()
+            if polygon.contains(Point(row["centroid_longitude"], row["centroid_latitude"]))
+        ]
     finally:
         conn.close()
 
@@ -2960,6 +3087,27 @@ def delete_fire_event(event_id: int, actor: str, reason: str = "") -> bool:
         cursor.execute('DELETE FROM fire_event_fuels WHERE event_id = ?', (event_id,))
         record_fire_moderation(cursor, event_id, action="deleted", actor=actor,
                                 from_status=from_status, to_status="deleted", reason=reason)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def delete_fire_incident(incident_id: int, reason: str = "") -> bool:
+    """Soft delete: status='deleted'. Member fire_events rows are left as-is
+    (their incident_id reference becomes orphaned, same tolerated pattern as
+    delete_fire_event/fire_event_moderation) - there is no FK enforcement in
+    SQLite here. reason is currently just documentation at the call site
+    (e.g. "inside exclusion zone <id>"); there's no incident-level moderation
+    log table the way fire_events has, so it isn't persisted."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id FROM fire_incidents WHERE id = ?', (incident_id,))
+        if not cursor.fetchone():
+            return False
+        cursor.execute("UPDATE fire_incidents SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (incident_id,))
         conn.commit()
         return True
     finally:
