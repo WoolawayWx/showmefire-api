@@ -524,29 +524,15 @@ def _sld_categorized_polygon_style(layer_name: str, field_name: str = "level") -
 '''
 
 
-def _package_shapefile_zip(
-    gdf: "gpd.GeoDataFrame",
-    out_path: Path,
-    run_str: str,
-    *,
-    base: str = "peak_fire_danger",
-    title: str = "Missouri Peak Fire Danger",
-    field_doc: str = (
-        "  level      0=Low 1=Moderate 2=Elevated 3=Critical 4=Extreme\n"
-        "  label      Danger level name\n"
-        "  color      Hex fill color matching the operational legend\n"
-        "  model_run  Forecast run timestamp (UTC)\n"
-        "  buffer_m   Polygon buffer distance in meters\n"
-        "  clipped    Clip boundary description\n"
-    ),
-) -> bool:
+def _package_shapefile_zip(gdf: "gpd.GeoDataFrame", out_path: Path, run_str: str) -> bool:
     """
-    Write a GeoDataFrame with a "level" field (0-4) as a zipped Esri
-    Shapefile bundle plus QGIS (.qml) and OGC (.sld) style files matching
-    the operational danger-level legend.
+    Write a GeoDataFrame (fields: level/label/color/model_run/buffer_m/clipped)
+    as a zipped Esri Shapefile bundle plus QGIS (.qml) and OGC (.sld) style
+    files matching the operational danger-level legend.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    base = "peak_fire_danger"
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp_dir = Path(tmp_str)
@@ -558,11 +544,16 @@ def _package_shapefile_zip(
             _sld_categorized_polygon_style(base), encoding="utf-8"
         )
         (tmp_dir / "README.txt").write_text(
-            f"{title} — daily shapefile export\n"
+            "Missouri Peak Fire Danger — daily shapefile export\n"
             f"Model run: {run_str}\n"
             "CRS: EPSG:4326 (WGS84)\n\n"
             "Fields:\n"
-            f"{field_doc}\n"
+            "  level      0=Low 1=Moderate 2=Elevated 3=Critical 4=Extreme\n"
+            "  label      Danger level name\n"
+            "  color      Hex fill color matching the operational legend\n"
+            "  model_run  Forecast run timestamp (UTC)\n"
+            "  buffer_m   Polygon buffer distance in meters\n"
+            "  clipped    Clip boundary description\n\n"
             f"{base}.qml — QGIS layer style "
             "(Layer Properties > Symbology > Style > Load Style)\n"
             f"{base}.sld — OGC Styled Layer Descriptor for other GIS software\n",
