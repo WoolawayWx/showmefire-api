@@ -23,6 +23,13 @@ from services.graphic_renderer import HEIGHT, WIDTH, _render_fingerprint, _rende
 
 BROWSER_RENDERER_VERSION = "graphics-browser-v1"
 RENDER_PAGE_URL = os.getenv("SMF_GRAPHICS_RENDER_URL", "https://showmefire.org/graphics/render")
+# Falls back to the preview deployment when prod hasn't picked up a render-page change
+# yet (Cloudflare Pages promotes preview -> prod on its own schedule, independent of
+# this API's deploys). Once prod is current this fallback is just dead weight per call.
+RENDER_PAGE_FALLBACK_URL = os.getenv(
+    "SMF_GRAPHICS_RENDER_FALLBACK_URL", "https://preview.showmefire.org/graphics/render"
+)
+RENDER_PAGE_URLS = [u for u in dict.fromkeys([RENDER_PAGE_URL, RENDER_PAGE_FALLBACK_URL]) if u]
 RENDER_TIMEOUT_MS = int(os.getenv("SMF_GRAPHICS_RENDER_TIMEOUT_MS", "20000"))
 RENDER_TOKEN_TTL_SECONDS = int(os.getenv("SMF_GRAPHICS_RENDER_TOKEN_TTL", "300"))
 DEFAULT_CENTER = [-92.45, 38.343121]
@@ -68,12 +75,12 @@ def render_graphic_browser(config: dict) -> dict:
     call, matching the ProcessPoolExecutor-per-call model the matplotlib renderer
     uses); pool this if per-render browser launch latency (~100-200ms) matters.
     """
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
     product_ids, payloads, urls, frames = _render_sources(config)
-    source_hash = _render_fingerprint(config, payloads)
+    source_hash = _render_fingerprint(config, payloads, renderer_version=BROWSER_RENDERER_VERSION)
     token = _store_render_config(config)
-    url = f"{RENDER_PAGE_URL}?token={token}"
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -86,9 +93,29 @@ def render_graphic_browser(config: dict) -> dict:
         )
         try:
             page = browser.new_page(viewport={"width": WIDTH, "height": HEIGHT})
-            page.goto(url, wait_until="load", timeout=RENDER_TIMEOUT_MS)
-            page.wait_for_function("window.__SMF_RENDER_READY__ === true", timeout=RENDER_TIMEOUT_MS)
-            data = page.screenshot(type="png")
+            data = None
+            last_error: Exception | None = None
+            for base_url in RENDER_PAGE_URLS:
+                url = f"{base_url}?token={token}"
+                try:
+                    response = page.goto(url, wait_until="load", timeout=RENDER_TIMEOUT_MS)
+                    if response is None or response.status == 404:
+                        last_error = RuntimeError(f"{base_url} returned {'no response' if response is None else 404}")
+                        continue
+                    # wait_for_function/evaluate run in the main JS world and are blocked by
+                    # the render page's CSP (script-src has no 'unsafe-eval'). wait_for_selector
+                    # matches in an isolated "utility world" that Chromium doesn't check against
+                    # page CSP, so the render page must flag readiness via a DOM attribute
+                    # (e.g. document.documentElement.setAttribute('data-smf-render-ready', 'true'))
+                    # rather than a window global.
+                    page.wait_for_selector('[data-smf-render-ready="true"]', timeout=RENDER_TIMEOUT_MS)
+                    data = page.screenshot(type="png")
+                    break
+                except PlaywrightError as exc:
+                    last_error = exc
+                    continue
+            if data is None:
+                raise RuntimeError(f"Render page unreachable at every configured URL: {RENDER_PAGE_URLS}") from last_error
         finally:
             browser.close()
 

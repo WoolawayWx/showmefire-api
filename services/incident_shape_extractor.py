@@ -33,7 +33,12 @@ from shapely.geometry import Point
 from shapely.geometry import shape as shapely_shape
 from shapely.ops import unary_union
 
-from core.database import list_fire_incident_members, list_fire_incidents, set_fire_incident_shape
+from core.database import (
+    get_fire_incident,
+    list_fire_incident_members,
+    list_fire_incidents,
+    set_fire_incident_shape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +233,30 @@ def compute_incident_shape(incident: dict, members: list[dict]) -> dict | None:
         return None
 
 
+def _iter_incidents(incident_id: int | None):
+    if incident_id is not None:
+        incident = get_fire_incident(incident_id)
+        if incident is not None:
+            yield incident
+        return
+
+    # list_fire_incidents caps its own page size at 200, so a single call
+    # only ever sees the 200 most-recently-active incidents - with enough
+    # incident churn, that page shifts fast enough to permanently skip
+    # eligible incidents that are still well within an active fire's
+    # lifespan. Page through offsets so every incident gets considered.
+    offset = 0
+    page_size = 200
+    while True:
+        page = list_fire_incidents(limit=page_size, offset=offset)
+        if not page:
+            return
+        yield from page
+        if len(page) < page_size:
+            return
+        offset += page_size
+
+
 def refresh_incident_shapes(incident_id: int | None = None, force: bool = False) -> dict:
     """Recompute shapes only for incidents whose detection_count changed
     since the last shape computation (or on force) - avoids re-fetching and
@@ -236,9 +265,7 @@ def refresh_incident_shapes(incident_id: int | None = None, force: bool = False)
     updated = 0
     skipped = 0
     failed = 0
-    for incident in list_fire_incidents(limit=200):
-        if incident_id is not None and int(incident["id"]) != incident_id:
-            continue
+    for incident in _iter_incidents(incident_id):
         if int(incident.get("detection_count") or 0) < MIN_DETECTIONS:
             continue
         if not force and incident.get("shape_detection_count") == incident.get("detection_count"):

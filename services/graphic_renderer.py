@@ -409,14 +409,20 @@ def _reference_boundaries():
         return empty, empty
 
 
-def _render_fingerprint(config: dict, payloads: list[bytes]) -> str:
-    """Include data, presentation settings, and local assets in change detection."""
+def _render_fingerprint(config: dict, payloads: list[bytes], renderer_version: str = RENDERER_VERSION) -> str:
+    """Include data, presentation settings, and local assets in change detection.
+
+    renderer_version is part of the hash so switching renderers (e.g. matplotlib -> browser)
+    always produces a fresh fingerprint and forces a re-render/re-upload, even when the
+    underlying source data is unchanged - otherwise the "source unchanged" skip in
+    routers/graphics.py would keep serving the old renderer's cached image forever.
+    """
     digest = hashlib.sha256()
     for payload in payloads:
         digest.update(payload)
     public_config = {key: value for key, value in config.items() if key not in {"jurisdiction_path", "department_logo_path"}}
     digest.update(json.dumps(public_config, sort_keys=True, separators=(",", ":"), default=str).encode())
-    digest.update(RENDERER_VERSION.encode())
+    digest.update(renderer_version.encode())
     for key in ("jurisdiction_path", "department_logo_path"):
         path = Path(config[key]) if config.get(key) else None
         if path and path.is_file():
