@@ -656,12 +656,15 @@ def export_shapefile_from_geojson(geojson_path: Path, out_path: Path) -> bool:
         return False
 
 
-def export_shapefile_from_raster(tif_path: Path, out_path: Path) -> bool:
+def export_shapefile_from_raster(tif_path: Path, out_path: Path, band_index: int = 1) -> bool:
     """
     Build the shapefile bundle by directly vectorizing an already-published
-    danger-level GeoTIFF (0-4 categories, e.g. peak_fire_danger.tif or
-    gis/latest/forecast_peak_fire_danger.tif) rather than recomputing
-    polygons from a separate in-memory array.
+    danger-level GeoTIFF (0-4 categories) rather than recomputing polygons
+    from a separate in-memory array. Works for both a single-band legacy
+    raster (e.g. gis/latest/forecast_peak_fire_danger.tif) and a multi-band
+    one where each band is a forecast day (e.g. forecast_v1's
+    rasters/daily/peak_fire_danger.tif, band 1 = Day 1/today, band 2 = Day 2,
+    ...) - pick the day with band_index.
 
     This guarantees the shapefile matches whatever raster is actually being
     served/displayed as the operational forecast pixel-for-pixel, instead of
@@ -674,13 +677,17 @@ def export_shapefile_from_raster(tif_path: Path, out_path: Path) -> bool:
 
         tif_path = Path(tif_path)
         with rasterio.open(tif_path) as src:
-            band = src.read(1)
+            band = src.read(band_index)
             nodata = src.nodata
             transform = src.transform
             crs = src.crs
             tags = src.tags()
+            band_tags = src.tags(band_index)
 
-        run_str = tags.get("VALID_TIME") or tags.get("RUN_TIME") or tags.get("MODEL_RUN") or "unknown"
+        run_str = (
+            tags.get("VALID_TIME") or tags.get("RUN_TIME") or tags.get("MODEL_RUN")
+            or band_tags.get("valid_time") or "unknown"
+        )
         mask = band != nodata if nodata is not None else None
 
         level_polys = {level: [] for level in DANGER_LEVELS.keys()}

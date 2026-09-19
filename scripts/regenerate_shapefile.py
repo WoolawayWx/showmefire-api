@@ -2,10 +2,11 @@
 Regenerate today's peak fire danger shapefile bundle on demand.
 
 Rebuilds the styled shapefile zip by directly vectorizing the already-
-published, operational forecast GeoTIFF (gis/latest/forecast_peak_fire_danger.tif
+published, operational HRRR forecast GeoTIFF (gis/latest/forecast_peak_fire_danger.tif
 by default - the same file the site's map and "Day 1 fire danger raster"
-download use) instead of re-running the forecast pipeline. This guarantees
-the shapefile matches the production 12Z forecast maps pixel-for-pixel.
+download use, written by DailyForecast.py's 12Z HRRR run) instead of
+re-running the forecast pipeline. This guarantees the shapefile matches the
+production 12Z HRRR forecast maps pixel-for-pixel.
 
 Useful when the shapefile export was added/changed after the day's forecast
 already ran, or to repair a corrupted zip.
@@ -29,7 +30,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tif", type=Path, default=GIS_DIR / "latest" / "forecast_peak_fire_danger.tif",
-        help="Source danger-level GeoTIFF (default: the live operational Day-1 forecast raster)",
+        help="Source danger-level GeoTIFF (default: the live operational HRRR Day-1 forecast raster)",
     )
     parser.add_argument(
         "--out", type=Path, default=GIS_DIR / "peak_fire_danger_shapefile.zip",
