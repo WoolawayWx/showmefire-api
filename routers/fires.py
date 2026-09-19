@@ -428,7 +428,12 @@ def _event_to_geojson_feature(event: dict) -> dict:
     }
 
 
-def _incident_to_geojson_feature(incident: dict) -> dict:
+def _incident_popup_properties(incident: dict) -> dict:
+    """Shared property set for every incident map feature - the point
+    marker (_incident_to_geojson_feature) and the ML shape
+    (_footprint... see list_public_fire_incident_shapes_geojson) both use
+    this, so clicking either one shows the same FRP/confidence/ML-score
+    info instead of the shape being a dead click target."""
     # list_fire_incident_members orders oldest-first; the popup shows the
     # latest detection's own readings rather than incident-level aggregates,
     # since FRP/brightness/confidence are properties of a single pass, not
@@ -438,28 +443,32 @@ def _incident_to_geojson_feature(incident: dict) -> dict:
     confidence_values = [m.get("detection_confidence_pct") for m in members if m.get("detection_confidence_pct") is not None]
 
     return {
+        "SOURCE": "SHOWMEFIRE_INCIDENT",
+        "TYPENAME": "incident",
+        "INCIDENT_ID": incident["id"],
+        "INCIDENT_SLUG": incident.get("public_slug"),
+        "DETECTION_COUNT": incident.get("detection_count", 0),
+        "COUNTY": incident.get("county_name"),
+        "FIRST_DETECTED_AT": incident.get("first_detected_at"),
+        "LAST_DETECTED_AT": incident.get("last_detected_at"),
+        "ACQ_DATE_TIME": latest.get("occurred_at") or incident.get("last_detected_at"),
+        "FRP": latest.get("frp"),
+        "BRIGHT_T7": latest.get("bright_t7"),
+        "CONFIDENCE": latest.get("confidence"),
+        "SATELLITE": latest.get("satellite"),
+        "TYPE_DESCRIPTION": "Fire detection",
+        "LAND_COVER": latest.get("land_cover") or "Unknown",
+        "DETECTION_CONFIDENCE_PCT": max(confidence_values) if confidence_values else None,
+        "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") and incident.get("graphic_filename") else None,
+        "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
+    }
+
+
+def _incident_to_geojson_feature(incident: dict) -> dict:
+    return {
         "type": "Feature",
         "geometry": {"type": "Point", "coordinates": [incident["centroid_longitude"], incident["centroid_latitude"]]},
-        "properties": {
-            "SOURCE": "SHOWMEFIRE_INCIDENT",
-            "TYPENAME": "incident",
-            "INCIDENT_ID": incident["id"],
-            "INCIDENT_SLUG": incident.get("public_slug"),
-            "DETECTION_COUNT": incident.get("detection_count", 0),
-            "COUNTY": incident.get("county_name"),
-            "FIRST_DETECTED_AT": incident.get("first_detected_at"),
-            "LAST_DETECTED_AT": incident.get("last_detected_at"),
-            "ACQ_DATE_TIME": latest.get("occurred_at") or incident.get("last_detected_at"),
-            "FRP": latest.get("frp"),
-            "BRIGHT_T7": latest.get("bright_t7"),
-            "CONFIDENCE": latest.get("confidence"),
-            "SATELLITE": latest.get("satellite"),
-            "TYPE_DESCRIPTION": "Fire detection",
-            "LAND_COVER": latest.get("land_cover") or "Unknown",
-            "DETECTION_CONFIDENCE_PCT": max(confidence_values) if confidence_values else None,
-            "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") and incident.get("graphic_filename") else None,
-            "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
-        },
+        "properties": _incident_popup_properties(incident),
     }
 
 
@@ -947,6 +956,38 @@ def admin_add_to_blocklist(payload: BlocklistCreate, token: Optional[str] = None
 
 
 # --- Admin: satellite detection incidents ---
+
+@router.get("/api/fires/incident-shapes.geojson")
+def list_public_fire_incident_shapes_geojson(response: Response, limit: int = 200, offset: int = 0):
+    """ML-extracted irregular incident shapes (radar-style feature ID over
+    the NGFS Microphysics composite, merged with stored pixel footprints -
+    see services/incident_shape_extractor.py). Only incidents with a
+    computed shape are included; everything else keeps using the point
+    marker from /api/fires/incidents.geojson."""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    incidents = list_fire_incidents(limit=limit, offset=offset)
+    features = []
+    for incident in incidents:
+        if not incident.get("shape_geojson") or not incident.get("public_slug"):
+            continue
+        try:
+            geometry = json.loads(incident["shape_geojson"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        # Same property set as the point marker (_incident_popup_properties)
+        # so clicking the shape shows the same FRP/confidence/ML-score info,
+        # not just the bare id/county the shape used to carry.
+        features.append({
+            "type": "Feature",
+            "geometry": geometry,
+            "properties": _incident_popup_properties(incident),
+        })
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "fire_incidents store (ML shape extraction)"},
+    }
+
 
 @router.get("/api/admin/fires/incidents")
 def admin_list_fire_incidents(

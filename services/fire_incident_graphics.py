@@ -129,6 +129,28 @@ def _add_locator_map(ax, detail_extent, lons, lats):
     return locator
 
 
+def _plot_incident_shape(ax, incident: dict, transform=None) -> None:
+    """Overlay the ML-extracted irregular incident shape (see
+    services/incident_shape_extractor.py), when one has been computed, on
+    top of the per-detection dots."""
+    raw = incident.get("shape_geojson")
+    if not raw:
+        return
+    try:
+        import json
+
+        from shapely.geometry import shape as shapely_shape
+
+        geometry = shapely_shape(json.loads(raw))
+        polygons = geometry.geoms if geometry.geom_type == "MultiPolygon" else [geometry]
+        for polygon in polygons:
+            xs, ys = polygon.exterior.xy
+            kwargs = {"transform": transform} if transform is not None else {}
+            ax.plot(xs, ys, color="#c2410c", linewidth=2, linestyle="--", zorder=6, **kwargs)
+    except Exception:
+        logger.debug("Incident shape overlay unavailable", exc_info=True)
+
+
 def render_incident_graphic(incident: dict, detections: Iterable[dict], output: Path) -> Path:
     """Create a map-left/info-right PNG. Basemap downloads are optional; the
     graphic remains useful in restricted/offline environments."""
@@ -213,10 +235,12 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
             except Exception:
                 logger.debug("Local primary-road overlay unavailable", exc_info=True)
         ax.scatter(lons, lats, s=55, c="#ff3b20", edgecolors="white", linewidths=1, transform=ccrs.PlateCarree(), zorder=5)
+        _plot_incident_shape(ax, incident, transform=ccrs.PlateCarree())
     except Exception as exc:
         logger.info("Incident basemap unavailable: %s", exc)
         ax.scatter(lons, lats, s=55, c="#e53935", edgecolors="white", linewidths=1, zorder=5)
         ax.grid(True, alpha=0.25)
+        _plot_incident_shape(ax, incident)
     _add_locator_map(ax, detail_extent, lons, lats)
     info.axis("off")
     info.set_facecolor("#ffffff")

@@ -234,6 +234,8 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
     for name, definition in (
         ("public_slug", "TEXT"),
         ("graphic_filename", "TEXT"),
+        ("shape_geojson", "TEXT"),
+        ("shape_detection_count", "INTEGER"),
     ):
         if name not in incident_columns:
             cursor.execute(f"ALTER TABLE fire_incidents ADD COLUMN {name} {definition}")
@@ -2735,7 +2737,7 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
     try:
         cursor.execute('''
             SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source,
-                   bright_t7, land_cover, detection_confidence_pct
+                   bright_t7, land_cover, detection_confidence_pct, footprint_geojson
             FROM fire_events
             WHERE incident_id = ?
             ORDER BY occurred_at ASC
@@ -2784,6 +2786,19 @@ def create_fire_incident_feedback(
 def set_fire_incident_graphic(incident_id: int, filename: str) -> None:
     with sqlite3.connect(get_db_path()) as conn:
         conn.execute("UPDATE fire_incidents SET graphic_filename = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (filename, incident_id))
+        conn.commit()
+
+
+def set_fire_incident_shape(incident_id: int, shape_geojson: str, detection_count: int) -> None:
+    """Store the ML-extracted irregular shape for an incident (see
+    services/incident_shape_extractor.py) along with the detection_count it
+    was computed at, so refresh_incident_shapes() can skip recomputing an
+    incident that hasn't changed."""
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.execute(
+            "UPDATE fire_incidents SET shape_geojson = ?, shape_detection_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (shape_geojson, detection_count, incident_id),
+        )
         conn.commit()
 
 

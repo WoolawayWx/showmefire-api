@@ -268,6 +268,8 @@ async def ingest_fire_detections_job():
         await asyncio.to_thread(publish_fire_detections)
         from services.fire_incident_graphics import refresh_incident_graphics
         await asyncio.to_thread(refresh_incident_graphics)
+        from services.incident_shape_extractor import refresh_incident_shapes
+        await asyncio.to_thread(refresh_incident_shapes)
         from services.fire_confidence import refresh_confidence_shapes
         await asyncio.to_thread(refresh_confidence_shapes)
     except Exception as error:
