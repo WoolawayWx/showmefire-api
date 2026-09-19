@@ -656,6 +656,67 @@ def export_shapefile_from_geojson(geojson_path: Path, out_path: Path) -> bool:
         return False
 
 
+def export_shapefile_from_raster(tif_path: Path, out_path: Path) -> bool:
+    """
+    Build the shapefile bundle by directly vectorizing an already-published
+    danger-level GeoTIFF (0-4 categories, e.g. peak_fire_danger.tif or
+    gis/latest/forecast_peak_fire_danger.tif) rather than recomputing
+    polygons from a separate in-memory array.
+
+    This guarantees the shapefile matches whatever raster is actually being
+    served/displayed as the operational forecast pixel-for-pixel, instead of
+    depending on a second, parallel dissolve/buffer/clip pipeline that can
+    silently drift out of sync with it.
+    """
+    try:
+        import rasterio
+        from rasterio.features import shapes as raster_shapes
+
+        tif_path = Path(tif_path)
+        with rasterio.open(tif_path) as src:
+            band = src.read(1)
+            nodata = src.nodata
+            transform = src.transform
+            crs = src.crs
+            tags = src.tags()
+
+        run_str = tags.get("VALID_TIME") or tags.get("RUN_TIME") or tags.get("MODEL_RUN") or "unknown"
+        mask = band != nodata if nodata is not None else None
+
+        level_polys = {level: [] for level in DANGER_LEVELS.keys()}
+        for geom, value in raster_shapes(band, mask=mask, transform=transform):
+            level = int(value)
+            if level in level_polys:
+                level_polys[level].append(shape(geom))
+
+        rows = []
+        geoms = []
+        for level, meta in DANGER_LEVELS.items():
+            polys = level_polys.get(level, [])
+            if not polys:
+                continue
+            rows.append({
+                "level": level,
+                "label": meta["label"],
+                "color": meta["color"],
+                "model_run": run_str,
+                "buffer_m": 0.0,
+                "clipped": "vectorized from published raster",
+            })
+            geoms.append(unary_union(polys))
+
+        if not rows:
+            logger.warning(f"Shapefile export: no danger-level regions found in {tif_path}")
+            return False
+
+        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs=crs).to_crs("EPSG:4326")
+        return _package_shapefile_zip(gdf, out_path, run_str)
+
+    except Exception as e:
+        logger.error(f"Shapefile export from raster failed: {e}", exc_info=True)
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 5.  Convenience wrapper – call this from generate_complete_forecast()
 # ══════════════════════════════════════════════════════════════════════════════
@@ -712,8 +773,14 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     results['geojson_polygons'] = poly_path if ok else None
 
     # ── Shapefile bundle (zipped .shp/.shx/.dbf/.prj + .qml/.sld styles) ───────
+    # Vectorized directly from the GeoTIFF just written above, so it's
+    # guaranteed to match that file (and the map/download built from it)
+    # pixel-for-pixel instead of drifting from a second recomputation.
     shp_zip_path = out_dir / f'peak_fire_danger_shapefile{filename_suffix}.zip'
-    ok = export_shapefile(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
+    if results.get('geotiff'):
+        ok = export_shapefile_from_raster(tif_path, shp_zip_path)
+    else:
+        ok = export_shapefile(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
     results['shapefile'] = shp_zip_path if ok else None
 
     # ── Summary ───────────────────────────────────────────────────────────────
