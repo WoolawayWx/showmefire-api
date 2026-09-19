@@ -569,158 +569,99 @@ def _package_shapefile_zip(gdf: "gpd.GeoDataFrame", out_path: Path, run_str: str
     return True
 
 
-def export_shapefile(peak_risk_smooth: np.ndarray,
-                     lon: np.ndarray,
-                     lat: np.ndarray,
-                     out_path: Path,
-                     run_date=None) -> bool:
-    """
-    Package today's peak fire danger polygons as a zipped Esri Shapefile
-    (.shp/.shx/.dbf/.prj/.cpg) plus QGIS (.qml) and OGC (.sld) style files,
-    for use in desktop GIS tools (QGIS, ArcGIS Pro) and other applications.
+def _ring_signed_area(ring: np.ndarray) -> float:
+    x, y = ring[:, 0], ring[:, 1]
+    return 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
 
-    Attribute fields (10-char DBF limit):
-      level     – integer danger level, 0-4 (0=Low … 4=Extreme)
-      label     – danger level name
-      color     – hex fill color matching the operational legend
-      model_run – forecast run timestamp (UTC)
-      buffer_m  – polygon buffer distance in meters
-      clipped   – clip boundary description
+
+def _polygon_from_contourf_path(path) -> "object | None":
+    """
+    Convert one matplotlib contourf level's Path into a shapely (Multi)Polygon.
+
+    matplotlib's contour paths encode holes as rings with the opposite
+    winding direction from their enclosing exterior ring (positive signed
+    area = exterior, negative = hole). Union all exteriors, then subtract
+    the union of all holes, rather than pairing them by nesting order,
+    since a single level's Path can contain multiple disjoint regions.
+    """
+    exteriors = []
+    holes = []
+    for ring in path.to_polygons():
+        if len(ring) < 4:
+            continue
+        poly = Polygon(ring)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            continue
+        (exteriors if _ring_signed_area(ring) >= 0 else holes).append(poly)
+
+    if not exteriors:
+        return None
+    result = unary_union(exteriors)
+    if holes:
+        result = result.difference(unary_union(holes))
+    return result if not result.is_empty else None
+
+
+def export_shapefile_from_contourf(peak_risk_smooth: np.ndarray,
+                                   lon: np.ndarray,
+                                   lat: np.ndarray,
+                                   out_path: Path,
+                                   run_date=None) -> bool:
+    """
+    Build the shapefile bundle by extracting polygons directly from a
+    matplotlib contourf() call over the same continuous peak_risk_smooth
+    field and level bins used to render mo-forecastfiredanger.png
+    (DailyForecast.py's "MAP 1: PEAK FIRE DANGER" section).
+
+    This matters because a per-pixel/per-cell rasterization of the
+    *pre-binned* GeoTIFF (the previous approach) produces blocky, grid-
+    aligned boundaries, whereas contourf performs marching-squares
+    interpolation on the continuous field - smooth boundaries that don't
+    align with pixel edges. Same underlying data, visibly different shapes.
+    Using the identical contourf() call the map itself uses is the only way
+    to guarantee the shapefile matches the map, not just the raw values.
     """
     try:
-        regions = _build_danger_level_regions(peak_risk_smooth, lon, lat, run_date)
-        if not regions:
-            logger.warning("Shapefile export: no danger-level regions to write")
-            return False
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
 
-        gdf = gpd.GeoDataFrame(
-            [{
-                "level": int(r["danger_level"]),
-                "label": r["label"],
-                "color": r["color"],
-                "model_run": r["model_run"],
-                "buffer_m": r["buffer_meters"],
-                "clipped": "MO state boundary",
-            } for r in regions],
-            geometry=[r["geometry"] for r in regions],
-            crs="EPSG:4326",
-        )
+        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+        fig, ax = plt.subplots()
+        try:
+            cs = ax.contourf(lon, lat, peak_risk_smooth, levels=bins)
+        finally:
+            plt.close(fig)
 
         run_str = run_date.strftime('%Y-%m-%d %HZ') if run_date else 'unknown'
-        return _package_shapefile_zip(gdf, out_path, run_str)
-
-    except Exception as e:
-        logger.error(f"Shapefile export failed: {e}", exc_info=True)
-        return False
-
-
-def export_shapefile_from_geojson(geojson_path: Path, out_path: Path) -> bool:
-    """
-    Rebuild the shapefile bundle from an already-published polygons GeoJSON
-    (e.g. api/gis/peak_fire_danger_polygons.geojson) instead of recomputing
-    the forecast. Lets today's shapefile be regenerated (or a stale one
-    repaired) on demand, without re-running the full ML/HRRR pipeline.
-
-    See scripts/regenerate_shapefile.py for a runnable CLI wrapper.
-    """
-    try:
-        geojson_path = Path(geojson_path)
-        with open(geojson_path) as f:
-            data = json.load(f)
-
-        run_str = (data.get("metadata") or {}).get("model_run", "unknown")
-
         rows = []
         geoms = []
-        for feature in data.get("features", []):
-            props = feature.get("properties", {})
-            rows.append({
-                "level": int(props.get("danger_level", -1)),
-                "label": props.get("label", ""),
-                "color": props.get("color", ""),
-                "model_run": props.get("model_run"),
-                "buffer_m": props.get("buffer_meters"),
-                "clipped": props.get("clipped_to", ""),
-            })
-            geoms.append(shape(feature["geometry"]))
-
-        if not rows:
-            logger.warning(f"Shapefile export: no features in {geojson_path}")
-            return False
-
-        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
-        return _package_shapefile_zip(gdf, out_path, run_str)
-
-    except Exception as e:
-        logger.error(f"Shapefile export from GeoJSON failed: {e}", exc_info=True)
-        return False
-
-
-def export_shapefile_from_raster(tif_path: Path, out_path: Path, band_index: int = 1) -> bool:
-    """
-    Build the shapefile bundle by directly vectorizing an already-published
-    danger-level GeoTIFF (0-4 categories) rather than recomputing polygons
-    from a separate in-memory array. Works for both a single-band legacy
-    raster (e.g. gis/latest/forecast_peak_fire_danger.tif) and a multi-band
-    one where each band is a forecast day (e.g. forecast_v1's
-    rasters/daily/peak_fire_danger.tif, band 1 = Day 1/today, band 2 = Day 2,
-    ...) - pick the day with band_index.
-
-    This guarantees the shapefile matches whatever raster is actually being
-    served/displayed as the operational forecast pixel-for-pixel, instead of
-    depending on a second, parallel dissolve/buffer/clip pipeline that can
-    silently drift out of sync with it.
-    """
-    try:
-        import rasterio
-        from rasterio.features import shapes as raster_shapes
-
-        tif_path = Path(tif_path)
-        with rasterio.open(tif_path) as src:
-            band = src.read(band_index)
-            nodata = src.nodata
-            transform = src.transform
-            crs = src.crs
-            tags = src.tags()
-            band_tags = src.tags(band_index)
-
-        run_str = (
-            tags.get("VALID_TIME") or tags.get("RUN_TIME") or tags.get("MODEL_RUN")
-            or band_tags.get("valid_time") or "unknown"
-        )
-        mask = band != nodata if nodata is not None else None
-
-        level_polys = {level: [] for level in DANGER_LEVELS.keys()}
-        for geom, value in raster_shapes(band, mask=mask, transform=transform):
-            level = int(value)
-            if level in level_polys:
-                level_polys[level].append(shape(geom))
-
-        rows = []
-        geoms = []
-        for level, meta in DANGER_LEVELS.items():
-            polys = level_polys.get(level, [])
-            if not polys:
+        for level, path in enumerate(cs.get_paths()):
+            geom = _polygon_from_contourf_path(path)
+            if geom is None:
                 continue
+            meta = DANGER_LEVELS[level]
             rows.append({
                 "level": level,
                 "label": meta["label"],
                 "color": meta["color"],
                 "model_run": run_str,
                 "buffer_m": 0.0,
-                "clipped": "vectorized from published raster",
+                "clipped": "matches mo-forecastfiredanger.png contourf rendering",
             })
-            geoms.append(unary_union(polys))
+            geoms.append(geom)
 
         if not rows:
-            logger.warning(f"Shapefile export: no danger-level regions found in {tif_path}")
+            logger.warning("Shapefile export: contourf produced no danger-level regions")
             return False
 
-        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs=crs).to_crs("EPSG:4326")
+        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
         return _package_shapefile_zip(gdf, out_path, run_str)
 
     except Exception as e:
-        logger.error(f"Shapefile export from raster failed: {e}", exc_info=True)
+        logger.error(f"Shapefile export from contourf failed: {e}", exc_info=True)
         return False
 
 
@@ -780,14 +721,11 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     results['geojson_polygons'] = poly_path if ok else None
 
     # ── Shapefile bundle (zipped .shp/.shx/.dbf/.prj + .qml/.sld styles) ───────
-    # Vectorized directly from the GeoTIFF just written above, so it's
-    # guaranteed to match that file (and the map/download built from it)
-    # pixel-for-pixel instead of drifting from a second recomputation.
+    # Extracted from the same contourf() call used to render
+    # mo-forecastfiredanger.png, so the polygon boundaries match the map's
+    # smooth, interpolated contours instead of the GeoTIFF's blocky pixel grid.
     shp_zip_path = out_dir / f'peak_fire_danger_shapefile{filename_suffix}.zip'
-    if results.get('geotiff'):
-        ok = export_shapefile_from_raster(tif_path, shp_zip_path)
-    else:
-        ok = export_shapefile(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
+    ok = export_shapefile_from_contourf(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
     results['shapefile'] = shp_zip_path if ok else None
 
     # ── Summary ───────────────────────────────────────────────────────────────
