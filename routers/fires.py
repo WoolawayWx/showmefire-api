@@ -60,7 +60,9 @@ from core.database import (
     list_fire_incident_feedback,
     list_fire_incidents,
     list_nearby_fire_events,
+    list_pending_fire_incident_feedback,
     set_fire_event_status,
+    set_fire_incident_feedback_status,
     update_fire_event,
 )
 from core.fire_events import FUEL_TYPES, MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN, VERIFICATION_TIERS
@@ -474,6 +476,11 @@ def _incident_popup_properties(incident: dict) -> dict:
         "DETECTION_CONFIDENCE_PCT": max(confidence_values) if confidence_values else None,
         "GRAPHIC_URL": f"{PUBLIC_API_BASE_URL}/images/fire-incidents/{incident['public_slug']}.png" if incident.get("public_slug") and incident.get("graphic_filename") else None,
         "FEEDBACK_URL": f"/fires/incident/{incident['public_slug']}" if incident.get("public_slug") else None,
+        # 'Confirmed' = at least one public 'confirmed_fire' feedback submission
+        # (see list_fire_incidents) - unmoderated, so this is a public signal,
+        # not an official review.
+        "CONFIRMED": bool(incident.get("confirmed")),
+        "FEEDBACK_COUNT": incident.get("feedback_count", 0),
     }
 
 
@@ -871,6 +878,47 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     return {"success": True, "message": "Thanks—your fire information was received."}
 
 
+# --- Admin: incident feedback review ---
+# Public feedback (above) always lands as status='pending' - it never marks
+# an incident 'confirmed' on its own (core.database.list_fire_incidents).
+# An admin must approve a 'confirmed_fire' submission here before the public
+# map/popup shows anything as confirmed.
+
+@router.get("/api/admin/fires/incident-feedback")
+def admin_list_pending_incident_feedback(token: Optional[str] = None, limit: int = 100):
+    """Feedback awaiting review, most recent first, each with a heuristic
+    confidence score to help triage (see services/feedback_confidence.py) -
+    admin only. The score is advisory, not a decision."""
+    _require_admin(token)
+    from services.feedback_confidence import score_feedback
+    feedback = list_pending_fire_incident_feedback(limit=limit)
+    for item in feedback:
+        item["confidence"] = score_feedback(item["id"])
+    return {"success": True, "feedback": feedback, "count": len(feedback)}
+
+
+@router.post("/api/admin/fires/incident-feedback/{feedback_id}/approve")
+def admin_approve_incident_feedback(feedback_id: int, token: Optional[str] = None):
+    """Approve a feedback submission - if it's 'confirmed_fire', the incident
+    becomes 'confirmed' on the public map immediately (admin only)."""
+    actor = _require_admin(token)
+    feedback = set_fire_incident_feedback_status(feedback_id, "approved", reviewed_by=actor)
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    return {"success": True, "feedback": feedback}
+
+
+@router.post("/api/admin/fires/incident-feedback/{feedback_id}/reject")
+def admin_reject_incident_feedback(feedback_id: int, token: Optional[str] = None):
+    """Reject a feedback submission - excluded from 'confirmed' status and
+    from the review queue, but kept for the audit trail (admin only)."""
+    actor = _require_admin(token)
+    feedback = set_fire_incident_feedback_status(feedback_id, "rejected", reviewed_by=actor)
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    return {"success": True, "feedback": feedback}
+
+
 # --- Admin: moderation ---
 
 @router.get("/api/admin/fires/reports")
@@ -1005,6 +1053,46 @@ def list_public_fire_incident_shapes_geojson(response: Response, since: Optional
     }
 
 
+@router.get("/api/admin/fires/detections.geojson")
+def admin_list_fire_detections_geojson(
+    token: Optional[str] = None,
+    source: str = "modis,viirs,ngfs",
+    since: Optional[str] = None,
+    limit: int = 500,
+):
+    """Raw individual satellite detections (not incident-clustered), for
+    staff to see where signatures actually fall before drawing an exclusion
+    zone - includes ones already suppressed by a recurring source or
+    exclusion zone, so staff can see the full false-positive pattern, not
+    just what's currently published (admin only)."""
+    _require_admin(token)
+    events = list_fire_events(source=source, since=since, limit=limit, admin=True)
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [event["longitude"], event["latitude"]]},
+            "properties": {
+                "EVENT_ID": event["id"],
+                "SOURCE": event["source"],
+                "ACQ_DATE_TIME": event["occurred_at"],
+                "FRP": event.get("frp"),
+                "CONFIDENCE": event.get("confidence"),
+                "INCIDENT_ID": event.get("incident_id"),
+                "RECURRING_SOURCE_ID": event.get("recurring_source_id"),
+                "EXCLUSION_ZONE_ID": event.get("exclusion_zone_id"),
+                "SUPPRESSED": bool(event.get("recurring_source_id") or event.get("exclusion_zone_id")),
+            },
+        }
+        for event in events
+        if event.get("latitude") is not None and event.get("longitude") is not None
+    ]
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {"fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "count": len(features)},
+    }
+
+
 @router.get("/api/admin/fires/incidents")
 def admin_list_fire_incidents(
     token: Optional[str] = None,
@@ -1012,13 +1100,18 @@ def admin_list_fire_incidents(
     until: Optional[str] = None,
     source: Optional[str] = None,
     bbox: Optional[str] = None,
+    has_feedback: Optional[bool] = None,
+    confirmed_only: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    """List satellite-detection incidents, most recently active first (admin only)"""
+    """List satellite-detection incidents, most recently active first (admin only).
+    has_feedback=true: only incidents with at least one public feedback submission.
+    confirmed_only=true: only incidents with at least one 'confirmed_fire' submission."""
     _require_admin(token)
     incidents = list_fire_incidents(
-        since=since, until=until, source=source, bbox=_parse_bbox(bbox), limit=limit, offset=offset,
+        since=since, until=until, source=source, bbox=_parse_bbox(bbox),
+        has_feedback=has_feedback, confirmed_only=confirmed_only, limit=limit, offset=offset,
     )
     return {"success": True, "incidents": incidents, "count": len(incidents)}
 

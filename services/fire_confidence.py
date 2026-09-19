@@ -76,7 +76,7 @@ def _circle(lon: float, lat: float, radius_km: float, steps: int = 24) -> list[l
 
 def build_confidence_geojson() -> dict:
     features = []
-    for incident in list_fire_incidents(limit=200):
+    for incident in list_fire_incidents(limit=500):
         members = list_fire_incident_members(incident["id"])
         score, label, method = _score(_features(incident, members))
         radius = min(3.0, max(0.5, 0.45 + len(members) * 0.08))

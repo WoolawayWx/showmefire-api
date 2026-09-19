@@ -4,9 +4,10 @@ export_fire_danger_gis.py
 Drop-in replacement for the GIS export block in forecastedfiredanger.py.
 
 Exports peak fire danger as:
-  1. GeoTIFF  – single-band uint8, EPSG:32615 on the canonical Missouri grid
-  2. GeoJSON  – polygon contour regions (best for MapLibre fill layers)
-  3. The operational GIS contract intentionally publishes polygons only.
+  1. GeoTIFF   – single-band uint8, EPSG:32615 on the canonical Missouri grid
+  2. GeoJSON   – polygon contour regions (best for MapLibre fill layers)
+  3. Shapefile – zipped .shp/.shx/.dbf/.prj bundle + QGIS/SLD styles, for
+                 desktop GIS tools and other applications.
 
 Usage inside generate_complete_forecast():
     from export_fire_danger_gis import export_all_gis_formats
@@ -21,6 +22,8 @@ import json
 import logging
 import re
 import shutil
+import tempfile
+import zipfile
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
@@ -181,6 +184,95 @@ def export_geotiff(peak_risk_smooth: np.ndarray,
 # 2.  GeoJSON – polygon contour regions
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _build_danger_level_regions(peak_risk_smooth: np.ndarray,
+                                lon: np.ndarray,
+                                lat: np.ndarray,
+                                run_date=None) -> list[dict]:
+    """
+    Shared dissolve/buffer/clip/simplify pipeline used by every vector
+    export (GeoJSON polygons, Shapefile). Returns one dict per non-empty
+    danger level with a WGS84 shapely geometry plus the properties every
+    exporter needs.
+
+    Strategy
+    ────────
+    1. Bin the smooth raster to uint8 danger levels (same as GeoTIFF).
+    2. Create cell polygons using actual 2D coordinate grids (handles projection warping).
+    3. Dissolve shapes per level with shapely unary_union.
+    4. Buffer 250m and clip to the Missouri state boundary (in a projected CRS).
+
+    Note: HRRR data uses Lambert Conformal projection with 2D coordinate meshes.
+    We must use the actual cell coordinates, not assume a regular lat/lon grid.
+    """
+    rows, cols = peak_risk_smooth.shape
+
+    # ── Bin values ────────────────────────────────────────────────────────
+    bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+    risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
+    risk_binned = np.clip(risk_binned, 0, 4).astype(np.uint8)
+    nan_mask = np.isnan(peak_risk_smooth)
+    risk_binned[nan_mask] = NODATA_UINT8
+
+    # ── Create polygons using actual 2D coordinates ───────────────────────
+    # For each grid cell, create a polygon from its corner coordinates
+    # Group cells by danger level
+    level_cells = {level: [] for level in DANGER_LEVELS.keys()}
+
+    for i in range(rows - 1):
+        for j in range(cols - 1):
+            level = risk_binned[i, j]
+            if level == NODATA_UINT8:
+                continue
+
+            # Get the 4 corners of this cell (i,j), (i,j+1), (i+1,j+1), (i+1,j)
+            corners = [
+                (float(lon[i, j]), float(lat[i, j])),
+                (float(lon[i, j+1]), float(lat[i, j+1])),
+                (float(lon[i+1, j+1]), float(lat[i+1, j+1])),
+                (float(lon[i+1, j]), float(lat[i+1, j])),
+                (float(lon[i, j]), float(lat[i, j]))  # close the ring
+            ]
+
+            try:
+                poly = Polygon(corners)
+                if poly.is_valid and not poly.is_empty:
+                    level_cells[level].append(poly)
+            except Exception:
+                continue
+
+    run_str = run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else None
+    state = gpd.read_file(STATE_BOUNDARY_SHP).to_crs("EPSG:32615")
+    state_union = unary_union(state.geometry)
+
+    regions = []
+    for level, meta in DANGER_LEVELS.items():
+        polys = level_cells.get(level, [])
+        if not polys:
+            continue
+
+        merged = unary_union(polys)
+        # Close small grid seams, then trim the result to Missouri. Work
+        # in a projected CRS so the buffer is measured in meters.
+        projected = gpd.GeoSeries([merged], crs="EPSG:4326").to_crs("EPSG:32615")
+        buffered = projected.iloc[0].buffer(POLYGON_BUFFER_METERS, join_style=2)
+        clipped = buffered.intersection(state_union)
+        merged = gpd.GeoSeries([clipped], crs="EPSG:32615").to_crs("EPSG:4326").iloc[0]
+        # Simplify to reduce file size while preserving topology.
+        merged = merged.simplify(0.0005, preserve_topology=True)
+
+        regions.append({
+            "danger_level": level,
+            "label": meta["label"],
+            "color": meta["color"],
+            "model_run": run_str,
+            "buffer_meters": POLYGON_BUFFER_METERS,
+            "clipped_to": "Missouri state boundary",
+            "geometry": merged,
+        })
+
+    return regions
+
+
 def export_geojson_polygons(peak_risk_smooth: np.ndarray,
                             lon: np.ndarray,
                             lat: np.ndarray,
@@ -194,88 +286,28 @@ def export_geojson_polygons(peak_risk_smooth: np.ndarray,
       • MapLibre GL fill layers   (use 'danger_level' property for paint rules)
       • Sharing with agencies     (readable, self-describing, no special tools)
       • QGIS vector editing
-
-    Strategy
-    ────────
-    1. Bin the smooth raster to uint8 danger levels (same as GeoTIFF).
-    2. Create cell polygons using actual 2D coordinate grids (handles projection warping).
-    3. Dissolve shapes per level with shapely unary_union.
-    4. Write as a FeatureCollection with metadata properties.
-    
-    Note: HRRR data uses Lambert Conformal projection with 2D coordinate meshes.
-    We must use the actual cell coordinates, not assume a regular lat/lon grid.
     """
     try:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        rows, cols = peak_risk_smooth.shape
+        regions = _build_danger_level_regions(peak_risk_smooth, lon, lat, run_date)
 
-        # ── Bin values ────────────────────────────────────────────────────────
-        bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
-        risk_binned = np.digitize(peak_risk_smooth, bins, right=False) - 1
-        risk_binned = np.clip(risk_binned, 0, 4).astype(np.uint8)
-        nan_mask = np.isnan(peak_risk_smooth)
-        risk_binned[nan_mask] = NODATA_UINT8
-
-        # ── Create polygons using actual 2D coordinates ───────────────────────
-        # For each grid cell, create a polygon from its corner coordinates
-        features = []
-        
-        # Group cells by danger level
-        level_cells = {level: [] for level in DANGER_LEVELS.keys()}
-        
-        for i in range(rows - 1):
-            for j in range(cols - 1):
-                level = risk_binned[i, j]
-                if level == NODATA_UINT8:
-                    continue
-                
-                # Get the 4 corners of this cell (i,j), (i,j+1), (i+1,j+1), (i+1,j)
-                corners = [
-                    (float(lon[i, j]), float(lat[i, j])),
-                    (float(lon[i, j+1]), float(lat[i, j+1])),
-                    (float(lon[i+1, j+1]), float(lat[i+1, j+1])),
-                    (float(lon[i+1, j]), float(lat[i+1, j])),
-                    (float(lon[i, j]), float(lat[i, j]))  # close the ring
-                ]
-                
-                try:
-                    poly = Polygon(corners)
-                    if poly.is_valid and not poly.is_empty:
-                        level_cells[level].append(poly)
-                except Exception:
-                    continue
-        
-        # Dissolve polygons per danger level
-        for level, meta in DANGER_LEVELS.items():
-            polys = level_cells.get(level, [])
-            if not polys:
-                continue
-
-            merged = unary_union(polys)
-            # Close small grid seams, then trim the result to Missouri. Work
-            # in a projected CRS so the buffer is measured in meters.
-            projected = gpd.GeoSeries([merged], crs="EPSG:4326").to_crs("EPSG:32615")
-            state = gpd.read_file(STATE_BOUNDARY_SHP).to_crs("EPSG:32615")
-            buffered = projected.iloc[0].buffer(POLYGON_BUFFER_METERS, join_style=2)
-            clipped = buffered.intersection(unary_union(state.geometry))
-            merged = gpd.GeoSeries([clipped], crs="EPSG:32615").to_crs("EPSG:4326").iloc[0]
-            # Simplify to reduce file size while preserving topology.
-            merged = merged.simplify(0.0005, preserve_topology=True)
-
-            features.append({
+        features = [
+            {
                 "type": "Feature",
-                "geometry": mapping(merged),
+                "geometry": mapping(r["geometry"]),
                 "properties": {
-                    "danger_level": level,
-                    "label":        meta["label"],
-                    "color":        meta["color"],
-                    "model_run":    run_date.strftime('%Y-%m-%dT%H:%M:%SZ') if run_date else None,
-                    "buffer_meters": POLYGON_BUFFER_METERS,
-                    "clipped_to": "Missouri state boundary",
+                    "danger_level": r["danger_level"],
+                    "label":        r["label"],
+                    "color":        r["color"],
+                    "model_run":    r["model_run"],
+                    "buffer_meters": r["buffer_meters"],
+                    "clipped_to":   r["clipped_to"],
                 }
-            })
+            }
+            for r in regions
+        ]
 
         run_str = run_date.strftime('%Y-%m-%d %HZ') if run_date else 'unknown'
         geojson = {
@@ -404,7 +436,228 @@ def export_geojson_points(peak_risk_smooth: np.ndarray,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4.  Convenience wrapper – call this from generate_complete_forecast()
+# 4.  Shapefile – zipped .shp/.shx/.dbf/.prj bundle + QGIS/SLD style files
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _qml_categorized_polygon_style(field_name: str = "level") -> str:
+    """
+    QGIS layer style (.qml) with a categorized renderer matching DANGER_LEVELS.
+    Load in QGIS via Layer Properties → Symbology → Style → Load Style.
+    """
+    def rgba(hex_color: str) -> str:
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return f"{r},{g},{b},255"
+
+    categories = []
+    symbols = []
+    for level, meta in DANGER_LEVELS.items():
+        categories.append(
+            f'      <category value="{level}" symbol="{level}" label="{meta["label"]}" render="true"/>'
+        )
+        symbols.append(f'''      <symbol type="fill" name="{level}" alpha="1" clip_to_extent="1" force_rhr="0">
+        <layer class="SimpleFill" enabled="1" locked="0" pass="0">
+          <prop k="color" v="{rgba(meta["color"])}"/>
+          <prop k="outline_color" v="35,35,35,255"/>
+          <prop k="outline_width" v="0.26"/>
+          <prop k="outline_style" v="solid"/>
+          <prop k="style" v="solid"/>
+        </layer>
+      </symbol>''')
+
+    return f'''<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.28" styleCategories="AllStyleCategories">
+  <renderer-v2 type="categorizedSymbol" attr="{field_name}" forceraster="0" enableorderby="0" symbollevels="0">
+    <categories>
+{chr(10).join(categories)}
+    </categories>
+    <symbols>
+{chr(10).join(symbols)}
+    </symbols>
+  </renderer-v2>
+</qgis>
+'''
+
+
+def _sld_categorized_polygon_style(layer_name: str, field_name: str = "level") -> str:
+    """
+    OGC Styled Layer Descriptor (.sld) with the same categorized colors,
+    for GIS software that doesn't read QGIS .qml files (GeoServer, ArcGIS, etc).
+    """
+    rules = []
+    for level, meta in DANGER_LEVELS.items():
+        rules.append(f'''    <Rule>
+      <Name>{meta["label"]}</Name>
+      <ogc:Filter xmlns:ogc="http://www.opengis.net/ogc">
+        <ogc:PropertyIsEqualTo>
+          <ogc:PropertyName>{field_name}</ogc:PropertyName>
+          <ogc:Literal>{level}</ogc:Literal>
+        </ogc:PropertyIsEqualTo>
+      </ogc:Filter>
+      <PolygonSymbolizer>
+        <Fill>
+          <CssParameter name="fill">{meta["color"]}</CssParameter>
+          <CssParameter name="fill-opacity">0.7</CssParameter>
+        </Fill>
+        <Stroke>
+          <CssParameter name="stroke">#232323</CssParameter>
+          <CssParameter name="stroke-width">0.5</CssParameter>
+        </Stroke>
+      </PolygonSymbolizer>
+    </Rule>''')
+
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<StyledLayerDescriptor version="1.0.0"
+    xmlns="http://www.opengis.net/sld"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd">
+  <NamedLayer>
+    <Name>{layer_name}</Name>
+    <UserStyle>
+      <Title>Missouri Peak Fire Danger</Title>
+      <FeatureTypeStyle>
+{chr(10).join(rules)}
+      </FeatureTypeStyle>
+    </UserStyle>
+  </NamedLayer>
+</StyledLayerDescriptor>
+'''
+
+
+def _package_shapefile_zip(gdf: "gpd.GeoDataFrame", out_path: Path, run_str: str) -> bool:
+    """
+    Write a GeoDataFrame (fields: level/label/color/model_run/buffer_m/clipped)
+    as a zipped Esri Shapefile bundle plus QGIS (.qml) and OGC (.sld) style
+    files matching the operational danger-level legend.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    base = "peak_fire_danger"
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp_dir = Path(tmp_str)
+        shp_path = tmp_dir / f"{base}.shp"
+        gdf.to_file(shp_path, driver="ESRI Shapefile", encoding="utf-8")
+
+        (tmp_dir / f"{base}.qml").write_text(_qml_categorized_polygon_style(), encoding="utf-8")
+        (tmp_dir / f"{base}.sld").write_text(
+            _sld_categorized_polygon_style(base), encoding="utf-8"
+        )
+        (tmp_dir / "README.txt").write_text(
+            "Missouri Peak Fire Danger — daily shapefile export\n"
+            f"Model run: {run_str}\n"
+            "CRS: EPSG:4326 (WGS84)\n\n"
+            "Fields:\n"
+            "  level      0=Low 1=Moderate 2=Elevated 3=Critical 4=Extreme\n"
+            "  label      Danger level name\n"
+            "  color      Hex fill color matching the operational legend\n"
+            "  model_run  Forecast run timestamp (UTC)\n"
+            "  buffer_m   Polygon buffer distance in meters\n"
+            "  clipped    Clip boundary description\n\n"
+            f"{base}.qml — QGIS layer style "
+            "(Layer Properties > Symbology > Style > Load Style)\n"
+            f"{base}.sld — OGC Styled Layer Descriptor for other GIS software\n",
+            encoding="utf-8",
+        )
+
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(tmp_dir.iterdir()):
+                zf.write(f, arcname=f.name)
+
+    size_kb = out_path.stat().st_size / 1024
+    logger.info(f"Shapefile bundle saved → {out_path}  ({size_kb:.0f} KB, {len(gdf)} features)")
+    return True
+
+
+def export_shapefile(peak_risk_smooth: np.ndarray,
+                     lon: np.ndarray,
+                     lat: np.ndarray,
+                     out_path: Path,
+                     run_date=None) -> bool:
+    """
+    Package today's peak fire danger polygons as a zipped Esri Shapefile
+    (.shp/.shx/.dbf/.prj/.cpg) plus QGIS (.qml) and OGC (.sld) style files,
+    for use in desktop GIS tools (QGIS, ArcGIS Pro) and other applications.
+
+    Attribute fields (10-char DBF limit):
+      level     – integer danger level, 0-4 (0=Low … 4=Extreme)
+      label     – danger level name
+      color     – hex fill color matching the operational legend
+      model_run – forecast run timestamp (UTC)
+      buffer_m  – polygon buffer distance in meters
+      clipped   – clip boundary description
+    """
+    try:
+        regions = _build_danger_level_regions(peak_risk_smooth, lon, lat, run_date)
+        if not regions:
+            logger.warning("Shapefile export: no danger-level regions to write")
+            return False
+
+        gdf = gpd.GeoDataFrame(
+            [{
+                "level": int(r["danger_level"]),
+                "label": r["label"],
+                "color": r["color"],
+                "model_run": r["model_run"],
+                "buffer_m": r["buffer_meters"],
+                "clipped": "MO state boundary",
+            } for r in regions],
+            geometry=[r["geometry"] for r in regions],
+            crs="EPSG:4326",
+        )
+
+        run_str = run_date.strftime('%Y-%m-%d %HZ') if run_date else 'unknown'
+        return _package_shapefile_zip(gdf, out_path, run_str)
+
+    except Exception as e:
+        logger.error(f"Shapefile export failed: {e}", exc_info=True)
+        return False
+
+
+def export_shapefile_from_geojson(geojson_path: Path, out_path: Path) -> bool:
+    """
+    Rebuild the shapefile bundle from an already-published polygons GeoJSON
+    (e.g. api/gis/peak_fire_danger_polygons.geojson) instead of recomputing
+    the forecast. Lets today's shapefile be regenerated (or a stale one
+    repaired) on demand, without re-running the full ML/HRRR pipeline.
+
+    See scripts/regenerate_shapefile.py for a runnable CLI wrapper.
+    """
+    try:
+        geojson_path = Path(geojson_path)
+        with open(geojson_path) as f:
+            data = json.load(f)
+
+        run_str = (data.get("metadata") or {}).get("model_run", "unknown")
+
+        rows = []
+        geoms = []
+        for feature in data.get("features", []):
+            props = feature.get("properties", {})
+            rows.append({
+                "level": int(props.get("danger_level", -1)),
+                "label": props.get("label", ""),
+                "color": props.get("color", ""),
+                "model_run": props.get("model_run"),
+                "buffer_m": props.get("buffer_meters"),
+                "clipped": props.get("clipped_to", ""),
+            })
+            geoms.append(shape(feature["geometry"]))
+
+        if not rows:
+            logger.warning(f"Shapefile export: no features in {geojson_path}")
+            return False
+
+        gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
+        return _package_shapefile_zip(gdf, out_path, run_str)
+
+    except Exception as e:
+        logger.error(f"Shapefile export from GeoJSON failed: {e}", exc_info=True)
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5.  Convenience wrapper – call this from generate_complete_forecast()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def export_all_gis_formats(peak_risk_smooth: np.ndarray,
@@ -457,6 +710,11 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     poly_path = out_dir / f'peak_fire_danger_polygons{filename_suffix}.geojson'
     ok = export_geojson_polygons(peak_risk_smooth, lon, lat, poly_path, run_date)
     results['geojson_polygons'] = poly_path if ok else None
+
+    # ── Shapefile bundle (zipped .shp/.shx/.dbf/.prj + .qml/.sld styles) ───────
+    shp_zip_path = out_dir / f'peak_fire_danger_shapefile{filename_suffix}.zip'
+    ok = export_shapefile(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
+    results['shapefile'] = shp_zip_path if ok else None
 
     # ── Summary ───────────────────────────────────────────────────────────────
     for fmt, path in results.items():

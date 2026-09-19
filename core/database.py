@@ -255,11 +255,24 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
             note TEXT NOT NULL DEFAULT '',
             contact TEXT NOT NULL DEFAULT '',
             submitter_ip_hash TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            reviewed_by TEXT NOT NULL DEFAULT '',
+            reviewed_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (incident_id) REFERENCES fire_incidents(id)
         )
     ''')
+    cursor.execute("PRAGMA table_info(fire_incident_feedback)")
+    feedback_columns = {row[1] for row in cursor.fetchall()}
+    for name, definition in (
+        ("status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("reviewed_by", "TEXT NOT NULL DEFAULT ''"),
+        ("reviewed_at", "TIMESTAMP"),
+    ):
+        if name not in feedback_columns:
+            cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_incident ON fire_incident_feedback(incident_id, created_at DESC)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_status ON fire_incident_feedback(status, created_at DESC)')
 
 
 def _ensure_recurring_fire_source_tables(cursor: sqlite3.Cursor) -> None:
@@ -1943,6 +1956,8 @@ _PUBLIC_EVENT_COLUMNS = (
 
 _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
     "incident_id",
+    "recurring_source_id",
+    "exclusion_zone_id",
     "occurred_at_tz_offset_minutes",
     "official_source_system",
     "label_revision", "revised_at", "parent_event_id",
@@ -2779,16 +2794,21 @@ def list_fire_incidents(
     until: Optional[str] = None,
     source: Optional[str] = None,
     bbox: Optional[tuple] = None,
+    has_feedback: Optional[bool] = None,
+    confirmed_only: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> List[Dict]:
-    """bbox is (min_lon, min_lat, max_lon, max_lat), matching list_fire_events."""
+    """bbox is (min_lon, min_lat, max_lon, max_lat), matching list_fire_events.
+    'Confirmed' means at least one public feedback submission classified
+    'confirmed_fire' (see fire_incident_feedback/create_fire_incident_feedback) -
+    that feedback is unmoderated, so this is a public signal, not a review gate."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        safe_limit = max(1, min(limit, 200))
+        safe_limit = max(1, min(limit, 500))
         safe_offset = max(0, offset)
 
         clauses = []
@@ -2808,6 +2828,13 @@ def list_fire_incidents(
                 SELECT 1 FROM fire_events fe WHERE fe.incident_id = fire_incidents.id AND fe.source = ?
             )''')
             params.append(source)
+        if has_feedback:
+            clauses.append('EXISTS (SELECT 1 FROM fire_incident_feedback fb WHERE fb.incident_id = fire_incidents.id)')
+        if confirmed_only:
+            clauses.append('''EXISTS (
+                SELECT 1 FROM fire_incident_feedback fb
+                WHERE fb.incident_id = fire_incidents.id AND fb.classification = 'confirmed_fire' AND fb.status = 'approved'
+            )''')
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cursor.execute(f'''
@@ -2827,6 +2854,25 @@ def list_fire_incidents(
             ).fetchall()
             incident["county_names"] = [item[0] for item in counties]
             incident["county_name"] = ", ".join(incident["county_names"]) or incident.get("county_name")
+            feedback_rows = cursor.execute(
+                "SELECT classification, status, COUNT(*) as n FROM fire_incident_feedback WHERE incident_id = ? GROUP BY classification, status",
+                (incident["id"],),
+            ).fetchall()
+            feedback_counts: Dict[str, int] = {}
+            approved_counts: Dict[str, int] = {}
+            pending_count = 0
+            for fb_row in feedback_rows:
+                feedback_counts[fb_row["classification"]] = feedback_counts.get(fb_row["classification"], 0) + fb_row["n"]
+                if fb_row["status"] == "approved":
+                    approved_counts[fb_row["classification"]] = approved_counts.get(fb_row["classification"], 0) + fb_row["n"]
+                elif fb_row["status"] == "pending":
+                    pending_count += fb_row["n"]
+            incident["feedback_counts"] = feedback_counts
+            incident["feedback_count"] = sum(feedback_counts.values())
+            incident["pending_feedback_count"] = pending_count
+            # 'Confirmed' requires an admin-approved 'confirmed_fire' submission -
+            # a pending or rejected one doesn't count (see set_fire_incident_feedback_status).
+            incident["confirmed"] = approved_counts.get("confirmed_fire", 0) > 0
             incidents.append(incident)
         return incidents
     finally:
@@ -2933,10 +2979,52 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
     with sqlite3.connect(get_db_path()) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, incident_id, classification, note, contact, created_at FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
+            "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at "
+            "FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
             (incident_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
+    """Feedback awaiting admin review, most recent first, joined with just
+    enough incident context (slug/county) for the moderation queue to link
+    back to the incident without a second round-trip per row."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            '''SELECT fb.id, fb.incident_id, fb.classification, fb.note, fb.contact, fb.created_at,
+                      fi.public_slug, fi.county_name, fi.detection_count
+               FROM fire_incident_feedback fb
+               JOIN fire_incidents fi ON fi.id = fb.incident_id
+               WHERE fb.status = 'pending'
+               ORDER BY fb.created_at DESC
+               LIMIT ?''',
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by: str) -> Optional[Dict]:
+    if status not in ("pending", "approved", "rejected"):
+        raise ValueError(f"invalid feedback status: {status}")
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE fire_incident_feedback SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, reviewed_by, feedback_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM fire_incident_feedback WHERE id = ?", (feedback_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def list_nearby_fire_events(latitude: float, longitude: float, radius_km: float, hours: float) -> List[Dict]:
