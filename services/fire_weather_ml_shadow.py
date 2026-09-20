@@ -125,7 +125,13 @@ def _risk_score_image_path() -> Path:
 
 
 def _configured() -> bool:
-    return bool(os.getenv(BUNDLE_ENV, "").strip())
+    if os.getenv(BUNDLE_ENV, "").strip():
+        return True
+    try:
+        from models.versioning import get_model_entry
+        return bool(get_model_entry("fire_weather_ml").get("stable"))
+    except Exception:
+        return False
 
 
 def _requested() -> bool:
@@ -199,9 +205,42 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _resolve_bundle_files(directory: Optional[Path]):
+    """Resolve role -> file path for a bundle, preferring an explicit
+    directory / BUNDLE_ENV override (an operator's own choice always wins),
+    and falling back to the unified registry's `stable` channel (see
+    models/versioning.py::load_active_assets) once this family has been
+    migrated off the fixed-directory convention and nothing has overridden
+    it. Returns (files, version_hint)."""
+    directory = Path(directory or os.getenv(BUNDLE_ENV, "")) if (directory or os.getenv(BUNDLE_ENV, "").strip()) else None
+    if directory is not None:
+        if not directory.is_dir():
+            raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
+        files = {role: directory / filename for role, filename in BUNDLE_ASSET_FILENAMES.items()}
+        version = None
+        version_path = directory / "registered_version.json"
+        if version_path.is_file():
+            try:
+                version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+            except Exception:
+                version = None
+        return files, version
+
+    from models.versioning import get_model_entry, load_active_assets
+    resolved = load_active_assets("fire_weather_ml", channel="stable")
+    files = {role: asset["path"] for role, asset in resolved.items()}
+    stable = get_model_entry("fire_weather_ml").get("stable") or {}
+    version = (stable.get("metadata") or {}).get("shadow_bundle_version") or stable.get("version")
+    return files, version
+
+
 def load_bundle(directory: Optional[Path] = None) -> Dict:
     """
-    Loads and validates a fire_weather_ml candidate bundle directory.
+    Loads and validates a fire_weather_ml candidate bundle, either from an
+    explicit directory / BUNDLE_ENV (fixed filenames), or - once this
+    family is migrated and nothing overrides it - from the unified
+    registry's active stable version.
+
     Raises on any contract mismatch - a caller must never score with a
     bundle that isn't advisory_only, isn't the model_family this module
     knows how to score, or whose feature_columns don't match
@@ -209,14 +248,12 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     """
     import xgboost as xgb
 
-    directory = Path(directory or os.getenv(BUNDLE_ENV, ""))
-    if not str(directory) or not directory.is_dir():
-        raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
-    for filename in BUNDLE_ASSET_FILENAMES.values():
-        if not (directory / filename).is_file():
-            raise FileNotFoundError(f"fire_weather_ml bundle missing asset: {filename}")
+    files, version = _resolve_bundle_files(directory)
+    missing = [role for role in BUNDLE_ASSET_FILENAMES if role not in files]
+    if missing:
+        raise FileNotFoundError(f"fire_weather_ml bundle missing asset(s): {missing}")
 
-    contract = json.loads((directory / BUNDLE_ASSET_FILENAMES["contract"]).read_text(encoding="utf-8"))
+    contract = json.loads(Path(files["contract"]).read_text(encoding="utf-8"))
     if contract.get("advisory_only") is not True:
         raise ValueError("fire_weather_ml bundle is not advisory_only")
     if contract.get("model_family") != "xgboost_regressor":
@@ -230,10 +267,9 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
             f"this module's EXPECTED_FEATURE_COLUMNS {EXPECTED_FEATURE_COLUMNS!r}")
 
     booster = xgb.Booster()
-    booster.load_model(str(directory / BUNDLE_ASSET_FILENAMES["model"]))
+    booster.load_model(str(files["model"]))
 
-    risk_calibration = json.loads(
-        (directory / BUNDLE_ASSET_FILENAMES["risk_calibration"]).read_text(encoding="utf-8"))
+    risk_calibration = json.loads(Path(files["risk_calibration"]).read_text(encoding="utf-8"))
 
     # Per-feature [min, max] actually observed in training (model-training/
     # fire_weather_ml/model_bundle.py::fit) - real, discovered need: the
@@ -242,28 +278,15 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     # that range. Missing on an older bundle (not fatal) - score_grid then
     # can't apply the out-of-range mask and callers should treat every
     # cell as unchecked, not silently "fine".
-    metadata_path = directory / BUNDLE_ASSET_FILENAMES["metadata"]
     feature_ranges = None
     try:
-        feature_ranges = json.loads(metadata_path.read_text(encoding="utf-8")).get("feature_ranges")
+        feature_ranges = json.loads(Path(files["metadata"]).read_text(encoding="utf-8")).get("feature_ranges")
     except Exception:
         feature_ranges = None
 
     bundle_checksum = hashlib.sha256(
-        "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
+        "".join(_sha256_file(Path(files[role])) for role in BUNDLE_ASSET_FILENAMES).encode()
     ).hexdigest()
-
-    # Written by model-training/fire_weather_ml/register_beta.py after a
-    # successful registration - optional (an older/manually-copied bundle
-    # directory won't have it), never fatal. Without it, graphics/evidence
-    # just report "unknown" rather than refusing to score.
-    version_path = directory / "registered_version.json"
-    version = None
-    if version_path.is_file():
-        try:
-            version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
-        except Exception:
-            version = None
 
     return {"booster": booster, "contract": contract, "bundle_checksum": bundle_checksum,
             "version": version, "risk_calibration": risk_calibration, "feature_ranges": feature_ranges}

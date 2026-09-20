@@ -47,6 +47,31 @@ def _validators():
     }
 
 
+def _asset_filenames_for(family: str) -> Dict[str, str]:
+    """Role -> filename map for a family's bundle, from its own *_shadow.py
+    module - the single source of truth for what files actually make up
+    that family's bundle (BUNDLE_ASSET_FILENAMES), reused here rather than
+    hardcoded a second time."""
+    if family == "risk_fusion_glm":
+        from services import risk_fusion_glm_shadow
+        filenames = dict(risk_fusion_glm_shadow.BUNDLE_ASSET_FILENAMES)
+        filenames["uncertainty"] = risk_fusion_glm_shadow.UNCERTAINTY_ASSET_FILENAME
+        return filenames
+    if family == "fire_weather_ml":
+        from services import fire_weather_ml_shadow
+        return dict(fire_weather_ml_shadow.BUNDLE_ASSET_FILENAMES)
+    if family == "fire_weather_index":
+        from services import fire_weather_index_shadow
+        return dict(fire_weather_index_shadow.BUNDLE_ASSET_FILENAMES)
+    if family == "v4":
+        from services import v4_shadow
+        return dict(v4_shadow.BUNDLE_ASSET_FILENAMES)
+    if family == "v5":
+        from services import v5_shadow
+        return dict(v5_shadow.BUNDLE_ASSET_FILENAMES)
+    raise ValueError(f"no asset filename mapping defined for family {family!r}")
+
+
 def _require_family(family: str) -> None:
     if family not in SHADOW_FAMILIES:
         raise ValueError(f"unknown shadow family: {family!r} (expected one of {SHADOW_FAMILIES})")
@@ -158,13 +183,99 @@ def _resolve_bundle_root(extracted: Path, validate_fn) -> Path:
     raise ValueError("uploaded archive does not contain a valid bundle at its root or one level down")
 
 
+# Families that dual-write into the unified registry (models/versioning.py)
+# alongside this module's own version history, as part of migrating them
+# off this fixed-directory/env-var mechanism onto the same gated
+# beta/stable registry every other model type uses. risk_fusion_glm was the
+# pilot; the others join this set as each one's own migration lands.
+_REGISTRY_MIGRATED_FAMILIES = {"risk_fusion_glm", "fire_weather_ml", "fire_weather_index", "v4", "v5"}
+
+
+def _registry_metadata_for_upload(family: str, bundle: Dict, resolved_version: Optional[str],
+                                  bundle_root: Path) -> Dict:
+    """Metadata for register_trained_model(), built from the same fields
+    the family's own validator already checked - see each family's own
+    load_bundle()/validate_bundle() contract checks, which this mirrors
+    rather than re-deriving independently. `bundle_root` is available for
+    fields that live in a file load_bundle() doesn't fully expose in its
+    return value (e.g. fire_weather_ml's training_row_count, buried inside
+    its metadata.json alongside feature_ranges, which load_bundle() only
+    partially unpacks)."""
+    if family == "risk_fusion_glm":
+        contract = bundle.get("contract") or {}
+        return {
+            "model_family": contract.get("model_family"),
+            "advisory_only": contract.get("advisory_only"),
+            "feature_module_sha256": contract.get("feature_module_sha256"),
+            "shadow_bundle_version": resolved_version,
+        }
+    if family == "fire_weather_ml":
+        contract = bundle.get("contract") or {}
+        metadata_path = bundle_root / "fire_weather_ml_metadata.json"
+        training_row_count = None
+        if metadata_path.is_file():
+            try:
+                training_row_count = json.loads(metadata_path.read_text(encoding="utf-8")).get("training_row_count")
+            except Exception:
+                training_row_count = None
+        return {
+            "feature_module_sha256": contract.get("feature_module_sha256"),
+            "label_module_sha256": contract.get("label_module_sha256"),
+            "label_column": contract.get("label_column"),
+            "model_family": contract.get("model_family"),
+            "training_row_count": training_row_count,
+            "split_manifest_sha256": (contract.get("split_manifest") or {}).get("manifest_sha256"),
+            "advisory_only": contract.get("advisory_only"),
+            "shadow_bundle_version": resolved_version,
+        }
+    if family in ("v4", "v5"):
+        contract = bundle or {}
+        return {
+            "rule_spec_sha256": contract.get("rule_spec_sha256"),
+            "precipitation_contract_version": contract.get("precipitation_contract_version"),
+            "precipitation_contract_sha256": contract.get("precipitation_contract_sha256"),
+            # validate_bundle() (services/v4_shadow.py / v5_shadow.py) only
+            # succeeds - reaching this dual-write at all - for a bundle
+            # whose shadow_bundle_manifest.json already asserts
+            # status == "experimental_shadow_only"; asserted here as
+            # already-confirmed fact rather than re-read from that file a
+            # second time.
+            "advisory_only": True,
+            "shadow_bundle_version": resolved_version,
+        }
+    if family == "fire_weather_index":
+        # No contract.json for this family (its two assets are
+        # factor_weights.json/category_thresholds.json, neither of which
+        # carries a model_family/advisory_only field - see
+        # fire_weather_index/model_bundle.py) - this is a fixed-weights
+        # ramp score, not a fitted model family in the same sense as the
+        # others, and it has been advisory/shadow-only by design throughout
+        # (see this module's own docstring and fire_weather_index_shadow.py's).
+        # Asserted here as known fact rather than read from a file, purely
+        # to satisfy REQUIRED_FIRE_WEATHER_INDEX_METADATA's existing gate.
+        return {
+            "model_family": "fire_weather_index",
+            "advisory_only": True,
+            "shadow_bundle_version": resolved_version,
+        }
+    raise ValueError(f"no registry metadata mapping defined for family {family!r}")
+
+
 def install_bundle(family: str, archive_path: Path, uploaded_by: str, version: Optional[str] = None) -> Dict:
     """Extracts `archive_path` (a zip/tar upload), validates it with the
     family's OWN real shadow-module validator/loader (so a malformed or
     contract-mismatched upload can never be installed, let alone
     activated), then commits it into a new versioned directory under this
     family's root. Never activates - that is a separate, deliberate
-    set_active() call, never implicit."""
+    set_active() call, never implicit.
+
+    For families in _REGISTRY_MIGRATED_FAMILIES, also registers the same
+    bundle as a beta candidate in the unified registry (models/versioning.py)
+    - see set_active()'s docstring for what that then enables at activation
+    time. This module's own version history stays the source of truth for
+    the actual bundle files; the registry entry exists so promotion gates
+    and version history are visible/consistent with every other model type.
+    """
     import tempfile
 
     _, validate_fn = _validators()[family]
@@ -185,11 +296,23 @@ def install_bundle(family: str, archive_path: Path, uploaded_by: str, version: O
             raise FileExistsError(f"{family} version {directory_name!r} is already installed at {final}")
         shutil.copytree(bundle_root, final)
 
+        registry_version = None
+        if family in _REGISTRY_MIGRATED_FAMILIES:
+            from models.versioning import register_trained_model
+            asset_filenames = _asset_filenames_for(family)
+            assets = {role: str(final / filename) for role, filename in asset_filenames.items()
+                      if (final / filename).exists()}
+            registry_version = register_trained_model(
+                family, channel="beta", assets=assets,
+                metadata=_registry_metadata_for_upload(family, bundle, resolved_version, bundle_root),
+            )
+
     manifest = {
         "installed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "uploaded_by": uploaded_by,
         "bundle_sha256": checksum,
         "version": resolved_version,
+        "registry_version": registry_version,
     }
     (final / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"version": directory_name, "path": str(final), **manifest}

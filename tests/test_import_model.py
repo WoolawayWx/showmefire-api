@@ -7,6 +7,7 @@ import numpy as np
 import xarray as xr
 
 from pipelines.import_model import (
+    ImportValidationError,
     REQUIRED_RISK_FUSION_ASSET_ROLES,
     _sha256,
     _verify_fire_behavior_static_assets,
@@ -35,19 +36,19 @@ class GenericMultiassetVerificationTests(unittest.TestCase):
         self.assertEqual(resolved["glm"], glm_path)
 
     def test_rejects_missing_required_role(self):
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ImportValidationError):
             _verify_generic_multiasset({}, {}, {"glm", "guard"})
 
     def test_rejects_sha256_mismatch(self):
         glm_path = self._write("glm.json")
         files = {"glm.json": glm_path}
         declarations = {"glm": {"filename": "glm.json", "sha256": "0" * 64}}
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ImportValidationError):
             _verify_generic_multiasset(files, declarations, {"glm"})
 
     def test_rejects_declared_file_not_present(self):
         declarations = {"glm": {"filename": "missing.json", "sha256": "0" * 64}}
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ImportValidationError):
             _verify_generic_multiasset({}, declarations, {"glm"})
 
     def test_risk_fusion_required_roles_omit_optional_gbm(self):
@@ -106,7 +107,7 @@ class GenericMultiassetVerificationTests(unittest.TestCase):
 
     def test_rejects_synthetic_fire_behavior_static_release(self):
         files, declarations = self._fire_behavior_release(synthetic=True)
-        with self.assertRaisesRegex(SystemExit, "Synthetic"):
+        with self.assertRaisesRegex(ImportValidationError, "Synthetic"):
             _verify_fire_behavior_static_assets(files, declarations)
 
 

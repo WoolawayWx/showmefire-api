@@ -5,7 +5,12 @@ The API collects and archives operational data, imports verified model
 releases, and serves predictions. Training and static-raster preprocessing
 belong in `ShowMeFire-Models`. See its
 [`docs/spatial_fuel_moisture_runbook.md`](https://github.com/Cade417/ShowMeFire-Models/blob/main/docs/spatial_fuel_moisture_runbook.md)
-for the complete operator workflow.
+for the complete operator workflow, or its
+[`docs/model_lifecycle.md`](https://github.com/Cade417/ShowMeFire-Models/blob/main/docs/model_lifecycle.md)
+for the general publish/import/promote workflow shared by every model family
+(not just the spatial one) — including the website's Import button
+(`POST /api/admin/models/{family}/import`) as an alternative to the CLI
+commands below.
 
 ## RTMA and historical fuel-moisture capture
 

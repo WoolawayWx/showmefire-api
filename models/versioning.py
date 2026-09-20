@@ -69,6 +69,16 @@ REQUIRED_FIRE_WEATHER_INDEX_METADATA = {
     "model_family", "advisory_only",
 }
 
+# risk_fusion_glm is the first of the formerly shadow_bundles.py-only
+# families to be migrated onto this registry (see
+# services/risk_fusion_glm_shadow.py's own load_bundle(), whose contract
+# checks this mirrors: advisory_only, model_family=="glm", and the
+# feature-module checksum against core/risk_fusion_features.py). Chosen as
+# the pilot because it's advisory-only with no live-serving fallback risk.
+REQUIRED_RISK_FUSION_GLM_METADATA = {
+    "model_family", "advisory_only", "feature_module_sha256",
+}
+
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
 
 # Static filenames older/ad-hoc scripts still hardcode. promote() keeps these
@@ -92,7 +102,16 @@ def _save_config(config):
     temp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
     with open(temp, "w") as f:
         json.dump(config, f, indent=2)
-    temp.replace(CONFIG_PATH)
+    try:
+        temp.replace(CONFIG_PATH)
+    except PermissionError:
+        # Some Windows/network volumes permit writes but deny replace while a
+        # reader has the registry open. Keep the already-complete temp file as
+        # the source and flush the destination before removing it.
+        with open(temp, "r", encoding="utf-8") as source, open(CONFIG_PATH, "w", encoding="utf-8") as destination:
+            destination.write(source.read())
+            destination.flush()
+        temp.unlink()
 
 
 def _entry(model_type, config):
@@ -152,13 +171,23 @@ def next_version(model_type, bump="patch", beta=False):
 
 
 def register_trained_model(model_type, source_path=None, performance=None, bump="patch", channel="beta", assets=None,
-                           metadata=None):
+                           metadata=None, live_pointer_env=None):
     """Register a freshly trained model artifact under the given channel.
 
     Copies `source_path` into models/versions/ under an immutable, versioned
     filename, updates config.json, and returns the assigned version string.
     Defaults to the `beta` channel so a retrain never silently replaces what
     is currently being served.
+
+    `live_pointer_env`: for model types being migrated off the legacy
+    shadow_bundles.py fixed-directory/env-var mechanism (see
+    shadow_bundles.SHADOW_FAMILIES) - the env var name (e.g.
+    "SMF_V4_SHADOW_BUNDLE") that family's *_shadow.py service still reads
+    directly. Recorded on the entry so promote()/rollback() can keep that
+    env var pointed at the active bundle during the migration, so the
+    service's existing read path needs no code change until it's fully
+    cut over to load_active_assets(). Not yet acted on by promote()/
+    rollback() - that lands alongside each family's actual migration.
     """
     if channel != "beta":
         raise ValueError("Fresh artifacts must enter the beta channel and pass promotion gates")
@@ -190,6 +219,8 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
         ("trained_at" if channel == "beta" else "promoted_at"): now,
         "metadata": metadata or {},
     }
+    if live_pointer_env:
+        record["live_pointer_env"] = live_pointer_env
     if versioned_path:
         record["sha256"] = _sha256(versioned_path)
     if asset_records:
@@ -251,6 +282,38 @@ def validate_promotion_candidate(model_type, candidate):
         # Same hard v1 boundary as fire_risk_fusion/fire_weather_ml.
         if metadata.get("advisory_only") is not True:
             blockers.append("fire_weather_index candidates must have advisory_only=True in v1")
+    if model_type == "risk_fusion_glm":
+        missing = sorted(REQUIRED_RISK_FUSION_GLM_METADATA.difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+        # Mirrors services/risk_fusion_glm_shadow.py::load_bundle()'s own
+        # checks exactly - "stable" here means "the version currently
+        # scored in shadow," never a public-facing path, so this isn't the
+        # same kind of permanent structural boundary as fire_risk_fusion's
+        # (nothing downstream of this family's output reaches the public
+        # forecast), but the bundle must still be internally consistent.
+        if metadata.get("advisory_only") is not True:
+            blockers.append("risk_fusion_glm candidates must have advisory_only=True")
+        if metadata.get("model_family") != "glm":
+            blockers.append("risk_fusion_glm shadow only knows how to score model_family='glm'")
+        from services.risk_fusion_glm_shadow import FEATURES_MODULE_PATH, _sha256_file
+        if metadata.get("feature_module_sha256") != _sha256_file(FEATURES_MODULE_PATH):
+            blockers.append("feature_module_sha256 does not match core/risk_fusion_features.py - retrain or re-mirror")
+    if model_type in ("v4", "v5"):
+        # Mirrors services/v4_shadow.py / v5_shadow.py::validate_bundle()'s
+        # own checks - "stable" here means "the version currently scored in
+        # shadow," never a public-facing path (same reasoning as
+        # risk_fusion_glm above).
+        from core.fire_danger import RULE_SPEC_SHA256 as LIVE_RULE_SPEC_SHA256
+        from core.precipitation import PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION
+        if metadata.get("advisory_only") is not True:
+            blockers.append(f"{model_type} candidates must have advisory_only=True")
+        if metadata.get("rule_spec_sha256") != LIVE_RULE_SPEC_SHA256:
+            blockers.append("rule spec checksum mismatch")
+        if metadata.get("precipitation_contract_version") != PRECIPITATION_CONTRACT_VERSION:
+            blockers.append("precipitation contract version mismatch")
+        if metadata.get("precipitation_contract_sha256") != PRECIPITATION_CONTRACT_SHA256:
+            blockers.append("precipitation contract checksum mismatch")
     precipitation_features = [name for name in metadata.get("feature_columns", [])
                               if name.startswith("precip_") or name == "hours_since_rain"]
     if model_type == "fuel_moisture" and precipitation_features:
@@ -259,11 +322,22 @@ def validate_promotion_candidate(model_type, candidate):
             blockers.append("precipitation contract version mismatch")
         if metadata.get("precipitation_contract_sha256") != PRECIPITATION_CONTRACT_SHA256:
             blockers.append("precipitation contract checksum mismatch")
-    artifact = API_DIR / candidate.get("file", "")
-    if not artifact.is_file():
-        blockers.append(f"artifact is missing: {artifact}")
-    elif candidate.get("sha256") and _sha256(artifact) != candidate["sha256"]:
-        blockers.append("artifact checksum mismatch")
+    # candidate["file"] is only set for single-file registrations, or
+    # multi-asset ones whose roles happen to include model/checkpoint/
+    # static_bundle (see register_trained_model) - it's None for bundles
+    # like fire_risk_fusion/fire_weather_index/fire_weather_ml whose roles
+    # don't match any of those. Each individual asset is still checksum-
+    # verified via its own `assets` entry, so there's nothing extra to
+    # check here for those candidates.
+    artifact = None
+    if candidate.get("file"):
+        artifact = API_DIR / candidate["file"]
+        if not artifact.is_file():
+            blockers.append(f"artifact is missing: {artifact}")
+        elif candidate.get("sha256") and _sha256(artifact) != candidate["sha256"]:
+            blockers.append("artifact checksum mismatch")
+    elif not candidate.get("assets"):
+        blockers.append("candidate has neither a file nor assets to promote")
     gates = metadata.get("promotion_gates") or {}
     failed = sorted(name for name, value in gates.items() if value is False)
     if failed:
@@ -283,7 +357,7 @@ def validate_promotion_candidate(model_type, candidate):
             ground_truth = shadow.get("ground_truth") or {}
             if not ground_truth.get("passed"):
                 blockers.append("ground-truth shadow accuracy has not passed")
-    if model_type == "fuel_moisture" and artifact.is_file() and metadata.get("feature_columns"):
+    if model_type == "fuel_moisture" and artifact is not None and artifact.is_file() and metadata.get("feature_columns"):
         try:
             import pandas as pd
             import xgboost as xgb
@@ -330,19 +404,20 @@ def promote(model_type, version=None):
         entry["history"] = entry["history"][-MAX_HISTORY:]
 
     # A promoted candidate becomes a clean release - drop the -beta.N suffix
-    # from both the version string and the on-disk filename.
+    # from the version string only. The on-disk filename stays as-is: it's
+    # already immutable/content-addressed under models/versions/, and trying
+    # to rename it here used to crash for any multi-asset bundle whose roles
+    # don't include model/checkpoint/static_bundle (beta["file"] is None for
+    # those - see register_trained_model) - fire_risk_fusion, fire_weather_ml,
+    # and fire_weather_index all hit this. Single-file models previously got
+    # renamed to drop the suffix too; that rename bought nothing real (the
+    # registry, not the filename, is what serving code and operators consult)
+    # and is dropped here rather than kept as a special case just for them.
     major, minor, patch, _ = parse_version(beta["version"])
     release_version = f"{major}.{minor}.{patch}"
 
-    old_path = API_DIR / beta["file"]
-    new_path = old_path
-    if not beta.get("assets"):
-        new_path = old_path.with_name(f"{model_type}_{release_version}{old_path.suffix}")
-        if old_path != new_path: old_path.rename(new_path)
-
     promoted = {k: v for k, v in beta.items() if k != "trained_at"}
     promoted["version"] = release_version
-    promoted["file"] = str(new_path.relative_to(API_DIR))
     promoted["promoted_at"] = now
 
     entry["stable"] = promoted
@@ -357,13 +432,38 @@ def promote(model_type, version=None):
     return promoted["version"]
 
 
+def _verify_record_artifacts(record) -> None:
+    """Raise if `record`'s artifact(s) are missing or checksum-mismatched.
+    Handles both single-file records (`file`) and multi-asset bundles
+    (`assets`) - a record can have `file=None` and still be entirely valid
+    if it's a multi-asset bundle whose roles don't include model/checkpoint/
+    static_bundle (see register_trained_model); checking only `file` here
+    used to silently exclude those bundles from rollback candidacy
+    entirely, and would have crashed on `API_DIR / None` if it hadn't."""
+    if record.get("assets"):
+        for role, asset in record["assets"].items():
+            path = API_DIR / asset["file"]
+            if not path.is_file():
+                raise FileNotFoundError(f"Rollback asset missing: {path}")
+            if asset.get("sha256") and _sha256(path) != asset["sha256"]:
+                raise ValueError(f"Rollback asset checksum mismatch: {role}")
+    elif record.get("file"):
+        path = API_DIR / record["file"]
+        if not path.is_file():
+            raise FileNotFoundError(f"Rollback artifact missing: {path}")
+        if record.get("sha256") and _sha256(path) != record["sha256"]:
+            raise ValueError("Rollback artifact checksum mismatch")
+    else:
+        raise ValueError("rollback candidate has neither a file nor assets to restore")
+
+
 def rollback(model_type, version=None):
     """Reactivate a prior stable artifact and synchronize legacy consumers."""
     config = _load_config()
     entry = _entry(model_type, config)
     current = entry.get("stable")
     candidates = [record for record in reversed(entry.get("history", []))
-                  if record.get("channel") == "stable" and record.get("file")]
+                  if record.get("channel") == "stable" and (record.get("file") or record.get("assets"))]
     if version:
         candidates = [record for record in candidates if record.get("version") == version]
     elif current:
@@ -372,11 +472,7 @@ def rollback(model_type, version=None):
         raise ValueError(f"No rollback target found for {model_type!r}")
     target = {key: value for key, value in candidates[0].items()
               if key not in {"channel", "recorded_at"}}
-    path = API_DIR / target["file"]
-    if not path.is_file():
-        raise FileNotFoundError(f"Rollback artifact missing: {path}")
-    if target.get("sha256") and _sha256(path) != target["sha256"]:
-        raise ValueError("Rollback artifact checksum mismatch")
+    _verify_record_artifacts(target)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if current:
         entry.setdefault("history", []).append({**current, "channel": "stable", "recorded_at": now})
@@ -387,7 +483,7 @@ def rollback(model_type, version=None):
     _save_config(config)
     legacy = _LEGACY_STATIC_FILENAMES.get(model_type)
     if legacy:
-        shutil.copy2(path, MODELS_DIR / legacy)
+        shutil.copy2(API_DIR / target["file"], MODELS_DIR / legacy)
     return target["version"]
 
 

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -10,6 +12,7 @@ from pydantic import BaseModel
 from core.security import verify_token
 from models import shadow_bundles
 from models.versioning import get_model_entry, promote, rollback, validate_promotion_candidate
+from pipelines import import_model
 from services.beta_operations import build_beta_operations_status
 from services.beta_verification import run_beta_verification
 from services.model_shadow import diagnostics as fuel_moisture_shadow_diagnostics
@@ -27,7 +30,13 @@ router = APIRouter(prefix="/api/admin/models", tags=["model-admin"])
 
 # Model types tracked in the shared stable/beta/history registry
 # (models/versioning.py) - promote()/rollback() apply to these.
-REGISTRY_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_behavior_static"]
+# fire_risk_fusion is import-only in practice: validate_promotion_candidate()
+# hard-blocks promotion unless metadata["advisory_only"] is True (a
+# deliberate v1 boundary, not a satisfiable gate) - listing it here makes
+# attempting a promotion possible (it used to crash on any bundle lacking a
+# model/checkpoint/static_bundle asset role) rather than guaranteed to succeed.
+REGISTRY_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_behavior_static",
+                        "fire_risk_fusion"]
 
 # Guarded shadow bundle families - not in the registry above, each scored
 # from a single fixed directory pointed at by an SMF_<X>_BUNDLE env var (see
@@ -111,11 +120,19 @@ async def get_model_status(token: Optional[str] = None):
 async def list_model_families(token: Optional[str] = None):
     """Every model family this page can show/manage, with which kind it is
     (registry vs guarded-shadow) - the single source the frontend's family
-    dropdown is built from, so a new family only needs adding here."""
+    dropdown is built from, so a new family only needs adding here.
+
+    `importable` is deliberately its own list, not just `registry`: two of
+    the guarded-shadow families (fire_weather_ml/fire_weather_index) DO have
+    a training-side GitHub-release path and are accepted by
+    pipelines/import_model.py, so the website's Import panel should show for
+    them too - see import_model.IMPORTABLE_MODEL_TYPES, the single source
+    of truth this mirrors rather than re-deriving from `registry` alone."""
     _require_admin(token)
     return {
         "registry": REGISTRY_MODEL_TYPES,
         "guarded_shadow": GUARDED_SHADOW_TYPES,
+        "importable": import_model.IMPORTABLE_MODEL_TYPES,
     }
 
 
@@ -159,8 +176,99 @@ async def upload_shadow_bundle(family: str, token: Optional[str] = None, file: U
     return {"success": True, "installed": installed}
 
 
+# Repo(s) import is allowed to pull from - never trust an arbitrary
+# client-supplied repo string, since this ultimately shells out to `gh`.
+# Defaults to SMF_GITHUB_REPO alone if unset, preserving today's
+# single-repo CLI behavior; set SMF_ALLOWED_IMPORT_REPOS (comma-separated)
+# to widen it deliberately.
+def _allowed_import_repos() -> set:
+    raw = os.getenv("SMF_ALLOWED_IMPORT_REPOS") or os.getenv("SMF_GITHUB_REPO", "")
+    return {entry.strip() for entry in raw.split(",") if entry.strip()}
+
+
+IMPORT_TIMEOUT_SECONDS = 300
+
+
+class ImportRequest(BaseModel):
+    tag: str
+    repo: Optional[str] = None
+    bump: str = "patch"
+
+
+@router.post("/{family}/import", status_code=201)
+async def import_model_release(family: str, payload: ImportRequest, token: Optional[str] = None):
+    """Server-side equivalent of pipelines/import_model.py's CLI: pulls a
+    GitHub release, verifies its assets, and registers it as a beta
+    candidate - the one step in the model lifecycle that was previously
+    100% CLI/SSH-only despite promote/rollback/upload already having a UI."""
+    _require_admin(token)
+    if family not in import_model.IMPORTABLE_MODEL_TYPES:
+        raise HTTPException(status_code=400, detail=f"{family} is not importable into the registry")
+    if not payload.tag.strip():
+        raise HTTPException(status_code=400, detail="tag is required")
+    if payload.bump not in ("major", "minor", "patch"):
+        raise HTTPException(status_code=400, detail="bump must be major, minor, or patch")
+
+    repo = payload.repo or os.getenv("SMF_GITHUB_REPO")
+    if not repo:
+        raise HTTPException(status_code=400, detail="No source repo configured (set SMF_GITHUB_REPO)")
+    if repo not in _allowed_import_repos():
+        raise HTTPException(status_code=403, detail=f"Repo {repo!r} is not in the allowlist")
+
+    try:
+        version = await asyncio.to_thread(
+            import_model.import_release, family, payload.tag, repo,
+            bump=payload.bump, timeout=IMPORT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Import timed out contacting GitHub")
+    except import_model.ImportValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=502, detail=f"gh release download failed: {exc}")
+    except Exception as exc:
+        logger.error("Failed to import %s %s from %s: %s", family, payload.tag, repo, exc)
+        raise HTTPException(status_code=500, detail="Import failed")
+    return {"success": True, "version": version, **_registry_summary(family)}
+
+
 class ActivateRequest(BaseModel):
     version: str
+
+
+def _registry_action_for_shadow_bundle(family: str, shadow_bundle_version: str):
+    """Maps a shadow_bundles.py version directory name to what activating it
+    means in the unified registry (models/versioning.py), for families in
+    shadow_bundles._REGISTRY_MIGRATED_FAMILIES: promoting the current beta,
+    a no-op (already stable), rolling back to an older stable, or None if
+    this shadow_bundle_version was never dual-written (predates migration).
+
+    Beta and stable version strings live in different spaces (beta carries
+    a "-beta.N" suffix, promote() strips it for stable) - matching on the
+    registry's own version field would compare the wrong string depending
+    on which channel happened to match first, so this compares
+    metadata["shadow_bundle_version"] against each channel explicitly and
+    returns which action applies, rather than a bare record for the caller
+    to guess at.
+
+    Returns (action, registry_version) where action is "promote", "current",
+    or "rollback"; or None.
+    """
+    entry = get_model_entry(family)
+
+    def _matches(record):
+        return bool(record) and (record.get("metadata") or {}).get("shadow_bundle_version") == shadow_bundle_version
+
+    beta = entry.get("beta")
+    if _matches(beta):
+        return "promote", beta["version"]
+    stable = entry.get("stable")
+    if _matches(stable):
+        return "current", None
+    for record in entry.get("history", []):
+        if record.get("channel") == "stable" and _matches(record):
+            return "rollback", record["version"]
+    return None
 
 
 @router.post("/{family}/activate")
@@ -170,6 +278,39 @@ async def activate_family_version(family: str, payload: ActivateRequest, token: 
     the named beta candidate) - wraps the existing, previously CLI-only
     models.versioning.promote()."""
     _require_admin(token)
+    if family in shadow_bundles._REGISTRY_MIGRATED_FAMILIES:
+        # Migrated shadow family: activating a version is a real, gated
+        # promotion in the unified registry (per the approved design -
+        # "Upload = beta, Activate = promote"), not just an ungated pointer
+        # flip. shadow_bundles.set_active() still runs afterward, best-effort,
+        # purely to keep its own active.json/BUNDLE_ENV in sync for the
+        # existing version-history display and any operator-set env var
+        # override during this transition - the read side
+        # (risk_fusion_glm_shadow.load_bundle()) already resolves correctly
+        # from the registry alone once BUNDLE_ENV is unset.
+        action = _registry_action_for_shadow_bundle(family, payload.version)
+        if action is None:
+            raise HTTPException(status_code=404,
+                                detail=f"{family} version {payload.version!r} has no matching registry candidate "
+                                       f"(it may predate this family's registry migration)")
+        action_name, registry_version = action
+        try:
+            if action_name == "promote":
+                promote(family, registry_version)
+            elif action_name == "rollback":
+                rollback(family, registry_version)
+            # "current": already the active stable version - nothing to do.
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            logger.error("Failed to promote/rollback %s to %s: %s", family, payload.version, exc)
+            raise HTTPException(status_code=500, detail="Activation failed")
+        try:
+            shadow_bundles.set_active(family, payload.version)
+        except Exception as exc:
+            logger.warning("Registry-side activation of %s %s succeeded, but shadow_bundles.set_active "
+                           "failed (non-fatal - registry fallback still serves it): %s", family, payload.version, exc)
+        return {"success": True, **_registry_summary(family)}
     if family in GUARDED_SHADOW_TYPES:
         try:
             return {"success": True, "active": shadow_bundles.set_active(family, payload.version)}

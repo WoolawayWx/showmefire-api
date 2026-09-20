@@ -95,7 +95,13 @@ def month_dummies(month: int) -> Dict[str, float]:
 
 
 def _configured() -> bool:
-    return bool(os.getenv(BUNDLE_ENV, "").strip())
+    if os.getenv(BUNDLE_ENV, "").strip():
+        return True
+    try:
+        from models.versioning import get_model_entry
+        return bool(get_model_entry("risk_fusion_glm").get("stable"))
+    except Exception:
+        return False
 
 
 def _requested() -> bool:
@@ -167,8 +173,45 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _resolve_bundle_files(directory: Optional[Path]):
+    """Resolve role -> file path for a bundle, preferring an explicit
+    directory / BUNDLE_ENV override (an operator's own choice always wins -
+    same precedence as before the registry fallback existed), and falling
+    back to the unified registry's `stable` channel (see
+    models/versioning.py::load_active_assets) once this family has been
+    migrated off the fixed-directory convention and nothing has overridden
+    it. UNCERTAINTY_ASSET_FILENAME is optional in both paths. Returns
+    (files, version_hint)."""
+    directory = Path(directory or os.getenv(BUNDLE_ENV, "")) if (directory or os.getenv(BUNDLE_ENV, "").strip()) else None
+    if directory is not None:
+        if not directory.is_dir():
+            raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
+        files = {role: directory / filename for role, filename in BUNDLE_ASSET_FILENAMES.items()}
+        uncertainty_path = directory / UNCERTAINTY_ASSET_FILENAME
+        if uncertainty_path.exists():
+            files["uncertainty"] = uncertainty_path
+        version = None
+        version_path = directory / "registered_version.json"
+        if version_path.is_file():
+            try:
+                version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+            except Exception:
+                version = None
+        return files, version
+
+    from models.versioning import get_model_entry, load_active_assets
+    resolved = load_active_assets("risk_fusion_glm", channel="stable")
+    files = {role: asset["path"] for role, asset in resolved.items()}
+    stable = get_model_entry("risk_fusion_glm").get("stable") or {}
+    version = (stable.get("metadata") or {}).get("shadow_bundle_version") or stable.get("version")
+    return files, version
+
+
 def load_bundle(directory: Optional[Path] = None) -> Dict:
-    """Loads and validates a fire_risk_fusion GLM-only v1 bundle directory.
+    """Loads and validates a fire_risk_fusion GLM-only v1 bundle, either
+    from an explicit directory / BUNDLE_ENV (fixed filenames), or - once
+    this family is migrated and nothing overrides it - from the unified
+    registry's active stable version.
 
     Raises on any contract mismatch - a caller must never score with a
     bundle whose feature module has drifted from what
@@ -177,15 +220,11 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
     contract isn't the advisory-only GLM-only v1 shape this module knows
     how to score.
     """
-    directory = Path(directory or os.getenv(BUNDLE_ENV, ""))
-    if not str(directory) or not directory.is_dir():
-        raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
-    assets = {}
-    for role, filename in BUNDLE_ASSET_FILENAMES.items():
-        path = directory / filename
-        if not path.exists():
-            raise FileNotFoundError(f"risk_fusion GLM bundle missing asset: {filename}")
-        assets[role] = json.loads(path.read_text(encoding="utf-8"))
+    files, version = _resolve_bundle_files(directory)
+    missing = [role for role in BUNDLE_ASSET_FILENAMES if role not in files]
+    if missing:
+        raise FileNotFoundError(f"risk_fusion GLM bundle missing asset(s): {missing}")
+    assets = {role: json.loads(Path(files[role]).read_text(encoding="utf-8")) for role in BUNDLE_ASSET_FILENAMES}
     contract = assets["contract"]
     if contract.get("advisory_only") is not True:
         raise ValueError("risk_fusion GLM bundle is not advisory_only")
@@ -198,17 +237,9 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
             "risk_fusion GLM bundle feature_module_sha256 does not match core/risk_fusion_features.py "
             "- retrain or re-mirror before scoring")
     bundle_checksum = hashlib.sha256(
-        "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
+        "".join(_sha256_file(Path(files[role])) for role in BUNDLE_ASSET_FILENAMES).encode()
     ).hexdigest()
-    uncertainty_path = directory / UNCERTAINTY_ASSET_FILENAME
-    uncertainty = json.loads(uncertainty_path.read_text(encoding="utf-8")) if uncertainty_path.exists() else None
-    version_path = directory / "registered_version.json"
-    version = None
-    if version_path.is_file():
-        try:
-            version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
-        except Exception:
-            version = None
+    uncertainty = json.loads(Path(files["uncertainty"]).read_text(encoding="utf-8")) if "uncertainty" in files else None
     return {**assets, "bundle_checksum": bundle_checksum, "uncertainty": uncertainty, "version": version}
 
 

@@ -24,33 +24,66 @@ def diagnostics(): return dict(_state)
 
 def _sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
+# Every file validate_bundle() reads, by role - reused by
+# models/shadow_bundles.py to know what to dual-write into the unified
+# registry, and by the registry-fallback branch below to resolve the same
+# roles from load_active_assets() instead of a fixed directory.
+BUNDLE_ASSET_FILENAMES = {
+    "contract": "contract.json", "shadow_manifest": "shadow_bundle_manifest.json",
+    "base_model": "base_xgboost.json", "model": "guarded_gru.pt", "lead_guard": "lead_guard.json",
+}
+
+
+def _resolve_bundle_files(directory):
+    """Resolve role -> file path, preferring an explicit directory /
+    BUNDLE_ENV override, and falling back to the unified registry's
+    `stable` channel once this family is migrated and nothing overrides
+    it. Returns (files, version_hint)."""
+    directory = Path(directory or os.getenv(BUNDLE_ENV, "")) if (directory or os.getenv(BUNDLE_ENV, "").strip()) else None
+    if directory is not None:
+        if not directory.is_dir(): raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
+        files = {role: directory / filename for role, filename in BUNDLE_ASSET_FILENAMES.items()}
+        version = None
+        version_path = directory / "registered_version.json"
+        if version_path.is_file():
+            try:
+                version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+            except Exception:
+                version = None
+        return files, version
+
+    from models.versioning import get_model_entry, load_active_assets
+    resolved = load_active_assets("v4", channel="stable")
+    files = {role: asset["path"] for role, asset in resolved.items()}
+    stable = get_model_entry("v4").get("stable") or {}
+    version = (stable.get("metadata") or {}).get("shadow_bundle_version") or stable.get("version")
+    return files, version
+
 
 def validate_bundle(directory=None):
-    directory = Path(directory or os.getenv(BUNDLE_ENV, ""))
-    if not str(directory) or not directory.is_dir(): raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
-    contract = json.loads((directory / "contract.json").read_text())
+    files, version = _resolve_bundle_files(directory)
+    missing = [role for role in BUNDLE_ASSET_FILENAMES if role not in files]
+    if missing: raise FileNotFoundError(f"V4 bundle missing asset(s): {missing}")
+    contract = json.loads(Path(files["contract"]).read_text())
     if contract.get("rule_spec_sha256") != RULE_SPEC_SHA256: raise ValueError("V4 rule contract mismatch")
     if (contract.get("precipitation_contract_version") != PRECIPITATION_CONTRACT_VERSION or
             contract.get("precipitation_contract_sha256") != PRECIPITATION_CONTRACT_SHA256):
         raise ValueError("V4 precipitation contract mismatch")
-    shadow = json.loads((directory / "shadow_bundle_manifest.json").read_text())
+    shadow = json.loads(Path(files["shadow_manifest"]).read_text())
     if shadow.get("status") != "experimental_shadow_only" or shadow.get("registry_channel") is not None:
         raise ValueError("V4 bundle is not shadow-only")
     if shadow.get("rule_spec_sha256") != RULE_SPEC_SHA256: raise ValueError("V4 shadow rule mismatch")
     if shadow.get("precipitation_contract_sha256") != PRECIPITATION_CONTRACT_SHA256:
         raise ValueError("V4 shadow precipitation mismatch")
     for filename, digest in shadow.get("assets", {}).items():
-        if _sha(directory / filename) != digest: raise ValueError(f"V4 shadow checksum mismatch: {filename}")
-    assets = {"base_xgboost.json": "base_model_sha256", "guarded_gru.pt": "residual_model_sha256",
-              "lead_guard.json": "lead_guard_sha256"}
-    for filename, field in assets.items():
-        if _sha(directory / filename) != contract.get(field): raise ValueError(f"V4 checksum mismatch: {filename}")
-    version_path = directory / "registered_version.json"
-    if version_path.is_file():
-        try:
-            contract["registered_version"] = json.loads(version_path.read_text(encoding="utf-8")).get("version")
-        except Exception:
-            contract["registered_version"] = None
+        matching = next((role for role, name in BUNDLE_ASSET_FILENAMES.items() if name == filename), None)
+        path = Path(files[matching]) if matching else Path(files["contract"]).parent / filename
+        if _sha(path) != digest: raise ValueError(f"V4 shadow checksum mismatch: {filename}")
+    assets = {"base_model": "base_model_sha256", "model": "residual_model_sha256",
+              "lead_guard": "lead_guard_sha256"}
+    for role, field in assets.items():
+        if _sha(Path(files[role])) != contract.get(field): raise ValueError(f"V4 checksum mismatch: {role}")
+    contract["registered_version"] = version
     return contract
 
 

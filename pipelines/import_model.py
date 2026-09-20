@@ -36,6 +36,18 @@ REQUIRED_RISK_FUSION_ASSET_ROLES = {
 }
 
 
+IMPORTABLE_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion",
+                          "fire_behavior_static", "fire_weather_index", "fire_weather_ml"]
+
+
+class ImportValidationError(Exception):
+    """A release's assets failed verification (missing role, checksum
+    mismatch, failed smoke test, etc.) - distinct from a transport failure
+    (gh CLI error, timeout) so callers like the admin API can map it to a
+    422 rather than a 500/504. Raised in place of the bare SystemExit these
+    verifier functions used before this was importable from a router."""
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -52,12 +64,12 @@ def _verify_generic_multiasset(files, declarations, required_roles):
     this one.
     """
     if missing := required_roles - set(declarations):
-        raise SystemExit(f"Release assets missing required roles: {sorted(missing)}")
+        raise ImportValidationError(f"Release assets missing required roles: {sorted(missing)}")
     resolved = {}
     for role, declaration in declarations.items():
         path = files.get(declaration["filename"])
         if not path or _sha256(path) != declaration["sha256"]:
-            raise SystemExit(f"Missing or invalid release asset: {role}")
+            raise ImportValidationError(f"Missing or invalid release asset: {role}")
         resolved[role] = path
     return resolved
 
@@ -68,39 +80,39 @@ def _verify_fire_behavior_static_assets(files, declarations):
 
     required = {"static_bundle", "static_manifest"}
     if missing := required - set(declarations):
-        raise SystemExit(f"Fire behavior static release assets missing: {sorted(missing)}")
+        raise ImportValidationError(f"Fire behavior static release assets missing: {sorted(missing)}")
     resolved = {}
     for role, declaration in declarations.items():
         path = files.get(declaration["filename"])
         if not path or _sha256(path) != declaration["sha256"]:
-            raise SystemExit(f"Missing or invalid release asset: {role}")
+            raise ImportValidationError(f"Missing or invalid release asset: {role}")
         resolved[role] = path
     manifest = json.loads(resolved["static_manifest"].read_text())
     if manifest.get("synthetic"):
-        raise SystemExit("Synthetic fire behavior bundles cannot be imported into production")
+        raise ImportValidationError("Synthetic fire behavior bundles cannot be imported into production")
     if manifest.get("sha256") and manifest["sha256"] != _sha256(resolved["static_bundle"]):
-        raise SystemExit("Fire behavior static bundle/manifest checksum mismatch")
+        raise ImportValidationError("Fire behavior static bundle/manifest checksum mismatch")
     validation = manifest.get("validation") or {}
     required_gates = {"crs_validated", "units_validated", "nodata_validated"}
     if not required_gates.issubset(validation) or not all(validation[key] is True for key in required_gates):
-        raise SystemExit("Fire behavior static manifest is missing required validation gates")
+        raise ImportValidationError("Fire behavior static manifest is missing required validation gates")
     with xr.open_dataset(resolved["static_bundle"]) as ds:
         if ds.sizes.get("x") != 256 or ds.sizes.get("y") != 256:
-            raise SystemExit("Fire behavior static bundle grid is not 256x256")
+            raise ImportValidationError("Fire behavior static bundle grid is not 256x256")
         required_channels = {
             "elevation_m", "slope_degrees", "aspect_sin", "aspect_cos",
             "canopy_cover_pct", "canopy_height_m", "latitude", "longitude",
             "static_valid_mask", "fuel_model_fbfm40",
         }
         if missing := required_channels - set(ds.data_vars):
-            raise SystemExit(f"Fire behavior static channels missing: {sorted(missing)}")
+            raise ImportValidationError(f"Fire behavior static channels missing: {sorted(missing)}")
         if ds.attrs.get("grid_fingerprint") != manifest.get("grid_fingerprint"):
-            raise SystemExit("Fire behavior static grid fingerprint mismatch")
+            raise ImportValidationError("Fire behavior static grid fingerprint mismatch")
         if declarations["static_bundle"].get("grid_fingerprint") != manifest.get("grid_fingerprint"):
-            raise SystemExit("Fire behavior release declaration grid fingerprint mismatch")
+            raise ImportValidationError("Fire behavior release declaration grid fingerprint mismatch")
         valid = np.asarray(ds["static_valid_mask"].values) > 0.5
         if not valid.any() or not np.isfinite(ds["latitude"].values[valid]).all():
-            raise SystemExit("Fire behavior static bundle has no valid georeferenced cells")
+            raise ImportValidationError("Fire behavior static bundle has no valid georeferenced cells")
     return resolved
 
 
@@ -109,38 +121,46 @@ def _verify_spatial_assets(files, declarations):
     import onnxruntime as ort
     import xarray as xr
     required = {"model", "checkpoint", "static_bundle", "static_manifest", "evaluation", "smoke"}
-    if missing := required - set(declarations): raise SystemExit(f"Spatial release assets missing: {sorted(missing)}")
+    if missing := required - set(declarations): raise ImportValidationError(f"Spatial release assets missing: {sorted(missing)}")
     resolved = {}
     for role, declaration in declarations.items():
         path = files.get(declaration["filename"])
-        if not path or _sha256(path) != declaration["sha256"]: raise SystemExit(f"Missing or invalid release asset: {role}")
+        if not path or _sha256(path) != declaration["sha256"]: raise ImportValidationError(f"Missing or invalid release asset: {role}")
         resolved[role] = path
     static_manifest = json.loads(resolved["static_manifest"].read_text())
-    if static_manifest["sha256"] != _sha256(resolved["static_bundle"]): raise SystemExit("Static bundle/manifest checksum mismatch")
+    if static_manifest["sha256"] != _sha256(resolved["static_bundle"]): raise ImportValidationError("Static bundle/manifest checksum mismatch")
     with xr.open_dataset(resolved["static_bundle"]) as ds:
-        if ds.sizes.get("x") != 256 or ds.sizes.get("y") != 256: raise SystemExit("Static bundle grid is not 256x256")
-        if ds.attrs.get("grid_fingerprint") != declarations["static_bundle"].get("grid_fingerprint"): raise SystemExit("Static grid fingerprint mismatch")
+        if ds.sizes.get("x") != 256 or ds.sizes.get("y") != 256: raise ImportValidationError("Static bundle grid is not 256x256")
+        if ds.attrs.get("grid_fingerprint") != declarations["static_bundle"].get("grid_fingerprint"): raise ImportValidationError("Static grid fingerprint mismatch")
     session = ort.InferenceSession(str(resolved["model"]), providers=["CPUExecutionProvider"])
     with np.load(resolved["smoke"]) as smoke:
         feed = {item.name: smoke[item.name] for item in session.get_inputs()}; expected = smoke["expected"]
     actual = session.run(None, feed)[0]
-    if float(np.max(np.abs(actual - expected))) > 1e-4: raise SystemExit("ONNX release smoke test failed")
+    if float(np.max(np.abs(actual - expected))) > 1e-4: raise ImportValidationError("ONNX release smoke test failed")
     return resolved
 
 
-def import_release(model_type, tag, repo, bump="patch"):
+def import_release(model_type, tag, repo, bump="patch", timeout=None):
+    """Returns the assigned beta version string.
+
+    `timeout` (seconds): passed through to the `gh release download`
+    subprocess. None means no timeout (the CLI's own default) - the admin
+    API endpoint always passes an explicit value so a stalled/huge asset
+    can't hang a request worker indefinitely; raises
+    subprocess.TimeoutExpired on expiry, same as subprocess.run itself.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         cmd = ["gh", "release", "download", tag, "--repo", repo, "--dir", str(tmp_path), "--clobber"]
         print(f"Running: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=timeout)
 
         downloaded = list(tmp_path.iterdir())
         meta_files = [p for p in downloaded if p.name == "metadata.json"]
         model_files = [p for p in downloaded if p.name != "metadata.json"]
 
         if not model_files:
-            raise SystemExit(f"No model artifact found in release assets for {tag}")
+            raise ImportValidationError(f"No model artifact found in release assets for {tag}")
         performance = {}
         meta = {}
         if meta_files:
@@ -173,18 +193,18 @@ def import_release(model_type, tag, repo, bump="patch"):
             version = register_trained_model(model_type=model_type, performance=performance, bump=bump,
                                              channel="beta", assets=assets, metadata=candidate_metadata)
         else:
-            if len(model_files) > 1: raise SystemExit(f"Expected exactly one model file asset, found {len(model_files)}")
+            if len(model_files) > 1: raise ImportValidationError(f"Expected exactly one model file asset, found {len(model_files)}")
             version = register_trained_model(model_type=model_type, source_path=model_files[0], performance=performance,
                                              bump=bump, channel="beta", metadata=candidate_metadata)
 
     print(f"\nImported release {tag!r} -> registered as {model_type} beta version {version} on this server.")
     print(f"Review it, then promote with: python pipelines/promote_model.py --model {model_type} --version {version}")
+    return version
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Import a model from a GitHub release into this server's registry as a beta candidate")
-    parser.add_argument("--model", required=True,
-                         choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion", "fire_behavior_static"])
+    parser.add_argument("--model", required=True, choices=IMPORTABLE_MODEL_TYPES)
     parser.add_argument("--tag", required=True, help="Release tag to import, e.g. fuel_moisture-v1.5.0-beta.1")
     parser.add_argument("--repo", default=None, help="owner/repo (defaults to SMF_GITHUB_REPO env var)")
     parser.add_argument("--bump", choices=["major", "minor", "patch"], default="patch",
@@ -195,4 +215,7 @@ if __name__ == "__main__":
     if not repo:
         raise SystemExit("No source repo - pass --repo or set SMF_GITHUB_REPO")
 
-    import_release(args.model, args.tag, repo, bump=args.bump)
+    try:
+        import_release(args.model, args.tag, repo, bump=args.bump)
+    except ImportValidationError as error:
+        raise SystemExit(str(error)) from error

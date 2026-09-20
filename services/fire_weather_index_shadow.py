@@ -79,7 +79,13 @@ BUNDLE_ASSET_FILENAMES = {
 
 
 def _configured() -> bool:
-    return bool(os.getenv(BUNDLE_ENV, "").strip())
+    if os.getenv(BUNDLE_ENV, "").strip():
+        return True
+    try:
+        from models.versioning import get_model_entry
+        return bool(get_model_entry("fire_weather_index").get("stable"))
+    except Exception:
+        return False
 
 
 def _requested() -> bool:
@@ -149,17 +155,43 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _resolve_bundle_files(directory: Optional[Path]):
+    """Resolve role -> file path for a bundle, preferring an explicit
+    directory / BUNDLE_ENV override, and falling back to the unified
+    registry's `stable` channel once this family has been migrated and
+    nothing has overridden it. Returns (files, version_hint)."""
+    directory = Path(directory or os.getenv(BUNDLE_ENV, "")) if (directory or os.getenv(BUNDLE_ENV, "").strip()) else None
+    if directory is not None:
+        if not directory.is_dir():
+            raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
+        files = {role: directory / filename for role, filename in BUNDLE_ASSET_FILENAMES.items()}
+        version = None
+        version_path = directory / "registered_version.json"
+        if version_path.is_file():
+            try:
+                version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
+            except Exception:
+                version = None
+        return files, version
+
+    from models.versioning import get_model_entry, load_active_assets
+    resolved = load_active_assets("fire_weather_index", channel="stable")
+    files = {role: asset["path"] for role, asset in resolved.items()}
+    stable = get_model_entry("fire_weather_index").get("stable") or {}
+    version = (stable.get("metadata") or {}).get("shadow_bundle_version") or stable.get("version")
+    return files, version
+
+
 def load_bundle(directory: Optional[Path] = None) -> Dict:
-    """Loads and validates a fire_weather_index candidate bundle directory."""
-    directory = Path(directory or os.getenv(BUNDLE_ENV, ""))
-    if not str(directory) or not directory.is_dir():
-        raise FileNotFoundError(f"{BUNDLE_ENV} is not a bundle directory")
-    assets = {}
-    for role, filename in BUNDLE_ASSET_FILENAMES.items():
-        path = directory / filename
-        if not path.exists():
-            raise FileNotFoundError(f"fire_weather_index bundle missing asset: {filename}")
-        assets[role] = json.loads(path.read_text(encoding="utf-8"))
+    """Loads and validates a fire_weather_index candidate bundle, either
+    from an explicit directory / BUNDLE_ENV (fixed filenames), or - once
+    this family is migrated and nothing overrides it - from the unified
+    registry's active stable version."""
+    files, version = _resolve_bundle_files(directory)
+    missing = [role for role in BUNDLE_ASSET_FILENAMES if role not in files]
+    if missing:
+        raise FileNotFoundError(f"fire_weather_index bundle missing asset(s): {missing}")
+    assets = {role: json.loads(Path(files[role]).read_text(encoding="utf-8")) for role in BUNDLE_ASSET_FILENAMES}
 
     weights_asset = assets["factor_weights"]
     if weights_asset.get("schema") != "fire-weather-index-factor-weights-v1":
@@ -169,15 +201,8 @@ def load_bundle(directory: Optional[Path] = None) -> Dict:
         raise ValueError(f"unexpected category_thresholds schema: {thresholds_asset.get('schema')!r}")
 
     bundle_checksum = hashlib.sha256(
-        "".join(_sha256_file(directory / filename) for filename in BUNDLE_ASSET_FILENAMES.values()).encode()
+        "".join(_sha256_file(Path(files[role])) for role in BUNDLE_ASSET_FILENAMES).encode()
     ).hexdigest()
-    version_path = directory / "registered_version.json"
-    version = None
-    if version_path.is_file():
-        try:
-            version = json.loads(version_path.read_text(encoding="utf-8")).get("version")
-        except Exception:
-            version = None
 
     return {**assets, "bundle_checksum": bundle_checksum, "version": version}
 

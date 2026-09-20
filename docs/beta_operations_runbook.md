@@ -1,5 +1,7 @@
 # Beta operations runbook
 
+This covers day-2 operational monitoring of the beta lane specifically. For the general publish/import/promote mechanics that apply to every model family (including `fuel_moisture`), see `model-training/docs/model_lifecycle.md`.
+
 The beta lane is designed to collect evidence without changing the operational forecast path. It has four separate boundaries:
 
 1. A beta forecast runs in a subprocess with its own output, cache, archive, and status paths under `data/testbed/forecast`.
@@ -50,14 +52,11 @@ polls for RTMA every 15 minutes and requires a promoted
 `fire_behavior_static` asset contract plus 120–168 cached RTMA hours.
 
 Build and publish the static bundle on the desktop by following
-`ShowMeFire-Models/docs/observed_spread_rate_runbook.md`. On this server:
+`ShowMeFire-Models/docs/observed_spread_rate_runbook.md`. On this server, import
+and promote it same as any other Archetype-B model (see `model_lifecycle.md`'s
+§4–§5), then warm the RTMA cache — the one step specific to this product:
 
 ```bash
-python pipelines/import_model.py \
-  --model fire_behavior_static \
-  --tag fire_behavior_static-vVERSION-beta.N \
-  --repo OWNER/ShowMeFire-Models
-python pipelines/promote_model.py --model fire_behavior_static
 python -c "from services.rtma_capture import warmup_rtma_cache; print(warmup_rtma_cache(days=7))"
 ```
 

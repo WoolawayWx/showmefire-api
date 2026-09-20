@@ -106,10 +106,17 @@ class RegistrySafetyTests(unittest.TestCase):
                 second_beta = versioning.register_trained_model("fuel_moisture", source2,
                     channel="beta", metadata=self._metadata(True))
                 self.assertEqual(versioning.promote("fuel_moisture", second_beta), "0.0.2")
+                # promote() no longer renames the on-disk file to drop the
+                # -beta.N suffix (that rename used to crash for multi-asset
+                # bundles with no model/checkpoint/static_bundle role) - the
+                # registry's version string is still cleaned up ("0.0.2"),
+                # but the versioned filename on disk keeps its original
+                # beta-suffixed name ("..._0.0.2-beta.1...").
                 active_path = root / versioning.get_model_entry("fuel_moisture")["stable"]["file"]
+                self.assertEqual(active_path, versions / "fuel_moisture_0.0.2-beta.1.json")
                 active_path.unlink()
                 self.assertEqual(versioning.load_active_model_path("fuel_moisture", auto_rollback=True),
-                                 versions / "fuel_moisture_0.0.1.json")
+                                 versions / "fuel_moisture_0.0.1-beta.1.json")
                 self.assertEqual((models / "fuel_moisture_model.json").read_text(), "one")
 
 
