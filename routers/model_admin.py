@@ -136,17 +136,55 @@ async def list_model_families(token: Optional[str] = None):
     }
 
 
+def _guarded_shadow_versions(family: str) -> dict:
+    """shadow_bundles.py's own version list/active pointer, extended with
+    any registry-only entries for migrated families - i.e. candidates that
+    arrived via GitHub-release import (pipelines/import_model.py), which
+    never calls shadow_bundles.install_bundle() at all, so they'd otherwise
+    be invisible here even though `import_model_release()` above reported
+    success. Registry entries dual-written by a zip upload already have a
+    matching shadow_bundles entry and are skipped to avoid double-listing."""
+    versions = shadow_bundles.list_versions(family)
+    active = shadow_bundles.get_active(family)
+
+    if family in shadow_bundles._REGISTRY_MIGRATED_FAMILIES:
+        known = {v.get("version") for v in versions}
+        entry = get_model_entry(family)
+        records = [entry.get("beta"), entry.get("stable"), *entry.get("history", [])]
+        seen = set()
+        for record in records:
+            if not record:
+                continue
+            display_version = (record.get("metadata") or {}).get("shadow_bundle_version") or record["version"]
+            if display_version in known or display_version in seen:
+                continue
+            seen.add(display_version)
+            source_release_tag = (record.get("performance") or {}).get("source_release_tag")
+            versions.append({
+                "version": display_version,
+                "installed_at": record.get("trained_at") or record.get("promoted_at") or record.get("recorded_at"),
+                "uploaded_by": f"github-import ({source_release_tag})" if source_release_tag else "github-import",
+                "registry_version": record["version"],
+                "origin": "registry-import",
+            })
+        stable = entry.get("stable")
+        if stable:
+            active = {
+                "version": (stable.get("metadata") or {}).get("shadow_bundle_version") or stable["version"],
+                "path": active.get("path") if active else None,
+                "activated_at": stable.get("promoted_at"),
+            }
+
+    return {"model_type": family, "versions": versions, "active": active}
+
+
 @router.get("/{family}/versions")
 async def list_family_versions(family: str, token: Optional[str] = None):
     _require_admin(token)
     if family in REGISTRY_MODEL_TYPES:
         return _registry_summary(family)
     if family in GUARDED_SHADOW_TYPES:
-        return {
-            "model_type": family,
-            "versions": shadow_bundles.list_versions(family),
-            "active": shadow_bundles.get_active(family),
-        }
+        return _guarded_shadow_versions(family)
     raise HTTPException(status_code=404, detail=f"Unknown model family: {family}")
 
 
@@ -236,20 +274,33 @@ class ActivateRequest(BaseModel):
     version: str
 
 
-def _registry_action_for_shadow_bundle(family: str, shadow_bundle_version: str):
-    """Maps a shadow_bundles.py version directory name to what activating it
-    means in the unified registry (models/versioning.py), for families in
+def _registry_action_for_shadow_bundle(family: str, version: str):
+    """Maps a version identifier to what activating it means in the unified
+    registry (models/versioning.py), for families in
     shadow_bundles._REGISTRY_MIGRATED_FAMILIES: promoting the current beta,
     a no-op (already stable), rolling back to an older stable, or None if
-    this shadow_bundle_version was never dual-written (predates migration).
+    this version was never registered at all.
+
+    `version` can be in EITHER of two identifier spaces, since a migrated
+    family's candidates can arrive two ways:
+      - zip upload (shadow_bundles.install_bundle's dual-write) - `version`
+        is the shadow_bundles version directory name, stored back onto the
+        registry record as metadata["shadow_bundle_version"].
+      - GitHub-release import (pipelines/import_model.py) - never touches
+        shadow_bundles at all, so there is no shadow_bundle_version; the
+        only identifier that exists is the registry's own assigned version
+        string (e.g. "0.0.1-beta.1").
+    Matching only the first (as an earlier version of this function did)
+    made an imported candidate's Activate button 404 - it had no
+    shadow_bundle_version to match against. Checking both, in order, covers
+    each origin.
 
     Beta and stable version strings live in different spaces (beta carries
     a "-beta.N" suffix, promote() strips it for stable) - matching on the
     registry's own version field would compare the wrong string depending
-    on which channel happened to match first, so this compares
-    metadata["shadow_bundle_version"] against each channel explicitly and
-    returns which action applies, rather than a bare record for the caller
-    to guess at.
+    on which channel happened to match first, so this checks each channel
+    explicitly and returns which action applies, rather than a bare record
+    for the caller to guess at.
 
     Returns (action, registry_version) where action is "promote", "current",
     or "rollback"; or None.
@@ -257,7 +308,11 @@ def _registry_action_for_shadow_bundle(family: str, shadow_bundle_version: str):
     entry = get_model_entry(family)
 
     def _matches(record):
-        return bool(record) and (record.get("metadata") or {}).get("shadow_bundle_version") == shadow_bundle_version
+        if not record:
+            return False
+        if (record.get("metadata") or {}).get("shadow_bundle_version") == version:
+            return True
+        return record.get("version") == version
 
     beta = entry.get("beta")
     if _matches(beta):
