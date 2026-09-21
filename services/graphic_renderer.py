@@ -15,14 +15,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import requests
 from PIL import Image
-from matplotlib.patches import FancyBboxPatch
 from matplotlib.patches import Patch
+from matplotlib.patches import Rectangle
 from dotenv import load_dotenv
 
 load_dotenv()
 
-WIDTH, HEIGHT, DPI = 1920, 1080, 120
-RENDERER_VERSION = "graphics-gis-v9"
+WIDTH, HEIGHT, DPI = 2048, 1152, 120
+RENDERER_VERSION = "graphics-gis-v12"
+# Fraction of image height taken by the accent bar + header band, both drawn
+# full-width and flush against the top edge (no margin above the accent bar).
+HEADER_ACCENT_HEIGHT = 0.012
+HEADER_BAND_HEIGHT = 0.088
+HEADER_TOTAL_HEIGHT = HEADER_ACCENT_HEIGHT + HEADER_BAND_HEIGHT
+# A full-width solid bar across the bottom carrying department/SMF branding
+# and source attribution, tall enough that the Show Me Fire logo stays legible.
+FOOTER_HEIGHT = 0.115
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MISSOURI_STATE_BOUNDARY = PROJECT_ROOT / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
 MISSOURI_COUNTY_BOUNDARIES = PROJECT_ROOT / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp"
@@ -139,86 +147,98 @@ def _load_show_me_fire_logo(width=420):
         return None
 
 
-def _add_branding(fig, department_name: str, logo_path: str | None, accent_color: str):
-    """Draw a responsive lower-left identity card with department and SMF branding."""
+def _logo_width_frac(image, height_frac: float) -> float:
+    """Figure-fraction width for an image drawn at height_frac tall, aspect-preserved.
+
+    x-fraction and y-fraction scale against different pixel counts (WIDTH vs
+    HEIGHT), so the aspect ratio has to be corrected for that before use.
+    """
+    return height_frac * (HEIGHT / WIDTH) * (image.width / max(image.height, 1))
+
+
+def _add_header(fig, config: dict):
+    """Full-width header flush against the top of the image: an accent bar
+    with no margin above it, then a full-width band in a configurable
+    palette. The map sits below this block rather than under it."""
+    background = config.get("header_background_color", "#0f172a")
+    foreground = config.get("header_text_color", "#f8fafc")
+    accent = config.get("accent_color", "#f97316")
+    band_bottom = 1.0 - HEADER_TOTAL_HEIGHT
+    band_top = 1.0 - HEADER_ACCENT_HEIGHT
+    band_center = band_bottom + HEADER_BAND_HEIGHT * 0.5
+    fig.patches.append(Rectangle(
+        (0.0, band_bottom), 1.0, HEADER_BAND_HEIGHT,
+        transform=fig.transFigure, facecolor=background, edgecolor="none",
+        linewidth=0, zorder=50,
+    ))
+    fig.patches.append(Rectangle(
+        (0.0, band_top), 1.0, HEADER_ACCENT_HEIGHT,
+        transform=fig.transFigure, facecolor=accent, edgecolor="none",
+        linewidth=0, zorder=55,
+    ))
     department_logo = None
+    logo_path = config.get("department_logo_path")
     if logo_path and Path(logo_path).is_file():
         try:
             department_logo = Image.open(logo_path).convert("RGBA")
         except (OSError, ValueError):
             department_logo = None
-    smf_logo = _load_show_me_fire_logo()
-    name = department_name or "Department weather graphics"
-    # Let the card grow for a wide department logo/name while keeping enough
-    # room for the source card on the opposite side.
-    logo_width = 0.0
     if department_logo:
-        logo_width = min(0.105, 0.066 * (HEIGHT / WIDTH) * (department_logo.width / max(department_logo.height, 1)))
-    name_width = min(0.21, max(0.105, len(name) * 0.0062))
-    card_width = min(0.49, 0.043 + logo_width + name_width + 0.12)
-    card = FancyBboxPatch(
-        (0.016, 0.016), card_width, 0.105,
-        boxstyle="round,pad=0.004,rounding_size=0.012",
-        transform=fig.transFigure, facecolor="#ffffff", edgecolor="#d7dee8",
-        linewidth=0.9, alpha=0.97, zorder=70,
-    )
-    fig.patches.append(card)
-    fig.patches.append(FancyBboxPatch(
-        (0.016, 0.016), 0.005, 0.105,
-        boxstyle="round,pad=0,rounding_size=0.004",
-        transform=fig.transFigure, facecolor=accent_color, edgecolor=accent_color,
-        linewidth=0, zorder=75,
-    ))
-    cursor = 0.029
-    if department_logo:
-        logo_ax = fig.add_axes((cursor, 0.031, logo_width, 0.075), zorder=80)
+        logo_height = HEADER_BAND_HEIGHT * 0.7
+        logo_width = min(0.16, _logo_width_frac(department_logo, logo_height))
+        logo_x = 1.0 - 0.022 - logo_width
+        logo_ax = fig.add_axes((logo_x, band_center - logo_height / 2, logo_width, logo_height), zorder=65)
         logo_ax.imshow(department_logo)
         logo_ax.axis("off")
-        cursor += logo_width + 0.012
-    fig.text(cursor, 0.082, name, ha="left", va="center", fontsize=12.5,
-             fontweight="bold", color="#172033", zorder=80)
-    divider_x = card_width - 0.105
-    fig.add_artist(plt.Line2D(
-        [divider_x, divider_x], [0.032, 0.105], transform=fig.transFigure,
-        color="#d7dee8", linewidth=0.8, zorder=80,
+    fig.text(0.022, band_center, config.get("header_text") or "Show Me Fire Weather Graphics",
+             ha="left", va="center", fontsize=27, fontweight="bold",
+             color=foreground, zorder=60)
+
+
+def _add_footer(fig, config: dict, source_text: str):
+    """Draw one full-width solid bar across the bottom carrying the department
+    name, Show Me Fire branding, and source attribution, tall enough that the
+    Show Me Fire logo reads clearly."""
+    department_name = config.get("department_name", "")
+    accent_color = config.get("accent_color", "#f97316")
+    smf_logo = _load_show_me_fire_logo()
+    name = department_name or "Department weather graphics"
+    bar_center = FOOTER_HEIGHT * 0.5
+    fig.patches.append(Rectangle(
+        (0.0, 0.0), 1.0, FOOTER_HEIGHT,
+        transform=fig.transFigure, facecolor="#ffffff", edgecolor="none",
+        linewidth=0, zorder=50,
     ))
-    fig.text(divider_x + 0.051, 0.094, "POWERED BY", ha="center", va="center",
-             fontsize=6.5, fontweight="bold", color="#64748b", zorder=80)
+    fig.add_artist(plt.Line2D(
+        [0.0, 1.0], [FOOTER_HEIGHT, FOOTER_HEIGHT], transform=fig.transFigure,
+        color="#d7dee8", linewidth=1.0, zorder=55,
+    ))
+    fig.patches.append(Rectangle(
+        (0.0, 0.0), 0.005, FOOTER_HEIGHT,
+        transform=fig.transFigure, facecolor=accent_color, edgecolor="none",
+        linewidth=0, zorder=60,
+    ))
+    fig.text(0.022, bar_center, name, ha="left", va="center", fontsize=15,
+             fontweight="bold", color="#172033", zorder=60)
+    name_width = min(0.24, max(0.12, len(name) * 0.0068))
+    divider_x = 0.036 + name_width
+    fig.add_artist(plt.Line2D(
+        [divider_x, divider_x], [FOOTER_HEIGHT * 0.18, FOOTER_HEIGHT * 0.82],
+        transform=fig.transFigure, color="#d7dee8", linewidth=0.9, zorder=60,
+    ))
+    label_x = divider_x + 0.018
+    fig.text(label_x, bar_center + FOOTER_HEIGHT * 0.2, "POWERED BY", ha="left", va="center",
+             fontsize=8, fontweight="bold", color="#64748b", zorder=60)
     if smf_logo:
-        smf_ax = fig.add_axes((divider_x + 0.012, 0.035, 0.078, 0.047), zorder=80)
+        logo_height = FOOTER_HEIGHT * 0.42
+        logo_width = _logo_width_frac(smf_logo, logo_height)
+        smf_ax = fig.add_axes(
+            (label_x, bar_center - FOOTER_HEIGHT * 0.36, logo_width, logo_height), zorder=60,
+        )
         smf_ax.imshow(smf_logo)
         smf_ax.axis("off")
-
-
-def _add_header(fig, config: dict, product_label: str):
-    """Modern, compact map header with a configurable palette."""
-    background = config.get("header_background_color", "#0f172a")
-    foreground = config.get("header_text_color", "#f8fafc")
-    accent = config.get("accent_color", "#f97316")
-    header = FancyBboxPatch(
-        (0.018, 0.875), 0.735, 0.105,
-        boxstyle="round,pad=0.006,rounding_size=0.014",
-        transform=fig.transFigure, facecolor=background, edgecolor=accent,
-        linewidth=1.0, alpha=0.96, zorder=50,
-    )
-    fig.patches.append(header)
-    fig.patches.append(FancyBboxPatch(
-        (0.026, 0.889), 0.0055, 0.077,
-        boxstyle="round,pad=0,rounding_size=0.003",
-        transform=fig.transFigure, facecolor=accent, edgecolor=accent,
-        linewidth=0, zorder=55,
-    ))
-    subtitle = (config.get("subtitle") or product_label).upper()
-    fig.text(0.043, 0.951, subtitle, ha="left", va="top", fontsize=8.5,
-             fontweight="bold", color=accent, zorder=60)
-    fig.text(0.043, 0.925, config.get("header_text") or "Show Me Fire Weather Graphics",
-             ha="left", va="center", fontsize=24, fontweight="bold",
-             color=foreground, zorder=60)
-    # A quiet product chip adds hierarchy without competing with the map.
-    fig.text(0.735, 0.927, product_label.upper(), ha="right", va="center",
-             fontsize=8, fontweight="bold", color=foreground, zorder=60,
-             bbox={"boxstyle": "round,pad=0.48", "facecolor": accent,
-                   "edgecolor": accent, "linewidth": 0.6, "alpha": 0.92})
+    fig.text(0.978, bar_center, source_text, ha="right", va="center", fontsize=11,
+             fontweight="bold", color="#374151", zorder=60)
 
 
 def _add_legend(fig, frames, background="#ffffff", foreground="#172033"):
@@ -226,7 +246,8 @@ def _add_legend(fig, frames, background="#ffffff", foreground="#172033"):
     if not entries:
         entries = [("No active areas", "#d1d5db")]
     handles = [Patch(facecolor=color, edgecolor="#f9fafb", linewidth=0.7, label=label) for label, color in entries]
-    legend = fig.legend(handles=handles, title="Legend", loc="upper right", bbox_to_anchor=(0.985, 0.975), frameon=True, ncol=1, fontsize=10, title_fontsize=11, borderpad=0.8, labelspacing=0.45)
+    legend_top = 1.0 - HEADER_TOTAL_HEIGHT - 0.02
+    legend = fig.legend(handles=handles, title="Legend", loc="upper right", bbox_to_anchor=(0.985, legend_top), frameon=True, ncol=1, fontsize=10, title_fontsize=11, borderpad=0.8, labelspacing=0.45)
     legend.set_zorder(90)
     legend.get_frame().set_facecolor(background)
     legend.get_frame().set_edgecolor("#cbd5e1")
@@ -434,8 +455,17 @@ def render_graphic(config: dict) -> dict:
     """Render one configured product; safe to call in a ProcessPoolExecutor."""
     product_ids, payloads, urls, frames = _render_sources(config)
     source_hash = _render_fingerprint(config, payloads)
-    map_width = 820 if config["product_id"] == "spc_four_panel" else WIDTH
-    map_height = 350 if config["product_id"] == "spc_four_panel" else HEIGHT
+    # The map sits between the full-width header and footer bars rather than
+    # under them, so panel positions are scaled into the space that remains.
+    map_area_bottom = FOOTER_HEIGHT
+    map_area_height = 1.0 - HEADER_TOTAL_HEIGHT - FOOTER_HEIGHT
+    base_positions = (
+        [(0.025, 0.51, 0.46, 0.35), (0.515, 0.51, 0.46, 0.35), (0.025, 0.12, 0.46, 0.35), (0.515, 0.12, 0.46, 0.35)]
+        if config["product_id"] == "spc_four_panel" else [(0.0, 0.0, 1.0, 1.0)]
+    )
+    positions = [(x, map_area_bottom + y * map_area_height, w, h * map_area_height) for x, y, w, h in base_positions]
+    map_width = max(1, round(positions[0][2] * WIDTH))
+    map_height = max(1, round(positions[0][3] * HEIGHT))
     extent = _configured_extent(config, map_width, map_height)
     if len(extent) != 4 or extent[0] >= extent[1] or extent[2] >= extent[3]:
         raise ValueError("invalid map extent")
@@ -468,28 +498,22 @@ def render_graphic(config: dict) -> dict:
     reference_boundaries = _reference_boundaries()
     fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI), dpi=DPI, facecolor=background_color)
     labels = {"spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_wind": "Day 1 Wind", "spc_hail": "Day 1 Hail", "mo_alerts": "Missouri Weather Alerts"}
-    positions = ([(0.025, 0.51, 0.46, 0.35), (0.515, 0.51, 0.46, 0.35), (0.025, 0.12, 0.46, 0.35), (0.515, 0.12, 0.46, 0.35)] if config["product_id"] == "spc_four_panel" else [(0, 0, 1, 1)])
     for product_id, frame, position in zip(product_ids, frames, positions):
         panel_title = labels[product_id] if config["product_id"] == "spc_four_panel" else ""
         _draw_frame(fig.add_axes(position), frame, panel_title, extent, basemap, reference_overlay,
                     reference_boundaries, config.get("jurisdiction_path"), config)
-    product_label = "Day 1 Four Panel" if config["product_id"] == "spc_four_panel" else labels[config["product_id"]]
-    _add_header(fig, config, product_label)
-    fig.text(0.985, 0.018, "Sources: NOAA/NWS SPC, weather.gov, OpenStreetMap & CARTO", ha="right", va="bottom", fontsize=9, fontweight="bold", color="#374151", zorder=80, bbox={"boxstyle": "round,pad=0.4", "facecolor": "#ffffff", "edgecolor": "#d1d5db", "linewidth": 0.7, "alpha": 0.94})
-    _add_branding(
-        fig, config.get("department_name", ""), config.get("department_logo_path"),
-        config.get("accent_color", "#f97316"),
-    )
+    _add_header(fig, config)
+    _add_footer(fig, config, "Sources: NOAA/NWS SPC, weather.gov, OpenStreetMap & CARTO")
     _add_legend(
         fig, frames, config.get("legend_background_color", "#ffffff"),
         config.get("legend_text_color", "#172033"),
     )
     output = io.BytesIO()
-    fig.savefig(output, format="png", dpi=DPI, facecolor=fig.get_facecolor())
+    fig.savefig(output, format="jpg", dpi=DPI, facecolor=fig.get_facecolor(), pil_kwargs={"quality": 92})
     plt.close(fig)
     data = output.getvalue()
     with Image.open(io.BytesIO(data)) as check:
-        if check.size != (WIDTH, HEIGHT) or check.format != "PNG":
-            raise ValueError("renderer produced an invalid PNG")
+        if check.size != (WIDTH, HEIGHT) or check.format != "JPEG":
+            raise ValueError("renderer produced an invalid JPEG")
     return {"bytes": data, "source_fingerprint": source_hash, "source_urls": urls, "basemap_tiles": tile_count,
             "renderer_version": RENDERER_VERSION, "generated_at": datetime.now(timezone.utc).isoformat()}

@@ -34,11 +34,11 @@ from services.spread_rate import run_spread_rate_job, run_spread_rate_pipeline
 from routers.burn_bans import run_burn_ban_maintenance
 from services.beta_products import BETA_ROOT, load_manifest, refresh_observation_products, save_manifest
 from services.beta_verification import run_beta_verification
-from services.forecast_jobs import trigger_beta_forecast
 from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast_v1_operational, run_forecast_v1_shadow
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 from services.spc_graphics_watcher import refresh_spc_graphics_job
+from services.newsletter_delivery import run_daily_forecast_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -125,20 +125,13 @@ async def rtma_spread_rate_pipeline_job():
         logger.error("RTMA/spread-rate pipeline failed: %s", error, exc_info=True)
 
 
-async def run_scheduled_beta_forecast_job():
-    """Regenerate the isolated Testbed forecast daily so verification has fresh evidence to score.
-
-    Without this, the nightly verification job has nothing new to compare
-    unless an admin happens to click "Run beta forecast" that same day.
-    """
+async def run_newsletter_delivery_job():
+    """Deliver qualifying county forecasts after the daily forecast publication."""
     try:
-        job = await asyncio.to_thread(trigger_beta_forecast, "scheduler")
-        logger.info("Scheduled beta forecast triggered: job_id=%s", job.get("job_id"))
-    except RuntimeError as error:
-        # A beta forecast triggered manually (or by a prior tick) is still running.
-        logger.info("Scheduled beta forecast skipped: %s", error)
+        result = await asyncio.to_thread(run_daily_forecast_delivery)
+        logger.info("Newsletter delivery completed: %s", result)
     except Exception as error:
-        logger.error("Scheduled beta forecast trigger failed: %s", error, exc_info=True)
+        logger.error("Newsletter delivery failed: %s", error, exc_info=True)
 
 
 async def run_forecast_v1_shadow_job():
@@ -378,13 +371,6 @@ def create_scheduler():
 # models/forecast job below - job ids are hand-matched against add_job()'s
 # own `id=` argument, there is no naming convention enforced automatically.
 MODEL_RELEVANT_JOBS = {
-    "run_scheduled_beta_forecast": {
-        "category": "forecast_generation",
-        "description": "Runs the daily beta forecast (forecast/DailyForecast.py), which embeds the "
-                       "fire_weather_index and risk_fusion_glm (Phase A + B) shadow scoring hooks - "
-                       "those two families have no separate scheduler entry of their own and run "
-                       "entirely within this job's cadence.",
-    },
     "verify_latest_beta_forecast": {
         "category": "verification",
         "description": "Nightly stable-vs-beta fuel_moisture verification against real observations "
@@ -520,11 +506,11 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     )
 
     scheduler.add_job(
-        run_scheduled_beta_forecast_job,
+        run_newsletter_delivery_job,
         'cron',
-        hour=9,
-        minute=0,
-        id='run_scheduled_beta_forecast',
+        hour=10,
+        minute=15,
+        id='deliver_daily_newsletter_forecasts',
         max_instances=1,
         coalesce=True,
     )

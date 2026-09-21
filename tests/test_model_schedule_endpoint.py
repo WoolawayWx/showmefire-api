@@ -49,13 +49,13 @@ class ModelScheduleEndpointTests(unittest.TestCase):
     def test_filters_to_the_curated_allowlist_and_drops_unrelated_jobs(self):
         next_run = datetime(2026, 9, 21, 9, 0, tzinfo=timezone.utc)
         jobs = [
-            _FakeJob("run_scheduled_beta_forecast", "cron[hour='9']", next_run),
+            _FakeJob("verify_v4_shadow", "interval[3:00:00]", next_run),
             _FakeJob("some_unrelated_log_purge_job", "interval[1 day, 0:00:00]", next_run),
         ]
         result = _run(model_admin.get_model_schedule(_fake_request(_FakeScheduler(jobs))))
         self.assertTrue(result["scheduler_running"])
         ids = [row["id"] for row in result["jobs"]]
-        self.assertIn("run_scheduled_beta_forecast", ids)
+        self.assertIn("verify_v4_shadow", ids)
         self.assertNotIn("some_unrelated_log_purge_job", ids)
 
     def test_job_rows_carry_category_description_cadence_and_next_run(self):

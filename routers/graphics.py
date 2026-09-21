@@ -47,7 +47,6 @@ from services.graphics_email import send_graphics_login_code
 from services.graphic_renderer import (
     PRODUCT_IDS, _load_alert_bytes, center_zoom_for_bounds, fetch_spc_product, render_graphic,
 )
-from services.graphic_renderer_browser import render_graphic_browser_async
 
 router = APIRouter(prefix="/api/graphics", tags=["graphics"])
 logger = logging.getLogger(__name__)
@@ -102,7 +101,7 @@ GRAPHICS_TERMS = {
 
 
 def _image_url(bundle_id: str) -> str:
-    return f"{GRAPHICS_CDN_BASE_URL}/{bundle_id}/image.png"
+    return f"{GRAPHICS_CDN_BASE_URL}/{bundle_id}/image.jpg"
 
 
 def _logo_object_key(department_slug: str, filename: str, digest: str) -> str:
@@ -332,27 +331,6 @@ async def preview_data(product_id: str):
         content=payload, media_type="application/geo+json",
         headers={"Cache-Control": "public,max-age=120,stale-while-revalidate=300"},
     )
-
-
-@router.get("/render-config/{token}")
-def render_config(token: str):
-    """Fetch a short-lived render config by token.
-
-    Used by graphics/render.vue - the headless page Playwright screenshots for the
-    GRAPHICS_RENDERER=browser path. That page is served from Cloudflare Pages, a
-    different origin than the API, so the config is fetched back by token instead
-    of being carried through the URL; it holds no secrets (product, colors,
-    department name, logo URL), same as what a department already sees while
-    editing, so an unauthenticated but token-gated, time-boxed read is fine here.
-    """
-    with _db() as db:
-        row = db.execute(
-            "SELECT payload_json FROM graphic_render_tokens WHERE token=? AND expires_at > CURRENT_TIMESTAMP",
-            (token,),
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Render config not found or expired")
-    return Response(content=row["payload_json"], media_type="application/json")
 
 
 @router.get("/me")
@@ -746,7 +724,7 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
     r2_deleted = False
     if (bundle_ids or asset_cdn_keys) and _r2_configured():
         objects = (
-            [{"Key": f"imggen/{bundle_id}/image.png"} for bundle_id in bundle_ids]
+            [{"Key": f"imggen/{bundle_id}/image.jpg"} for bundle_id in bundle_ids]
             + [{"Key": key} for key in asset_cdn_keys]
         )
         try:
@@ -756,7 +734,7 @@ async def delete_department(department_id: int, confirm: str, token: Optional[st
                 Delete={"Objects": objects, "Quiet": True},
             )
             for bundle_id in bundle_ids:
-                _purge_cdn(f"imggen/{bundle_id}/image.png")
+                _purge_cdn(f"imggen/{bundle_id}/image.jpg")
             for asset_key in asset_cdn_keys:
                 _purge_cdn(asset_key)
             r2_deleted = True
@@ -1070,10 +1048,7 @@ async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Op
                 raise ValueError("configured department logo asset no longer exists")
             bundle["department_logo_path"] = logo_asset["path"]
             bundle["department_logo_url"] = logo_asset["cdn_url"]
-        if os.getenv("GRAPHICS_RENDERER", "matplotlib") == "browser":
-            result = await render_graphic_browser_async(bundle)
-        else:
-            result = await asyncio.get_running_loop().run_in_executor(_get_executor(), render_graphic, bundle)
+        result = await asyncio.get_running_loop().run_in_executor(_get_executor(), render_graphic, bundle)
         data = result["bytes"]
         if len(data) < 1000:
             raise ValueError("rendered image failed content validation")
@@ -1085,10 +1060,10 @@ async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Op
                 db.execute("INSERT INTO graphic_usage_events(department_id,api_key_id,job_id,status,product_id,latency_ms,bytes) VALUES (?,?,?,?,?,?,?)", (department_id, api_key_id, job_id, "skipped", bundle["product_id"], int((time.monotonic()-started)*1000), 0))
             return
         bucket = os.getenv("R2_BUCKET", "cdn-showmefire")
-        key = f"imggen/{bundle['id']}/image.png"
+        key = f"imggen/{bundle['id']}/image.jpg"
         if not all(os.getenv(name) for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")):
             raise RuntimeError("graphics R2 credentials are not configured")
-        _r2_client().put_object(Bucket=bucket, Key=key, Body=data, ContentType="image/png", CacheControl="public,max-age=60,stale-while-revalidate=300")
+        _r2_client().put_object(Bucket=bucket, Key=key, Body=data, ContentType="image/jpeg", CacheControl="public,max-age=60,stale-while-revalidate=300")
         _purge_cdn(key)
         manifest = {k: result[k] for k in ("source_fingerprint", "source_urls", "renderer_version", "generated_at")}
         url = _image_url(bundle["id"])

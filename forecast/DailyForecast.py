@@ -1664,6 +1664,7 @@ def generate_complete_forecast():
             hourly_rh, hourly_ws, hourly_temp, hourly_precip,
             run_id=_risk_fusion_run_id,
             valid_local_date=_risk_fusion_valid_date,
+            lat=lat, lon=lon,
         )
     except Exception as _fire_weather_index_exc:
         logger.warning("fire_weather_index shadow hook failed (non-fatal): %s", _fire_weather_index_exc)

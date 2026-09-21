@@ -37,12 +37,20 @@ def run_fire_weather_index_shadow_for_forecast(
     hourly_precip_mm: list,
     run_id: str,
     valid_local_date: str,
+    lat: np.ndarray = None,
+    lon: np.ndarray = None,
 ) -> bool:
     """
     hourly_rh/hourly_ws_kts/hourly_temp_c/hourly_precip_mm: per-hour 2D
     grids, same indexing as the risk_fusion GLM hook (hours_ahead 4..15 ->
     index 0..11). hourly_precip_mm is that hour's precipitation INTERVAL,
     not cumulative.
+
+    lat/lon: the same grid's coordinates (DailyForecast.py's own mo_bounds
+    crop, same shape as hourly_rh[0]) - optional only so this still works
+    if ever called without them, but when given, the shadow renders the
+    real pixel map (see fire_weather_index_shadow.py::_render_png) instead
+    of the county-choropleth fallback.
     """
     try:
         if not fwis.diagnostics()["enabled"]:
@@ -96,11 +104,34 @@ def run_fire_weather_index_shadow_for_forecast(
                 "precip_24h_mm": float(np.nansum(precip_full)),
             }
 
+        # Same four reductions as the per-county loop above, applied
+        # elementwise over the full grid instead of each county's cell
+        # subset - lets the shadow render the real pixel map (see
+        # fire_weather_index_shadow.py::_render_png) instead of just
+        # scoring per county. Only built when lat/lon were actually passed,
+        # since they're required to render anything with these grids.
+        weather_grids = None
+        if lat is not None and lon is not None:
+            rh_offsets = afternoon_offsets or full_offsets
+            weather_grids = {
+                "rh_min_afternoon": np.nanmin(
+                    np.stack([np.asarray(hourly_rh[i], dtype="float64") for i in rh_offsets]), axis=0),
+                "wind_kts_max": np.nanmax(
+                    np.stack([np.asarray(hourly_ws_kts[i], dtype="float64") for i in full_offsets]), axis=0),
+                "vpd_kpa_max": np.nanmax(
+                    np.stack([np.asarray(grid, dtype="float64") for grid in vpd_by_hour]), axis=0),
+                "precip_24h_mm": np.nansum(
+                    np.stack([np.asarray(hourly_precip_mm[i], dtype="float64") for i in full_offsets]), axis=0),
+            }
+
         return fwis.score_for_forecast(
             run_id=run_id,
             valid_local_date=valid_local_date,
             county_fips=county_list,
             weather_rows=weather_rows,
+            weather_grids=weather_grids,
+            lat=lat,
+            lon=lon,
         )
     except Exception as exc:
         logger.warning("fire_weather_index shadow hook failed (non-fatal): %s", exc)

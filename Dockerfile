@@ -106,14 +106,6 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY --from=builder /opt/venv /opt/venv
 
-# Playwright (headless-browser graphics renderer, GRAPHICS_RENDERER=browser env
-# var) - Chromium binaries don't live in the venv, so they wouldn't survive the
-# multi-stage copy above; install them directly into the runtime image instead.
-# --with-deps pulls the OS libs Chromium needs (libnss3, libgbm1, fonts, etc).
-# Off by default and adds ~300MB; only required once that env var is set.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN python -m playwright install --with-deps chromium
-
 COPY . .
 
 

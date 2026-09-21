@@ -54,7 +54,7 @@ class GraphicsTests(unittest.TestCase):
         )
         self.assertTrue(all(url.endswith(".nolyr.geojson") for url in graphic_renderer.PRODUCT_URLS.values()))
 
-    def test_gis_renderer_produces_exact_png(self):
+    def test_gis_renderer_produces_exact_jpeg(self):
         with patch.object(graphic_renderer, "_fetch", return_value=SAMPLE_GEOJSON), patch.object(
             graphic_renderer, "_basemap", return_value=(Image.new("RGBA", (820, 350), (0, 0, 0, 0)), 8)
         ) as basemap:
@@ -63,8 +63,8 @@ class GraphicsTests(unittest.TestCase):
                 "background_color": "#e8e8e8",
             })
         image = Image.open(io.BytesIO(result["bytes"]))
-        self.assertEqual(image.size, (1920, 1080))
-        self.assertEqual(result["renderer_version"], "graphics-gis-v9")
+        self.assertEqual(image.size, (2048, 1152))
+        self.assertEqual(result["renderer_version"], "graphics-gis-v12")
         self.assertEqual(len(result["source_urls"]), 4)
         self.assertEqual(basemap.call_count, 2)
         self.assertEqual(basemap.call_args_list[0].args[3], "rastertiles/voyager_nolabels")
@@ -130,7 +130,7 @@ class GraphicsTests(unittest.TestCase):
             jurisdiction_asset_id=asset["asset_id"], center=(-92.5, 38.4), zoom=7.0,
         ), f"Bearer {api_key}")
         self.assertEqual(created["bundle_id"], "test-bundle")
-        self.assertEqual(created["image_url"], "https://cdn.showmefire.org/imggen/test-bundle/image.png")
+        self.assertEqual(created["image_url"], "https://cdn.showmefire.org/imggen/test-bundle/image.jpg")
         self.assertEqual(len(list(graphics.ASSET_ROOT.glob("*.geojson"))), 1)
         self.assertEqual(len(asset["suggested_center"]), 2)
         self.assertGreater(asset["suggested_zoom"], 1)

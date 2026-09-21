@@ -60,9 +60,20 @@ IMAGE_FILENAME = "fire_weather_index_shadow_latest.png"
 CATEGORY_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
 # Same 5-class palette convention as fire_weather_ml_shadow.py's ROS_CLASS_COLORS
 # (calm green -> extreme dark red) - kept visually consistent across shadow
-# products even though this is a county choropleth, not a grid.
+# products. Used for the county-choropleth fallback render only (see
+# PRODUCTION_* below for the pixel render's palette) and for category_counts'
+# dict keys elsewhere - do not rename/reorder, other code depends on it.
 CATEGORY_COLORS = ("#90EE90", "#ADFF2F", "#FFFF00", "#FFA500", "#8B0000")
 NODATA_COLOR = "#CCCCCC"
+
+# The live operational "Missouri Peak Fire Danger Forecast" map's exact
+# palette/bins (api/forecast/DailyForecast.py's own MAP 1: PEAK FIRE DANGER
+# block) - used only by the pixel render below, so this shadow map reads as
+# visually consistent with the real product it's the experimental
+# counterpart to. Display-only: does NOT replace CATEGORY_LABELS above.
+PRODUCTION_COLORS = ["#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000"]
+PRODUCTION_BINS = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+PRODUCTION_LABELS = ["Low", "Moderate", "Elevated\nHigh", "Critical\nVery High", "Extreme"]
 
 BUNDLE_ASSET_FILENAMES = {
     "factor_weights": "factor_weights.json",
@@ -277,6 +288,68 @@ def score_county_day(bundle: Dict, weather_row: Dict) -> Dict:
     return {"score": score, "category": category, "factors": factor_values}
 
 
+def _ramp_grid(value: np.ndarray, benign: float, extreme: float) -> np.ndarray:
+    """Grid counterpart of _ramp - NaN-safe/vectorized, same formula."""
+    ramped = np.clip((value - benign) / (extreme - benign), 0.0, 1.0)
+    return np.where(np.isfinite(value), ramped, np.nan)
+
+
+def compute_factors_grid(anchors: Dict, weather_grids: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """Grid counterpart of compute_factors."""
+    return {
+        "rh": _ramp_grid(weather_grids["rh_min_afternoon"], anchors["rh"]["benign"], anchors["rh"]["extreme"]),
+        "wind": _ramp_grid(weather_grids["wind_kts_max"], anchors["wind"]["benign"], anchors["wind"]["extreme"]),
+        "vpd": _ramp_grid(weather_grids["vpd_kpa_max"], anchors["vpd"]["benign"], anchors["vpd"]["extreme"]),
+        "precip_relief": _ramp_grid(weather_grids["precip_24h_mm"], anchors["precip_relief"]["benign"],
+                                     anchors["precip_relief"]["extreme"]),
+    }
+
+
+def compute_score_grid(weights: Dict[str, float], factor_grids: Dict[str, np.ndarray],
+                        raw_score_ceiling: float = 1.0) -> np.ndarray:
+    """Grid counterpart of compute_score: per-cell weighted average,
+    renormalized over whichever factors are finite AT THAT CELL - mirrors
+    model-training/fire_weather_index/grid_score.py::compute_score_grid's
+    approach without importing it (see module docstring for why)."""
+    sample = next(iter(factor_grids.values()))
+    numerator = np.zeros_like(sample, dtype=np.float64)
+    denominator = np.zeros_like(sample, dtype=np.float64)
+    for name, weight in weights.items():
+        value = factor_grids.get(name)
+        if value is None:
+            continue
+        signed_weight = -weight if name == "precip_relief" else weight
+        finite = np.isfinite(value)
+        numerator += np.where(finite, signed_weight * value, 0.0)
+        denominator += np.where(finite, weight, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        raw = numerator / denominator
+    score = np.clip(raw / raw_score_ceiling, 0.0, 1.0)
+    return np.where(denominator > 0.0, score, np.nan)
+
+
+def score_to_category_index_grid(score: np.ndarray, thresholds: List[float]) -> np.ndarray:
+    """Rescales a continuous [0,1] score grid onto a continuous 0-4
+    "category index" via the calibrated thresholds as anchor points, for
+    contourf's levels=PRODUCTION_BINS mechanism (built for a 0-4 field).
+    Direct port of score_fire_weather_index_today.py::render_pixel_map's
+    anchor logic, including its fix for when the Extreme threshold lands
+    exactly at the 1.0 score ceiling (a real observed case - see that
+    function's own comment for the full explanation): a naive
+    [..., thresholds[-1], 1.0] anchor list would then have a zero-width
+    final segment, collapsing the whole Extreme band to an unreachable
+    point once smoothing nudges cells fractionally below 1.0."""
+    anchor_scores = [0.0] + list(thresholds)
+    anchor_indices = [0.0, 0.5, 1.5, 2.5, 3.5]
+    if anchor_scores[-1] < 1.0:
+        anchor_scores.append(1.0)
+        anchor_indices.append(4.0)
+    else:
+        anchor_indices[-1] = 4.0
+    category_index = np.interp(score, anchor_scores, anchor_indices)
+    return np.where(np.isnan(score), np.nan, category_index)
+
+
 def _image_path() -> Path:
     """Rendered alongside the other beta/shadow products (services/beta_products.py's
     BETA_ROOT), under its own filename/manifest key - see fire_weather_ml_shadow.py's
@@ -298,13 +371,98 @@ def _county_geometries():
     return counties
 
 
-def _render_png(county_fips: List[str], scored: Dict[str, Dict], bundle: Dict, out_path: Path) -> None:
+def _render_county_fill(ax, data_crs, county_fips: List[str], scored: Dict[str, Dict]) -> None:
+    """County choropleth fallback fill, one flat color per category - same
+    categorical add_geometries-per-subset technique services/burn_ban_map.py
+    uses. Used only when the caller has no per-cell weather_grids to render
+    the real pixel map from (see _render_png)."""
+    counties = _county_geometries()
+    category_by_fips = {fips: scored[fips]["category"] for fips in county_fips}
+    counties["category"] = counties["fips"].map(category_by_fips)
+
+    for category_id, color in enumerate(CATEGORY_COLORS):
+        subset = counties[counties["category"] == category_id]
+        if not subset.empty:
+            ax.add_geometries(subset.geometry, crs=data_crs, facecolor=color, edgecolor="none", zorder=6)
+    no_data = counties[counties["category"].isna()]
+    if not no_data.empty:
+        ax.add_geometries(no_data.geometry, crs=data_crs, facecolor=NODATA_COLOR, edgecolor="none", zorder=6)
+    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#444444", facecolor="none", linewidth=0.7, zorder=9)
+
+    from matplotlib.patches import Patch
+    legend_handles = [Patch(facecolor=color, label=label) for color, label in zip(CATEGORY_COLORS, CATEGORY_LABELS)]
+    legend_handles.append(Patch(facecolor=NODATA_COLOR, label="No data"))
+    ax.legend(handles=legend_handles, loc="lower left", bbox_to_anchor=(0.0, 0.0), fontsize=10, frameon=False)
+
+
+def _render_pixel_fill(fig, ax, data_crs, bundle: Dict, weather_grids: Dict[str, np.ndarray],
+                        lat: np.ndarray, lon: np.ndarray):
     """
-    County choropleth, one fill color per category (0=Low .. 4=Extreme) -
-    same categorical add_geometries-per-subset technique
-    services/burn_ban_map.py already uses for Missouri county maps (no
-    existing continuous-colormap choropleth in this repo to mirror instead).
-    Explicitly labeled shadow/experimental, same convention as
+    Smooth, per-grid-cell fill matching the live operational Peak Fire
+    Danger Forecast map's exact visual identity - direct port of
+    model-training/scripts/score_fire_weather_index_today.py::render_pixel_map's
+    technique (proven and bug-fixed there for this exact model), adapted to
+    score from the live hook's in-memory grids instead of cached files.
+    """
+    from cartopy.mpl.path import shapely_to_path
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.patches import PathPatch
+
+    weights = bundle["factor_weights"]["weights"]
+    anchors = bundle["factor_weights"]["ramp_anchors"]
+    raw_score_ceiling = bundle["factor_weights"].get("raw_score_ceiling", {}).get("value") or 1.0
+    factor_grids = compute_factors_grid(anchors, weather_grids)
+    score = compute_score_grid(weights, factor_grids, raw_score_ceiling)
+    category_index = score_to_category_index_grid(score, bundle["category_thresholds"]["thresholds"])
+
+    lon = np.where(lon > 180, lon - 360, lon)
+    cmap = ListedColormap(PRODUCTION_COLORS)
+    norm = BoundaryNorm(PRODUCTION_BINS, len(PRODUCTION_COLORS))
+    contours = ax.contourf(lon, lat, category_index, transform=data_crs, levels=PRODUCTION_BINS,
+                            cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True)
+    separators = ax.contour(lon, lat, category_index, transform=data_crs, levels=PRODUCTION_BINS[1:-1],
+                             colors="black", linewidths=0.3, alpha=0.2, zorder=8)
+
+    state_shp = Path(__file__).resolve().parent.parent / "maps" / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
+    if state_shp.exists():
+        import geopandas as gpd
+        state = gpd.read_file(state_shp).to_crs("EPSG:4326")
+        try:
+            # Vector clip to Missouri's exact boundary - a raster NaN mask
+            # produces a visibly jagged/notched edge at HRRR's grid
+            # resolution instead. Both artists need it - the fill and the
+            # separator lines are separate matplotlib artists.
+            state_geom = state.geometry.union_all()
+            projected_geom = ax.projection.project_geometry(state_geom, data_crs)
+            clip_path = PathPatch(shapely_to_path(projected_geom), transform=ax.transData)
+            for artist_set in (contours, separators):
+                for collection in (getattr(artist_set, "collections", None) or [artist_set]):
+                    collection.set_clip_path(clip_path)
+        except Exception:
+            pass  # clip is cosmetic only - the pixel data itself doesn't need it
+
+    counties = _county_geometries()
+    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none", linewidth=0.7, zorder=9)
+    if state_shp.exists():
+        ax.add_geometries(state.geometry, crs=data_crs, edgecolor="#111111", facecolor="none", linewidth=1.5, zorder=10)
+
+    cax = fig.add_axes([0.02, 0.12, 0.02, 0.58])
+    cbar = fig.colorbar(contours, cax=cax, ticks=[0, 1, 2, 3, 4])
+    cbar.ax.set_yticklabels(PRODUCTION_LABELS)
+
+
+def _render_png(county_fips: List[str], scored: Dict[str, Dict], bundle: Dict, out_path: Path,
+                 weather_grids: Optional[Dict[str, np.ndarray]] = None,
+                 lat: Optional[np.ndarray] = None, lon: Optional[np.ndarray] = None) -> None:
+    """
+    Renders the shadow's live map. When weather_grids/lat/lon are provided
+    (the normal live-scoring path, see score_for_forecast), renders a
+    smooth pixel/raster map matching the operational Peak Fire Danger
+    Forecast map's exact palette/style (_render_pixel_fill). Falls back to
+    a county choropleth (_render_county_fill, the map style this used
+    unconditionally before) when they're not - keeps this function usable
+    without a live grid (e.g. from a test) rather than failing outright.
+    Explicitly labeled shadow/experimental either way, same convention as
     fire_weather_ml_shadow.py's _render_png.
     """
     import cartopy.crs as ccrs
@@ -313,9 +471,6 @@ def _render_png(county_fips: List[str], scored: Dict[str, Dict], bundle: Dict, o
     import matplotlib.pyplot as plt
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    counties = _county_geometries()
-    category_by_fips = {fips: scored[fips]["category"] for fips in county_fips}
-    counties["category"] = counties["fips"].map(category_by_fips)
 
     pixel_width, pixel_height, dpi = 2048, 1152, 144
     data_crs = ccrs.PlateCarree()
@@ -327,25 +482,10 @@ def _render_png(county_fips: List[str], scored: Dict[str, Dict], bundle: Dict, o
     ax.set_xticks([])
     ax.set_yticks([])
 
-    for category_id, color in enumerate(CATEGORY_COLORS):
-        subset = counties[counties["category"] == category_id]
-        if not subset.empty:
-            ax.add_geometries(subset.geometry, crs=data_crs, facecolor=color, edgecolor="none", zorder=6)
-    no_data = counties[counties["category"].isna()]
-    if not no_data.empty:
-        ax.add_geometries(no_data.geometry, crs=data_crs, facecolor=NODATA_COLOR, edgecolor="none", zorder=6)
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#444444", facecolor="none", linewidth=0.7, zorder=9)
-
-    state_shp = Path(__file__).resolve().parent.parent / "maps" / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
-    if state_shp.exists():
-        import geopandas as gpd
-        state = gpd.read_file(state_shp).to_crs("EPSG:4326")
-        ax.add_geometries(state.geometry, crs=data_crs, edgecolor="#111111", facecolor="none", linewidth=1.5, zorder=10)
-
-    from matplotlib.patches import Patch
-    legend_handles = [Patch(facecolor=color, label=label) for color, label in zip(CATEGORY_COLORS, CATEGORY_LABELS)]
-    legend_handles.append(Patch(facecolor=NODATA_COLOR, label="No data"))
-    ax.legend(handles=legend_handles, loc="lower left", bbox_to_anchor=(0.0, 0.0), fontsize=10, frameon=False)
+    if weather_grids is not None and lat is not None and lon is not None:
+        _render_pixel_fill(fig, ax, data_crs, bundle, weather_grids, lat, lon)
+    else:
+        _render_county_fill(ax, data_crs, county_fips, scored)
 
     fig.text(0.5, 0.965, NOT_FOR_OPERATIONS_LABEL, fontsize=22, fontweight="bold",
              ha="center", va="top", color="#B00000")
@@ -409,12 +549,21 @@ def score_for_forecast(
     weather_rows: Dict[str, Dict],
     bundle_dir: Optional[Path] = None,
     evidence_root: Optional[Path] = None,
+    weather_grids: Optional[Dict[str, np.ndarray]] = None,
+    lat: Optional[np.ndarray] = None,
+    lon: Optional[np.ndarray] = None,
 ) -> bool:
     """Scores one forecast run's county-day weather rows and writes an
     immutable evidence file. weather_rows keyed by county_fips, same shape
     risk_fusion_hook.py already builds (rh_min_afternoon, wind_kts_max,
     vpd_kpa_max, precip_24h_mm). Never raises; returns False on any failure
-    (including shadow being disabled)."""
+    (including shadow being disabled).
+
+    weather_grids/lat/lon: optional per-cell counterparts of the same four
+    weather_rows fields (2D arrays, same grid as lat/lon) - when given,
+    the rendered map is the real pixel/raster map instead of the county
+    choropleth fallback (see _render_png). Purely a rendering input; the
+    scoring/evidence-write path above only ever uses weather_rows."""
     if not diagnostics()["enabled"]:
         return False
     try:
@@ -447,7 +596,7 @@ def score_for_forecast(
         image_path = None
         try:
             image_path = _image_path()
-            _render_png(county_fips, scored, bundle, image_path)
+            _render_png(county_fips, scored, bundle, image_path, weather_grids=weather_grids, lat=lat, lon=lon)
             _update_manifest(image_path, bundle, category_counts, score_summary, record["recorded_at"])
             print(f"fire_weather_index shadow map written to: {image_path.resolve()}")
         except Exception as render_error:

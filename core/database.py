@@ -4,6 +4,7 @@ SQLite Database - core/database.py
 import sqlite3
 import logging
 import os
+import json
 import re
 import secrets
 import unicodedata
@@ -1004,6 +1005,95 @@ def init_database():
     # model families (fire_weather_index, fire_weather_ml, risk_fusion_glm,
     # v4, v5) - replaces requiring a .env edit + server restart to flip one.
     _ensure_shadow_model_settings_table(cursor)
+
+    # 24. FireWx bulletin content, email preferences, county forecasts, and
+    # delivery idempotency. Resend remains authoritative for contact status
+    # and unsubscribe state; these tables only store local preferences and
+    # operational bookkeeping.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bulletins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject TEXT NOT NULL,
+            html_body TEXT NOT NULL,
+            text_body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'sending', 'sent')),
+            resend_broadcast_id TEXT,
+            sent_at TIMESTAMP,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_bulletins_status_created ON bulletins(status, created_at DESC)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS newsletter_subscribers (
+            email TEXT PRIMARY KEY,
+            resend_contact_id TEXT,
+            name TEXT NOT NULL DEFAULT '',
+            affiliation TEXT NOT NULL DEFAULT '',
+            manage_token TEXT UNIQUE,
+            unsubscribed_at TIMESTAMP,
+            subscription_types_json TEXT NOT NULL DEFAULT '["fire-weather-forecasts"]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    subscriber_columns = {row[1] for row in cursor.execute("PRAGMA table_info(newsletter_subscribers)").fetchall()}
+    if "name" not in subscriber_columns:
+        cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+    if "affiliation" not in subscriber_columns:
+        cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN affiliation TEXT NOT NULL DEFAULT ''")
+    if "manage_token" not in subscriber_columns:
+        cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN manage_token TEXT")
+    if "unsubscribed_at" not in subscriber_columns:
+        cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN unsubscribed_at TIMESTAMP")
+    if "subscription_types_json" not in subscriber_columns:
+        cursor.execute(
+            "ALTER TABLE newsletter_subscribers ADD COLUMN subscription_types_json TEXT NOT NULL DEFAULT "
+            "'[\"fire-weather-forecasts\"]'"
+        )
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS newsletter_preferences (
+            email TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            min_danger_level INTEGER NOT NULL CHECK (min_danger_level BETWEEN 0 AND 4),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (email, county_fips),
+            FOREIGN KEY (email) REFERENCES newsletter_subscribers(email)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_newsletter_preferences_county ON newsletter_preferences(county_fips, min_danger_level)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS county_forecast_days (
+            forecast_date TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            danger_level INTEGER NOT NULL CHECK (danger_level BETWEEN 0 AND 4),
+            summary TEXT NOT NULL DEFAULT '',
+            forecast_run_id TEXT NOT NULL DEFAULT '',
+            published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (forecast_date, county_fips)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_county_forecast_days_date ON county_forecast_days(forecast_date, danger_level)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS newsletter_deliveries (
+            email TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            forecast_date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            provider_message_id TEXT,
+            error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sent_at TIMESTAMP,
+            PRIMARY KEY (email, county_fips, forecast_date)
+        )
+    ''')
+    delivery_columns = {row[1] for row in cursor.execute("PRAGMA table_info(newsletter_deliveries)").fetchall()}
+    if "claimed_at" not in delivery_columns:
+        cursor.execute("ALTER TABLE newsletter_deliveries ADD COLUMN claimed_at TIMESTAMP")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_newsletter_deliveries_status ON newsletter_deliveries(status, created_at)')
 
     conn.commit()
     conn.close()
@@ -3818,14 +3908,6 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
             decision TEXT NOT NULL CHECK(decision IN ('accepted','declined')),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS graphic_render_tokens (
-            token TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expires_at TIMESTAMP NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_graphic_render_tokens_expires
-            ON graphic_render_tokens(expires_at);
         CREATE TABLE IF NOT EXISTS forecast_source_models (
             key TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
@@ -4635,5 +4717,360 @@ def purge_burn_ban_throttle_rows(older_than_hours: int = 48) -> int:
         purged = cursor.rowcount
         conn.commit()
         return purged
+    finally:
+        conn.close()
+
+
+def upsert_newsletter_subscriber(
+    email: str,
+    resend_contact_id: Optional[str] = None,
+    subscription_types: Optional[List[str]] = None,
+    name: str = "",
+    affiliation: str = "",
+) -> Dict:
+    normalized = email.strip().lower()
+    subscription_json = json.dumps(subscription_types or ["fire-weather-forecasts"])
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        existing = conn.execute(
+            "SELECT manage_token FROM newsletter_subscribers WHERE email = ?",
+            (normalized,),
+        ).fetchone()
+        manage_token = existing["manage_token"] if existing and existing["manage_token"] else secrets.token_urlsafe(32)
+        conn.execute(
+            '''INSERT INTO newsletter_subscribers
+               (email, resend_contact_id, name, affiliation, manage_token, subscription_types_json)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(email) DO UPDATE SET
+                 resend_contact_id = COALESCE(excluded.resend_contact_id, newsletter_subscribers.resend_contact_id),
+                 name = excluded.name,
+                 affiliation = excluded.affiliation,
+                 subscription_types_json = excluded.subscription_types_json,
+                 unsubscribed_at = NULL,
+                 updated_at = CURRENT_TIMESTAMP''',
+            (normalized, resend_contact_id, name.strip(), affiliation.strip(), manage_token, subscription_json),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM newsletter_subscribers WHERE email = ?", (normalized,)).fetchone()
+        result = dict(row)
+        try:
+            result["subscription_types"] = json.loads(result.pop("subscription_types_json") or "[]")
+        except json.JSONDecodeError:
+            result["subscription_types"] = []
+        return result
+    finally:
+        conn.close()
+
+
+def replace_newsletter_preferences(email: str, preferences: List[Dict]) -> List[Dict]:
+    normalized = email.strip().lower()
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("DELETE FROM newsletter_preferences WHERE email = ?", (normalized,))
+        for preference in preferences:
+            conn.execute(
+                '''INSERT INTO newsletter_preferences (email, county_fips, min_danger_level)
+                   VALUES (?, ?, ?)''',
+                (normalized, preference["county_fips"], preference["min_danger_level"]),
+            )
+        conn.commit()
+        return [
+            dict(row) for row in conn.execute(
+                "SELECT county_fips, min_danger_level FROM newsletter_preferences WHERE email = ? ORDER BY county_fips",
+                (normalized,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def get_newsletter_preferences(email: Optional[str] = None) -> List[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        query = """
+            SELECT p.email, p.county_fips, p.min_danger_level
+            FROM newsletter_preferences p
+            JOIN newsletter_subscribers s ON s.email = p.email
+        """
+        params: tuple = ()
+        if email:
+            query += " WHERE p.email = ?"
+            params = (email.strip().lower(),)
+        query += " ORDER BY p.email, p.county_fips"
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def get_newsletter_account_by_token(token: str) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        subscriber = conn.execute(
+            "SELECT * FROM newsletter_subscribers WHERE manage_token = ?",
+            (token.strip(),),
+        ).fetchone()
+        if not subscriber:
+            return None
+        result = dict(subscriber)
+        result["subscription_types"] = json.loads(result.pop("subscription_types_json") or "[]")
+        result["counties"] = [
+            dict(row) for row in conn.execute(
+                "SELECT county_fips, min_danger_level FROM newsletter_preferences WHERE email = ? ORDER BY county_fips",
+                (result["email"],),
+            ).fetchall()
+        ]
+        return result
+    finally:
+        conn.close()
+
+
+def update_newsletter_account(
+    token: str,
+    name: str,
+    affiliation: str,
+    subscription_types: List[str],
+    preferences: List[Dict],
+) -> Optional[Dict]:
+    account = get_newsletter_account_by_token(token)
+    if not account:
+        return None
+    conn = sqlite3.connect(get_db_path())
+    try:
+        conn.execute(
+            '''UPDATE newsletter_subscribers
+               SET name = ?, affiliation = ?, subscription_types_json = ?,
+                   unsubscribed_at = NULL, updated_at = CURRENT_TIMESTAMP
+               WHERE manage_token = ?''',
+            (name.strip(), affiliation.strip(), json.dumps(subscription_types), token.strip()),
+        )
+        conn.execute("DELETE FROM newsletter_preferences WHERE email = ?", (account["email"],))
+        for preference in preferences:
+            conn.execute(
+                '''INSERT INTO newsletter_preferences (email, county_fips, min_danger_level)
+                   VALUES (?, ?, ?)''',
+                (account["email"], preference["county_fips"], preference["min_danger_level"]),
+            )
+        conn.commit()
+        return get_newsletter_account_by_token(token)
+    finally:
+        conn.close()
+
+
+def unsubscribe_newsletter(token: str) -> bool:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.execute(
+            '''UPDATE newsletter_subscribers
+               SET unsubscribed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE manage_token = ?''',
+            (token.strip(),),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def create_bulletin(subject: str, html_body: str, text_body: str) -> Dict:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            "INSERT INTO bulletins (subject, html_body, text_body) VALUES (?, ?, ?)",
+            (subject.strip(), html_body, text_body),
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM bulletins WHERE id = ?", (cursor.lastrowid,)).fetchone())
+    finally:
+        conn.close()
+
+
+def get_bulletin(bulletin_id: int) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_bulletins() -> List[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute("SELECT * FROM bulletins ORDER BY created_at DESC, id DESC").fetchall()]
+    finally:
+        conn.close()
+
+
+def update_bulletin(bulletin_id: int, subject: str, html_body: str, text_body: str) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            '''UPDATE bulletins
+               SET subject = ?, html_body = ?, text_body = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'draft' ''',
+            (subject.strip(), html_body, text_body, bulletin_id),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            return None
+        row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def mark_bulletin_sent(bulletin_id: int, resend_broadcast_id: str) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            '''UPDATE bulletins
+               SET status = 'sent', resend_broadcast_id = ?, sent_at = CURRENT_TIMESTAMP,
+                   last_error = NULL, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'sending' ''',
+            (resend_broadcast_id, bulletin_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def set_bulletin_error(bulletin_id: int, error: str) -> None:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        conn.execute(
+            "UPDATE bulletins SET status = 'draft', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (error[:2000], bulletin_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def claim_bulletin_send(bulletin_id: int) -> bool:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.execute(
+            "UPDATE bulletins SET status = 'sending', last_error = NULL, updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = 'draft'",
+            (bulletin_id,),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def upsert_county_forecast_day(
+    forecast_date: str, county_fips: str, danger_level: int,
+    summary: str = "", forecast_run_id: str = "",
+) -> Dict:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            '''INSERT INTO county_forecast_days
+               (forecast_date, county_fips, danger_level, summary, forecast_run_id)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(forecast_date, county_fips) DO UPDATE SET
+                 danger_level = excluded.danger_level,
+                 summary = excluded.summary,
+                 forecast_run_id = excluded.forecast_run_id,
+                 published_at = CURRENT_TIMESTAMP''',
+            (forecast_date, county_fips, danger_level, summary, forecast_run_id),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM county_forecast_days WHERE forecast_date = ? AND county_fips = ?",
+            (forecast_date, county_fips),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def list_matching_newsletter_forecasts(forecast_date: str) -> List[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(row) for row in conn.execute(
+            '''SELECT p.email, s.manage_token, p.county_fips, p.min_danger_level,
+                      f.danger_level, f.summary, f.forecast_run_id
+               FROM newsletter_preferences p
+               JOIN newsletter_subscribers s ON s.email = p.email
+               JOIN county_forecast_days f ON f.county_fips = p.county_fips
+                                           AND f.forecast_date = ?
+                                           AND f.danger_level >= p.min_danger_level
+               WHERE EXISTS (
+                   SELECT 1
+                   FROM json_each(
+                       CASE WHEN json_valid(s.subscription_types_json)
+                            THEN s.subscription_types_json ELSE '[]' END
+                   )
+                   WHERE value = 'fire-weather-forecasts'
+               )
+                 AND s.unsubscribed_at IS NULL
+               ORDER BY p.email, p.county_fips''',
+            (forecast_date,),
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+def claim_newsletter_delivery(email: str, county_fips: str, forecast_date: str) -> bool:
+    conn = sqlite3.connect(get_db_path(), isolation_level=None)
+    try:
+        cursor = conn.execute(
+            '''INSERT OR IGNORE INTO newsletter_deliveries
+               (email, county_fips, forecast_date, status, claimed_at)
+               VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)''',
+            (email, county_fips, forecast_date),
+        )
+        if cursor.rowcount == 1:
+            return True
+        stale = conn.execute(
+            '''UPDATE newsletter_deliveries
+               SET status = 'pending', error = NULL, claimed_at = CURRENT_TIMESTAMP
+               WHERE email = ? AND county_fips = ? AND forecast_date = ?
+                 AND status = 'pending'
+                 AND claimed_at <= datetime('now', '-30 minutes')''',
+            (email, county_fips, forecast_date),
+        )
+        if stale.rowcount == 1:
+            return True
+        retry = conn.execute(
+            '''UPDATE newsletter_deliveries
+               SET status = 'pending', error = NULL, claimed_at = CURRENT_TIMESTAMP
+               WHERE email = ? AND county_fips = ? AND forecast_date = ? AND status = 'failed' ''',
+            (email, county_fips, forecast_date),
+        )
+        return retry.rowcount == 1
+    finally:
+        conn.close()
+
+
+def complete_newsletter_delivery(
+    email: str, county_fips: str, forecast_date: str,
+    status: str, provider_message_id: str = "", error: str = "",
+) -> None:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        conn.execute(
+            '''UPDATE newsletter_deliveries
+               SET status = ?, provider_message_id = ?, error = ?, claimed_at = NULL, sent_at =
+                   CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE sent_at END
+               WHERE email = ? AND county_fips = ? AND forecast_date = ?''',
+            (status, provider_message_id, error[:2000], status, email, county_fips, forecast_date),
+        )
+        conn.commit()
     finally:
         conn.close()

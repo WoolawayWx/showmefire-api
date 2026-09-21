@@ -87,6 +87,20 @@ else
     echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
 fi
 
+# Beta must never be able to touch production's own state - without these,
+# DailyForecast_ModelFD.py falls back to its own unsafe defaults (writes
+# under PROJECT_DIR, FORECAST_STATUS_KEY='ForecastFireDanger' - the SAME
+# key the production run above just wrote - FORECAST_WRITE_DATABASE=True,
+# MODEL_SHADOW_ENABLED=True), silently overwriting the operational status
+# and re-triggering shadow scoring a second time every day. Same isolation
+# services/forecast_jobs.py's BETA_FORECAST_ENV already applies to the
+# admin-triggered beta run - kept in sync with that dict.
+export FORECAST_OUTPUT_ROOT="$("$PYTHON" -c "from services.beta_products import BETA_ROOT; print(BETA_ROOT / 'forecast')")"
+export FORECAST_STATUS_KEY="ForecastFireDangerBeta"
+export FORECAST_WRITE_DATABASE="false"
+export MODEL_SHADOW_ENABLED="false"
+export uploadForecast="false"
+
 run_step "Running BETA Forecast" "$PROJECT_DIR/forecast/DailyForecast_ModelFD.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then

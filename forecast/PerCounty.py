@@ -3,11 +3,15 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.features import geometry_mask
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from core.database import init_database, upsert_county_forecast_day
 
 # Danger levels: 0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme
 # 255 = nodata in the GeoTIFF
 DANGER_LABELS = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
-AREA_THRESHOLD = 0.20  # A level must cover ≥10% of the county to count
+AREA_THRESHOLD = 0.20  # A level must cover at least 20% of the county to count
 
 COUNTY_SHAPEFILE = 'maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'
 FIRE_DANGER_TIF  = '/app/gis/peak_fire_danger.tif'
@@ -51,6 +55,7 @@ def classify_county(values: np.ndarray) -> int | None:
 
 
 def main():
+    init_database()
     counties = gpd.read_file(COUNTY_SHAPEFILE)
 
     with rasterio.open(FIRE_DANGER_TIF) as src:
@@ -81,11 +86,23 @@ def main():
             county_cells = county_cells[county_cells != nodata]
 
         level = classify_county(county_cells)
+        raw_fips = str(row.get('COUNTYFIPS') or '').strip()
+        county_fips = raw_fips if len(raw_fips) == 5 else f"29{raw_fips.zfill(3)}"
 
         results.append({
             'county': county_name,
+            'county_fips': county_fips,
             'max_fire_danger': level,
         })
+
+        if level is not None:
+            upsert_county_forecast_day(
+                datetime.now(ZoneInfo("America/Chicago")).date().isoformat(),
+                county_fips,
+                level,
+                f"{DANGER_LABELS[level]} fire danger forecast for {county_name} County.",
+                datetime.now(ZoneInfo("America/Chicago")).strftime("%Y%m%d"),
+            )
 
         pct_str = ''
         if level is not None and len(county_cells) > 0:
