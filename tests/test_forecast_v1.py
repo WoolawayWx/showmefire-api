@@ -61,6 +61,7 @@ def test_herbie_acquisition_normalizes_clips_and_checks_hours(tmp_path):
     cube = acquire_source(spec, cycle, tmp_path, fast_herbie_factory=FakeFastHerbie, progress_callback=progress.append)
     assert cube.dataset.sizes == {"member": 1, "time": 2, "y": 2, "x": 2}
     assert cube.dataset.attrs["acquisition"] == "herbie-indexed-grib"
+    assert "optional unavailable" in cube.dataset.attrs["acquisition_warnings"]
     assert float(cube.dataset.temperature_2m.mean()) == pytest.approx(21.85)
     assert progress == [{"event": "member_completed", "member": "deterministic", "completed": 1, "total": 1}]
 
@@ -264,9 +265,9 @@ def test_station_api_uses_null_safe_nested_contract(tmp_path, monkeypatch):
     ensure_schema(db)
     monkeypatch.setattr("forecast_v1.repository.get_db_path", lambda: db)
     with sqlite3.connect(db) as connection:
-        connection.execute("INSERT INTO forecast_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        connection.execute("INSERT INTO forecast_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             "20260906T1200Z-v1", "2026-09-06T12:00:00Z", "2026-09-06T13:00:00Z", "2026-09-06T13:01:00Z",
-            "complete", 1, PUBLIC_GRID.id, 72, "forecast-v1", "beta-1", "physics-1", "{}", None, None, "[]", None, "2026-09-06T13:00:00Z",
+            "complete", 1, PUBLIC_GRID.id, 72, "forecast-v1", "beta-1", "physics-1", "{}", None, None, "[]", None, "2026-09-06T13:00:00Z", "[]",
         ))
         connection.execute("INSERT INTO forecast_station_metadata VALUES (?,?,?,?,?,?,?,?,?,?)", (
             "TEST", "Test RAWS", 38.5, -92.5, "RAWS", 250.0, "America/Chicago", 1, '{"fuelMoisture":true}', "2026-09-06T13:00:00Z",
@@ -291,6 +292,17 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
 
     db = tmp_path / "admin.db"
     ensure_schema(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            """INSERT INTO forecast_runs
+               (run_id,cycle_time_utc,status,is_public,grid_id,horizon_hours,schema_version,config_version,
+                model_version,source_cycles_json,warnings_json,source_diagnostics_json,created_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("20260906T1200Z-v1", "2026-09-06T12:00:00Z", "complete", 0, PUBLIC_GRID.id, 72,
+             "forecast-v1", "beta-1", "physics-1", "{}", '["source_unavailable:rrfs:ValueError"]',
+             '[{"source":"rrfs","role":"operational","status":"unavailable","severity":"warning","code":"source_unavailable","message":"ValueError: rotated_ll failed","missingFields":[],"affectedLeadHours":[49,72]}]',
+             "2026-09-06T13:00:00Z"),
+        )
     monkeypatch.setattr("forecast_v1.repository.get_db_path", lambda: db)
     app = FastAPI()
     app.include_router(forecast_v1_admin.router)
@@ -307,6 +319,10 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
     status_response = client.get("/api/admin/forecast-v1/status")
     assert status_response.status_code == 200
     assert status_response.json()["schedule"]["policy"].startswith("HRRR through hour 48")
+    assert status_response.json()["runs"][0]["warnings"] == ["source_unavailable:rrfs:ValueError"]
+    assert status_response.json()["runs"][0]["sourceDiagnostics"][0]["message"] == "ValueError: rotated_ll failed"
+    assert status_response.json()["monitoring"]["recentCompletedRuns"] == 1
+    assert status_response.json()["monitoring"]["rrfsSuccessCount"] == 0
     assert client.get("/api/admin/forecast-v1/job").json() == {"status": "idle"}
     run_response = client.post("/api/admin/forecast-v1/run")
     assert run_response.status_code == 202
@@ -373,9 +389,9 @@ def test_publication_failure_keeps_previous_run_public(tmp_path):
     db = tmp_path / "failure.db"
     ensure_schema(db)
     with sqlite3.connect(db) as connection:
-        connection.execute("INSERT INTO forecast_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        connection.execute("INSERT INTO forecast_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             "previous-v1", "2026-09-05T12:00:00Z", "2026-09-05T13:00:00Z", "2026-09-05T13:01:00Z",
-            "complete", 1, PUBLIC_GRID.id, 72, "forecast-v1", "beta-1", "physics-1", "{}", None, None, "[]", None, "2026-09-05T13:00:00Z",
+            "complete", 1, PUBLIC_GRID.id, 72, "forecast-v1", "beta-1", "physics-1", "{}", None, None, "[]", None, "2026-09-05T13:00:00Z", "[]",
         ))
     zero_cycle = datetime(2026, 9, 6, 0, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="12Z"):
@@ -425,6 +441,8 @@ def test_synthetic_publication_writes_73_hour_three_day_contract(tmp_path, monke
     assert len(manifest["staticAssets"]) == 32
     assert {asset["day"] for asset in manifest["staticAssets"]} == {2, 3}
     assert manifest["legacyAliases"] == {}
+    assert manifest["sourceDiagnostics"] == []
+    assert manifest["confidenceCoverage"]["meteorological_confidence"] == 0.0
     hourly_asset = next(layer for layer in manifest["layers"] if layer["variable"] == "fire_danger" and layer["aggregation"] == "hourly")
     assert "{lead_hour}" in hourly_asset["tileUrl"]
     with sqlite3.connect(db) as connection:

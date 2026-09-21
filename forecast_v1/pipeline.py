@@ -391,6 +391,8 @@ def _publish_run_impl(
     publish_root: str | Path, config_version: str = "beta-1", model_version: str = "physics-only-beta-1",
     make_public: bool = False, db_path: str | Path | None = None, r2_store: ForecastR2Store | None = None,
     confidence_components: dict[str, xr.DataArray | float] | None = None,
+    run_warnings: tuple[str, ...] | list[str] = (),
+    source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
@@ -427,12 +429,31 @@ def _publish_run_impl(
         forecast["source_mask"] = forecast.source_mask | initialization.source_mask.broadcast_like(forecast.source_mask)
     forecast.attrs.update(schema_version=SCHEMA_VERSION, run_id=run_id, cycle_time=utc_rfc3339(cycle), grid_id=PUBLIC_GRID.id, crs=PUBLIC_GRID.crs)
     assets: list[dict] = []
-    warnings = sorted({flag for cube in cubes.values() for flag in cube.quality_flags})
+    # Only operational run degradation belongs in this legacy list. Source
+    # completeness remains attached to its source and is exposed through the
+    # structured diagnostics below.
+    warnings = list(run_warnings)
     if bool(((forecast.quality_mask & QUALITY_BITS["coarse_synoptic_fallback"]) != 0).any()):
         warnings.append("coarse_synoptic_fallback:gefs:49-72")
-    if confidence_components is None:
+    confidence_available = bool((forecast.meteorological_confidence != 255).any())
+    if not confidence_available:
         warnings.append("meteorological_confidence_inputs_unavailable")
+    elif (
+        bool(((forecast.quality_mask & QUALITY_BITS["partial_confidence_inputs"]) != 0).any())
+        or bool(((forecast.fire_danger != 255) & (forecast.meteorological_confidence == 255)).any())
+    ):
+        warnings.append("partial_confidence_inputs")
     warnings = sorted(set(warnings))
+    confidence_coverage = {
+        name: round(float(np.isfinite(value).mean()), 4) if isinstance(value, xr.DataArray)
+        else float(np.isfinite(value))
+        for name, value in (confidence_components or {}).items()
+    }
+    for name in ("model_agreement", "ensemble_spread", "cycle_consistency", "rolling_verification"):
+        confidence_coverage.setdefault(name, 0.0)
+    confidence_coverage["meteorological_confidence"] = round(
+        float((forecast.meteorological_confidence != 255).mean()), 4
+    )
     valid_times = [utc_rfc3339(datetime.fromisoformat(np.datetime_as_string(value, unit="s")).replace(tzinfo=timezone.utc)) for value in forecast.time.values]
     cube_path = write_netcdf(forecast, staging / "derived" / "forecast_cube.nc")
     assets.append(artifact_record(cube_path, run_id=run_id, kind="cube", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/derived/forecast_cube.nc", dtype="NetCDF4", valid_start=valid_times[0], valid_end=valid_times[-1]))
@@ -498,7 +519,9 @@ def _publish_run_impl(
         "horizonHours": HORIZON_HOURS, "timeCount": TIME_COUNT,
         "grid": {"id": PUBLIC_GRID.id, "crs": PUBLIC_GRID.crs, "width": PUBLIC_GRID.width, "height": PUBLIC_GRID.height, "resolutionMeters": PUBLIC_GRID.resolution_m, "bounds": PUBLIC_GRID.bounds},
         "sources": [{"model": name, "cycleTime": utc_rfc3339(cube.cycle_time), "members": source_member_count(cube), "publicSummaryMembers": len(cube.member_ids), "status": "available", "qualityFlags": list(cube.quality_flags)} for name, cube in cubes.items()],
-        "modelVersion": model_version, "configVersion": config_version, "warnings": warnings, "layers": layers,
+        "modelVersion": model_version, "configVersion": config_version, "warnings": warnings,
+        "sourceDiagnostics": list(source_diagnostics), "confidenceCoverage": confidence_coverage,
+        "layers": layers,
         "confidenceMethod": {
             "meteorological": {"modelAgreement": 0.30, "ensembleSpread": 0.25, "cycleConsistency": 0.20, "rollingVerification": 0.15, "leadTime": 0.10},
             "category": "percentage of calibrated forecast scenarios matching the deterministic category",
@@ -544,6 +567,7 @@ def _publish_run_impl(
             "schema_version": SCHEMA_VERSION, "config_version": config_version, "model_version": model_version,
             "source_cycles_json": json_text({name: utc_rfc3339(cube.cycle_time) for name, cube in cubes.items()}),
             "manifest_key": assets[-1]["object_key"], "manifest_checksum": manifest_checksum, "warnings_json": json_text(warnings),
+            "source_diagnostics_json": json_text(list(source_diagnostics)),
             "superseded_run_id": previous[0] if make_public and previous else None, "created_at_utc": now,
         })
         replace_assets(connection, run_id, assets)
@@ -574,6 +598,8 @@ def publish_run(
     publish_root: str | Path, config_version: str = "beta-1", model_version: str = "physics-only-beta-1",
     make_public: bool = False, db_path: str | Path | None = None, r2_store: ForecastR2Store | None = None,
     confidence_components: dict[str, xr.DataArray | float] | None = None,
+    run_warnings: tuple[str, ...] | list[str] = (),
+    source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
@@ -596,7 +622,8 @@ def publish_run(
             "status": "staging", "is_public": 0, "grid_id": PUBLIC_GRID.id, "horizon_hours": HORIZON_HOURS,
             "schema_version": SCHEMA_VERSION, "config_version": config_version, "model_version": model_version,
             "source_cycles_json": json_text({name: utc_rfc3339(cube.cycle_time) for name, cube in cubes.items()}),
-            "manifest_key": None, "manifest_checksum": None, "warnings_json": "[]", "superseded_run_id": None,
+            "manifest_key": None, "manifest_checksum": None, "warnings_json": json_text(list(run_warnings)),
+            "source_diagnostics_json": json_text(list(source_diagnostics)), "superseded_run_id": None,
             "created_at_utc": started,
         })
     try:
@@ -604,6 +631,7 @@ def publish_run(
             cubes, stations, initial_fuel_moisture=initial_fuel_moisture, publish_root=publish_root,
             config_version=config_version, model_version=model_version, make_public=make_public, db_path=database,
             r2_store=r2_store, confidence_components=confidence_components, predicted_residuals=predicted_residuals,
+            run_warnings=run_warnings, source_diagnostics=source_diagnostics,
             fuel_quantile_residuals=fuel_quantile_residuals, source_member_rows=source_member_rows,
             progress_callback=progress_callback,
         )

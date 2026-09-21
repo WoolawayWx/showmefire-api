@@ -47,16 +47,37 @@ shared heavy-job pool defaults to at most two workers to prevent CPU-rich hosts
 from accidentally running many memory-intensive grid jobs simultaneously.
 
 `SMF_REFS_MEMBERS`, `SMF_GEFS_MEMBERS`, `SMF_RRFS_PRODUCT`, and
-`SMF_RRFS_DOMAIN` can override feed details without changing code. Until the
-operational RRFS/REFS feed is available, HRRR remains authoritative through
-hour 48 and the GEFS ensemble mean supplies a coarse synoptic fallback for
+`SMF_RRFS_DOMAIN` can override feed details without changing code. The local
+RRFS template targets the NOAA operational `noaa-rrfs-ops-pds` bucket; the
+Docker build checks that the weather `herbie-data` distribution supports the
+RRFS rotated grid. HRRR remains authoritative through hour 48. If RRFS is
+unavailable, the GEFS ensemble mean supplies a coarse synoptic fallback for
 hours 49-72. Those hours carry `coarse_synoptic_fallback`, are disclosed in
 the run manifest, and have category/meteorological confidence capped at 49.
 If neither RRFS nor GEFS is complete, publication fails closed.
 
+Run-level `warnings` retain their string-array API contract and contain only
+operational degradation: RRFS loss, GEFS fallback, or partial/unavailable
+meteorological confidence. `sourceDiagnostics` in the manifest and admin
+status provide source/role/severity, affected leads, missing fields, and the
+sanitized full acquisition error. FV3-HIRES is a zero-weight shadow source;
+its missing fields remain informational and do not raise the global degraded
+banner.
+
+Meteorological confidence uses available model agreement, REFS/GEFS ensemble
+spread, previous-cycle consistency at matching valid times, 30-day station
+verification, and lead time. It renormalizes the configured weights over
+available components. A real score needs agreement or spread and at least
+35% available weight; otherwise it remains NoData. The hourly Synoptic refresh
+stores normalized sensor values and matches completed forecast hours to
+QC-eligible observations within 30 minutes. Rolling verification activates
+only after 30 pairs from at least three stations in a lead bucket.
+
 The authenticated operations console is `/admin/forecast-v1`. Its status API
 reports whether the application scheduler and forecast job are enabled, the
-current/next eligible 12Z cycle, recent runs, warnings, storage totals, static
+current/next eligible 12Z cycle, recent runs, warnings, source diagnostics,
+confidence-component coverage, RRFS/fallback counts, verification samples,
+storage totals, static
 graphics, and station choices. Admins can queue a non-blocking run or invoke
 the normal retention cleanup. A shared execution lock prevents a manual run
 from overlapping the scheduled acquisition.
@@ -98,6 +119,13 @@ Set the public flag only after the verification gates pass. R2 upload is
 automatic when the standard R2 credentials are present. Objects use the
 `forecast-v1/` namespace and are checked after upload. `latest.json` is updated
 last.
+
+For rollout, migrate SQLite first by running `forecast_v1.repository.ensure_schema`
+or starting the new API, then deploy the worker. Leave
+`SMF_FORECAST_V1_PUBLIC=false` for a two-hour RRFS canary and a complete
+73-hour shadow run. Require two consecutive successful 12Z shadow cycles
+with RRFS hours 49-72, no GEFS fallback, populated supported confidence,
+and aligned public grids before changing the public flag.
 
 ## Persisted data
 

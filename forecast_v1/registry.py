@@ -200,6 +200,7 @@ def extra_specs(now: datetime | None = None) -> tuple[AcquisitionSpec, ...]:
         specs.append(AcquisitionSpec(
             model["key"], params["herbie_model"], params["product"], params["leads"],
             params["members"], domain=params.get("domain"), required=False,
+            role="shadow" if model["status"] == "shadow" else "operational",
         ))
     return tuple(specs)
 

@@ -226,20 +226,40 @@ def add_risk_and_confidence(
     lead_scores = np.array([100 if i <= 18 else 90 if i <= 36 else 75 if i <= 48 else 60 for i in range(result.sizes["time"])], dtype=np.float32)
     lead_score = xr.DataArray(lead_scores, dims="time", coords={"time": result.time}).broadcast_like(result.temperature_2m)
     valid = result.fire_danger != 255
-    required_components = {"model_agreement", "ensemble_spread", "cycle_consistency", "rolling_verification"}
-    if confidence_components and required_components <= set(confidence_components):
-        def component(name: str) -> xr.DataArray:
-            value = confidence_components[name]
-            return xr.full_like(result.temperature_2m, float(value)) if np.isscalar(value) else value.broadcast_like(result.temperature_2m)
-        met = (
-            0.30 * component("model_agreement") + 0.25 * component("ensemble_spread")
-            + 0.20 * component("cycle_consistency") + 0.15 * component("rolling_verification")
-            + 0.10 * lead_score
+    component_weights = {
+        "model_agreement": 0.30, "ensemble_spread": 0.25,
+        "cycle_consistency": 0.20, "rolling_verification": 0.15,
+    }
+    component_values: dict[str, xr.DataArray] = {}
+    weighted = xr.zeros_like(result.temperature_2m, dtype="float32")
+    available_weight = xr.zeros_like(result.temperature_2m, dtype="float32")
+    for name, weight in component_weights.items():
+        raw = (confidence_components or {}).get(name)
+        value = (
+            xr.full_like(result.temperature_2m, np.nan, dtype="float32") if raw is None
+            else xr.full_like(result.temperature_2m, float(raw), dtype="float32") if np.isscalar(raw)
+            else raw.broadcast_like(result.temperature_2m).astype("float32")
         )
-        result["meteorological_confidence"] = xr.where(valid & np.isfinite(met), np.rint(met).clip(0, 100), 255).astype("uint8")
-    else:
-        result["meteorological_confidence"] = xr.full_like(result.fire_danger, 255, dtype="uint8")
-        result["quality_mask"] = result.quality_mask | QUALITY_BITS["insufficient_confidence"]
+        component_values[name] = value
+        finite = np.isfinite(value)
+        weighted = weighted + xr.where(finite, value * weight, 0.0)
+        available_weight = available_weight + xr.where(finite, weight, 0.0)
+    realtime = np.isfinite(component_values["model_agreement"]) | np.isfinite(component_values["ensemble_spread"])
+    total_weight = available_weight + 0.10
+    supported = realtime & (total_weight >= 0.35)
+    met = (weighted + 0.10 * lead_score) / total_weight.where(total_weight > 0)
+    confidence_valid = valid & supported & np.isfinite(met)
+    result["meteorological_confidence"] = xr.where(
+        confidence_valid, np.rint(met).clip(0, 100), 255
+    ).astype("uint8")
+    partial = confidence_valid & (available_weight < sum(component_weights.values()))
+    insufficient = valid & ~confidence_valid
+    result["quality_mask"] = xr.where(
+        partial, result.quality_mask | QUALITY_BITS["partial_confidence_inputs"], result.quality_mask
+    ).astype("uint16")
+    result["quality_mask"] = xr.where(
+        insufficient, result.quality_mask | QUALITY_BITS["insufficient_confidence"], result.quality_mask
+    ).astype("uint16")
 
     rng = np.random.default_rng(seed)
     published = result.fire_danger.values

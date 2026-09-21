@@ -103,14 +103,54 @@ def forecast_v1_admin_status(token: Optional[str] = None):
             "SELECT kind,COUNT(*) AS asset_count,COALESCE(SUM(byte_size),0) AS bytes FROM forecast_assets "
             "WHERE status='ready' GROUP BY kind ORDER BY kind"
         ).fetchall()
+        verification_counts = connection.execute(
+            """SELECT lead_bucket,COUNT(*) AS samples,COUNT(DISTINCT station_id) AS stations
+               FROM forecast_verification WHERE qc_eligible=1 AND valid_time_utc>=?
+               GROUP BY lead_bucket""",
+            (utc_rfc3339(datetime.now(timezone.utc) - timedelta(days=30)),),
+        ).fetchall()
+        recent_matches = connection.execute(
+            "SELECT COUNT(*) FROM forecast_verification WHERE qc_eligible=1 AND valid_time_utc>=?",
+            (utc_rfc3339(datetime.now(timezone.utc) - timedelta(hours=24)),),
+        ).fetchone()[0]
+        manifest_path = None
+        if latest:
+            asset = connection.execute(
+                "SELECT local_path FROM forecast_assets WHERE run_id=? AND kind='manifest' LIMIT 1",
+                (latest["run_id"],),
+            ).fetchone()
+            manifest_path = Path(asset[0]) if asset and asset[0] else None
+    confidence_coverage = {}
+    if manifest_path and manifest_path.is_file():
+        try:
+            manifest = _decode_json(manifest_path.read_text(encoding="utf-8"), {})
+            if isinstance(manifest, dict) and isinstance(manifest.get("confidenceCoverage"), dict):
+                confidence_coverage = manifest["confidenceCoverage"]
+        except OSError:
+            pass
     runs = [{
         "runId": row["run_id"], "cycleTime": row["cycle_time_utc"], "issuedAt": row["issued_at_utc"],
         "completedAt": row["completed_at_utc"], "status": row["status"], "public": bool(row["is_public"]),
         "horizonHours": row["horizon_hours"], "sources": _decode_json(row["source_cycles_json"], {}),
         "warnings": _decode_json(row["warnings_json"], []),
+        "sourceDiagnostics": _decode_json(row["source_diagnostics_json"], []),
     } for row in run_rows]
+    completed_runs = [run for run in runs if run["status"] in {"complete", "superseded"}]
     return {
         "schedule": _schedule_status(), "job": get_forecast_v1_job_status(), "runs": runs,
+        "monitoring": {
+            "recentCompletedRuns": len(completed_runs),
+            "rrfsSuccessCount": sum("rrfs" in run["sources"] for run in completed_runs),
+            "gefsFallbackCount": sum(
+                "coarse_synoptic_fallback:gefs:49-72" in run["warnings"] for run in completed_runs
+            ),
+            "confidenceCoverage": confidence_coverage,
+            "eligibleObservationMatches24h": recent_matches,
+            "verificationSamples30d": {
+                row["lead_bucket"]: {"pairs": row["samples"], "stations": row["stations"]}
+                for row in verification_counts
+            },
+        },
         "latestRunId": latest["run_id"] if latest else None,
         "graphics": [{
             "variable": row["variable"], "aggregation": row["aggregation"],

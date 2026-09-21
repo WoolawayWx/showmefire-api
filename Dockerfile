@@ -41,6 +41,41 @@ COPY requirements.pyretechnics.txt .
 RUN python -m pip install --no-cache-dir --no-deps -r requirements.pyretechnics.txt \
     && python -c "import numpy, pyretechnics.surface_fire; assert numpy.__version__ == '2.2.6'"
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
+RUN python - <<'PY'
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
+from types import SimpleNamespace
+
+import xarray as xr
+from herbie.crs import get_cf_crs
+
+rrfs_module = import_module("herbie.models.rrfs")
+
+assert version("herbie-data") == "2025.12.0"
+try:
+    version("herbie")
+except PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("the unrelated PyPI package 'herbie' must not be installed")
+
+data = xr.DataArray(
+    [[0.0]], dims=("y", "x"),
+    attrs={
+        "GRIB_shapeOfTheEarth": 6,
+        "GRIB_gridType": "rotated_ll",
+        "GRIB_longitudeOfSouthernPoleInDegrees": 247.0,
+        "GRIB_latitudeOfSouthernPoleInDegrees": -35.0,
+    },
+)
+dataset = xr.Dataset({"t2m": data}, attrs={"model": "rrfs"})
+assert get_cf_crs(dataset)["grid_mapping_name"] == "rotated_latitude_longitude"
+
+probe = SimpleNamespace(product="2dfld.13km", date=__import__("datetime").datetime(2026, 9, 19, 12), fxx=1)
+probe.get_remoteFileName = "probe.grib2"
+rrfs_module.rrfs.template(probe)
+assert "noaa-rrfs-ops-pds" in probe.SOURCES["aws"]
+PY
 
 
 # ---------- Runtime stage ----------

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Literal
 
 import numpy as np
 import pyproj
@@ -24,6 +25,16 @@ from .adapters import ADAPTERS, SourceCube
 from .contracts import HORIZON_HOURS
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitized_error(error: object) -> str:
+    message = str(error).replace("\r", " ").replace("\n", " ")
+    message = re.sub(
+        r"(?i)(token|api[_-]?key|access[_-]?key|secret[_-]?key|authorization)=([^&\s]+)",
+        r"\1=<redacted>", message,
+    )
+    message = re.sub(r"(?i)(authorization\s*:\s*(?:bearer|basic))\s+\S+", r"\1 <redacted>", message)
+    return re.sub(r"\s+", " ", message).strip()
 
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
 SURFACE_SEARCHES = (
@@ -62,6 +73,31 @@ class AcquisitionSpec:
     members: tuple[str | int | None, ...]
     domain: str | None = None
     required: bool = False
+    role: Literal["operational", "fallback", "shadow"] = "operational"
+
+
+@dataclass(frozen=True)
+class SourceDiagnostic:
+    source: str
+    role: Literal["operational", "fallback", "shadow"]
+    status: Literal["available", "degraded", "unavailable"]
+    severity: Literal["info", "warning", "error"]
+    code: str
+    message: str
+    missing_fields: tuple[str, ...] = ()
+    affected_lead_hours: tuple[int, int] | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "role": self.role,
+            "status": self.status,
+            "severity": self.severity,
+            "code": self.code,
+            "message": self.message,
+            "missingFields": list(self.missing_fields),
+            "affectedLeadHours": list(self.affected_lead_hours) if self.affected_lead_hours else [],
+        }
 
 
 @dataclass(frozen=True)
@@ -69,6 +105,7 @@ class AcquisitionResult:
     cycle_time: datetime
     cubes: dict[str, SourceCube]
     warnings: tuple[str, ...]
+    diagnostics: tuple[SourceDiagnostic, ...] = ()
 
 
 def latest_publishable_12z(now: datetime | None = None, *, minimum_age_hours: int = 6) -> datetime:
@@ -118,7 +155,7 @@ def default_specs() -> tuple[AcquisitionSpec, ...]:
         specs.append(
             AcquisitionSpec("refs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), refs, domain=rrfs_domain)
         )
-    specs.append(AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs))
+    specs.append(AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs, role="fallback"))
     # Local import: registry.py imports AcquisitionSpec from this module, so a
     # module-level import here would be circular.
     from .registry import extra_specs
@@ -242,6 +279,14 @@ def _detect_crs(dataset: xr.Dataset) -> pyproj.CRS:
                 f"+proj=lcc +lat_0={lat0} +lon_0={lon0} +lat_1={lat1} "
                 f"+lat_2={lat2} +R=6371229 +units=m +no_defs"
             )
+        if attrs.get("GRIB_gridType") == "rotated_ll":
+            southern_lon = attrs.get("GRIB_longitudeOfSouthernPoleInDegrees")
+            southern_lat = attrs.get("GRIB_latitudeOfSouthernPoleInDegrees")
+            if southern_lon is not None and southern_lat is not None:
+                return pyproj.CRS.from_proj4(
+                    f"+proj=ob_tran +o_proj=longlat +lon_0={float(southern_lon)} "
+                    f"+o_lon_p=0 +o_lat_p={-float(southern_lat)} +R=6371229 +no_defs"
+                )
     # GEFS is a regular geographic grid.
     return pyproj.CRS.from_epsg(4326)
 
@@ -313,7 +358,7 @@ def _fetch_member(
                 break
             except Exception as error:
                 if attempt == attempts:
-                    errors.append(f"{search}:{type(error).__name__}")
+                    errors.append(f"{search}:{type(error).__name__}: {_sanitized_error(error)}")
                 else:
                     logger.warning(
                         "%s %s query failed on attempt %d/%d: %s",
@@ -321,7 +366,8 @@ def _fetch_member(
                     )
                     time.sleep(min(attempt, 2))
     if not groups:
-        raise RuntimeError("Herbie returned no forecast-v1 surface fields")
+        detail = "; ".join(errors) if errors else "no query results"
+        raise RuntimeError(f"Herbie returned no forecast-v1 surface fields; {detail}")
     surface = xr.merge(groups, compat="override", join="outer")
     if errors:
         surface.attrs["acquisition_warnings"] = ";".join(errors)
@@ -330,6 +376,9 @@ def _fetch_member(
         surface = xr.merge([surface, upper], compat="override", join="outer")
     except Exception as error:
         logger.info("%s optional upper-air fields unavailable for %s: %s", spec.public_name, member, error)
+        errors.append(f"{UPPER_AIR_SEARCH}:{type(error).__name__}: {_sanitized_error(error)}")
+    if errors:
+        surface.attrs["acquisition_warnings"] = ";".join(errors)
     canonical = _canonicalize_variables(surface)
     flags = []
     if "weasd" not in canonical and cycle.month in {5, 6, 7, 8, 9} and "t2m" in canonical:
@@ -398,8 +447,24 @@ def acquire_source(
         member_datasets.append(dataset.expand_dims(member=[member_name]))
         member_names.append(member_name)
     combined = xr.concat(member_datasets, dim="member", join="outer", compat="override", coords="minimal")
+    member_errors = [
+        f"{member_names[index]}: {dataset.attrs['acquisition_warnings']}"
+        for index, dataset in enumerate(member_datasets)
+        if dataset.attrs.get("acquisition_warnings")
+    ]
+    if member_errors:
+        combined.attrs["acquisition_warnings"] = "; ".join(member_errors)
     if spec.public_name == "gefs":
         combined = _hourly_gefs(combined, cycle)
+    # RRFS analyses do not publish APCP at f000.  A missing initialization
+    # value is a real zero increment, not a missing required field, whenever
+    # later forecast hours contain precipitation increments.
+    precipitation = next((name for name in ("tp", "apcp", "precipitation_increment") if name in combined), None)
+    if precipitation and combined.sizes.get("time", 0) > 1:
+        data = combined[precipitation]
+        if not bool(data.isel(time=0).notnull().any()) and bool(data.isel(time=slice(1, None)).notnull().any()):
+            combined[precipitation] = data.where(data.time != data.time.values[0], 0.0)
+            combined[precipitation].attrs.update(data.attrs)
     combined.attrs.update(cycle_time=cycle.isoformat().replace("+00:00", "Z"), acquisition="herbie-indexed-grib")
     try:
         cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
@@ -430,6 +495,7 @@ def acquire_cycle(
     cycle = cycle.astimezone(timezone.utc)
     cubes: dict[str, SourceCube] = {}
     warnings: list[str] = []
+    diagnostics: list[SourceDiagnostic] = []
     requested_specs = tuple(specs or default_specs())
     for source_index, spec in enumerate(requested_specs, 1):
         def source_progress(update: dict) -> None:
@@ -446,7 +512,10 @@ def acquire_cycle(
                 "completed": 0, "total": len(spec.members),
             })
         if spec.public_name == "refs" and "rrfs" not in cubes:
-            warnings.append("source_unavailable:refs:rrfs_feed_unavailable")
+            diagnostics.append(SourceDiagnostic(
+                "refs", spec.role, "unavailable", "warning", "source_unavailable",
+                "REFS was skipped because its RRFS feed was unavailable.", affected_lead_hours=(0, 72),
+            ))
             if progress_callback:
                 progress_callback({
                     "event": "source_skipped", "model": spec.public_name,
@@ -455,10 +524,32 @@ def acquire_cycle(
                 })
             continue
         try:
-            cubes[spec.public_name] = acquire_source(
+            cube = acquire_source(
                 spec, cycle, cache_dir, fast_herbie_factory=fast_herbie_factory,
                 progress_callback=source_progress,
             )
+            cubes[spec.public_name] = cube
+            missing_fields = tuple(sorted(
+                flag.split(":", 1)[1]
+                for flag in cube.quality_flags
+                if flag.startswith(("required_field_unavailable:", "optional_field_missing:"))
+            ))
+            if missing_fields:
+                query_errors = str(cube.dataset.attrs.get("acquisition_warnings") or "")
+                diagnostics.append(SourceDiagnostic(
+                    spec.public_name, spec.role, "degraded", "info" if spec.role == "shadow" else "warning",
+                    "field_completeness",
+                    f"{spec.public_name.upper()} is missing {len(missing_fields)} configured fields."
+                    + (f" Herbie query failures: {query_errors}" if query_errors else ""),
+                    missing_fields=missing_fields,
+                ))
+            else:
+                query_errors = str(cube.dataset.attrs.get("acquisition_warnings") or "")
+                diagnostics.append(SourceDiagnostic(
+                    spec.public_name, spec.role, "available", "info", "source_available",
+                    f"{spec.public_name.upper()} acquisition completed."
+                    + (f" Herbie query failures: {query_errors}" if query_errors else ""),
+                ))
             if spec.public_name not in ("hrrr", "rrfs", "refs", "gefs"):
                 from .registry import mark_acquired
                 mark_acquired(spec.public_name)
@@ -477,10 +568,20 @@ def acquire_cycle(
                 })
             if spec.required:
                 raise RuntimeError(f"required {spec.public_name} acquisition failed: {error}") from error
-            warnings.append(f"source_unavailable:{spec.public_name}:{type(error).__name__}")
+            if spec.public_name == "rrfs":
+                warnings.append(f"source_unavailable:{spec.public_name}:{type(error).__name__}")
+            diagnostics.append(SourceDiagnostic(
+                spec.public_name, spec.role, "unavailable", "info" if spec.role == "shadow" else "warning", "source_unavailable",
+                f"{type(error).__name__}: {_sanitized_error(error)}", affected_lead_hours=(min(spec.leads), max(spec.leads)),
+            ))
             logger.warning("Optional %s acquisition failed: %s", spec.public_name, error, exc_info=True)
     if "rrfs" not in cubes and "gefs" not in cubes:
         raise RuntimeError("lead hours 49-72 require RRFS or the GEFS coarse fallback")
     if "rrfs" not in cubes:
         warnings.append("coarse_synoptic_fallback:gefs:49-72")
-    return AcquisitionResult(cycle, cubes, tuple(warnings))
+        diagnostics.append(SourceDiagnostic(
+            "gefs", "fallback", "degraded", "warning", "coarse_synoptic_fallback",
+            "GEFS supplies the coarse synoptic fallback because RRFS is unavailable.",
+            affected_lead_hours=(49, 72),
+        ))
+    return AcquisitionResult(cycle, cubes, tuple(warnings), tuple(diagnostics))

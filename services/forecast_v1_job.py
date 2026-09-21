@@ -7,7 +7,6 @@ import logging
 import os
 import threading
 import uuid
-from dataclasses import replace
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -17,6 +16,7 @@ from services.synoptic import get_station_data
 from forecast_v1.acquisition import acquire_cycle, latest_publishable_12z
 from forecast_v1.adapters import ADAPTERS
 from forecast_v1.contracts import run_id_for_cycle
+from forecast_v1.confidence import build_confidence_inputs, load_previous_forecast
 from forecast_v1.engine import blend_sources
 from forecast_v1.pipeline import (
     archive_source_cube,
@@ -238,11 +238,18 @@ def _run_forecast_v1_staged_impl(make_public: bool | None = None) -> dict:
         native = native_cubes.pop(model)
         cubes[model] = regrid_to_public(summarize_ensemble_for_public(native))
     gc.collect()
+    _report_progress("blending", "Blending available models across all 73 hours", 75)
+    atmosphere = blend_sources(cubes)
+    confidence = build_confidence_inputs(
+        cubes, atmosphere, cycle,
+        previous=load_previous_forecast(cycle), db_path=get_db_path(),
+    )
     manifest = publish_run(
         cubes, stations, initial_fuel_moisture=float(cycle_payload.get("fallbackFuelMoisture", 12.0)),
         publish_root=publish_root,
         make_public=os.getenv("SMF_FORECAST_V1_PUBLIC", "false").lower() == "true" if make_public is None else make_public,
         r2_store=r2,
+        confidence_components=confidence.components,
         source_member_rows=source_member_rows,
         progress_callback=_publication_progress,
     )
@@ -348,8 +355,7 @@ def _run_forecast_v1_operational_impl(
     source_items = list(result.cubes.items())
     for model_index, (model, source) in enumerate(source_items, 1):
         _report_progress("archiving_sources", f"Packing and archiving {model.upper()}", 51 + round(10 * model_index / len(source_items)), model=model.upper(), current=model_index, total=len(source_items))
-        flags = tuple(sorted(set(source.quality_flags).union(result.warnings)))
-        native_cubes[model] = archive_source_cube(replace(source, quality_flags=flags), publish_root, r2)
+        native_cubes[model] = archive_source_cube(source, publish_root, r2)
     result.cubes.clear()
     _report_progress("station_extraction", "Extracting full-member forecasts at station locations", 63, current=0, total=len(stations))
     source_member_rows = extract_source_member_rows(native_cubes, stations, run_id)
@@ -362,12 +368,19 @@ def _run_forecast_v1_operational_impl(
     gc.collect()
     _report_progress("blending", "Blending available models across all 73 hours", 75)
     atmosphere = blend_sources(cubes)
+    confidence = build_confidence_inputs(
+        cubes, atmosphere, cycle,
+        previous=load_previous_forecast(cycle, database), db_path=database,
+    )
     _report_progress("fuel_initialization", "Initializing fuel moisture from recent station observations", 77)
     initialization = initialize_fuel_moisture(atmosphere, cycle, observations)
     manifest = publish_run(
         cubes, stations, initial_fuel_moisture=initialization, publish_root=publish_root,
         make_public=os.getenv("SMF_FORECAST_V1_PUBLIC", "false").lower() == "true" if make_public is None else make_public,
         r2_store=r2,
+        confidence_components=confidence.components,
+        run_warnings=result.warnings,
+        source_diagnostics=[diagnostic.as_dict() for diagnostic in result.diagnostics],
         source_member_rows=source_member_rows,
         progress_callback=_publication_progress,
     )

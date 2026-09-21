@@ -203,6 +203,17 @@ async def fetch_synoptic_data():
         station_data["error"] = None
         
         logger.info(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
+        try:
+            # Verification storage is intentionally best-effort: a database
+            # problem must not turn a successful station refresh into an API
+            # outage.
+            from forecast_v1.observations import persist_station_observations, update_forecast_verification
+
+            persisted = persist_station_observations(combined_stations)
+            matched = update_forecast_verification()
+            logger.info("Forecast verification refresh persisted=%s matched=%s", persisted, matched)
+        except Exception as verification_error:
+            logger.warning("Forecast verification refresh failed: %s", verification_error)
         _debug(
             "fetch_synoptic_data summary: "
             f"combined={len(combined_stations)} "

@@ -156,6 +156,7 @@ QUALITY_BITS: Final = {
     "correction_capped": 16,
     "insufficient_confidence": 32,
     "coarse_synoptic_fallback": 64,
+    "partial_confidence_inputs": 128,
 }
 
 PUBLIC_LAYER_STYLES: Final = {

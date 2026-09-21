@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
     warnings_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warnings_json)),
     superseded_run_id TEXT,
     created_at_utc TEXT NOT NULL,
+    source_diagnostics_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(source_diagnostics_json)),
     FOREIGN KEY(superseded_run_id) REFERENCES forecast_runs(run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_forecast_runs_public_cycle ON forecast_runs(is_public, cycle_time_utc DESC);
@@ -155,6 +156,11 @@ def ensure_schema(db_path: str | Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA_SQL)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(forecast_runs)")}
+        if "source_diagnostics_json" not in columns:
+            connection.execute(
+                "ALTER TABLE forecast_runs ADD COLUMN source_diagnostics_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
 
 @contextmanager
@@ -181,14 +187,18 @@ def upsert_run(connection: sqlite3.Connection, run: dict[str, Any]) -> None:
         "run_id", "cycle_time_utc", "issued_at_utc", "completed_at_utc", "status", "is_public",
         "grid_id", "horizon_hours", "schema_version", "config_version", "model_version",
         "source_cycles_json", "manifest_key", "manifest_checksum", "warnings_json",
-        "superseded_run_id", "created_at_utc",
+        "superseded_run_id", "created_at_utc", "source_diagnostics_json",
     )
-    values = [run.get(name) for name in columns]
+    values = [
+        (run.get(name) or "[]") if name == "source_diagnostics_json" else run.get(name)
+        for name in columns
+    ]
     connection.execute(
         f"INSERT INTO forecast_runs ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
         "ON CONFLICT(run_id) DO UPDATE SET completed_at_utc=excluded.completed_at_utc,status=excluded.status,"
         "is_public=excluded.is_public,manifest_key=excluded.manifest_key,manifest_checksum=excluded.manifest_checksum,"
-        "warnings_json=excluded.warnings_json,superseded_run_id=excluded.superseded_run_id",
+        "warnings_json=excluded.warnings_json,superseded_run_id=excluded.superseded_run_id,"
+        "source_diagnostics_json=excluded.source_diagnostics_json",
         values,
     )
 
