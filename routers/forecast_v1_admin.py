@@ -9,9 +9,10 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
 
 from core.config import FORECAST_V1_DIR
-from core.security import verify_token
+from core.security import verify_confirm_token, verify_token
 from forecast_v1.acquisition import latest_publishable_12z
 from forecast_v1.contracts import run_id_for_cycle, utc_rfc3339
 from forecast_v1.repository import ensure_schema, transaction
@@ -23,6 +24,12 @@ from services.forecast_v1_job import (
 
 
 router = APIRouter(prefix="/api/admin/forecast-v1", tags=["forecast-v1-admin"])
+
+RUN_ACTION = "run_forecast_v1"
+
+
+class RunConfirmation(BaseModel):
+    confirm_token: Optional[str] = None
 
 
 def _require_admin(token: Optional[str] = None) -> str:
@@ -164,8 +171,10 @@ def forecast_v1_admin_status(token: Optional[str] = None):
 
 
 @router.post("/run", status_code=status.HTTP_202_ACCEPTED)
-def run_forecast_v1_admin(token: Optional[str] = None):
+def run_forecast_v1_admin(payload: RunConfirmation = RunConfirmation(), token: Optional[str] = None):
     email = _require_admin(token)
+    if not verify_confirm_token(payload.confirm_token, RUN_ACTION):
+        raise HTTPException(status_code=401, detail="Password confirmation required or expired")
     try:
         return trigger_forecast_v1(email)
     except RuntimeError as error:

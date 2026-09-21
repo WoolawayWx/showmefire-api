@@ -324,7 +324,13 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
     assert status_response.json()["monitoring"]["recentCompletedRuns"] == 1
     assert status_response.json()["monitoring"]["rrfsSuccessCount"] == 0
     assert client.get("/api/admin/forecast-v1/job").json() == {"status": "idle"}
-    run_response = client.post("/api/admin/forecast-v1/run")
+
+    # /run additionally requires a password-confirmation token (see
+    # routers/admin_confirm.py) - a request without one is still rejected
+    # even once logged in.
+    assert client.post("/api/admin/forecast-v1/run").status_code == 401
+    monkeypatch.setattr(forecast_v1_admin, "verify_confirm_token", lambda token, action: "admin@example.org")
+    run_response = client.post("/api/admin/forecast-v1/run", json={"confirm_token": "dummy"})
     assert run_response.status_code == 202
     assert run_response.json()["requested_by"] == "admin@example.org"
 

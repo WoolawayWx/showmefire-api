@@ -20,6 +20,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(
     os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(ACCESS_TOKEN_EXPIRE_HOURS * 60))
 )
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+CONFIRM_TOKEN_EXPIRE_MINUTES = int(os.getenv("ADMIN_CONFIRM_TOKEN_EXPIRE_MINUTES", "2"))
 ACCESS_COOKIE_NAME = os.getenv("ACCESS_COOKIE_NAME", "admin_access")
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "admin_refresh")
 GRAPHICS_ACCESS_COOKIE_NAME = os.getenv("GRAPHICS_ACCESS_COOKIE_NAME", "graphics_access")
@@ -79,6 +80,29 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None):
         payload,
         expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
     )
+
+def create_confirm_token(email: str, action: str) -> str:
+    """Short-lived, action-scoped token proving the admin re-entered their
+    password just now (see routers/admin_confirm.py). `action` must match
+    exactly at verify time so a token minted to confirm one sensitive
+    action can't be replayed for another."""
+    return create_access_token(
+        {"sub": email, "type": "admin_confirm", "action": action},
+        timedelta(minutes=CONFIRM_TOKEN_EXPIRE_MINUTES),
+    )
+
+def verify_confirm_token(token: Optional[str], action: str) -> Optional[str]:
+    """Verify a confirm token minted for exactly this action. Returns the
+    admin email on success, None on any mismatch/expiry/absence."""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("type") != "admin_confirm" or payload.get("action") != action:
+        return None
+    return payload.get("sub")
 
 def set_request_token(token: Optional[str]):
     return _request_token.set(token)

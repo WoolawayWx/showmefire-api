@@ -2,14 +2,22 @@
 Loaders for the vendored county reference data used by the risk-fusion
 shadow hook.
 
-county_cells.json and county_reference.json are copied from
-model-training/risk_fusion/ (built there by scripts/build_county_cells.py
-and scripts/build_county_reference.py against a TRAINING-repo HRRR grid
-crop - see those scripts for provenance). They are NOT regenerated here
-and must NOT be assumed to align with whatever grid DailyForecast.py
-happens to be using at runtime - the two repos crop HRRR to different
-bounding boxes (MO_BUFFERED_BBOX in model-training vs
-DailyForecast.py's own mo_bounds), so their grids are different shapes.
+county_reference.json is copied from model-training/risk_fusion/ (built
+there by scripts/build_county_reference.py - grid-independent, just
+per-county area/region metadata, so no crop concerns).
+
+county_cells.json is copied from
+model-training/risk_fusion/county_cells_api.json, built there by
+`python scripts/build_county_cells.py --source hrrr_api`. That source
+reproduces DailyForecast.py's OWN two-step HRRR crop (core.domain.crop's
+buffered MO_BUFFERED_BBOX, then DailyForecast.py's own tighter
+`mo_bounds`) rather than the plain "hrrr" source's single buffered crop
+- the plain source's grid is (273, 267) and does NOT match what
+DailyForecast.py hands the shadow hooks at runtime, (196, 205). Do not
+regenerate this file from the plain "hrrr" source/output
+(risk_fusion/county_cells.json) - that was the cause of a real incident
+(2026-09-21) where every shadow hook silently zero-scored on a grid-shape
+mismatch for months.
 
 Anything that consumes county_cells()["cell_to_fips"] MUST first check
 county_cells()["grid_shape"] against the actual grid it has in hand and

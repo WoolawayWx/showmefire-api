@@ -28,6 +28,7 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
                            CONFIG_PATH=root / "reg-models" / "config.json", VERSIONS_DIR=root / "reg-models" / "versions"),
             patch.object(shadow_bundles, "BUNDLES_ROOT", root / "model-bundles"),
             patch.object(model_admin, "_require_admin", return_value="tester@example.com"),
+            patch.object(model_admin, "_require_confirmation", return_value=None),
         )
 
     def _install_zip(self, root, version="0.0.1-beta.9"):
@@ -45,8 +46,8 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
     def test_activate_promotes_the_matching_registry_beta(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reg_patch, bundles_patch, admin_patch = self._isolated(root)
-            with reg_patch, bundles_patch, admin_patch:
+            reg_patch, bundles_patch, admin_patch, confirm_patch = self._isolated(root)
+            with reg_patch, bundles_patch, admin_patch, confirm_patch:
                 installed = self._install_zip(root)
 
                 response = _run(model_admin.activate_family_version(
@@ -64,8 +65,8 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
     def test_activate_unknown_version_returns_404_not_a_crash(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reg_patch, bundles_patch, admin_patch = self._isolated(root)
-            with reg_patch, bundles_patch, admin_patch:
+            reg_patch, bundles_patch, admin_patch, confirm_patch = self._isolated(root)
+            with reg_patch, bundles_patch, admin_patch, confirm_patch:
                 self._install_zip(root)
                 from fastapi import HTTPException
                 with self.assertRaises(HTTPException) as cm:
@@ -76,8 +77,8 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
     def test_reactivating_an_already_stable_version_is_a_no_op_not_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reg_patch, bundles_patch, admin_patch = self._isolated(root)
-            with reg_patch, bundles_patch, admin_patch:
+            reg_patch, bundles_patch, admin_patch, confirm_patch = self._isolated(root)
+            with reg_patch, bundles_patch, admin_patch, confirm_patch:
                 installed = self._install_zip(root)
                 _run(model_admin.activate_family_version(
                     "risk_fusion_glm", model_admin.ActivateRequest(version=installed["version"])))
@@ -89,8 +90,8 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
     def test_reactivating_an_older_promoted_version_rolls_back(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reg_patch, bundles_patch, admin_patch = self._isolated(root)
-            with reg_patch, bundles_patch, admin_patch:
+            reg_patch, bundles_patch, admin_patch, confirm_patch = self._isolated(root)
+            with reg_patch, bundles_patch, admin_patch, confirm_patch:
                 first = self._install_zip(root, version="0.0.1-beta.1")
                 _run(model_admin.activate_family_version(
                     "risk_fusion_glm", model_admin.ActivateRequest(version=first["version"])))

@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from core.database import get_shadow_model_setting, list_shadow_model_settings, set_shadow_model_setting
-from core.security import verify_token
+from core.security import verify_confirm_token, verify_token
 from models import shadow_bundles
 from models.versioning import get_model_entry, promote, rollback, validate_promotion_candidate
 from pipelines import import_model
@@ -55,6 +55,11 @@ def _require_admin(token: Optional[str] = None) -> str:
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return email
+
+
+def _require_confirmation(confirm_token: Optional[str], action: str) -> None:
+    if not verify_confirm_token(confirm_token, action):
+        raise HTTPException(status_code=401, detail="Password confirmation required or expired")
 
 
 def _registry_summary(model_type: str) -> dict:
@@ -344,6 +349,7 @@ async def import_model_release(family: str, payload: ImportRequest, token: Optio
 
 class ActivateRequest(BaseModel):
     version: str
+    confirm_token: Optional[str] = None
 
 
 def _registry_action_for_shadow_bundle(family: str, version: str):
@@ -405,6 +411,7 @@ async def activate_family_version(family: str, payload: ActivateRequest, token: 
     the named beta candidate) - wraps the existing, previously CLI-only
     models.versioning.promote()."""
     _require_admin(token)
+    _require_confirmation(payload.confirm_token, f"activate_model:{family}")
     if family in shadow_bundles._REGISTRY_MIGRATED_FAMILIES:
         # Migrated shadow family: activating a version is a real, gated
         # promotion in the unified registry (per the approved design -
@@ -459,6 +466,7 @@ async def activate_family_version(family: str, payload: ActivateRequest, token: 
 
 class RollbackRequest(BaseModel):
     version: Optional[str] = None
+    confirm_token: Optional[str] = None
 
 
 @router.post("/{family}/rollback")
@@ -469,6 +477,7 @@ async def rollback_family(family: str, payload: RollbackRequest, token: Optional
     instead - there is no separate stable/beta distinction to roll back
     from for those families."""
     _require_admin(token)
+    _require_confirmation(payload.confirm_token, f"rollback_model:{family}")
     if family not in REGISTRY_MODEL_TYPES:
         raise HTTPException(status_code=400,
                             detail=f"{family} has no stable/beta distinction - use /activate with an older version instead")

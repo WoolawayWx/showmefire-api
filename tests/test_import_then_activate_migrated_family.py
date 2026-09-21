@@ -34,14 +34,15 @@ class ImportThenActivateTests(unittest.TestCase):
                            CONFIG_PATH=root / "models" / "config.json", VERSIONS_DIR=root / "models" / "versions"),
             patch.object(shadow_bundles, "BUNDLES_ROOT", root / "model-bundles"),
             patch.object(model_admin, "_require_admin", return_value="tester@example.com"),
+            patch.object(model_admin, "_require_confirmation", return_value=None),
             patch.dict("os.environ", {"SMF_GITHUB_REPO": "owner/ShowMeFire-Models"}, clear=False),
         )
 
     def test_imported_version_shows_up_and_can_be_activated(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            reg_patch, bundles_patch, admin_patch, env_patch = self._isolated(root)
-            with reg_patch, bundles_patch, admin_patch, env_patch:
+            reg_patch, bundles_patch, admin_patch, confirm_patch, env_patch = self._isolated(root)
+            with reg_patch, bundles_patch, admin_patch, confirm_patch, env_patch:
                 asset_path = root / "factor_weights.json"
                 asset_path.write_text("{}")
 
