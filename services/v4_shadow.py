@@ -9,17 +9,68 @@ from pathlib import Path
 
 import numpy as np
 
-from core.fire_danger import RULE_SPEC_SHA256, calculate_fire_danger
+from core.fire_danger import RULE_SPEC_SHA256
 from core.precipitation import PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION
+from services import shadow_metrics
 
 BUNDLE_ENV = "SMF_V4_SHADOW_BUNDLE"
+ENABLED_ENV = "V4_SHADOW_ENABLED"  # v4 had no enable/disable switch at all before this
 EVIDENCE_ROOT = Path(__file__).resolve().parent.parent / "logs" / "v4_shadow"
 MAX_FAILURES = int(os.getenv("V4_SHADOW_MAX_FAILURES", "3"))
 _state = {"enabled": True, "consecutive_failures": 0, "last_error": None,
           "runs": 0, "unavailable": 0, "model_version": None}
 
 
-def diagnostics(): return dict(_state)
+def _configured() -> bool:
+    """Matches the other four shadow modules' _configured() shape exactly."""
+    if os.getenv(BUNDLE_ENV, "").strip():
+        return True
+    try:
+        from models.versioning import get_model_entry
+        return bool(get_model_entry("v4").get("stable"))
+    except Exception:
+        return False
+
+
+def _requested() -> bool:
+    """DB setting wins when present (live, no-restart admin control via the
+    website); the env var is only the deploy-time default/fallback. Default
+    "true" (not "false" like the other four) preserves v4's pre-existing
+    always-on-unless-failing behavior for anyone who never touches the new
+    env var or DB row."""
+    try:
+        from core.database import get_shadow_model_setting
+        setting = get_shadow_model_setting("v4")
+        if setting is not None:
+            return setting["enabled"]
+    except Exception:
+        pass
+    return os.getenv(ENABLED_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def diagnostics() -> dict:
+    """v4 previously just returned a bare passthrough of _state, which never
+    reflected configured/requested/DB-setting changes - real callers (the
+    admin API, beta_operations) need a fresh recompute on every call, same
+    as the other four shadow modules' diagnostics() already does. Does NOT
+    change record_predictions()'s own guard (still the raw `_state["enabled"]`
+    flag, unchanged) - v4 has no live production caller today (confirmed:
+    only tests call record_predictions directly), so there's no existing
+    call site to migrate onto this fresh gate; a future real caller should
+    check diagnostics()["enabled"] first, mirroring v5_shadow.py's
+    score_and_record precedent, rather than calling record_predictions
+    directly."""
+    _state["configured"] = _configured()
+    _state["requested"] = _requested()
+    auto_disabled = _state.get("consecutive_failures", 0) >= MAX_FAILURES
+    _state["auto_disabled"] = auto_disabled
+    _state["enabled"] = bool(_state["configured"] and _state["requested"] and not auto_disabled)
+    try:
+        from services.shadow_observation_scoring import rolling_accuracy_summary
+        _state["observation_accuracy"] = rolling_accuracy_summary("v4", EVIDENCE_ROOT)
+    except Exception:
+        _state["observation_accuracy"] = None
+    return dict(_state)
 
 
 def _sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -98,11 +149,12 @@ def record_predictions(run_id, row_keys, stable_fm, quantiles, rh, wind_kts,
         contract = validate_bundle(bundle_dir); quantiles = np.asarray(quantiles, float)
         if quantiles.shape[-1] != 7 or np.any(np.diff(quantiles, axis=-1) < 0): raise ValueError("invalid V4 quantiles")
         stable_fm = np.asarray(stable_fm, float); rh = np.asarray(rh, float); wind_kts = np.asarray(wind_kts, float)
-        stable_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(stable_fm, rh, wind_kts)]
-        v4_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(quantiles[:, 3], rh, wind_kts)]
-        p10_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(quantiles[:, 1], rh, wind_kts)]
-        p90_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(quantiles[:, 5], rh, wind_kts)]
-        unavailable = sum(a is None or b is None for a, b in zip(stable_category, v4_category))
+        stable_category = shadow_metrics.categories_for(stable_fm, rh, wind_kts)
+        v4_category = shadow_metrics.categories_for(quantiles[:, 3], rh, wind_kts)
+        p10_category = shadow_metrics.categories_for(quantiles[:, 1], rh, wind_kts)
+        p90_category = shadow_metrics.categories_for(quantiles[:, 5], rh, wind_kts)
+        disagreement = shadow_metrics.category_disagreement_summary(stable_category, v4_category)
+        unavailable = disagreement["unavailable"]
         record = {"run_id": str(run_id), "recorded_at": datetime.now(timezone.utc).isoformat(),
                   "observation_attached": False, "row_keys": list(map(str, row_keys)),
                   "stable_fm": stable_fm.tolist(), "v4_quantiles": quantiles.tolist(),
@@ -110,7 +162,7 @@ def record_predictions(run_id, row_keys, stable_fm, quantiles, rh, wind_kts,
                   "lead_weights": np.asarray(lead_weights, float).tolist(),
                   "stable_category": stable_category, "v4_category": v4_category,
                   "p10_category": p10_category, "p90_category": p90_category,
-                  "category_disagreements": sum(a != b for a, b in zip(stable_category, v4_category)),
+                  "category_disagreements": disagreement["category_disagreements"],
                   "feature_freshness_minutes": feature_freshness_minutes,
                   "fallback_used": bool(fallback_used), "latency_ms": latency_ms,
                   "unavailable": unavailable, "bundle_manifest_sha256": contract["manifest_sha256"]}

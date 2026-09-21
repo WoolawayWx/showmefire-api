@@ -18,6 +18,7 @@ from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
+from services.v4_verification import verify_pending as verify_v4_shadow
 from services.drift_monitor import run_drift_check
 from services.fire_ingest import ingest_detection_files
 from services.recurring_source_detector import run_recurring_source_scan
@@ -212,6 +213,17 @@ async def verify_v5_shadow_observations():
         logger.error("V5 shadow verification failed: %s", error, exc_info=True)
 
 
+async def verify_v4_shadow_observations():
+    """Attach mature observations without blocking the API event loop.
+    v4_shadow.py::attach_observations() existed since V4 shipped but had
+    no caller at all until services/v4_verification.py was written - this
+    is the first thing that actually invokes it."""
+    try:
+        await asyncio.to_thread(verify_v4_shadow)
+    except Exception as error:
+        logger.error("V4 shadow verification failed: %s", error, exc_info=True)
+
+
 async def run_drift_check_job():
     """Evaluate feature/prediction drift across shadow-tracked model types."""
     try:
@@ -356,6 +368,67 @@ def create_scheduler():
     # so its fork() happens against a clean process.
     get_process_pool()
     return AsyncIOScheduler(timezone=central_tz)
+
+# Curated allowlist + human descriptions for
+# routers/model_admin.py's GET /schedule endpoint (read-only introspection
+# of the live scheduler). Only jobs relevant to model scoring/forecast
+# generation are listed here - unrelated jobs (log purges, burn-ban
+# maintenance, raw data pulls, etc.) are deliberately excluded, not just
+# hidden client-side. Keep this in sync when adding/removing a
+# models/forecast job below - job ids are hand-matched against add_job()'s
+# own `id=` argument, there is no naming convention enforced automatically.
+MODEL_RELEVANT_JOBS = {
+    "run_scheduled_beta_forecast": {
+        "category": "forecast_generation",
+        "description": "Runs the daily beta forecast (forecast/DailyForecast.py), which embeds the "
+                       "fire_weather_index and risk_fusion_glm (Phase A + B) shadow scoring hooks - "
+                       "those two families have no separate scheduler entry of their own and run "
+                       "entirely within this job's cadence.",
+    },
+    "verify_latest_beta_forecast": {
+        "category": "verification",
+        "description": "Nightly stable-vs-beta fuel_moisture verification against real observations "
+                       "(services/beta_verification.py), feeding the Beta Operations Scorecard.",
+    },
+    "verify_v5_shadow": {
+        "category": "shadow_verification",
+        "description": "Attaches real observations to pending V5 shadow predictions and scores them "
+                       "(services/v5_verification.py + shadow_observation_scoring.py).",
+    },
+    "verify_v4_shadow": {
+        "category": "shadow_verification",
+        "description": "Attaches real observations to pending V4 shadow predictions and scores them "
+                       "(services/v4_verification.py + shadow_observation_scoring.py).",
+    },
+    "rtma_spread_rate_pipeline": {
+        "category": "feature_pipeline",
+        "description": "Builds the live RTMA-derived spread-rate features fire_weather_ml_shadow.py "
+                       "scores against.",
+    },
+    "run_forecast_v1_shadow": {
+        "category": "forecast_generation",
+        "description": "Polls and scores the forecast_v1 NWP-blend pipeline (only registered when "
+                       "SMF_FORECAST_V1_ENABLED=true).",
+    },
+    "prune_forecast_v1_hot_storage": {
+        "category": "maintenance",
+        "description": "Prunes forecast_v1's hot-storage retention window (only registered when "
+                       "SMF_FORECAST_V1_ENABLED=true).",
+    },
+    "drift_check": {
+        "category": "monitoring",
+        "description": "Nightly feature/prediction drift check across active model types (services/drift_monitor.py).",
+    },
+    "post_promotion_monitor": {
+        "category": "monitoring",
+        "description": "Post-promotion rollout monitor across registered model families.",
+    },
+    "update_seasonal_fuel_state": {
+        "category": "feature_pipeline",
+        "description": "Updates the daily GDD/seasonal fuel-state accumulators several models depend on.",
+    },
+}
+
 
 def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
@@ -531,6 +604,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         'interval',
         hours=3,
         id='verify_v5_shadow',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        verify_v4_shadow_observations,
+        'interval',
+        hours=3,
+        id='verify_v4_shadow',
         max_instances=1,
         coalesce=True,
     )

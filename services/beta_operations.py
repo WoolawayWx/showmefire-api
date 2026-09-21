@@ -138,6 +138,11 @@ def build_beta_operations_status(*, shadows: dict) -> dict:
             "latency_ms": diagnostics.get("latency_ms"),
             "last_error": diagnostics.get("last_error"),
             "public_path_unchanged": diagnostics.get("public_path_unchanged", True),
+            # Only v4/v5 populate this (real MAE/category-match vs an
+            # attached station observation) - every other family's
+            # diagnostics() simply has no such key, so this rides through
+            # as None for them without any special-casing here.
+            "observation_accuracy": diagnostics.get("observation_accuracy"),
         })
 
     needs_attention = [row["name"] for row in shadow_rows if row["state"] == "attention"]

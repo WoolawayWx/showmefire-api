@@ -6,9 +6,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from core.database import get_shadow_model_setting, list_shadow_model_settings, set_shadow_model_setting
 from core.security import verify_token
 from models import shadow_bundles
 from models.versioning import get_model_entry, promote, rollback, validate_promotion_candidate
@@ -98,20 +99,36 @@ async def get_model_status(token: Optional[str] = None):
         "fire_weather_ml": fire_weather_ml_shadow_diagnostics(),
         "fire_weather_index": fire_weather_index_shadow_diagnostics(),
     }
+    guarded_shadows = {
+        "v4": shadows["v4"],
+        "v5": shadows["v5"],
+        "risk_fusion": shadows["risk_fusion"],
+        "risk_fusion_glm": shadows["risk_fusion_glm"],
+        "fire_weather_ml": shadows["fire_weather_ml"],
+        "fire_weather_index": shadows["fire_weather_index"],
+    }
+    # Merge the DB-backed live enable/disable setting into each guarded
+    # family so the dashboard doesn't need a second round-trip.
+    # `requested_enabled` is deliberately a distinct field from `enabled` -
+    # `enabled` already means "actually running right now, accounting for
+    # configured/auto_disabled/failures" per each module's own diagnostics(),
+    # while `requested_enabled` is specifically "what the admin asked for."
+    # risk_fusion (Phase A) has no settings row (it's not in
+    # shadow_bundles.SHADOW_FAMILIES - no trained artifact at all).
+    db_settings = list_shadow_model_settings()
+    for family in shadow_bundles.SHADOW_FAMILIES:
+        setting = db_settings.get(family)
+        if setting:
+            guarded_shadows[family]["requested_enabled"] = setting["enabled"]
+            guarded_shadows[family]["settings_updated_at"] = setting["updated_at"]
+            guarded_shadows[family]["settings_updated_by"] = setting["updated_by"]
     return {
         "registry": [_registry_summary(model_type) for model_type in REGISTRY_MODEL_TYPES],
         "fuel_moisture_shadow": {
             "diagnostics": shadows["fuel_moisture"],
             "promotion_gate": evaluate_shadow_evidence(),
         },
-        "guarded_shadows": {
-            "v4": shadows["v4"],
-            "v5": shadows["v5"],
-            "risk_fusion": shadows["risk_fusion"],
-            "risk_fusion_glm": shadows["risk_fusion_glm"],
-            "fire_weather_ml": shadows["fire_weather_ml"],
-            "fire_weather_index": shadows["fire_weather_index"],
-        },
+        "guarded_shadows": guarded_shadows,
         "operations": build_beta_operations_status(shadows=shadows),
     }
 
@@ -134,6 +151,61 @@ async def list_model_families(token: Optional[str] = None):
         "guarded_shadow": GUARDED_SHADOW_TYPES,
         "importable": import_model.IMPORTABLE_MODEL_TYPES,
     }
+
+
+class ShadowSettingsRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/{family}/settings")
+async def get_family_settings(family: str, token: Optional[str] = None):
+    """Live, no-restart enable/disable state for a shadow/advisory family -
+    see core.database.shadow_model_settings. Registry families
+    (fuel_moisture, fuel_moisture_spatial, etc.) and risk_fusion (Phase A,
+    no trained artifact) have no such setting - they're always on."""
+    _require_admin(token)
+    if family not in shadow_bundles.SHADOW_FAMILIES:
+        raise HTTPException(status_code=404, detail=f"{family} has no live enable/disable setting")
+    setting = get_shadow_model_setting(family)
+    if setting is None:
+        raise HTTPException(status_code=404, detail=f"{family} has no settings row (database not initialized?)")
+    return setting
+
+
+@router.post("/{family}/settings")
+async def set_family_settings(family: str, payload: ShadowSettingsRequest, token: Optional[str] = None):
+    email = _require_admin(token)
+    if family not in shadow_bundles.SHADOW_FAMILIES:
+        raise HTTPException(status_code=404, detail=f"{family} has no live enable/disable setting")
+    return {"success": True, "setting": set_shadow_model_setting(family, payload.enabled, updated_by=email)}
+
+
+@router.get("/schedule")
+async def get_model_schedule(request: Request, token: Optional[str] = None):
+    """Read-only introspection of the live APScheduler instance, filtered to
+    the curated core.scheduler.MODEL_RELEVANT_JOBS allowlist - no editing
+    capability is exposed here by design (see the plan this shipped under)."""
+    _require_admin(token)
+    from core.scheduler import MODEL_RELEVANT_JOBS
+
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        return {"scheduler_running": False, "jobs": []}
+
+    jobs = []
+    for job in scheduler.get_jobs():
+        meta = MODEL_RELEVANT_JOBS.get(job.id)
+        if meta is None:
+            continue
+        jobs.append({
+            "id": job.id,
+            "category": meta["category"],
+            "description": meta["description"],
+            "cadence": str(job.trigger),
+            "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+        })
+    jobs.sort(key=lambda row: (row["category"], row["id"]))
+    return {"scheduler_running": True, "jobs": jobs}
 
 
 def _guarded_shadow_versions(family: str) -> dict:

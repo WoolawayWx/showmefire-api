@@ -141,7 +141,12 @@ async def lifespan(app: FastAPI):
         start_scheduler_jobs(scheduler_local)
     else:
         logger.info("Scheduler disabled via run_sch environment variable")
-    
+
+    # Reachable by routers (e.g. GET /api/admin/models/schedule) for
+    # read-only introspection - the scheduler instance was previously only
+    # a bare local variable here, unreachable from anywhere else in the app.
+    app.state.scheduler = scheduler_local
+
     # Start the fetch in the background so the API starts immediately
     asyncio.create_task(run_initial_fetches())
     

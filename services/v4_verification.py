@@ -1,4 +1,13 @@
-"""Attach mature station observations to immutable V5 shadow predictions."""
+"""Attach mature station observations to immutable V4 shadow predictions.
+
+v4_shadow.py::attach_observations() has existed since V4 shipped but was
+never called by anything - confirmed via a repo-wide grep before writing
+this file. This is a close structural mirror of services/v5_verification.py
+(same station-observation loading, same maturity/tolerance-window matching,
+same category computation) - v4 and v5 predict the same quantity (fuel
+moisture -> fire-danger category) from the same kind of station network, so
+there's no reason for the verification logic itself to differ.
+"""
 from __future__ import annotations
 
 import json
@@ -9,47 +18,21 @@ from pathlib import Path
 import pandas as pd
 
 from core.fire_danger import calculate_fire_danger
-from services.v5_shadow import EVIDENCE_ROOT, attach_observations
+from services.v4_shadow import EVIDENCE_ROOT, attach_observations
 from services.shadow_observation_scoring import score_pending_runs
+from services.v5_verification import load_observations
 
 RAW_ROOT = Path(os.getenv("SMF_RAW_OBSERVATION_ROOT", "archive/raw_data"))
 TOLERANCE_MINUTES = 60
 
 
-def _values(observations, *names):
-    for name in names:
-        value = observations.get(name)
-        if value: return value
-    return []
-
-
-def load_observations(raw_root=RAW_ROOT):
-    records = []
-    for path in sorted(Path(raw_root).glob("raw_data_*.json")):
-        try: payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception: continue
-        stations = payload.get("STATION", []); stations = [stations] if isinstance(stations, dict) else stations
-        for station in stations:
-            observations = station.get("OBSERVATIONS", {}); times = observations.get("date_time", [])
-            fm = _values(observations, "fuel_moisture_set_1", "fuel_moisture")
-            rh = _values(observations, "relative_humidity_set_1", "relative_humidity")
-            wind = _values(observations, "wind_speed_set_1", "wind_speed")
-            for index, value in enumerate(times):
-                if index >= len(fm) or index >= len(rh) or index >= len(wind): continue
-                if any(series[index] is None for series in (fm, rh, wind)): continue
-                records.append({"station_id": str(station.get("STID")), "observation_time": pd.to_datetime(value, utc=True),
-                                "target_fm": float(fm[index]), "target_rh": float(rh[index]),
-                                "target_wind_ms": float(wind[index]) * .44704})
-    return pd.DataFrame(records)
-
-
 def _score_pending_backlog(evidence_root):
     """Runs regardless of whether there's fresh raw observation data this
     call - scores runs that already have an attached observation (from an
-    earlier call) but no .scored.json yet, so a quiet raw-data day never
-    silently stalls the scoring backlog."""
+    earlier call) but no .scored.json yet, mirroring
+    v5_verification.py::_score_pending_backlog."""
     try:
-        return score_pending_runs("v5", evidence_root)
+        return score_pending_runs("v4", evidence_root)
     except Exception:
         return {"scored_count": 0, "errors": [{"run_id": None, "error": "scoring pass failed"}]}
 
@@ -87,12 +70,6 @@ def verify_pending(evidence_root=EVIDENCE_ROOT, raw_root=RAW_ROOT, now=None):
                 "target_wind_ms": float(selected.target_wind_ms), "actual_category": actual_category}
         if not mature: pending += 1; continue
         attach_observations(run_id, result, evidence_root); attached += 1; matched += len(result)
-    # Score every run that now has both a prediction and an attached
-    # observation but no accuracy result yet - the step attach_observations()
-    # started (writing real observations alongside each prediction) but
-    # nothing ever finished until now. Never raises - a scoring failure
-    # must not affect the observation-attachment work above, which already
-    # completed and returned by this point.
     return {"pending": pending, "attached": attached, "matched_rows": matched,
             "scoring": _score_pending_backlog(evidence_root)}
 

@@ -416,6 +416,85 @@ def _ensure_fuel_moisture_sensor_tables(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE fuel_moisture_sensor_readings ADD COLUMN enclosure_state TEXT")
 
 
+# Live, no-restart enable/disable state for the shadow/advisory model
+# families (fire_weather_index, fire_weather_ml, risk_fusion_glm, v4, v5).
+# Deliberately minimal - one boolean per family, not a multi-column config
+# like forecast_source_models (status enum, schedule_minutes, blend
+# weights) - this only ever needs to answer "should this family's
+# _requested() return True right now." Seeded from each family's CURRENT
+# env-var-derived state so a fresh deploy never silently disables
+# something already running via .env.
+SHADOW_MODEL_SETTINGS_DEFAULTS = {
+    "fire_weather_index": os.getenv("FIRE_WEATHER_INDEX_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+    "fire_weather_ml": os.getenv("FIRE_WEATHER_ML_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+    "risk_fusion_glm": os.getenv("RISK_FUSION_GLM_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+    "v4": True,  # v4 has no existing env-var gate - defaults enabled to preserve today's always-on behavior
+    "v5": os.getenv("V5_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+}
+
+
+def _ensure_shadow_model_settings_table(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shadow_model_settings (
+            family TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT
+        )
+    ''')
+    for family, default_enabled in SHADOW_MODEL_SETTINGS_DEFAULTS.items():
+        cursor.execute(
+            'INSERT OR IGNORE INTO shadow_model_settings (family, enabled, updated_by) VALUES (?, ?, ?)',
+            (family, int(default_enabled), None),
+        )
+
+
+def get_shadow_model_setting(family: str) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT family, enabled, updated_at, updated_by FROM shadow_model_settings WHERE family = ?', (family,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {"family": row["family"], "enabled": bool(row["enabled"]),
+                "updated_at": row["updated_at"], "updated_by": row["updated_by"]}
+    finally:
+        conn.close()
+
+
+def set_shadow_model_setting(family: str, enabled: bool, updated_by: Optional[str]) -> Dict:
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO shadow_model_settings (family, enabled, updated_by, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(family) DO UPDATE SET
+                enabled = excluded.enabled, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP
+        ''', (family, int(enabled), updated_by))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_shadow_model_setting(family)
+
+
+def list_shadow_model_settings() -> Dict[str, Dict]:
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT family, enabled, updated_at, updated_by FROM shadow_model_settings')
+        rows = cursor.fetchall()
+        return {row["family"]: {"enabled": bool(row["enabled"]), "updated_at": row["updated_at"],
+                                "updated_by": row["updated_by"]} for row in rows}
+    finally:
+        conn.close()
+
+
 def get_db_path():
     # Honor the documented container/local override even before the database
     # file exists. This keeps first-start initialization on the mounted volume.
@@ -920,6 +999,11 @@ def init_database():
     # 22. Field-deployed dowel fuel-moisture sensor readings (own hardware,
     # not RAWS). See SMF_FuelMoistureSensor/.
     _ensure_fuel_moisture_sensor_tables(cursor)
+
+    # 23. Live, no-restart enable/disable state for the shadow/advisory
+    # model families (fire_weather_index, fire_weather_ml, risk_fusion_glm,
+    # v4, v5) - replaces requiring a .env edit + server restart to flip one.
+    _ensure_shadow_model_settings_table(cursor)
 
     conn.commit()
     conn.close()

@@ -9,8 +9,9 @@ from pathlib import Path
 
 import numpy as np
 
-from core.fire_danger import RULE_SPEC_SHA256, calculate_fire_danger
+from core.fire_danger import RULE_SPEC_SHA256
 from core.precipitation import PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION
+from services import shadow_metrics
 
 BUNDLE_ENV = "SMF_V5_SHADOW_BUNDLE"
 ENABLED_ENV = "V5_SHADOW_ENABLED"
@@ -20,8 +21,33 @@ MAX_FAILURES = int(os.getenv("V5_SHADOW_MAX_FAILURES", "3"))
 STATE_PATH = EVIDENCE_ROOT / "shadow-state.json"
 
 
-def _configured(): return bool(os.getenv(BUNDLE_ENV, "").strip())
-def _requested(): return os.getenv(ENABLED_ENV, "false").strip().lower() in {"1", "true", "yes", "on"}
+def _configured() -> bool:
+    """Was left checking BUNDLE_ENV alone even after v5 gained a registry
+    fallback in _resolve_bundle_files() - a real bug this fixes: diagnostics
+    would report "not configured" even when a real registered `stable`
+    version exists and scoring would actually succeed. Matches
+    fire_weather_index_shadow.py/fire_weather_ml_shadow.py/
+    risk_fusion_glm_shadow.py's own _configured() shape exactly."""
+    if os.getenv(BUNDLE_ENV, "").strip():
+        return True
+    try:
+        from models.versioning import get_model_entry
+        return bool(get_model_entry("v5").get("stable"))
+    except Exception:
+        return False
+def _requested():
+    """DB setting wins when present (live, no-restart admin control via the
+    website); the env var is only the deploy-time default/fallback for a
+    fresh install or if the DB is unreachable - never let a DB hiccup
+    silently disable a running shadow."""
+    try:
+        from core.database import get_shadow_model_setting
+        setting = get_shadow_model_setting("v5")
+        if setting is not None:
+            return setting["enabled"]
+    except Exception:
+        pass
+    return os.getenv(ENABLED_ENV, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _initial_state():
@@ -71,6 +97,11 @@ def diagnostics():
     # requested state now instead of preserving the import-time value.
     _state["configured"] = _configured()
     _state["enabled"] = bool(_configured() and _requested() and not _state.get("auto_disabled", False))
+    try:
+        from services.shadow_observation_scoring import rolling_accuracy_summary
+        _state["observation_accuracy"] = rolling_accuracy_summary("v5", EVIDENCE_ROOT)
+    except Exception:
+        _state["observation_accuracy"] = None
     result = dict(_state)
     return result
 def _sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -152,9 +183,10 @@ def record_predictions(run_id, row_keys, stable_fm, base_fm, v5_fm, intervals,
         if intervals.shape != (len(v5_fm), 3) or np.any(np.diff(intervals, axis=1) < 0): raise ValueError("invalid V5 intervals")
         if not all(len(value) == len(v5_fm) for value in (stable_fm, base_fm, weights, rh, wind_kts, row_keys)):
             raise ValueError("V5 shadow row alignment mismatch")
-        stable_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(stable_fm, rh, wind_kts)]
-        v5_category = [calculate_fire_danger(f, r, w) for f, r, w in zip(v5_fm, rh, wind_kts)]
-        unavailable = sum(a is None or b is None for a, b in zip(stable_category, v5_category))
+        stable_category = shadow_metrics.categories_for(stable_fm, rh, wind_kts)
+        v5_category = shadow_metrics.categories_for(v5_fm, rh, wind_kts)
+        disagreement = shadow_metrics.category_disagreement_summary(stable_category, v5_category)
+        unavailable = disagreement["unavailable"]
         record = {"run_id": str(run_id), "recorded_at": datetime.now(timezone.utc).isoformat(),
                   "observation_attached": False, "row_keys": list(map(str, row_keys)),
                   "stable_fm": stable_fm.tolist(), "rain_aware_base_fm": base_fm.tolist(), "v5_fm": v5_fm.tolist(),
@@ -162,7 +194,7 @@ def record_predictions(run_id, row_keys, stable_fm, base_fm, v5_fm, intervals,
                   "guard_weights": weights.tolist(), "guard_reasons": list(map(str, guard_reasons)),
                   "regimes": list(map(str, regimes)), "fallback": (weights == 0).tolist(),
                   "stable_category": stable_category, "v5_category": v5_category,
-                  "category_disagreements": sum(a != b for a, b in zip(stable_category, v5_category)),
+                  "category_disagreements": disagreement["category_disagreements"],
                   "feature_freshness_minutes": feature_freshness_minutes, "latency_ms": latency_ms,
                   "unavailable": unavailable, "bundle_manifest_sha256": contract["manifest_sha256"]}
         evidence_root = Path(evidence_root); evidence_root.mkdir(parents=True, exist_ok=True)

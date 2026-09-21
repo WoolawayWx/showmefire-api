@@ -105,6 +105,17 @@ def _configured() -> bool:
 
 
 def _requested() -> bool:
+    """DB setting wins when present (live, no-restart admin control via the
+    website); the env var is only the deploy-time default/fallback for a
+    fresh install or if the DB is unreachable - never let a DB hiccup
+    silently disable a running shadow."""
+    try:
+        from core.database import get_shadow_model_setting
+        setting = get_shadow_model_setting("risk_fusion_glm")
+        if setting is not None:
+            return setting["enabled"]
+    except Exception:
+        pass
     return os.getenv(ENABLED_ENV, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
