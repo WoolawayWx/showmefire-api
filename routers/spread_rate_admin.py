@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from core.executors import run_in_process_pool_async
-from core.security import verify_token
+from core.security import verify_confirm_token, verify_token
 from services.spread_rate import (
     PNG_PATH,
     STATUS_PATH,
@@ -23,8 +23,15 @@ from core.scheduler import raws_station_data
 router = APIRouter(prefix="/api/admin/testbed/spread-rate", tags=["spread-rate-admin"])
 
 
+RUN_ACTION = "run_spread_rate"
+
+
 class WarmupRequest(BaseModel):
     days: int = Field(default=7, ge=1, le=14)
+
+
+class RunConfirmation(BaseModel):
+    confirm_token: Optional[str] = None
 
 
 def _require_admin(token: Optional[str] = None) -> str:
@@ -49,8 +56,10 @@ async def spread_rate_admin_status(token: Optional[str] = None):
 
 
 @router.post("/generate")
-async def spread_rate_admin_generate(token: Optional[str] = None):
+async def spread_rate_admin_generate(payload: RunConfirmation = RunConfirmation(), token: Optional[str] = None):
     email = _require_admin(token)
+    if not verify_confirm_token(payload.confirm_token, RUN_ACTION):
+        raise HTTPException(status_code=401, detail="Password confirmation required or expired")
     try:
         result = await run_in_process_pool_async(
             run_spread_rate_pipeline,
