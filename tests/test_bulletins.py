@@ -69,7 +69,8 @@ class BulletinTests(unittest.TestCase):
         )
         with patch.object(bulletins, "county_catalog", return_value=[{"fips": "29001", "name": "Adair"}]), \
              patch.object(bulletins, "upsert_audience_contact", return_value="contact-id"), \
-             patch.object(bulletins, "set_audience_contact_unsubscribed"):
+             patch.object(bulletins, "set_audience_contact_unsubscribed"), \
+             patch.object(bulletins, "set_audience_contact_properties"):
             result = bulletins.signup_newsletter(payload)
         self.assertEqual(result["email"], "user@example.com")
         self.assertEqual(result["counties"][0]["level"], 4)
@@ -131,7 +132,10 @@ class BulletinTests(unittest.TestCase):
         payload = request.call_args.kwargs["json"]
         self.assertEqual(payload["segment_id"], "segment")
         self.assertTrue(payload["send"])
+        self.assertIn("contact.manage_url", payload["html"])
         self.assertIn("RESEND_UNSUBSCRIBE_URL", payload["html"])
+        self.assertIn("contact.manage_url", payload["text"])
+        self.assertIn("RESEND_UNSUBSCRIBE_URL", payload["text"])
 
 
 if __name__ == "__main__":

@@ -72,18 +72,49 @@ def set_audience_contact_unsubscribed(email: str, unsubscribed: bool) -> None:
     )
 
 
+def set_audience_contact_properties(email: str, properties: dict) -> None:
+    """Synchronize custom contact properties used by broadcast templates."""
+    _resend_request(
+        "PATCH",
+        f"/contacts/{email.strip().lower()}",
+        {"properties": properties},
+    )
+
+
 def send_bulletin_broadcast(subject: str, html_body: str, text_body: str) -> str:
     """Create and send a Resend broadcast to the configured Audience."""
     sender, reply_to = _sender_settings()
+    html_footer = (
+        '<p style="font-size:12px;color:#64748b">'
+        'Manage your Show Me Fire email preferences: '
+        '<a href="{{{contact.manage_url}}}">Manage preferences</a><br>'
+        '<a href="{{{RESEND_UNSUBSCRIBE_URL}}}">Unsubscribe from broadcasts</a>'
+        "</p>"
+    )
+    text_footer = (
+        "\n\nManage your Show Me Fire email preferences:\n"
+        "{{{contact.manage_url}}}\n\n"
+        "Unsubscribe from broadcasts:\n"
+        "{{{RESEND_UNSUBSCRIBE_URL}}}"
+    )
+    rendered_html = html_body
+    if "contact.manage_url" not in rendered_html:
+        rendered_html += html_footer
+    if "RESEND_UNSUBSCRIBE_URL" not in rendered_html:
+        rendered_html += (
+            '<p style="font-size:12px;color:#64748b">'
+            '<a href="{{{RESEND_UNSUBSCRIBE_URL}}}">Unsubscribe from broadcasts</a>'
+            "</p>"
+        )
+    rendered_text = text_body
+    if "contact.manage_url" not in rendered_text or "RESEND_UNSUBSCRIBE_URL" not in rendered_text:
+        rendered_text += text_footer
     payload = {
         "segment_id": resend_audience_id(),
         "from": sender,
         "subject": subject,
-        "html": html_body if "RESEND_UNSUBSCRIBE_URL" in html_body else (
-            f"{html_body}<p style=\"font-size:12px;color:#64748b\">"
-            "{{{RESEND_UNSUBSCRIBE_URL}}}</p>"
-        ),
-        "text": text_body,
+        "html": rendered_html,
+        "text": rendered_text,
         "send": True,
     }
     if reply_to:

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
+import os
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -13,6 +15,7 @@ from core.database import (
     get_bulletin,
     get_newsletter_account_by_token,
     get_newsletter_preferences,
+    list_newsletter_subscribers,
     list_bulletins,
     mark_bulletin_sent,
     replace_newsletter_preferences,
@@ -24,6 +27,7 @@ from core.database import (
 )
 from core.security import verify_token
 from services.graphics_email import (
+    set_audience_contact_properties,
     send_bulletin_broadcast,
     set_audience_contact_unsubscribed,
     upsert_audience_contact,
@@ -125,6 +129,11 @@ def _validate_preferences(counties: List[CountyPreference]) -> List[dict]:
     return normalized
 
 
+def _manage_url(token: str) -> str:
+    base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
+    return f"{base}/comms/emails/manage?token={quote(token, safe='')}"
+
+
 @router.post("/api/newsletter/signup")
 def signup_newsletter(payload: NewsletterSignup):
     if "fire-weather-forecasts" in payload.lists and not payload.counties:
@@ -142,6 +151,10 @@ def signup_newsletter(payload: NewsletterSignup):
             payload.affiliation,
         )
         saved = replace_newsletter_preferences(email, preferences)
+        set_audience_contact_properties(
+            email,
+            {"manage_url": _manage_url(subscriber["manage_token"])},
+        )
         return {
             "email": subscriber["email"],
             "name": subscriber["name"],
@@ -295,3 +308,21 @@ def admin_send_bulletin(bulletin_id: int, token: Optional[str] = None):
 def admin_newsletter_preferences(token: Optional[str] = None):
     _require_admin(token)
     return {"preferences": get_newsletter_preferences()}
+
+
+@router.post("/api/admin/newsletter/sync-manage-urls")
+def admin_sync_newsletter_manage_urls(token: Optional[str] = None):
+    """Backfill Resend's manage_url property for existing subscribers."""
+    _require_admin(token)
+    synced = 0
+    failed = []
+    for subscriber in list_newsletter_subscribers():
+        try:
+            set_audience_contact_properties(
+                subscriber["email"],
+                {"manage_url": _manage_url(subscriber["manage_token"])},
+            )
+            synced += 1
+        except Exception as exc:
+            failed.append({"email": subscriber["email"], "error": str(exc)})
+    return {"synced": synced, "failed": failed}

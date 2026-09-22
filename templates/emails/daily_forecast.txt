@@ -1,0 +1,11 @@
+Show Me Fire daily fire-weather forecast
+
+Forecast date: {{forecast_date}}
+
+{{county_rows_text}}
+
+Manage email preferences or unsubscribe:
+{{manage_url}}
+
+You are receiving this because you subscribed to Show Me Fire Fire Weather
+Forecasts.

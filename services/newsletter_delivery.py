@@ -5,6 +5,7 @@ import html
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from core.database import (
@@ -13,19 +14,29 @@ from core.database import (
     list_matching_newsletter_forecasts,
 )
 from services.graphics_email import send_daily_forecast_email
+from services.mobile_content import county_catalog
 
 logger = logging.getLogger(__name__)
 DANGER_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
 CENTRAL = ZoneInfo("America/Chicago")
+TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "emails"
 
 
 def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
     manage_base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
     manage_token = rows[0].get("manage_token") or ""
     manage_url = f"{manage_base}/comms/emails/manage?token={manage_token}"
+    county_names = {item["fips"]: item["name"] for item in county_catalog()}
     labels = [
-        (html.escape(row["county_fips"]), DANGER_LABELS[int(row["danger_level"])],
-         html.escape(row.get("summary") or "Fire weather forecast available."))
+        (
+            html.escape(
+                county_names.get(row["county_fips"], "Missouri County")
+                if county_names.get(row["county_fips"], "").lower().endswith(" county")
+                else f"{county_names.get(row['county_fips'], 'Missouri County')} County"
+            ),
+            DANGER_LABELS[int(row["danger_level"])],
+            html.escape(row.get("summary") or "Fire weather forecast available."),
+        )
         for row in rows
     ]
     subject = (
@@ -33,28 +44,39 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
         if len(labels) == 1
         else f"FireWx forecast for {len(labels)} counties"
     )
-    text_lines = [
-        f"Show Me Fire daily forecast for {forecast_date}",
-        "",
-        *[
-            f"{row['county_fips']}: {label}\n{row.get('summary') or 'Fire weather forecast available.'}"
-            for row, (_, label, _) in zip(rows, labels)
-        ],
-        "",
-        f"Manage or unsubscribe: {manage_url}",
-    ]
     county_rows = "".join(
-        f"<li><strong>{county}</strong>: {html.escape(label)}<br>{summary}</li>"
+        '<div style="margin:0 0 12px;padding:16px;border:1px solid #d9e0e8;'
+        'border-radius:8px;background:#fbfcfd;">'
+        f"<strong style=\"font-size:17px;color:#172033;\">{county}</strong>"
+        f"<span style=\"float:right;font-weight:700;color:#315f9e;\">"
+        f"{html.escape(label)} Fire Danger</span>"
+        f"<div style=\"margin-top:8px;color:#536174;line-height:1.5;\">{summary}</div>"
+        "</div>"
         for county, label, summary in labels
     )
-    text = "\n".join(text_lines)
-    body = (
-        '<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">'
-        f"<h1>Show Me Fire daily forecast</h1><p><strong>Date:</strong> {html.escape(forecast_date)}</p>"
-        f"<ul>{county_rows}</ul><p><a href=\"{html.escape(manage_url)}\">Manage or unsubscribe from email updates</a></p>"
-        "</div>"
+    county_rows_text = "\n\n".join(
+        f"{county}: {label} Fire Danger\n{summary}"
+        for county, label, summary in labels
     )
-    return subject, body, text
+    manage_url_html = (
+        f'<a href="{html.escape(manage_url, quote=True)}" style="color:#315f9e;">'
+        "Manage or unsubscribe from email updates</a>"
+    )
+    replacements = {
+        "{{forecast_date}}": html.escape(forecast_date),
+        "{{county_rows_html}}": county_rows,
+        "{{county_rows_text}}": county_rows_text,
+        "{{manage_url}}": html.escape(manage_url, quote=True),
+        "{{manage_link_html}}": manage_url_html,
+    }
+
+    def render_template(filename: str) -> str:
+        rendered = (TEMPLATE_DIR / filename).read_text(encoding="utf-8")
+        for placeholder, value in replacements.items():
+            rendered = rendered.replace(placeholder, value)
+        return rendered
+
+    return subject, render_template("daily_forecast.html"), render_template("daily_forecast.txt")
 
 
 def run_daily_forecast_delivery(forecast_date: str | None = None) -> dict:

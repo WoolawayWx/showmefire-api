@@ -4763,6 +4763,23 @@ def upsert_newsletter_subscriber(
         conn.close()
 
 
+def list_newsletter_subscribers() -> List[Dict]:
+    """Return subscriber identity fields needed for provider synchronization."""
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        return [
+            dict(row) for row in conn.execute(
+                """SELECT email, resend_contact_id, manage_token
+                   FROM newsletter_subscribers
+                   WHERE manage_token IS NOT NULL AND manage_token != ''
+                   ORDER BY email"""
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def replace_newsletter_preferences(email: str, preferences: List[Dict]) -> List[Dict]:
     normalized = email.strip().lower()
     conn = sqlite3.connect(get_db_path())
