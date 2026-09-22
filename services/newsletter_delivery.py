@@ -42,11 +42,12 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
     ]
     subject = f"Fire Weather Forecast for {SUBJECT_FORECAST_DATE}"
     county_rows = (
-        "<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">"
-        "<thead><tr><th>County</th><th>Fire Danger</th></tr></thead>"
+        "<table align=\"center\" border=\"1\" cellpadding=\"6\" cellspacing=\"0\">"
+        "<thead><tr><th align=\"center\">County</th><th align=\"center\">Fire Danger</th></tr></thead>"
         "<tbody>"
         + "".join(
-            f"<tr><td>{county}</td><td>{html.escape(label)} Fire Danger</td></tr>"
+            f"<tr><td align=\"center\">{county}</td>"
+            f"<td align=\"center\">{html.escape(label)} Fire Danger</td></tr>"
             for county, label, _summary in labels
         )
         + "</tbody></table>"
