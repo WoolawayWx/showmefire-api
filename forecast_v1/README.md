@@ -19,13 +19,13 @@ members f00-f72, and GEFS control plus all 30 perturbed members at three-hour
 source intervals. GEFS precipitation is distributed over its source interval
 and continuous fields are interpolated to the hourly uncertainty grid.
 
-Full ensemble members remain on their clipped native grids for the immutable
-archive and station-member Parquet extract. Before the public 3 km reprojection,
-ensembles are reduced to mean-minus-spread and mean-plus-spread pseudo-members.
-That pair preserves the ensemble mean and population spread used by blending
-and confidence calculations without allocating a 267x264x73 cube for every
-GEFS/REFS member. Source metadata and the archive retain the actual member
-count.
+GEFS members are normalized and appended to one disk-backed NetCDF cube as
+they download, so only one loaded member is retained in memory at a time. All
+31 real members remain available for the immutable native archive and
+station-member extract. Before public-grid reprojection, the existing summary
+step reduces the ensemble to mean-minus-spread and mean-plus-spread
+pseudo-members; this bounds reprojection memory without discarding the
+member-level source archive.
 
 ```text
 SMF_FORECAST_V1_ENABLED=true
@@ -34,13 +34,16 @@ SMF_FORECAST_V1_PUBLIC=false
 SMF_FORECAST_V1_MIN_CYCLE_AGE_HOURS=6
 SMF_FORECAST_V1_POLL_MINUTES=30
 SMF_FORECAST_V1_MEMORY_LIMIT_GB=8
-SMF_HERBIE_THREADS=4
-SMF_ENSEMBLE_MEMBER_THREADS=2
+SMF_HERBIE_THREADS=1
+SMF_ENSEMBLE_MEMBER_THREADS=1
 SMF_CPU_POOL_WORKERS=2
 ```
 
-The thread settings are conservative defaults; increasing them trades
-additional peak memory for download speed. The forecast worker's default 8 GiB
+The single-thread defaults bound the number of full-domain GRIB fields open
+during acquisition; increasing them trades additional peak memory for download
+speed. Each query is clipped and eagerly loaded before its backing dataset is
+closed. Downloaded subsets remain in the seven-day cache instead of being
+removed while cfgrib arrays may still reference them. The forecast worker's default 8 GiB
 address-space ceiling leaves headroom beneath a 12 GB container limit; an
 over-budget run fails without replacing the previous public forecast. The
 shared heavy-job pool defaults to at most two workers to prevent CPU-rich hosts

@@ -10,7 +10,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from forecast_v1.adapters import DatasetAdapter, SourceCube
-from forecast_v1.acquisition import AcquisitionSpec, acquire_source, latest_publishable_12z
+from forecast_v1.acquisition import (
+    AcquisitionSpec, _open_staged_gefs_members, _stage_gefs_member,
+    acquire_source, latest_publishable_12z,
+)
 from forecast_v1.artifacts import write_cog, write_netcdf, write_points_parquet
 from forecast_v1.contracts import PUBLIC_GRID, QUALITY_BITS, REQUIRED_VARIABLES
 from forecast_v1.contracts import GridDefinition
@@ -52,6 +55,7 @@ def test_herbie_acquisition_normalizes_clips_and_checks_hours(tmp_path):
     class FakeFastHerbie:
         def __init__(self, **kwargs): self.calls = 0
         def xarray(self, search, **kwargs):
+            assert kwargs["remove_grib"] is False
             self.calls += 1
             if "700" in search: raise RuntimeError("optional unavailable")
             return raw
@@ -135,6 +139,37 @@ def test_public_ensemble_summary_preserves_mean_and_spread_with_two_members():
         reduced = summary.dataset[name]
         xr.testing.assert_allclose(reduced.mean("member"), original.mean("member"))
         xr.testing.assert_allclose(reduced.std("member"), original.std("member"))
+
+
+def test_gefs_members_are_streamed_to_disk_without_reduction(tmp_path, monkeypatch):
+    import forecast_v1.acquisition as acquisition
+
+    monkeypatch.setattr(acquisition, "HORIZON_HOURS", 1)
+    cycle = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+    target = tmp_path / "gefs-members.nc"
+    for index, value in enumerate((281.0, 283.0, 288.0)):
+        member = f"p{index:02d}"
+        dataset = xr.Dataset(
+            {"t2m": (("time", "y", "x"), np.full((2, 1, 1), value, dtype=np.float32), {"units": "K"})},
+            coords={
+                "time": [
+                    np.datetime64(cycle.replace(tzinfo=None)),
+                    np.datetime64(cycle.replace(tzinfo=None) + timedelta(hours=1)),
+                ],
+                "y": [1.0], "x": [2.0],
+            },
+            attrs={"crs": "EPSG:4326"},
+        )
+        _stage_gefs_member(dataset, member=member, cycle=cycle, target=target, first=index == 0)
+
+    staged = _open_staged_gefs_members(target, 3)
+    try:
+        assert staged.sizes["member"] == 3
+        assert staged.member.values.tolist() == ["p00", "p01", "p02"]
+        assert staged.temperature_2m[:, 0, 0, 0].values.tolist() == pytest.approx([7.85, 9.85, 14.85])
+        assert staged.attrs["member_storage"] == "disk_backed_full_ensemble"
+    finally:
+        staged.close()
 
 
 def test_lead_weights_are_renormalized_when_optional_source_is_missing():

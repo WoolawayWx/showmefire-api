@@ -262,6 +262,23 @@ def _merge_herbie_result(value, cycle: datetime) -> xr.Dataset:
     return merged.sortby("time")
 
 
+def _load_clipped_herbie_result(value, cycle: datetime) -> xr.Dataset:
+    """Clip and eagerly load a query before releasing its GRIB-backed inputs."""
+    items = value if isinstance(value, list) else [value]
+    merged = None
+    try:
+        merged = _merge_herbie_result(items, cycle)
+        clipped = _clip_and_project_axes(_canonicalize_variables(merged))
+        return clipped.load()
+    finally:
+        if merged is not None:
+            merged.close()
+        for item in items:
+            close = getattr(item, "close", None)
+            if close is not None:
+                close()
+
+
 def _detect_crs(dataset: xr.Dataset) -> pyproj.CRS:
     projection = dataset.get("gribfile_projection")
     if projection is not None and projection.attrs.get("grid_mapping_name"):
@@ -340,7 +357,7 @@ def _fetch_member(
 ) -> xr.Dataset:
     kwargs = dict(
         DATES=[cycle.replace(tzinfo=None)], fxx=list(spec.leads), model=spec.herbie_model,
-        product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "4")),
+        product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "1")),
         verbose=False,
     )
     if member is not None:
@@ -354,7 +371,10 @@ def _fetch_member(
         attempts = max(1, int(os.getenv("SMF_HERBIE_QUERY_ATTEMPTS", "3")))
         for attempt in range(1, attempts + 1):
             try:
-                groups.append(_merge_herbie_result(client.xarray(search, remove_grib=True), cycle))
+                # Herbie/cfgrib arrays are lazy. Removing the subset here used
+                # to leave later merge/load operations pointing at a deleted
+                # file. Cache retention removes these files after seven days.
+                groups.append(_load_clipped_herbie_result(client.xarray(search, remove_grib=False), cycle))
                 break
             except Exception as error:
                 if attempt == attempts:
@@ -372,7 +392,7 @@ def _fetch_member(
     if errors:
         surface.attrs["acquisition_warnings"] = ";".join(errors)
     try:
-        upper = _merge_herbie_result(client.xarray(UPPER_AIR_SEARCH, remove_grib=True), cycle)
+        upper = _load_clipped_herbie_result(client.xarray(UPPER_AIR_SEARCH, remove_grib=False), cycle)
         surface = xr.merge([surface, upper], compat="override", join="outer")
     except Exception as error:
         logger.info("%s optional upper-air fields unavailable for %s: %s", spec.public_name, member, error)
@@ -387,7 +407,10 @@ def _fetch_member(
         flags.append("seasonal_swe_assumed_zero")
     if flags:
         canonical.attrs["acquisition_quality_flags"] = ";".join(flags)
-    return _clip_and_project_axes(canonical)
+    # Every query group is already clipped and loaded. The second
+    # canonicalization above only derives aliases that need multiple groups.
+    canonical.attrs.update(surface.attrs)
+    return canonical.load()
 
 
 def _hourly_gefs(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
@@ -410,6 +433,66 @@ def _hourly_gefs(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
     return hourly
 
 
+def _stage_gefs_member(
+    dataset: xr.Dataset,
+    *,
+    member: str | int | None,
+    cycle: datetime,
+    target: Path,
+    first: bool,
+) -> tuple[Path, tuple[str, ...]]:
+    """Normalize one GEFS member and append it to a disk-backed cube."""
+    member_name = "deterministic" if member is None else str(member)
+    hourly = _hourly_gefs(dataset, cycle)
+    hourly.attrs.update(cycle_time=cycle.isoformat().replace("+00:00", "Z"), acquisition="herbie-indexed-grib")
+    cube = ADAPTERS["gefs"]().normalize(hourly, cycle)
+    member_dataset = cube.dataset.assign_coords(member=[member_name])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if first:
+            temporary = target.with_suffix(".nc.tmp")
+            temporary.unlink(missing_ok=True)
+            member_dataset.to_netcdf(temporary, engine="netcdf4", unlimited_dims=["member"])
+            os.replace(temporary, target)
+        else:
+            import netCDF4
+            with netCDF4.Dataset(target, "a") as destination:
+                member_index = len(destination.dimensions["member"])
+                for name, source in member_dataset.variables.items():
+                    if "member" not in source.dims:
+                        continue
+                    if name not in destination.variables:
+                        fill_value = source.encoding.get("_FillValue")
+                        destination_variable = destination.createVariable(
+                            name, source.dtype, source.dims, fill_value=fill_value,
+                        )
+                        destination_variable.setncatts({
+                            key: value for key, value in source.attrs.items() if key != "_FillValue"
+                        })
+                    destination_variable = destination.variables[name]
+                    selection = [slice(None)] * len(source.dims)
+                    selection[source.dims.index("member")] = slice(member_index, member_index + 1)
+                    destination_variable[tuple(selection)] = source.values
+    finally:
+        member_dataset.close()
+    return target, cube.quality_flags
+
+
+def _open_staged_gefs_members(path: Path, member_count: int) -> xr.Dataset:
+    """Return one lazy, disk-backed dataset containing every GEFS member."""
+    combined = xr.open_dataset(path, engine="netcdf4", cache=False)
+    if combined.sizes.get("member") != member_count:
+        combined.close()
+        raise RuntimeError(
+            f"GEFS disk-backed cube expected {member_count} members, found {combined.sizes.get('member', 0)}"
+        )
+    combined.attrs.update(
+        source_member_count=member_count,
+        member_storage="disk_backed_full_ensemble",
+    )
+    return combined
+
+
 def acquire_source(
     spec: AcquisitionSpec,
     cycle: datetime,
@@ -424,38 +507,57 @@ def acquire_source(
     def fetch(member):
         return member, _fetch_member(spec, cycle, member, Path(cache_dir), fast_herbie_factory)
 
-    workers = min(len(spec.members), max(1, int(os.getenv("SMF_ENSEMBLE_MEMBER_THREADS", "2"))))
+    workers = min(len(spec.members), max(1, int(os.getenv("SMF_ENSEMBLE_MEMBER_THREADS", "1"))))
     fetched = []
+    stage_gefs = spec.public_name == "gefs"
+    staged_member_path = Path(cache_dir) / "normalized-members" / "gefs-members.nc"
+    staged_member_count = 0
+    member_errors: list[str] = []
+    quality_flags: set[str] = set()
+
+    def retain(item) -> None:
+        nonlocal staged_member_count
+        member, dataset = item
+        member_name = "deterministic" if member is None else str(member)
+        warning = dataset.attrs.get("acquisition_warnings")
+        if warning:
+            member_errors.append(f"{member_name}: {warning}")
+        quality_flags.update(filter(None, str(dataset.attrs.get("acquisition_quality_flags", "")).split(";")))
+        if stage_gefs:
+            _, normalized_flags = _stage_gefs_member(
+                dataset, member=member, cycle=cycle, target=staged_member_path,
+                first=staged_member_count == 0,
+            )
+            staged_member_count += 1
+            quality_flags.update(normalized_flags)
+            dataset.close()
+        else:
+            fetched.append(item)
+
     if workers == 1:
         iterator = map(fetch, spec.members)
     else:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"forecast-{spec.public_name}") as executor:
             iterator = executor.map(fetch, spec.members)
             for completed, item in enumerate(iterator, 1):
-                fetched.append(item)
+                retain(item)
                 if progress_callback:
                     progress_callback({"event": "member_completed", "member": "deterministic" if item[0] is None else str(item[0]), "completed": completed, "total": len(spec.members)})
     if workers == 1:
         for completed, item in enumerate(iterator, 1):
-            fetched.append(item)
+            retain(item)
             if progress_callback:
                 progress_callback({"event": "member_completed", "member": "deterministic" if item[0] is None else str(item[0]), "completed": completed, "total": len(spec.members)})
-    member_datasets = []
-    member_names = []
-    for member, dataset in fetched:
-        member_name = "deterministic" if member is None else str(member)
-        member_datasets.append(dataset.expand_dims(member=[member_name]))
-        member_names.append(member_name)
-    combined = xr.concat(member_datasets, dim="member", join="outer", compat="override", coords="minimal")
-    member_errors = [
-        f"{member_names[index]}: {dataset.attrs['acquisition_warnings']}"
-        for index, dataset in enumerate(member_datasets)
-        if dataset.attrs.get("acquisition_warnings")
-    ]
+    if stage_gefs:
+        combined = _open_staged_gefs_members(staged_member_path, len(spec.members))
+    else:
+        member_datasets = []
+        for member, dataset in fetched:
+            member_name = "deterministic" if member is None else str(member)
+            member_datasets.append(dataset.expand_dims(member=[member_name]))
+        combined = xr.concat(member_datasets, dim="member", join="outer", compat="override", coords="minimal")
     if member_errors:
         combined.attrs["acquisition_warnings"] = "; ".join(member_errors)
-    if spec.public_name == "gefs":
-        combined = _hourly_gefs(combined, cycle)
     # RRFS analyses do not publish APCP at f000.  A missing initialization
     # value is a real zero increment, not a missing required field, whenever
     # later forecast hours contain precipitation increments.
@@ -466,13 +568,21 @@ def acquire_source(
             combined[precipitation] = data.where(data.time != data.time.values[0], 0.0)
             combined[precipitation].attrs.update(data.attrs)
     combined.attrs.update(cycle_time=cycle.isoformat().replace("+00:00", "Z"), acquisition="herbie-indexed-grib")
-    try:
-        cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
-    except ValueError as error:
-        query_errors = combined.attrs.get("acquisition_warnings")
-        detail = f"; Herbie query failures: {query_errors}" if query_errors else ""
-        raise ValueError(f"{error}{detail}") from error
-    acquisition_flags = tuple(filter(None, str(combined.attrs.get("acquisition_quality_flags", "")).split(";")))
+    if stage_gefs:
+        cube = SourceCube(
+            "gefs", cycle, combined, tuple(str(value) for value in combined.member.values),
+            tuple(sorted(quality_flags)),
+        )
+    else:
+        try:
+            cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
+        except ValueError as error:
+            query_errors = combined.attrs.get("acquisition_warnings")
+            detail = f"; Herbie query failures: {query_errors}" if query_errors else ""
+            raise ValueError(f"{error}{detail}") from error
+    acquisition_flags = tuple(sorted(quality_flags.union(
+        filter(None, str(combined.attrs.get("acquisition_quality_flags", "")).split(";"))
+    )))
     if acquisition_flags:
         cube = SourceCube(
             cube.model, cube.cycle_time, cube.dataset, cube.member_ids,
