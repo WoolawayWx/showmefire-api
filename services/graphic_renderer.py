@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WIDTH, HEIGHT, DPI = 2048, 1152, 120
-RENDERER_VERSION = "graphics-gis-v12"
+RENDERER_VERSION = "graphics-gis-v14"
 # Fraction of image height taken by the accent bar + header band, both drawn
 # full-width and flush against the top edge (no margin above the accent bar).
 HEADER_ACCENT_HEIGHT = 0.012
@@ -186,19 +186,19 @@ def _add_header(fig, config: dict):
     if department_logo:
         logo_height = HEADER_BAND_HEIGHT * 0.7
         logo_width = min(0.16, _logo_width_frac(department_logo, logo_height))
-        logo_x = 1.0 - 0.022 - logo_width
+        logo_x = 1.0 - 0.032 - logo_width
         logo_ax = fig.add_axes((logo_x, band_center - logo_height / 2, logo_width, logo_height), zorder=65)
         logo_ax.imshow(department_logo)
         logo_ax.axis("off")
-    fig.text(0.022, band_center, config.get("header_text") or "Show Me Fire Weather Graphics",
+    fig.text(0.032, band_center, config.get("header_text") or "Show Me Fire Weather Graphics",
              ha="left", va="center", fontsize=27, fontweight="bold",
              color=foreground, zorder=60)
 
 
-def _add_footer(fig, config: dict, source_text: str):
+def _add_footer(fig, config: dict):
     """Draw one full-width solid bar across the bottom carrying the department
-    name, Show Me Fire branding, and source attribution, tall enough that the
-    Show Me Fire logo reads clearly."""
+    name and Show Me Fire branding, tall enough that the Show Me Fire logo
+    reads clearly."""
     department_name = config.get("department_name", "")
     accent_color = config.get("accent_color", "#f97316")
     smf_logo = _load_show_me_fire_logo()
@@ -218,15 +218,15 @@ def _add_footer(fig, config: dict, source_text: str):
         transform=fig.transFigure, facecolor=accent_color, edgecolor="none",
         linewidth=0, zorder=60,
     ))
-    fig.text(0.022, bar_center, name, ha="left", va="center", fontsize=15,
+    fig.text(0.032, bar_center, name, ha="left", va="center", fontsize=15,
              fontweight="bold", color="#172033", zorder=60)
     name_width = min(0.24, max(0.12, len(name) * 0.0068))
-    divider_x = 0.036 + name_width
+    divider_x = 0.046 + name_width
     fig.add_artist(plt.Line2D(
         [divider_x, divider_x], [FOOTER_HEIGHT * 0.18, FOOTER_HEIGHT * 0.82],
         transform=fig.transFigure, color="#d7dee8", linewidth=0.9, zorder=60,
     ))
-    label_x = divider_x + 0.018
+    label_x = divider_x + 0.024
     fig.text(label_x, bar_center + FOOTER_HEIGHT * 0.2, "POWERED BY", ha="left", va="center",
              fontsize=8, fontweight="bold", color="#64748b", zorder=60)
     if smf_logo:
@@ -237,25 +237,29 @@ def _add_footer(fig, config: dict, source_text: str):
         )
         smf_ax.imshow(smf_logo)
         smf_ax.axis("off")
-    fig.text(0.978, bar_center, source_text, ha="right", va="center", fontsize=11,
-             fontweight="bold", color="#374151", zorder=60)
 
 
 def _add_legend(fig, frames, background="#ffffff", foreground="#172033"):
     entries = _legend_entries(frames)
     if not entries:
         entries = [("No active areas", "#d1d5db")]
-    handles = [Patch(facecolor=color, edgecolor="#f9fafb", linewidth=0.7, label=label) for label, color in entries]
+    handles = [Patch(facecolor=color, edgecolor="#94a3b8", linewidth=0.8, label=label) for label, color in entries]
     legend_top = 1.0 - HEADER_TOTAL_HEIGHT - 0.02
-    legend = fig.legend(handles=handles, title="Legend", loc="upper right", bbox_to_anchor=(0.985, legend_top), frameon=True, ncol=1, fontsize=10, title_fontsize=11, borderpad=0.8, labelspacing=0.45)
+    legend = fig.legend(
+        handles=handles, title="Legend", loc="upper right", bbox_to_anchor=(0.982, legend_top),
+        frameon=True, ncol=1, fontsize=13, title_fontsize=15, borderpad=1.0, labelspacing=0.6,
+        handlelength=1.6, handleheight=1.3, borderaxespad=0.9,
+    )
     legend.set_zorder(90)
     legend.get_frame().set_facecolor(background)
     legend.get_frame().set_edgecolor("#cbd5e1")
     legend.get_frame().set_alpha(0.97)
+    legend.get_frame().set_linewidth(1.1)
     legend.get_title().set_color(foreground)
     legend.get_title().set_fontweight("bold")
     for text in legend.get_texts():
         text.set_color(foreground)
+        text.set_fontweight("bold")
 
 
 def _world_pixel(lon: float, lat: float, zoom: int):
@@ -380,8 +384,11 @@ def _draw_frame(ax, frame: gpd.GeoDataFrame, title: str, extent, basemap, refere
         )
         state_boundary.boundary.plot(ax=ax, color="#374151", linewidth=1.0, alpha=0.9, zorder=18)
     if jurisdiction_path and Path(jurisdiction_path).is_file():
-        gpd.read_file(jurisdiction_path).to_crs("EPSG:3857").boundary.plot(ax=ax, color="#ffffff", linewidth=4.2, zorder=20)
-        gpd.read_file(jurisdiction_path).to_crs("EPSG:3857").boundary.plot(ax=ax, color="#111827", linewidth=1.6, zorder=21)
+        # A bold halo + accent-colored core so the department's own district
+        # reads clearly regardless of what's underneath it on the basemap.
+        jurisdiction_boundary = gpd.read_file(jurisdiction_path).to_crs("EPSG:3857").boundary
+        jurisdiction_boundary.plot(ax=ax, color="#ffffff", linewidth=7.0, alpha=0.9, zorder=20)
+        jurisdiction_boundary.plot(ax=ax, color=config.get("accent_color", "#f97316"), linewidth=3.0, zorder=21)
     if config.get("show_town_labels", True):
         ax.imshow(reference_overlay, extent=(west, east, south, north), origin="upper", zorder=30)
     # The extent was derived in Web Mercator for this exact viewport ratio.
@@ -503,7 +510,7 @@ def render_graphic(config: dict) -> dict:
         _draw_frame(fig.add_axes(position), frame, panel_title, extent, basemap, reference_overlay,
                     reference_boundaries, config.get("jurisdiction_path"), config)
     _add_header(fig, config)
-    _add_footer(fig, config, "Sources: NOAA/NWS SPC, weather.gov, OpenStreetMap & CARTO")
+    _add_footer(fig, config)
     _add_legend(
         fig, frames, config.get("legend_background_color", "#ffffff"),
         config.get("legend_text_color", "#172033"),

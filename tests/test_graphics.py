@@ -64,7 +64,7 @@ class GraphicsTests(unittest.TestCase):
             })
         image = Image.open(io.BytesIO(result["bytes"]))
         self.assertEqual(image.size, (2048, 1152))
-        self.assertEqual(result["renderer_version"], "graphics-gis-v12")
+        self.assertEqual(result["renderer_version"], "graphics-gis-v14")
         self.assertEqual(len(result["source_urls"]), 4)
         self.assertEqual(basemap.call_count, 2)
         self.assertEqual(basemap.call_args_list[0].args[3], "rastertiles/voyager_nolabels")
