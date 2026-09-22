@@ -60,6 +60,7 @@ def upsert_audience_contact(email: str) -> str:
         # silently resubscribe it when a preference update is retried.
         existing = _resend_request("GET", f"/contacts/{normalized}")
         return str(existing.get("id") or "")
+    return str(result.get("id") or "")
 
 
 def set_audience_contact_unsubscribed(email: str, unsubscribed: bool) -> None:
@@ -69,7 +70,6 @@ def set_audience_contact_unsubscribed(email: str, unsubscribed: bool) -> None:
         f"/contacts/{email.strip().lower()}",
         {"unsubscribed": bool(unsubscribed)},
     )
-    return str(result.get("id") or "")
 
 
 def send_bulletin_broadcast(subject: str, html_body: str, text_body: str) -> str:
