@@ -70,11 +70,12 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+# Per-county maps are a supplementary product, not the core forecast. A
+# failure here must not suppress the "forecast ready" notifications below.
 run_step "Updating Per County Maps" "$PROJECT_DIR/forecast/PerCounty.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
-    echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
-    exit $EXIT_CODE
+    echo "WARNING: Updating Per County Maps failed at $(date) with exit code $EXIT_CODE - continuing so forecast notifications still go out" >> "$LOG_FILE" 2>&1
 fi
 
 echo "=== Sending forecast maps to Discord ===" >> "$LOG_FILE" 2>&1

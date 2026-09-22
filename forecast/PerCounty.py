@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import geopandas as gpd
 import numpy as np
 import rasterio
@@ -6,6 +8,8 @@ from rasterio.features import geometry_mask
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.database import init_database, upsert_county_forecast_day
 
 # Danger levels: 0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme
