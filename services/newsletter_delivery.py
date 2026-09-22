@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 DANGER_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
 CENTRAL = ZoneInfo("America/Chicago")
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "emails"
+SUBJECT_FORECAST_DATE = datetime.now(CENTRAL).date().strftime("%B %d, %Y")
 
 
 def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
@@ -39,20 +40,16 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
         )
         for row in rows
     ]
-    subject = (
-        f"FireWx forecast for {labels[0][0]}: {labels[0][1]}"
-        if len(labels) == 1
-        else f"FireWx forecast for {len(labels)} counties"
-    )
-    county_rows = "".join(
-        '<div style="margin:0 0 12px;padding:16px;border:1px solid #d9e0e8;'
-        'border-radius:8px;background:#fbfcfd;">'
-        f"<strong style=\"font-size:17px;color:#172033;\">{county}</strong>"
-        f"<span style=\"float:right;font-weight:700;color:#315f9e;\">"
-        f"{html.escape(label)} Fire Danger</span>"
-        f"<div style=\"margin-top:8px;color:#536174;line-height:1.5;\">{summary}</div>"
-        "</div>"
-        for county, label, summary in labels
+    subject = f"Fire Weather Forecast for {SUBJECT_FORECAST_DATE}"
+    county_rows = (
+        "<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">"
+        "<thead><tr><th>County</th><th>Fire Danger</th></tr></thead>"
+        "<tbody>"
+        + "".join(
+            f"<tr><td>{county}</td><td>{html.escape(label)} Fire Danger</td></tr>"
+            for county, label, _summary in labels
+        )
+        + "</tbody></table>"
     )
     county_rows_text = "\n\n".join(
         f"{county}: {label} Fire Danger\n{summary}"
@@ -63,7 +60,7 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
         "Manage or unsubscribe from email updates</a>"
     )
     replacements = {
-        "{{forecast_date}}": html.escape(forecast_date),
+        "{{forecast_date}}": html.escape(SUBJECT_FORECAST_DATE),
         "{{county_rows_html}}": county_rows,
         "{{county_rows_text}}": county_rows_text,
         "{{manage_url}}": html.escape(manage_url, quote=True),
