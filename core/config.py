@@ -25,7 +25,7 @@ def _parse_office_codes(raw: str):
 	return offices or ["EAX", "SGF", "LSX"]
 
 
-AFD_OFFICES = _parse_office_codes(os.getenv("AFD_OFFICES", "EAX,SGF,LSX"))
+AFD_OFFICES = _parse_office_codes(os.getenv("AFD_OFFICES", "EAX,SGF,LSX,DVN,PAH"))
 
 try:
 	AFD_POLL_MINUTES = max(1, int(os.getenv("AFD_POLL_MINUTES", "60")))

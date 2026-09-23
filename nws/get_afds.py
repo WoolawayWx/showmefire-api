@@ -1,11 +1,11 @@
 import httpx
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, List, Set
 
-MO_OFFICES = ["EAX", "SGF", "LSX"]
+MO_OFFICES = ["EAX", "SGF", "LSX", "DVN", "PAH"]
 NWS_BASE = "https://api.weather.gov"
-HEADERS = {"User-Agent": "your-app contact@youremail.com"}
+HEADERS = {"User-Agent": "ShowMeFire (https://showmefire.org)"}
 
 # NWS asks you stay under ~1 req/sec
 REQUEST_DELAY = 1.0  # seconds between requests
@@ -31,7 +31,13 @@ async def fetch_new_afds_for_office(office: str, client: httpx.AsyncClient, know
     r = await fetch_with_backoff(client, f"{NWS_BASE}/products/types/AFD/locations/{office}")
     products = r.json().get("@graph", [])
 
-    latest_product = next((product for product in products if product.get("id")), None)
+    # NWS product feeds are not guaranteed to return the newest AFD first.
+    # Select by issuance time so a stale first entry cannot mask a newer EAX AFD.
+    latest_product = max(
+        (product for product in products if product.get("id") and product.get("issuanceTime")),
+        key=lambda product: datetime.fromisoformat(product["issuanceTime"].replace("Z", "+00:00")),
+        default=None,
+    )
     if not latest_product:
         return results
 
