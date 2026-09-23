@@ -43,6 +43,69 @@
       "invalidates": [
         "fire_risk_fusion"
       ]
+    },
+    {
+      "name": "ensemble_fire_danger_core",
+      "api_path": "services/ensemble_fire_danger/core.py",
+      "training_path": "ensemble_fire_danger/core.py",
+      "sha256": "924b1baf9b6d2d4076901d00d5f24763f5daaebfa2c48c3d6230388ee509abe4",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_grib_idx",
+      "api_path": "services/ensemble_fire_danger/grib_idx.py",
+      "training_path": "ensemble_fire_danger/grib_idx.py",
+      "sha256": "7c44125a651736ff68ef1ccda312a04af78d8a7158e47dfd6e39223939cef604",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_members",
+      "api_path": "services/ensemble_fire_danger/members.py",
+      "training_path": "ensemble_fire_danger/members.py",
+      "sha256": "45c004726a730afd789bb67f7ffde74110be607bef4ed5b1b9428b0cba9b1728",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_regrid",
+      "api_path": "services/ensemble_fire_danger/regrid.py",
+      "training_path": "ensemble_fire_danger/regrid.py",
+      "sha256": "9e93dea213290936582a17c0646f6937dfea1b05b3e6a78aaac118a1acbccaef",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_tracks",
+      "api_path": "services/ensemble_fire_danger/tracks.py",
+      "training_path": "ensemble_fire_danger/tracks.py",
+      "sha256": "60f6fe0a032bfffce007cddb146b1e8af0759b5e4ab1e1b5920dd7d8eb7ef1e1",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_fm_features",
+      "api_path": "services/ensemble_fire_danger/fm_features.py",
+      "training_path": "ensemble_fire_danger/fm_features.py",
+      "sha256": "fb2ab05bb3d2debcdc6b2cf68a26cc0fcf3879e0dd2551ed53215476a4171091",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
+    },
+    {
+      "name": "ensemble_fire_danger_member_config",
+      "api_path": "services/ensemble_fire_danger/member_config.json",
+      "training_path": "ensemble_fire_danger/member_config.json",
+      "sha256": "46c1a6525020b4039b683654e654b073c31a352f7953984e4bf29849f1ce5ab8",
+      "invalidates": [
+        "ensemble_fire_danger"
+      ]
     }
   ]
 }

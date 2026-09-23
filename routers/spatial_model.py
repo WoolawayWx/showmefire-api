@@ -62,6 +62,16 @@ def fire_weather_index_shadow_diagnostics_endpoint():
     return fire_weather_index_shadow_diagnostics()
 
 
+@router.get("/ensemble-fire-danger-diagnostics")
+def ensemble_fire_danger_diagnostics_endpoint():
+    """Last run of the Day-1 ensemble fire danger beta: members used (with
+    their actual cycles), per-track member counts / degraded flags, and the
+    calibration bundle in effect. Read-only; see
+    services/ensemble_fire_danger/runtime.py::diagnostics."""
+    from services.ensemble_fire_danger.runtime import diagnostics
+    return diagnostics()
+
+
 @router.get("/drift-diagnostics")
 def drift_diagnostics_endpoint():
     return drift_diagnostics()

@@ -58,6 +58,13 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+# Ensemble fire danger (BETA): HREF-style multi-model + REFS/HREF ensprod
+# probabilities and a categorical ensemble forecast. Runs after the
+# operational forecast so it can anchor on this run's own fuel moisture
+# (forecast-state hand-off). Advisory-only and must never block publication.
+run_step "Running Ensemble Fire Danger (beta)" "$PROJECT_DIR/scripts/run_ensemble_fire_danger.py" || \
+  echo "WARNING: Ensemble fire danger (beta) generation failed at $(date)" >> "$LOG_FILE" 2>&1
+
 # The 09z comparison must run after this operational 12z archive exists.
 # It is observational/reporting-only and must not block forecast publication.
 run_step "Comparing 9z run against same-day 12z run" "$PROJECT_DIR/scripts/compare_09z_12z.py" || \

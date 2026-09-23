@@ -37,7 +37,7 @@ router = APIRouter(prefix="/api/admin/models", tags=["model-admin"])
 # attempting a promotion possible (it used to crash on any bundle lacking a
 # model/checkpoint/static_bundle asset role) rather than guaranteed to succeed.
 REGISTRY_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_behavior_static",
-                        "fire_risk_fusion"]
+                        "fire_risk_fusion", "ensemble_fire_danger"]
 
 # Guarded shadow bundle families - not in the registry above, each scored
 # from a single fixed directory pointed at by an SMF_<X>_BUNDLE env var (see
