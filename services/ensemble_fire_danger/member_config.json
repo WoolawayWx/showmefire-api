@@ -1,0 +1,283 @@
+{
+  "schema": "ensemble-member-config-1",
+  "version": "1.0.0",
+  "window": {
+    "anchor_cycle_hour_utc": 12,
+    "valid_lead_start": 4,
+    "valid_lead_end": 15,
+    "label": "10:00–21:00 CT"
+  },
+  "min_members": 5,
+  "abort_below_members": 3,
+  "neighborhood_radius_km": 20.0,
+  "smooth_sigma_cells": 1.5,
+  "default_categorical_threshold": 0.5,
+  "fm_clip": [
+    1.0,
+    40.0
+  ],
+  "sources": {
+    "hrrr": {
+      "name": "HRRR",
+      "url": "https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{date}/conus/hrrr.t{hh}z.wrfsfcf{fxx:02d}.grib2",
+      "cycles": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ],
+      "max_lead": {
+        "default": 18,
+        "0": 48,
+        "6": 48,
+        "12": 48,
+        "18": 48
+      },
+      "wind_factor": 0.8,
+      "archived": true,
+      "latency_hours": 1.5
+    },
+    "nam_nest": {
+      "name": "NAM 3km",
+      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/nam/prod/nam.{date}/nam.t{hh}z.conusnest.hiresf{fxx:02d}.tm00.grib2",
+      "cycles": [
+        0,
+        6,
+        12,
+        18
+      ],
+      "max_lead": {
+        "default": 60
+      },
+      "wind_factor": 0.8,
+      "archived": true,
+      "latency_hours": 2.25,
+      "archive_url": "https://noaa-nam-pds.s3.amazonaws.com/nam.{date}/nam.t{hh}z.conusnest.hiresf{fxx:02d}.tm00.grib2"
+    },
+    "rrfs": {
+      "name": "RRFS",
+      "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{hh}/rrfs.t{hh}z.2dfld.13km.f{fxx:03d}.na.grib2",
+      "cycles": [
+        0,
+        6,
+        12,
+        18
+      ],
+      "max_lead": {
+        "default": 84
+      },
+      "wind_factor": 0.8,
+      "archived": true,
+      "archive_start": "2026-08-12",
+      "latency_hours": 2.75
+    },
+    "hiresw_arw": {
+      "name": "HiResW ARW",
+      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.arw_2p5km.f{fxx:02d}.conus.grib2",
+      "cycles": [
+        0,
+        12
+      ],
+      "max_lead": {
+        "default": 48
+      },
+      "wind_factor": 0.8,
+      "archived": false,
+      "latency_hours": 2.75
+    },
+    "hiresw_fv3": {
+      "name": "HiResW FV3",
+      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.fv3_2p5km.f{fxx:02d}.conus.grib2",
+      "cycles": [
+        0,
+        12
+      ],
+      "max_lead": {
+        "default": 48
+      },
+      "wind_factor": 0.8,
+      "archived": false,
+      "latency_hours": 2.25
+    },
+    "hiresw_arw2": {
+      "name": "HiResW ARW mem2",
+      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.arw_5km.f{fxx:02d}.conusmem2.grib2",
+      "cycles": [
+        0,
+        12
+      ],
+      "max_lead": {
+        "default": 48
+      },
+      "wind_factor": 0.8,
+      "archived": false,
+      "latency_hours": 2.5
+    }
+  },
+  "members": [
+    {
+      "id": "hrrr_0",
+      "source": "hrrr",
+      "cycle_offset_hours": 0,
+      "weight": 1.0,
+      "control": true
+    },
+    {
+      "id": "hrrr_m6",
+      "source": "hrrr",
+      "cycle_offset_hours": -6,
+      "weight": 1.0
+    },
+    {
+      "id": "hrrr_m12",
+      "source": "hrrr",
+      "cycle_offset_hours": -12,
+      "weight": 1.0
+    },
+    {
+      "id": "nam_0",
+      "source": "nam_nest",
+      "cycle_offset_hours": 0,
+      "weight": 1.0
+    },
+    {
+      "id": "nam_m6",
+      "source": "nam_nest",
+      "cycle_offset_hours": -6,
+      "weight": 1.0
+    },
+    {
+      "id": "rrfs_0",
+      "source": "rrfs",
+      "cycle_offset_hours": 0,
+      "weight": 1.0
+    },
+    {
+      "id": "rrfs_m6",
+      "source": "rrfs",
+      "cycle_offset_hours": -6,
+      "weight": 1.0
+    },
+    {
+      "id": "arw_0",
+      "source": "hiresw_arw",
+      "cycle_offset_hours": 0,
+      "weight": 1.0,
+      "optional": true
+    },
+    {
+      "id": "fv3_0",
+      "source": "hiresw_fv3",
+      "cycle_offset_hours": 0,
+      "weight": 1.0,
+      "optional": true
+    },
+    {
+      "id": "arw2_0",
+      "source": "hiresw_arw2",
+      "cycle_offset_hours": 0,
+      "weight": 1.0,
+      "optional": true
+    }
+  ],
+  "ensprod_sources": {
+    "refs": {
+      "name": "REFS",
+      "cycles": [
+        0,
+        6,
+        12,
+        18
+      ],
+      "max_lead": {
+        "default": 36
+      },
+      "archived": true,
+      "archive_start": "2026-08-12",
+      "products": {
+        "mean": {
+          "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/refs.{date}/{hh}/ensprod/refs.t{hh}z.mean.f{fxx:02d}.conus.grib2"
+        },
+        "sprd": {
+          "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/refs.{date}/{hh}/ensprod/refs.t{hh}z.sprd.f{fxx:02d}.conus.grib2"
+        },
+        "prob": {
+          "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/refs.{date}/{hh}/ensprod/refs.t{hh}z.prob.f{fxx:02d}.conus.grib2"
+        }
+      },
+      "latency_hours": 2.9
+    },
+    "href": {
+      "name": "HREF",
+      "cycles": [
+        0,
+        12
+      ],
+      "max_lead": {
+        "default": 48
+      },
+      "archived": false,
+      "products": {
+        "mean": {
+          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.mean.f{fxx:02d}.grib2"
+        },
+        "sprd": {
+          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.sprd.f{fxx:02d}.grib2"
+        },
+        "prob": {
+          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.prob.f{fxx:02d}.grib2"
+        }
+      },
+      "latency_hours": 3.3
+    }
+  },
+  "ensprod_members": [
+    {
+      "id": "refs",
+      "source": "refs",
+      "cycle_offset_hours": 0,
+      "weight": 1.0
+    },
+    {
+      "id": "href",
+      "source": "href",
+      "cycle_offset_hours": 0,
+      "weight": 1.0,
+      "optional": true
+    }
+  ],
+  "synthetic": {
+    "n_draws": 40,
+    "seed": 20260922,
+    "rho_t_td": -0.3,
+    "spatial_sigma_cells": 3.0,
+    "wind_factor": 0.8
+  },
+  "max_cycle_age_hours": 30,
+  "live_run_offset_hours": 3.0,
+  "_notes": {
+    "latency_hours": "Typical hours after cycle time until the LAST lead the Day-1 window needs (f15 of the 12z) is published, measured from real Last-Modified headers on 2026-09-22 plus ~0.25h margin: HRRR 1.2h, NAM nest (NOMADS) 1.9h, RRFS 2.4h, HiResW ARW 2.4h / FV3 1.8h / ARW2 2.2h, REFS 2.6h, HREF 3.1h. Only used to EMULATE the live member mix during historical capture (members.resolve_plan emulate_live_at); live runs check the real .idx.",
+    "archive_url": "NAM nest on AWS (noaa-nam-pds) is uploaded ~12h late (Last-Modified 00:40Z next day, confirmed 2026-09-22), so live runs read NOMADS (url) and historical capture reads AWS (archive_url).",
+    "live_run_offset_hours": "The ensemble step runs right after DailyForecast in scripts/forecasts.sh (cron 14:30Z) - about anchor+3h."
+  }
+}

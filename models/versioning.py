@@ -69,6 +69,16 @@ REQUIRED_FIRE_WEATHER_INDEX_METADATA = {
     "model_family", "advisory_only",
 }
 
+# ensemble_fire_danger: calibration (isotonic knots + categorical thresholds)
+# for the Day-1 ensemble fire danger probabilities - see
+# services/ensemble_fire_danger/ and model-training/ensemble_fire_danger/.
+# Beta-labelled public guidance, never an operational replacement for the
+# rule: same hard advisory_only v1 boundary as its siblings. core_module_sha256
+# pins the calibration to the numeric core it was fitted against.
+REQUIRED_ENSEMBLE_FIRE_DANGER_METADATA = {
+    "model_family", "advisory_only", "core_module_sha256",
+}
+
 # risk_fusion_glm is the first of the formerly shadow_bundles.py-only
 # families to be migrated onto this registry (see
 # services/risk_fusion_glm_shadow.py's own load_bundle(), whose contract
@@ -282,6 +292,16 @@ def validate_promotion_candidate(model_type, candidate):
         # Same hard v1 boundary as fire_risk_fusion/fire_weather_ml.
         if metadata.get("advisory_only") is not True:
             blockers.append("fire_weather_index candidates must have advisory_only=True in v1")
+    if model_type == "ensemble_fire_danger":
+        missing = sorted(REQUIRED_ENSEMBLE_FIRE_DANGER_METADATA.difference(metadata))
+        if missing:
+            blockers.append(f"missing metadata: {', '.join(missing)}")
+        if metadata.get("advisory_only") is not True:
+            blockers.append("ensemble_fire_danger candidates must have advisory_only=True in v1")
+        from services.ensemble_fire_danger.bundle import core_module_sha256
+        if metadata.get("core_module_sha256") and metadata["core_module_sha256"] != core_module_sha256():
+            blockers.append("ensemble_fire_danger calibration was fitted against a different core.py "
+                            "(core_module_sha256 mismatch) - refit against the current core")
     if model_type == "risk_fusion_glm":
         missing = sorted(REQUIRED_RISK_FUSION_GLM_METADATA.difference(metadata))
         if missing:

@@ -37,7 +37,8 @@ REQUIRED_RISK_FUSION_ASSET_ROLES = {
 
 
 IMPORTABLE_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion",
-                          "fire_behavior_static", "fire_weather_index", "fire_weather_ml"]
+                          "fire_behavior_static", "fire_weather_index", "fire_weather_ml",
+                          "ensemble_fire_danger"]
 
 
 class ImportValidationError(Exception):
