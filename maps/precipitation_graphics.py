@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -14,10 +15,13 @@ import geopandas as gpd
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
+import numpy as np
 import requests
-from matplotlib.patches import Rectangle
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
-from matplotlib.ticker import MaxNLocator
+from matplotlib.patches import Rectangle
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+from scipy.ndimage import gaussian_filter
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SERVICE_URL = "https://mapservices.weather.noaa.gov/raster/rest/services/obs/rfc_qpe/MapServer"
@@ -71,8 +75,11 @@ def resolve_layer_ids(service: str = SERVICE_URL, *, session=requests) -> dict[s
 
 
 def fetch_layer_png(layer_id: int, *, service: str = SERVICE_URL, session=requests) -> bytes:
+    lon_min, lon_max, lat_min, lat_max = EXTENT
     params = {
-        "bbox": ",".join(str(value) for value in EXTENT),
+        # ArcGIS export expects bbox as xmin,ymin,xmax,ymax; EXTENT is in
+        # matplotlib's (lon_min, lon_max, lat_min, lat_max) order.
+        "bbox": f"{lon_min},{lat_min},{lon_max},{lat_max}",
         "bboxSR": "4326", "imageSR": "4326", "size": "1500,1000",
         "format": "png32", "transparent": "true", "layers": f"show:{layer_id}",
         "f": "image",
@@ -106,25 +113,91 @@ def fetch_legend_entries(layer_id: int, *, service: str = SERVICE_URL, session=r
     return entries
 
 
+def _shorten_legend_label(label: str) -> str:
+    """Condense NOAA's verbose legend sentences into compact range text.
+
+    Units are already stated once in the graphic's description line, so the
+    legend itself only needs the numbers, e.g. "Greater than or equal to 10"
+    -> "≥ 10", "10 to 15" -> "10–15".
+    """
+    label = label.strip()
+    lower = label.lower()
+    if lower.startswith("greater than or equal to"):
+        return f"≥ {label.rsplit(' ', 1)[-1]}"
+    if lower.startswith("less than"):
+        return f"< {label.rsplit(' ', 1)[-1]}"
+    if lower in ("missing data", "missing_data"):
+        return "No Data"
+    match = re.match(r"^([\d.]+)\s+to\s+([\d.]+)$", label, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}–{match.group(2)}"
+    return label
+
+
+def _smooth_and_mask_to_state(raster: np.ndarray, state_geometry, extent: tuple[float, float, float, float], *, sigma: float = 1.6) -> np.ndarray:
+    """Soften NOAA's blocky color bands and clip the raster to Missouri's outline.
+
+    Smoothing runs on alpha-premultiplied color so blurring never pulls in
+    fully-transparent black from outside NOAA's own data footprint. The state
+    mask is applied after smoothing so the outline itself stays crisp instead
+    of bleeding into neighboring states, matching the look of the RBF/gaussian
+    forecast graphics (fuelmoisturemap.py, rhmap-fil.py, windmap-fil.py).
+    """
+    lon_min, lon_max, lat_min, lat_max = extent
+    height, width = raster.shape[:2]
+    if raster.shape[2] == 3:
+        raster = np.dstack([raster, np.ones((height, width), dtype=raster.dtype)])
+
+    alpha = raster[..., 3]
+    premultiplied_rgb = raster[..., :3] * alpha[..., None]
+    blurred_rgb = np.dstack([gaussian_filter(premultiplied_rgb[..., channel], sigma=sigma) for channel in range(3)])
+    blurred_alpha = gaussian_filter(alpha, sigma=sigma)
+    safe_alpha = np.clip(blurred_alpha, 1e-6, None)
+    smoothed_rgb = np.where(blurred_alpha[..., None] > 1e-6, blurred_rgb / safe_alpha[..., None], 0.0)
+
+    transform = from_bounds(lon_min, lat_min, lon_max, lat_max, width, height)
+    state_mask = rasterize([(state_geometry, 1)], out_shape=(height, width), transform=transform, fill=0, dtype="uint8").astype(bool)
+
+    result = np.dstack([smoothed_rgb, blurred_alpha])
+    result[~state_mask, 3] = 0.0
+    return np.clip(result, 0.0, 1.0)
+
+
 def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, float, float]]], title: str, units: str, timestamp: datetime, output: Path) -> None:
     data_crs = ccrs.PlateCarree()
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
-    fig = plt.figure(figsize=(2048 / 144, 1152 / 144), dpi=144, facecolor="#E8E8E8")
-    ax = fig.add_axes([0.05, 0.04, 0.90, 0.82], projection=map_crs)
+    # A bit lighter than the other graphics' #E8E8E8: NOAA's own "greater than
+    # or equal to X" swatch on the accumulation (inches) products is a very
+    # close gray (~#DCDCDC), which reads as background at a glance otherwise.
+    fig = plt.figure(figsize=(2048 / 144, 1152 / 144), dpi=144, facecolor="#F5F5F3")
+    # Layout matches the other realtime graphics (fuelmoisturemap.py,
+    # rhmap-fil.py, windmap-fil.py, realtimefiredanger.py): a full-bleed axes
+    # anchored to the west after set_extent, which leaves a right-hand gutter
+    # for the text block and a left-hand gutter for the stacked legend.
+    ax = plt.axes([0, 0, 1, 1], projection=map_crs)
     ax.set_extent(EXTENT, crs=data_crs)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_frame_on(False)
-    raster = mpimg.imread(BytesIO(image_bytes), format="png")
-    ax.imshow(raster, extent=EXTENT, transform=data_crs, origin="upper", interpolation="nearest", zorder=1)
 
     counties = gpd.read_file(PROJECT_DIR / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp")
     boundary = gpd.read_file(PROJECT_DIR / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp")
-    for frame, color, width, zorder in ((counties, "#B6B6B6", 0.65, 5), (boundary, "#202020", 1.6, 8)):
+    for frame in (counties, boundary):
         if frame.crs is None:
             raise RuntimeError("Missouri map boundary data has no CRS")
-        frame = frame.to_crs("EPSG:4326")
+    counties = counties.to_crs("EPSG:4326")
+    boundary = boundary.to_crs("EPSG:4326")
+    state_geometry = boundary.geometry.union_all()
+
+    raster = mpimg.imread(BytesIO(image_bytes), format="png")
+    raster = _smooth_and_mask_to_state(raster, state_geometry, EXTENT)
+    ax.imshow(raster, extent=EXTENT, transform=data_crs, origin="upper", interpolation="bilinear", zorder=1)
+
+    for frame, color, width, zorder in ((counties, "#B6B6B6", 0.65, 5), (boundary, "#202020", 1.6, 8)):
         ax.add_geometries(frame.geometry, crs=data_crs, edgecolor=color, facecolor="none", linewidth=width, zorder=zorder)
+
+    ax.set_anchor("W")
+    plt.subplots_adjust(left=0.05)
 
     for relative in (
         "assets/Montserrat/static/Montserrat-Regular.ttf",
@@ -134,30 +207,47 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
         font_path = PROJECT_DIR / relative
         if font_path.exists():
             font_manager.fontManager.addfont(str(font_path))
-    fig.text(0.98, 0.955, title, fontsize=24, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans", color="#202020")
-    fig.text(0.98, 0.905, f"NOAA RFC QPE | {timestamp.strftime('%Y-%m-%d %H:%M CT')}", fontsize=14, ha="right", va="top", fontname="Montserrat", color="#333333")
-    fig.text(0.055, 0.885, f"Accumulated precipitation ({units})" if units == "inches" else "Precipitation relative to normal (%)", fontsize=12, ha="left", va="top", fontname="Montserrat", color="#333333")
-    fig.text(0.02, 0.012, "ShowMeFire.org", fontsize=18, fontweight="bold", ha="left", va="bottom", fontname="Montserrat", color="#202020")
+    fig.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans", color="#202020")
+    fig.text(0.99, 0.90, f"NOAA RFC QPE | Valid Time: {timestamp.strftime('%Y-%m-%d %H:%M CT')}", fontsize=16, ha="right", va="top", fontname="Montserrat", color="#333333")
+    description = f"Accumulated precipitation ({units})" if units == "inches" else "Precipitation relative to normal (%)"
+    fig.text(
+        0.99, 0.62,
+        f"{description}\n\n"
+        "Data Source: NOAA River Forecast Centers\n"
+        "Quantitative Precipitation Estimate (QPE)\n\n"
+        "For More Info, Visit ShowMeFire.org",
+        fontsize=10, ha="right", va="top", linespacing=1.6, fontname="Montserrat", color="#333333",
+    )
+    fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat", color="#202020")
 
-    # Use NOAA's own labeled swatches so thresholds and colors always match
-    # the layer being displayed, including percent-of-normal products.
-    rows = (len(legend) + 1) // 2
-    panel = fig.add_axes([0.052, 0.10, 0.19, min(0.58, 0.025 + rows * 0.022)])
-    panel.set_facecolor((1, 1, 1, 0.88))
-    panel.set_xticks([])
-    panel.set_yticks([])
-    for spine in panel.spines.values():
-        spine.set_color("#777777")
-        spine.set_linewidth(0.5)
+    # Custom compact legend, stacked on the left in the same spot as the
+    # other realtime graphics' colorbar (fuelmoisturemap.py, rhmap-fil.py,
+    # windmap-fil.py, realtimefiredanger.py). Shortened labels (see
+    # _shorten_legend_label) keep it narrow enough to sit there, unlike
+    # NOAA's original verbose sentences, which needed a backdrop panel to
+    # stay legible over the map at this position.
+    legend_top, legend_bottom = 0.68, 0.08
+    row_height = (legend_top - legend_bottom) / len(legend)
+    swatch_w = 0.018
+    swatch_h = min(row_height * 0.7, swatch_w)
+    title_x, swatch_x, label_x = 0.022, 0.037, 0.062
+    legend_title = "Accumulated Precipitation (in)" if units == "inches" else "Precipitation vs. Normal (%)"
+    fig.text(
+        title_x, (legend_top + legend_bottom) / 2, legend_title,
+        transform=fig.transFigure, rotation=90, fontsize=11, ha="center", va="center",
+        fontname="Montserrat", color="#222222",
+    )
     for index, (label, color) in enumerate(legend):
-        col = index // rows
-        row = index % rows
-        x = 0.025 + col * 0.5
-        y = 0.98 - (row + 1) / rows
-        panel.add_patch(Rectangle((x, y + 0.015), 0.075, 0.065, transform=panel.transAxes, facecolor=color, edgecolor="#666666", linewidth=0.25))
-        panel.text(x + 0.09, y + 0.047, label, transform=panel.transAxes, ha="left", va="center", fontsize=5.8, color="#222222")
-    panel.set_xlim(0, 1)
-    panel.set_ylim(0, 1)
+        row_top = legend_top - index * row_height
+        fig.add_artist(Rectangle(
+            (swatch_x, row_top - swatch_h), swatch_w, swatch_h,
+            transform=fig.transFigure, facecolor=color, edgecolor="#777777", linewidth=0.4,
+        ))
+        fig.text(
+            label_x, row_top - swatch_h / 2, _shorten_legend_label(label),
+            transform=fig.transFigure, fontsize=8.5, ha="left", va="center",
+            fontname="Montserrat", color="#222222",
+        )
 
     logo_path = PROJECT_DIR / "assets/LightBackGroundLogo.svg"
     if logo_path.exists():
