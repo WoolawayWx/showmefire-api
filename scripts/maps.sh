@@ -37,7 +37,7 @@ for script in ./maps/*.py; do
     base_script="$(basename "$script")"
 
     # Helper modules are imported by other scripts and should not be executed directly.
-    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "__init__.py" ]]; then
+    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "precipitation_graphics.py" || "$base_script" == "__init__.py" ]]; then
         continue
     fi
 

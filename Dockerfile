@@ -143,6 +143,11 @@ RUN echo "TZ=UTC" > /etc/cron.d/maps \
     && echo "" >> /etc/cron.d/maps \
     && chmod 0644 /etc/cron.d/maps
 
+RUN echo "CRON_TZ=America/Chicago" > /etc/cron.d/precipitation-graphics \
+    && echo "0 6,18 * * * root cd /app && /opt/venv/bin/python /app/scripts/publish_precipitation_graphics.py >> /app/logs/precipitation_graphics.log 2>&1" >> /etc/cron.d/precipitation-graphics \
+    && echo "" >> /etc/cron.d/precipitation-graphics \
+    && chmod 0644 /etc/cron.d/precipitation-graphics
+
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
