@@ -143,10 +143,10 @@ RUN echo "TZ=UTC" > /etc/cron.d/maps \
     && echo "" >> /etc/cron.d/maps \
     && chmod 0644 /etc/cron.d/maps
 
-RUN echo "CRON_TZ=America/Chicago" > /etc/cron.d/precipitation-graphics \
-    && echo "0 6,18 * * * root cd /app && /opt/venv/bin/python /app/scripts/publish_precipitation_graphics.py >> /app/logs/precipitation_graphics.log 2>&1" >> /etc/cron.d/precipitation-graphics \
-    && echo "" >> /etc/cron.d/precipitation-graphics \
-    && chmod 0644 /etc/cron.d/precipitation-graphics
+# Precipitation graphics publishing moved to the in-app APScheduler
+# (core/scheduler.py: publish_precipitation_graphics_job, cron hour='6,18',
+# America/Chicago) so a missed firing shows up in the app's own logs instead
+# of a cron.d entry that fails silently if cron isn't running at boot.
 
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

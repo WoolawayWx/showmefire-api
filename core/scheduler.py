@@ -39,6 +39,7 @@ from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 from services.spc_graphics_watcher import refresh_spc_graphics_job
 from services.newsletter_delivery import run_daily_forecast_delivery
+from scripts.publish_precipitation_graphics import publish as publish_precipitation_graphics
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,21 @@ async def rtma_spread_rate_pipeline_job():
             logger.error("Spread-rate RTMA retention cleanup failed: %s", cleanup_error, exc_info=True)
     except Exception as error:
         logger.error("RTMA/spread-rate pipeline failed: %s", error, exc_info=True)
+
+
+async def publish_precipitation_graphics_job():
+    """Render and publish the six NOAA QPE precipitation graphics to R2.
+
+    Previously a standalone `0 6,18 * * *` (CRON_TZ=America/Chicago) entry in
+    /etc/cron.d - moved in-app so a missed firing (e.g. container restart
+    around 18:00) shows up in the app's own logs/job state instead of being
+    silently skipped with no record anywhere.
+    """
+    try:
+        published = await asyncio.to_thread(publish_precipitation_graphics)
+        logger.info("Precipitation graphics published: %s", published)
+    except Exception as error:
+        logger.error("Precipitation graphics publish failed: %s", error, exc_info=True)
 
 
 async def run_newsletter_delivery_job():
@@ -501,6 +517,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=23,
         minute=30,
         id='update_seasonal_fuel_state',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        publish_precipitation_graphics_job,
+        'cron',
+        hour='6,18',
+        minute=0,
+        id='publish_precipitation_graphics',
         max_instances=1,
         coalesce=True,
     )
