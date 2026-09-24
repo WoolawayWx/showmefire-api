@@ -10,6 +10,7 @@ sys.path.append(str(BASE_DIR))
 from core.database import get_latest_forecast
 from services.discord_notifier import notify_forecast_ready
 from services.mobile_push import notify_forecast
+from services.newsletter_delivery import run_daily_forecast_delivery
 
 MAP_FILES = [
     "mo-forecastfiredanger.png",
@@ -57,6 +58,13 @@ def main() -> int:
 
     mobile_sent = notify_forecast(latest, image_urls[0] if image_urls else None)
     print(f"Forecast completion mobile event delivered to {mobile_sent} device(s)")
+
+    email_result = run_daily_forecast_delivery()
+    print(
+        "Forecast completion email delivery: "
+        f"{email_result['sent']} sent, {email_result['failed']} failed, "
+        f"{email_result['skipped']} skipped"
+    )
 
     return 0
 

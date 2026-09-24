@@ -38,7 +38,6 @@ from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 from services.spc_graphics_watcher import refresh_spc_graphics_job
-from services.newsletter_delivery import run_daily_forecast_delivery
 from scripts.publish_precipitation_graphics import publish as publish_precipitation_graphics
 
 logger = logging.getLogger(__name__)
@@ -139,15 +138,6 @@ async def publish_precipitation_graphics_job():
         logger.info("Precipitation graphics published: %s", published)
     except Exception as error:
         logger.error("Precipitation graphics publish failed: %s", error, exc_info=True)
-
-
-async def run_newsletter_delivery_job():
-    """Deliver qualifying county forecasts after the daily forecast publication."""
-    try:
-        result = await asyncio.to_thread(run_daily_forecast_delivery)
-        logger.info("Newsletter delivery completed: %s", result)
-    except Exception as error:
-        logger.error("Newsletter delivery failed: %s", error, exc_info=True)
 
 
 async def run_forecast_v1_shadow_job():
@@ -527,16 +517,6 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour='6,18',
         minute=0,
         id='publish_precipitation_graphics',
-        max_instances=1,
-        coalesce=True,
-    )
-
-    scheduler.add_job(
-        run_newsletter_delivery_job,
-        'cron',
-        hour=10,
-        minute=15,
-        id='deliver_daily_newsletter_forecasts',
         max_instances=1,
         coalesce=True,
     )
