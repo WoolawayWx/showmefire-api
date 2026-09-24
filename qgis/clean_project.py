@@ -78,9 +78,13 @@ def main() -> None:
             if child.tag == "layer-tree-layer":
                 name = child.get("name")
                 if name == "peak_fire_danger_polygons":
+                    # Renaming only changes the display name/WMS name — the
+                    # internal id must keep matching the <maplayer><id> in
+                    # projectlayers (and the WFSLayers/layerorder entries),
+                    # or QGIS Server can't resolve this node and silently
+                    # drops the layer from GetCapabilities.
                     child.set("name", "forecast_peak_fire_danger_polygons")
                     child.set("source", TARGETS["forecast_peak_fire_danger_polygons"])
-                    child.set("id", "forecast_peak_fire_danger_polygons_8871e05c_c119_4e77_9ff4_1df870ab7a7f")
                 elif name in TARGETS:
                     child.set("source", TARGETS[name])
                 elif name != "forecast_peak_fire_danger_polygons":
@@ -93,8 +97,6 @@ def main() -> None:
                     name = child.get("name")
                     if name == "peak_fire_danger_polygons":
                         child.set("name", "forecast_peak_fire_danger_polygons")
-                        for f in child.findall("./filegroup/legendlayerfile"):
-                            f.set("layerid", "forecast_peak_fire_danger_polygons_8871e05c_c119_4e77_9ff4_1df870ab7a7f")
                     if name not in {"forecast_peak_fire_danger", "burn_bans", "forecast_peak_fire_danger_polygons"}:
                         legend.remove(child)
 

@@ -28,7 +28,7 @@ the GIS services so forecast compute has priority:
 
 ```yaml
   qgis-server:
-    image: qgis/qgis-server:4.0-trixie
+    build: ./showmefire-api/qgis
     cpus: "0.50"
     mem_limit: 1g
     memswap_limit: 1g
