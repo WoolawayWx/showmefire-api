@@ -264,6 +264,10 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    # Nuxt may select another port when the default dev port is occupied.
+    # Keep local development origins limited to loopback hosts while allowing
+    # any local port, instead of making developers change the API for each run.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
