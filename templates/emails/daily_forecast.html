@@ -12,12 +12,57 @@
 -->
 <!doctype html>
 <html lang="en">
+<head>
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <style>
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+
+    .email-header {
+      background-color: #3f3f3f !important;
+      color: #ffffff !important;
+    }
+
+    .email-button {
+      background-color: #e65100 !important;
+      color: #212121 !important;
+    }
+
+    .email-footer {
+      background-color: #e65100 !important;
+      color: #212121 !important;
+    }
+
+    .email-footer a {
+      color: #dfdfdf !important;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .email-header {
+        background-color: #3f3f3f !important;
+        color: #ffffff !important;
+      }
+
+      .email-footer {
+        background-color: #e65100 !important;
+        color: #212121 !important;
+      }
+
+      .email-footer a {
+        color: #dfdfdf !important;
+      }
+    }
+  </style>
+</head>
 <body style="margin:0;color:#172033;font-family:Arial,sans-serif;">
-  <div style="">
+  <div class="email-shell">
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-      style="margin:0 auto;background:#ffffff;overflow:hidden;">
+      style="margin:0 auto;overflow:hidden;">
       <tr>
-        <td style="padding:28px 32px;background:#3f3f3f;color:#ffffff;">
+        <td class="email-header" bgcolor="#3f3f3f" style="padding:28px 32px;background-color:#3f3f3f;color:#ffffff;">
           <div style="text-align:center;width:100%;">
             <img src="https://cdn.showmefire.org/assets/branding/Full%20Logo%20-%20Dark%20Logo.svg" alt="Show Me Fire Logo" style="width:300px;height:auto;display:inline-block;padding:0px;">
           </div>
@@ -27,8 +72,8 @@
         </td>
       </tr>
       <tr>
-        <td style="padding:28px 32px;text-align:center;">
-          <p style="margin:0 0 20px;color:#536174;text-align:center;">
+        <td class="email-content" style="padding:28px 32px;text-align:center;">
+          <p class="email-muted" style="margin:0 0 20px;color:#536174;text-align:center;">
             Forecast date:
             <strong style="color:#172033;">{{forecast_date}}</strong>
           </p>
@@ -38,23 +83,23 @@
         </td>
       </tr>
       <tr>
-        <td>
-          <h2 style="text-align:center;font-size:20px;line-height:1.2;color:#212121;">Fire Weather Forecast Graphic</h2>
+        <td style="text-align:center;">
+          <h2 class="email-heading" style="text-align:center;font-size:20px;line-height:1.2;color:#212121;">Fire Weather Forecast Graphic</h2>
           <img src="https://cdn.showmefire.org/latest/mo-forecastfiredanger.png" style="width:95%;height:auto;display:block;padding:0px;margin-left:auto;margin-right:auto;padding-bottom:10px;" alt="Fire Weather Forecast Graphic"/>  
-          <button style="background:#e65100;color:#212121;border:none;padding:10px 20px;border-radius:5px;font-size:16px;line-height:1.2;text-align:center;display:block;margin-left:auto;margin-right:auto;">Click Here To View The Full Forecast</button>
-          <p style="text-align:center;font-size:12px;line-height:1.2;color:#212121;"><a href="https://showmefire.org/forecast" style="color:#e65100;">Show Me Fire Forecast</a></p>
+          <a class="email-button" href="https://showmefire.org/forecasts" role="button" style="background-color:#e65100;color:#212121;border-radius:5px;font-size:16px;line-height:1.2;text-align:center;display:inline-block;padding:10px 20px;text-decoration:none;">Click Here To View The Full Forecast</a>
+          <p class="email-heading" style="text-align:center;font-size:12px;line-height:1.2;color:#212121;"><a href="https://showmefire.org/forecasts" style="color:#e65100;">Show Me Fire Forecast</a></p>
         </td>
       </tr>
 
       <tr>
-        <td style="padding:20px 32px;background:#e65100;color:#212121;font-size:12px;line-height:1.6;text-align:center;">
+        <td class="email-footer" bgcolor="#e65100" style="padding:20px 32px;background-color:#e65100;color:#212121;font-size:12px;line-height:1.6;text-align:center;">
           <img src="https://cdn.showmefire.org/assets/branding/Icon_Black.png" alt="Show Me Fire Icon" style="width:50px;height:50px;display:inline-block;padding:0px;vertical-align:middle;" />
           <p style="margin:0;font-size:12px;line-height:1.2;color:#212121;">
           You are receiving this because you subscribed to Show Me Fire
           Fire Weather Forecasts.
           </p>
           <br>
-          <a href="{{manage_url}}" style="color:#dfdfdf;">Manage email preferences or unsubscribe</a>
+          <a class="email-footer" href="{{manage_url}}" style="color:#dfdfdf;">Manage email preferences or unsubscribe</a>
           from all Show Me Fire emails.
         </td>
       </tr>
