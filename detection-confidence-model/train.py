@@ -19,7 +19,7 @@ sys.path.append(str(API_DIR))
 from config import LATEST_MODEL_META_PATH, LATEST_MODEL_PATH, MIN_TRAINING_SAMPLES, MODELS_DIR, RANDOM_STATE
 from features import FEATURE_NAMES, build_feature_vector
 
-FALSE_POSITIVE_CAUSES = {"prescribed", "agricultural", "debris_burn"}
+FALSE_POSITIVE_CAUSES = {"prescribed", "agricultural", "debris_burn", "not_a_fire"}
 
 
 def load_training_rows():

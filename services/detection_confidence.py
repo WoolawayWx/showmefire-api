@@ -18,6 +18,7 @@ import math
 from pathlib import Path
 
 from core.database import list_detection_events_for_scoring, update_detection_confidence
+from services.weather_context import county_fire_danger_today
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ FEATURE_NAMES = [
     "frp_log", "bright_diff", "bright_t7_norm", "pixel_area_log",
     "quality_flag", "raw_confidence", "solar_zenith_norm",
     "satellite_zenith_norm", "is_day", "cropland_frac", "water_frac",
-    "is_ngfs", "is_viirs", "is_modis",
+    "is_ngfs", "is_viirs", "is_modis", "fuel_model_fbfm40", "canopy_cover_frac",
 ]
 NAN = float("nan")
 
@@ -83,6 +84,8 @@ def build_feature_vector(row: dict) -> list:
     daynight = str(row.get("daynight") or "").upper()
     source = str(row.get("source") or "").lower()
     land_cover = row.get("land_cover")
+    fuel_model = _num(row.get("fuel_model_fbfm40"))
+    canopy_cover = _num(row.get("canopy_cover_pct"))
 
     return [
         math.log1p(frp) if frp is not None and frp > 0 else 0.0,
@@ -99,6 +102,8 @@ def build_feature_vector(row: dict) -> list:
         1.0 if source == "ngfs" else 0.0,
         1.0 if source == "viirs" else 0.0,
         1.0 if source == "modis" else 0.0,
+        fuel_model if fuel_model is not None else NAN,
+        (canopy_cover / 100.0) if canopy_cover is not None else NAN,
     ]
 
 
@@ -108,7 +113,7 @@ def _heuristic_probability(features: list) -> float:
     fire_confidence.py's incident-level scorer."""
     (frp_log, bright_diff, _bright_t7_norm, _pixel_area_log, quality_flag, raw_confidence,
      _solar_zenith_norm, _sat_zenith_norm, _is_day, cropland_frac, water_frac,
-     _is_ngfs, _is_viirs, _is_modis) = features
+     _is_ngfs, _is_viirs, _is_modis, _fuel_model, _canopy_cover_frac) = features
 
     score = 0.40 * raw_confidence + 0.20 * min(1.0, frp_log / 6.0)
     if not math.isnan(bright_diff):
@@ -164,7 +169,12 @@ def refresh_detection_confidence(limit: int = 2000) -> dict:
     for row in rows:
         try:
             pct = score_detection(row)
-            update_detection_confidence(row["id"], pct)
+            # "Today's" published fire-danger run is a reasonable proxy for
+            # conditions at scoring time since candidate rows here are recent/
+            # pending - this is live context, not a historical reconstruction,
+            # so it is never fed into the trained model as a feature.
+            weather_category, weather_prob = county_fire_danger_today(row.get("county_fips"))
+            update_detection_confidence(row["id"], pct, weather_category, weather_prob)
             scored += 1
         except Exception as exc:
             logger.error("detection_confidence: failed to score event %s: %s", row.get("id"), exc)

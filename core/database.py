@@ -134,6 +134,11 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         ("footprint_geojson", "TEXT"),
         ("recurring_source_id", "INTEGER"),
         ("exclusion_zone_id", "INTEGER"),
+        ("fuel_model_fbfm40", "INTEGER"),
+        ("canopy_cover_pct", "REAL"),
+        ("weather_danger_category", "TEXT"),
+        ("weather_danger_prob", "REAL"),
+        ("reporter_relationship", "TEXT"),
     ):
         if column_name not in fire_events_columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {column_name} {column_type}")
@@ -2136,7 +2141,7 @@ _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
     "official_source_system",
     "label_revision", "revised_at", "parent_event_id",
     "reporter_contact", "submitter_ip_hash",
-    "reporter_name", "reporter_org", "address_text",
+    "reporter_name", "reporter_org", "address_text", "reporter_relationship",
     "consent_version", "captcha_verdict",
     "moderated_by", "moderated_at", "pii_purged_at",
     "first_seen_at", "last_seen_at",
@@ -2206,6 +2211,7 @@ def create_fire_report(
     reporter_name: str = "",
     reporter_org: str = "",
     address_text: str = "",
+    reporter_relationship: Optional[str] = None,
     upload_token_hash: str = "",
     county_fips: Optional[str] = None,
     county_name: Optional[str] = None,
@@ -2223,14 +2229,14 @@ def create_fire_report(
                 latitude, longitude, county_fips, county_name,
                 occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
                 acres, acres_is_estimate, description, out_of_ordinary,
-                reporter_contact, reporter_name, reporter_org, address_text,
+                reporter_contact, reporter_name, reporter_org, address_text, reporter_relationship,
                 submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict
-            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
             acres, 1 if acres_is_estimate else 0, description, out_of_ordinary,
-            reporter_contact, reporter_name, reporter_org, address_text,
+            reporter_contact, reporter_name, reporter_org, address_text, reporter_relationship,
             submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict,
         ))
         event_id = cursor.lastrowid
@@ -2268,6 +2274,8 @@ def upsert_detection_event(
     daynight: Optional[str] = None,
     land_cover: Optional[str] = None,
     footprint_geojson: Optional[str] = None,
+    fuel_model_fbfm40: Optional[int] = None,
+    canopy_cover_pct: Optional[float] = None,
 ) -> Dict:
     """
     Idempotent upsert for a non-submission fire record (satellite/NGFS
@@ -2301,9 +2309,10 @@ def upsert_detection_event(
                 occurred_at, occurred_at_precision, frp, confidence, satellite,
                 bright_t7, bright_t13, pixel_area, quality_flag,
                 solar_zenith_angle, satellite_zenith_angle, daynight, land_cover, footprint_geojson,
+                fuel_model_fbfm40, canopy_cover_pct,
                 cause_category, acres, official_source_system, official_source_ref,
                 first_seen_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(source, external_id) DO UPDATE SET
                 last_seen_at = CURRENT_TIMESTAMP,
                 frp = COALESCE(excluded.frp, fire_events.frp),
@@ -2318,12 +2327,15 @@ def upsert_detection_event(
                 daynight = COALESCE(excluded.daynight, fire_events.daynight),
                 land_cover = COALESCE(excluded.land_cover, fire_events.land_cover),
                 footprint_geojson = COALESCE(excluded.footprint_geojson, fire_events.footprint_geojson),
+                fuel_model_fbfm40 = COALESCE(excluded.fuel_model_fbfm40, fire_events.fuel_model_fbfm40),
+                canopy_cover_pct = COALESCE(excluded.canopy_cover_pct, fire_events.canopy_cover_pct),
                 updated_at = CURRENT_TIMESTAMP
         ''', (
             source, external_id, initial_status, verification_tier, latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, frp, confidence, satellite,
             bright_t7, bright_t13, pixel_area, quality_flag,
             solar_zenith_angle, satellite_zenith_angle, daynight, land_cover, footprint_geojson,
+            fuel_model_fbfm40, canopy_cover_pct,
             cause_category or "unknown", acres, official_source_system or "", official_source_ref or "",
         ))
         cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
@@ -2362,16 +2374,26 @@ def upsert_detection_event(
         conn.close()
 
 
-def update_detection_confidence(event_id: int, confidence_pct: float) -> None:
-    """Write the per-detection ML confidence score (0-100). Separate from
-    upsert_detection_event because scoring runs as its own pass after
-    ingest, once a detection's full feature set is committed."""
+def update_detection_confidence(
+    event_id: int,
+    confidence_pct: float,
+    weather_danger_category: Optional[str] = None,
+    weather_danger_prob: Optional[float] = None,
+) -> None:
+    """Write the per-detection ML confidence score (0-100), plus the
+    weather-danger context (services/weather_context.py) computed alongside
+    it. Separate from upsert_detection_event because scoring runs as its own
+    pass after ingest, once a detection's full feature set is committed."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
-            'UPDATE fire_events SET detection_confidence_pct = ? WHERE id = ?',
-            (confidence_pct, event_id),
+            '''UPDATE fire_events
+               SET detection_confidence_pct = ?,
+                   weather_danger_category = COALESCE(?, weather_danger_category),
+                   weather_danger_prob = COALESCE(?, weather_danger_prob)
+               WHERE id = ?''',
+            (confidence_pct, weather_danger_category, weather_danger_prob, event_id),
         )
         conn.commit()
     finally:
@@ -2414,7 +2436,7 @@ def list_detection_events_for_scoring(limit: int = 2000) -> List[Dict]:
         cursor.execute(
             '''SELECT id, source, frp, confidence, satellite, bright_t7, bright_t13,
                       pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
-                      daynight, land_cover
+                      daynight, land_cover, fuel_model_fbfm40, canopy_cover_pct, county_fips
                FROM fire_events
                WHERE source IN ('modis', 'viirs', 'ngfs') AND detection_confidence_pct IS NULL
                  AND recurring_source_id IS NULL
@@ -2439,7 +2461,8 @@ def list_labeled_detection_events(limit: int = 5000) -> List[Dict]:
         cursor.execute(
             '''SELECT id, source, frp, confidence, satellite, bright_t7, bright_t13,
                       pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
-                      daynight, land_cover, cause_category
+                      daynight, land_cover, fuel_model_fbfm40, canopy_cover_pct, county_fips,
+                      cause_category
                FROM fire_events
                WHERE source IN ('modis', 'viirs', 'ngfs')
                  AND verification_tier IN ('admin_reviewed', 'official_source_confirmed')
@@ -2646,9 +2669,11 @@ def find_or_create_incident_for_detection(
     centroid, detection_count, and time span), or create a new incident.
 
     Caller owns the transaction/commit (same convention as
-    record_fire_moderation). Only meant for satellite-sourced detections
-    (modis/viirs/ngfs) - human-submitted reports keep their separate
-    list_nearby_fire_events() duplicate-hint workflow untouched.
+    record_fire_moderation). Originally satellite-ingest-only; also called
+    by correlate_report_with_incident() below when an admin approves a user
+    report, so an approved report joins an existing detection cluster
+    instead of only ever being listed as a "nearby" sibling for a human to
+    notice via list_nearby_fire_events().
     """
     from datetime import timedelta
     from core.geo import degree_box, haversine_km
@@ -3201,8 +3226,21 @@ def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by
         conn.close()
 
 
-def list_nearby_fire_events(latitude: float, longitude: float, radius_km: float, hours: float) -> List[Dict]:
-    """Duplicate-report hint for the admin detail page: other reports near this point/time."""
+def list_nearby_fire_events(
+    latitude: float,
+    longitude: float,
+    radius_km: float,
+    hours: float,
+    occurred_at: Optional[str] = None,
+    exclude_event_id: Optional[int] = None,
+) -> List[Dict]:
+    """Duplicate-report hint for the admin detail page, and the primitive
+    report-detection correlation (see fires_v2/services.fire_labeling) uses
+    to decide whether a report should join an existing detection incident:
+    other events near this point *and* time. `hours` was previously accepted
+    but never applied - pass `occurred_at` (the reference event's own
+    occurred_at) to actually filter to that window; omit it to fall back to
+    the old space-only behavior for any caller that hasn't been updated."""
     from core.geo import degree_box, haversine_km
 
     min_lat, max_lat, min_lon, max_lon = degree_box(latitude, longitude, radius_km)
@@ -3211,12 +3249,20 @@ def list_nearby_fire_events(latitude: float, longitude: float, radius_km: float,
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute('''
+        query = '''
             SELECT id, latitude, longitude, occurred_at, status, verification_tier, source
             FROM fire_events
             WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
               AND status != 'deleted'
-        ''', (min_lat, max_lat, min_lon, max_lon))
+        '''
+        params: List = [min_lat, max_lat, min_lon, max_lon]
+        if occurred_at:
+            query += " AND ABS(julianday(occurred_at) - julianday(?)) <= (? / 24.0)"
+            params += [occurred_at, hours]
+        if exclude_event_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_event_id)
+        cursor.execute(query, params)
         nearby = []
         for row in cursor.fetchall():
             distance = haversine_km(latitude, longitude, row["latitude"], row["longitude"])
@@ -3264,6 +3310,39 @@ def set_fire_event_status(
                                 from_tier=from_tier, to_tier=new_tier, reason=reason)
         conn.commit()
         return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
+    finally:
+        conn.close()
+
+
+def correlate_report_with_incident(event_id: int) -> Optional[int]:
+    """Called after a user report is approved: join it to an existing
+    nearby/recent detection incident cluster (same clustering radius/window
+    satellite ingest uses) if one exists, so it groups with corroborating
+    satellite detections instead of only surfacing as a "nearby" hint on the
+    admin single-report view. Idempotent - a no-op if the event already has
+    an incident_id. Returns the (possibly newly created) incident_id, or
+    None if the event doesn't exist."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        row = cursor.execute(
+            "SELECT latitude, longitude, occurred_at, county_fips, county_name, incident_id "
+            "FROM fire_events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if row["incident_id"] is not None:
+            return row["incident_id"]
+        incident_id = find_or_create_incident_for_detection(
+            cursor, row["latitude"], row["longitude"], row["occurred_at"],
+            row["county_fips"], row["county_name"],
+        )
+        cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
+        conn.commit()
+        return incident_id
     finally:
         conn.close()
 

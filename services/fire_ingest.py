@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from core.config import GIS_DIR, MISSOURI_FIRES_GEOJSON
 from core.database import upsert_detection_event
 from services.county_lookup import county_for_point
+from services.static_context import sample_static_context
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ def _ingest_satdet_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         return None
 
     county_fips, county_name = county_for_point(lat, lon)
+    fuel_model_fbfm40, canopy_cover_pct = sample_static_context(lat, lon)
     return upsert_detection_event(
         source=source,
         external_id=str(external_id),
@@ -70,6 +72,8 @@ def _ingest_satdet_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         frp=props.get("FRP"),
         confidence=props.get("CONFIDENCE"),
         satellite=props.get("SATELLITE"),
+        fuel_model_fbfm40=fuel_model_fbfm40,
+        canopy_cover_pct=canopy_cover_pct,
     )
 
 
@@ -98,6 +102,7 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
     county_fips, county_name = county_for_point(lat, lon)
     geometry = feature.get("geometry")
     footprint_geojson = json.dumps(geometry, separators=(",", ":")) if geometry and geometry.get("type") == "Polygon" else None
+    fuel_model_fbfm40, canopy_cover_pct = sample_static_context(lat, lon)
 
     return upsert_detection_event(
         source="ngfs",
@@ -119,6 +124,8 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         footprint_geojson=footprint_geojson,
         daynight=props.get("daynight"),
         land_cover=props.get("land_cover"),
+        fuel_model_fbfm40=fuel_model_fbfm40,
+        canopy_cover_pct=canopy_cover_pct,
     )
 
 

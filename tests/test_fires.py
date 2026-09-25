@@ -209,15 +209,26 @@ class FiresRouterTests(unittest.TestCase):
     # --- geocode handler ---
 
     def test_geocode_returns_approximate_point_in_bounds(self):
-        with patch.object(fires_router, "_forward_geocode", return_value={
+        with patch.object(fires_router, "_forward_geocode", return_value=[{
             "latitude": 38.9517, "longitude": -92.3341, "display_name": "Columbia, Boone County, Missouri",
-        }):
+        }]):
             result = self.geocode()
         self.assertEqual(result["location"]["latitude"], 38.9517)
         self.assertEqual(result["location"]["display_name"], "Columbia, Boone County, Missouri")
+        self.assertEqual(result["candidates"], [result["location"]])
+
+    def test_geocode_returns_multiple_candidates_for_a_common_name(self):
+        candidates = [
+            {"latitude": 38.9517, "longitude": -92.3341, "display_name": "Main St, Columbia, Boone County, Missouri"},
+            {"latitude": 38.5767, "longitude": -92.1735, "display_name": "Main St, Jefferson City, Cole County, Missouri"},
+        ]
+        with patch.object(fires_router, "_forward_geocode", return_value=candidates):
+            result = self.geocode()
+        self.assertEqual(result["location"], candidates[0])
+        self.assertEqual(result["candidates"], candidates)
 
     def test_geocode_returns_404_when_address_not_found(self):
-        with patch.object(fires_router, "_forward_geocode", return_value=None):
+        with patch.object(fires_router, "_forward_geocode", return_value=[]):
             with self.assertRaises(HTTPException) as ctx:
                 self.geocode()
         self.assertEqual(ctx.exception.status_code, 404)
@@ -238,9 +249,9 @@ class FiresRouterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
 
     def test_geocode_is_throttled_independently_of_report_submission(self):
-        with patch.object(fires_router, "_forward_geocode", return_value={
+        with patch.object(fires_router, "_forward_geocode", return_value=[{
             "latitude": 38.9517, "longitude": -92.3341, "display_name": "Columbia, MO",
-        }):
+        }]):
             for _ in range(fires_router.FIRE_GEOCODE_LIMIT_PER_HOUR):
                 self.geocode()
             with self.assertRaises(HTTPException) as ctx:
@@ -256,6 +267,14 @@ class FiresRouterTests(unittest.TestCase):
         result = self.submit()
         self.assertEqual(result["report"]["status"], "pending")
         self.assertEqual(result["report"]["county_name"], "Boone")
+
+    def test_reporter_relationship_round_trips_and_is_admin_only(self):
+        result = self.submit(reporter_relationship="reported_to_me")
+        event_id = result["report"]["id"]
+        admin_event = database.get_fire_event(event_id, admin=True)
+        self.assertEqual(admin_event["reporter_relationship"], "reported_to_me")
+        public_event = database.get_fire_event(event_id, admin=False)
+        self.assertNotIn("reporter_relationship", public_event)
 
     def test_pending_report_is_invisible_to_public_reads(self):
         self.submit()

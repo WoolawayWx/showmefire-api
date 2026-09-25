@@ -89,7 +89,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, bulletins
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, bulletins
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -232,6 +232,7 @@ app.include_router(mobile.router)
 app.include_router(posts.router)
 app.include_router(post_media.router)
 app.include_router(fires.router)
+app.include_router(fires_v2.router)
 app.include_router(verification.router)
 app.include_router(feedback.router)
 app.include_router(forecast_discussions.router)

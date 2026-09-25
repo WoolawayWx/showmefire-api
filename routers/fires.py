@@ -37,6 +37,7 @@ from core.database import (
     add_ip_to_blocklist,
     add_fire_event_media,
     consume_fire_submission_quota,
+    correlate_report_with_incident,
     count_fire_event_media,
     create_fire_report,
     create_fire_exclusion_zone,
@@ -162,22 +163,27 @@ class _GeocodeUnavailable(Exception):
     shortly instead of telling them their address doesn't exist."""
 
 
-def _forward_geocode(address: str) -> Optional[Dict]:
+def _forward_geocode(address: str) -> List[Dict]:
     """
     Best-effort address -> point lookup for the "I don't know the exact
-    coordinates" reporting flow. Returns an approximate point bounded to
-    Missouri, or None when Nominatim genuinely has no match/only an
-    out-of-state one. Raises _GeocodeUnavailable when the lookup itself
-    failed (rate limited, timed out, 5xx) so the caller doesn't conflate
-    "temporarily can't check" with "not a real address". Coordinates from
-    this are always approximate; staff correct them via FireEventUpdate
-    during review like any other report field.
+    coordinates" reporting flow. Returns up to 5 approximate candidate
+    points bounded to Missouri, ranked by Nominatim's own relevance order
+    (best match first), or an empty list when Nominatim genuinely has no
+    match/only out-of-state ones. A single click-triggered search returning
+    several candidates is fine under Nominatim's usage policy; a per-
+    keystroke autocomplete against the free public server is not, which is
+    why this stays a manual "search" action rather than type-ahead. Raises
+    _GeocodeUnavailable when the lookup itself failed (rate limited, timed
+    out, 5xx) so the caller doesn't conflate "temporarily can't check" with
+    "not a real address". Coordinates from this are always approximate;
+    staff correct them via FireEventUpdate during review like any other
+    report field.
     """
     try:
         query = urllib.parse.urlencode({
             "q": address,
             "format": "json",
-            "limit": 1,
+            "limit": 5,
             "countrycodes": "us",
             "viewbox": f"{MO_LON_MIN},{MO_LAT_MAX},{MO_LON_MAX},{MO_LAT_MIN}",
             "bounded": 1,
@@ -192,24 +198,28 @@ def _forward_geocode(address: str) -> Optional[Dict]:
         if exc.code in (429, 503):
             raise _GeocodeUnavailable() from exc
         logger.info("Forward geocoding unavailable", exc_info=False)
-        return None
+        return []
     except urllib.error.URLError:
         raise _GeocodeUnavailable()
     except Exception:
         logger.info("Forward geocoding unavailable", exc_info=False)
-        return None
+        return []
 
-    if not results:
-        return None
-    latitude = float(results[0]["lat"])
-    longitude = float(results[0]["lon"])
-    if not (MO_LAT_MIN <= latitude <= MO_LAT_MAX and MO_LON_MIN <= longitude <= MO_LON_MAX):
-        return None
-    return {
-        "latitude": round(latitude, 4),
-        "longitude": round(longitude, 4),
-        "display_name": _clean_text(results[0].get("display_name"), required=False, field="address_text")[:500],
-    }
+    candidates = []
+    for result in results:
+        try:
+            latitude = float(result["lat"])
+            longitude = float(result["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (MO_LAT_MIN <= latitude <= MO_LAT_MAX and MO_LON_MIN <= longitude <= MO_LON_MAX):
+            continue
+        candidates.append({
+            "latitude": round(latitude, 4),
+            "longitude": round(longitude, 4),
+            "display_name": _clean_text(result.get("display_name"), required=False, field="address_text")[:500],
+        })
+    return candidates
 
 
 class AddressGeocodeRequest(BaseModel):
@@ -230,6 +240,7 @@ class FireReportCreate(BaseModel):
     reporter_name: str = Field(min_length=1, max_length=120)
     reporter_org: str = Field(default="", max_length=120)
     address_text: str = Field(default="", max_length=500)
+    reporter_relationship: Optional[Literal["on_scene", "nearby", "reported_to_me", "other"]] = None
     consent_acknowledged: bool
     turnstile_token: str = Field(min_length=1, max_length=4096)
     website: str = Field(default="", max_length=200)  # honeypot; must stay empty
@@ -520,18 +531,21 @@ def geocode_fire_report_address(payload: AddressGeocodeRequest, request: Request
 
     address = _clean_text(payload.address, required=True, field="address")
     try:
-        result = _forward_geocode(address)
+        candidates = _forward_geocode(address)
     except _GeocodeUnavailable:
         raise HTTPException(
             status_code=503,
             detail="Location lookup is busy right now. Please try again in a moment, or place the pin on the map directly.",
         )
-    if not result:
+    if not candidates:
         raise HTTPException(
             status_code=404,
             detail="Couldn't find that address in Missouri. Try adding more detail, or place the point on the map instead.",
         )
-    return {"success": True, "location": result}
+    # "location" (the top match) is kept for backward compatibility with any
+    # caller that predates the multi-candidate picker; "candidates" is the
+    # full ranked list the reworked form's picker uses.
+    return {"success": True, "location": candidates[0], "candidates": candidates}
 
 
 # --- Public: submit ---
@@ -587,6 +601,7 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         reporter_name=payload.reporter_name,
         reporter_org=payload.reporter_org,
         address_text=address_text,
+        reporter_relationship=payload.reporter_relationship,
         submitter_ip_hash=ip_hash,
         upload_token_hash=hashlib.sha256(upload_token.encode()).hexdigest(),
         consent_version=CONSENT_VERSION,
@@ -905,7 +920,9 @@ def admin_approve_incident_feedback(feedback_id: int, token: Optional[str] = Non
     feedback = set_fire_incident_feedback_status(feedback_id, "approved", reviewed_by=actor)
     if not feedback:
         raise HTTPException(status_code=404, detail="Feedback not found")
-    return {"success": True, "feedback": feedback}
+    from services.fire_labeling import apply_feedback_label
+    labeled = apply_feedback_label(feedback["incident_id"], feedback["classification"], reviewed_by=actor)
+    return {"success": True, "feedback": feedback, "labeled_event_count": len(labeled)}
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/reject")
@@ -942,7 +959,10 @@ def admin_get_fire_report(event_id: int, token: Optional[str] = None):
     event = get_fire_event(event_id, admin=True)
     if not event:
         raise HTTPException(status_code=404, detail="Fire event not found")
-    event["nearby_reports"] = list_nearby_fire_events(event["latitude"], event["longitude"], radius_km=2.0, hours=6.0)
+    event["nearby_reports"] = list_nearby_fire_events(
+        event["latitude"], event["longitude"], radius_km=2.0, hours=6.0,
+        occurred_at=event["occurred_at"], exclude_event_id=event_id,
+    )
     return {"success": True, "report": event}
 
 
@@ -959,6 +979,7 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, toke
         raise HTTPException(status_code=404, detail="Fire event not found")
     if result.get("already_moderated"):
         raise HTTPException(status_code=409, detail="Report already moderated")
+    result["incident_id"] = correlate_report_with_incident(event_id)
     return {"success": True, "report": result}
 
 

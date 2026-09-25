@@ -3,6 +3,7 @@ import functools
 import os
 import logging
 from datetime import datetime
+from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
@@ -295,6 +296,25 @@ async def ingest_fire_detections_job():
         await asyncio.to_thread(refresh_confidence_shapes)
     except Exception as error:
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
+
+
+async def retrain_detection_confidence_job():
+    """Nightly gated retrain for the per-detection confidence model (see
+    detection-confidence-model/retrain.py) - runs standalone by direct file
+    path, same pattern services/detection_confidence.py already uses to load
+    the resulting model, to avoid the sys.path module-name collision with
+    other model-training packages under api/ documented there."""
+    try:
+        import importlib.util
+
+        module_path = Path(__file__).resolve().parent.parent / "detection-confidence-model" / "retrain.py"
+        spec = importlib.util.spec_from_file_location("detection_confidence_retrain", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        result = await asyncio.to_thread(module.retrain_and_gate)
+        logger.info("Detection-confidence retrain: %s", result)
+    except Exception as error:
+        logger.error("Detection-confidence retrain failed: %s", error, exc_info=True)
 
 
 async def purge_spatial_fm_uncertainty_cache_job():
@@ -653,6 +673,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=2,
         minute=50,
         id='purge_feedback_throttle',
+    )
+
+    scheduler.add_job(
+        retrain_detection_confidence_job,
+        'cron',
+        hour=3,
+        minute=0,
+        id='retrain_detection_confidence',
     )
 
     scheduler.add_job(

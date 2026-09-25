@@ -26,6 +26,8 @@ FEATURE_NAMES = [
     "is_ngfs",
     "is_viirs",
     "is_modis",
+    "fuel_model_fbfm40",
+    "canopy_cover_frac",
 ]
 
 NAN = float("nan")
@@ -82,6 +84,8 @@ def build_feature_vector(row: dict) -> list:
     daynight = str(row.get("daynight") or "").upper()
     source = str(row.get("source") or "").lower()
     land_cover = row.get("land_cover")
+    fuel_model = _num(row.get("fuel_model_fbfm40"))
+    canopy_cover = _num(row.get("canopy_cover_pct"))
 
     return [
         math.log1p(frp) if frp is not None and frp > 0 else 0.0,
@@ -98,4 +102,6 @@ def build_feature_vector(row: dict) -> list:
         1.0 if source == "ngfs" else 0.0,
         1.0 if source == "viirs" else 0.0,
         1.0 if source == "modis" else 0.0,
+        fuel_model if fuel_model is not None else NAN,
+        (canopy_cover / 100.0) if canopy_cover is not None else NAN,
     ]
