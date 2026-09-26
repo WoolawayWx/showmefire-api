@@ -81,6 +81,11 @@ def _send_event(payload: Dict[str, Any]) -> bool:
     except Exception:
         settings = {}
 
+    # With a bot token the API posts to Discord itself: no webhook, no shared secret.
+    from services import discord_rest
+    if discord_rest.is_configured():
+        return discord_rest.deliver_event(payload, settings)
+
     effective_url = str(settings.get("event_url_override") or DISCORD_EVENT_URL or "").strip()
     effective_secret = str(settings.get("event_secret_override") or DISCORD_EVENT_SECRET or "").strip()
 

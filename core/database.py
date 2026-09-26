@@ -98,6 +98,117 @@ def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
             f"DEFAULT '{DISCORD_STAFF_ALERT_TYPES_DEFAULT}'"
         )
 
+def _ensure_discord_oauth_tables(cursor: sqlite3.Cursor) -> None:
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS discord_oauth_states (
+            state TEXT PRIMARY KEY,
+            admin_email TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT 'connect',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # One linked Discord account per Show Me Fire admin. Only a snapshot of the
+    # user's profile and servers is kept; OAuth tokens are never stored.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS discord_admin_links (
+            admin_email TEXT PRIMARY KEY,
+            discord_user_id TEXT NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            avatar TEXT NOT NULL DEFAULT '',
+            guilds_json TEXT NOT NULL DEFAULT '[]',
+            linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
+def create_discord_oauth_state(state: str, *, admin_email: str, purpose: str) -> None:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        _ensure_discord_oauth_tables(cursor)
+        cursor.execute("DELETE FROM discord_oauth_states WHERE created_at < datetime('now', '-1 hour')")
+        cursor.execute(
+            "INSERT INTO discord_oauth_states (state, admin_email, purpose) VALUES (?, ?, ?)",
+            (state, admin_email, purpose),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def consume_discord_oauth_state(state: str, *, max_age_minutes: int = 10) -> Optional[Dict]:
+    """Single-use: returns the state's admin/purpose once, if it's still fresh."""
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        _ensure_discord_oauth_tables(cursor)
+        cursor.execute(
+            "SELECT admin_email, purpose, created_at >= datetime('now', ?) AS fresh "
+            "FROM discord_oauth_states WHERE state = ?",
+            (f"-{max_age_minutes} minutes", state),
+        )
+        row = cursor.fetchone()
+        cursor.execute("DELETE FROM discord_oauth_states WHERE state = ?", (state,))
+        conn.commit()
+        if not row or not row["fresh"]:
+            return None
+        return {"admin_email": row["admin_email"], "purpose": row["purpose"]}
+    finally:
+        conn.close()
+
+
+def save_discord_admin_link(admin_email: str, *, discord_user_id: str, username: str,
+                            display_name: str, avatar: str, guilds: List[Dict]) -> None:
+    import json as _json
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        _ensure_discord_oauth_tables(cursor)
+        cursor.execute('''
+            INSERT INTO discord_admin_links
+                (admin_email, discord_user_id, username, display_name, avatar, guilds_json, linked_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(admin_email) DO UPDATE SET
+                discord_user_id = excluded.discord_user_id, username = excluded.username,
+                display_name = excluded.display_name, avatar = excluded.avatar,
+                guilds_json = excluded.guilds_json, linked_at = CURRENT_TIMESTAMP
+        ''', (admin_email, discord_user_id, username, display_name, avatar, _json.dumps(guilds)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_discord_admin_link(admin_email: str) -> Optional[Dict]:
+    import json as _json
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        _ensure_discord_oauth_tables(cursor)
+        cursor.execute("SELECT * FROM discord_admin_links WHERE admin_email = ?", (admin_email,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["guilds"] = _json.loads(data.pop("guilds_json") or "[]")
+        return data
+    finally:
+        conn.close()
+
+
+def delete_discord_admin_link(admin_email: str) -> None:
+    conn = sqlite3.connect(get_db_path())
+    try:
+        cursor = conn.cursor()
+        _ensure_discord_oauth_tables(cursor)
+        cursor.execute("DELETE FROM discord_admin_links WHERE admin_email = ?", (admin_email,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def save_discord_server_cache(payload: Dict) -> None:
     """Remember the last successful server/channel/role discovery."""
     import json as _json

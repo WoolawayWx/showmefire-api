@@ -221,25 +221,14 @@ def _fetch_discord_health() -> dict:
         }
 
 
-DISCORD_API_BASE = "https://discord.com/api/v10"
 # View Channel, Send Messages, Embed Links, Attach Files, Mention @everyone/roles
 BOT_INVITE_PERMISSIONS = 1024 | 2048 | 16384 | 32768 | 131072
 _TEXT_CHANNEL_TYPES = {0, 5}  # guild text, announcement
 
 
 def _discord_rest_get(path: str, bot_token: str):
-    import json
-
-    req = request.Request(
-        f"{DISCORD_API_BASE}{path}",
-        method="GET",
-        headers={
-            "Authorization": f"Bot {bot_token}",
-            "User-Agent": "ShowMeFire (https://showmefire.org, 1.0)",
-        },
-    )
-    with request.urlopen(req, timeout=8) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    from services import discord_rest
+    return discord_rest.get(path, token=bot_token, timeout=8.0)
 
 
 def _discover_servers_via_rest(bot_token: str) -> dict:
@@ -581,7 +570,7 @@ async def get_discord_servers(token: Optional[str] = None):
         "servers": payload.get("servers") or [],
         "server_errors": payload.get("errors") or [],
         "error": payload.get("error"),
-        "invite_url": _bot_invite_url(application_id) if application_id else None,
+        "invite_url": _server_invite_url(application_id),
     }
 
 
@@ -662,3 +651,212 @@ async def send_discord_test_event(payload: DiscordTestEventRequest, token: Optio
     except Exception as exc:
         logger.error("Failed to send Discord test event for %s: %s", email, exc)
         raise HTTPException(status_code=500, detail="Failed to send Discord test event") from exc
+
+
+# --- "Connect with Discord" (OAuth2) ---------------------------------------
+# Like a typical bot dashboard: the admin signs in with Discord, sees the
+# servers they manage, and adds the bot to one with a single click. Discord
+# then redirects back here. Show Me Fire's own admin login is unchanged; this
+# only links a Discord account to the signed-in admin.
+
+from fastapi.responses import RedirectResponse  # noqa: E402
+
+from services.discord_notifier import PUBLIC_API_BASE_URL, PUBLIC_WEB_URL  # noqa: E402
+
+DISCORD_OAUTH_AUTHORIZE = "https://discord.com/oauth2/authorize"
+DISCORD_OAUTH_TOKEN = "https://discord.com/api/oauth2/token"
+USER_SCOPES = "identify guilds"
+MANAGE_GUILD = 0x20
+ADMINISTRATOR = 0x8
+
+
+def _oauth_redirect_uri() -> str:
+    return os.getenv(
+        "DISCORD_OAUTH_REDIRECT_URI", f"{PUBLIC_API_BASE_URL}/api/admin/discord/oauth/callback"
+    ).strip()
+
+
+def _oauth_client() -> tuple[str, str]:
+    return _bot_application_id(), os.getenv("DISCORD_CLIENT_SECRET", "").strip()
+
+
+def _admin_page_redirect(**params: str) -> RedirectResponse:
+    from urllib.parse import urlencode
+
+    query = urlencode({k: v for k, v in params.items() if v})
+    return RedirectResponse(f"{PUBLIC_WEB_URL}/admin/discord{'?' + query if query else ''}", status_code=302)
+
+
+def _can_manage(guild: dict) -> bool:
+    try:
+        permissions = int(guild.get("permissions") or 0)
+    except (TypeError, ValueError):
+        permissions = 0
+    return bool(guild.get("owner")) or bool(permissions & (ADMINISTRATOR | MANAGE_GUILD))
+
+
+def _server_invite_url(application_id: str) -> Optional[str]:
+    """Prefer the OAuth flow (returns to the admin page); else a plain invite."""
+    if application_id and os.getenv("DISCORD_CLIENT_SECRET", "").strip():
+        return f"{PUBLIC_API_BASE_URL}/api/admin/discord/oauth/start?purpose=invite"
+    return _bot_invite_url(application_id) if application_id else None
+
+
+@router.get("/api/admin/discord/oauth/start")
+async def discord_oauth_start(purpose: str = "connect", guild_id: Optional[str] = None, token: Optional[str] = None):
+    """Browser navigation target for "Connect with Discord" / "Add bot"."""
+    import secrets
+    from urllib.parse import urlencode
+
+    from core.database import create_discord_oauth_state
+
+    email = _require_admin(token)
+    client_id, client_secret = _oauth_client()
+    if not client_id or not client_secret:
+        return _admin_page_redirect(discord_error="not_configured")
+    purpose = "invite" if purpose == "invite" else "connect"
+    state = secrets.token_urlsafe(32)
+    create_discord_oauth_state(state, admin_email=email, purpose=purpose)
+
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": _oauth_redirect_uri(),
+        "state": state,
+        "scope": USER_SCOPES,
+    }
+    if purpose == "invite":
+        params["scope"] = f"{USER_SCOPES} bot applications.commands"
+        params["permissions"] = str(BOT_INVITE_PERMISSIONS)
+        if guild_id and guild_id.isdigit():
+            params["guild_id"] = guild_id
+            params["disable_guild_select"] = "true"
+    return RedirectResponse(f"{DISCORD_OAUTH_AUTHORIZE}?{urlencode(params)}", status_code=302)
+
+
+def _exchange_oauth_code(code: str) -> dict:
+    import json
+    from urllib.parse import urlencode
+
+    client_id, client_secret = _oauth_client()
+    body = urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": _oauth_redirect_uri(),
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }).encode()
+    req = request.Request(
+        DISCORD_OAUTH_TOKEN, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "ShowMeFire (https://showmefire.org, 1.0)"},
+    )
+    with request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+@router.get("/api/admin/discord/oauth/callback")
+async def discord_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    guild_id: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Discord redirects here after sign-in (and after adding the bot)."""
+    from core.database import consume_discord_oauth_state, save_discord_admin_link
+    from services import discord_rest
+
+    if error:
+        # e.g. access_denied when the admin clicks Cancel on Discord's screen.
+        return _admin_page_redirect(discord_error=error)
+    record = consume_discord_oauth_state(state or "") if state else None
+    if not record or not code:
+        return _admin_page_redirect(discord_error="expired")
+    # State is single-use and bound to the admin who started the flow. If this
+    # browser is signed in as a different admin, refuse rather than cross-link.
+    current = verify_token(None)
+    if current and current != record["admin_email"]:
+        return _admin_page_redirect(discord_error="account_mismatch")
+
+    try:
+        tokens = _exchange_oauth_code(code)
+        access = tokens["access_token"]
+        user = discord_rest.get("/users/@me", token=access, auth_scheme="Bearer")
+        guilds = discord_rest.get("/users/@me/guilds", token=access, auth_scheme="Bearer") or []
+    except Exception as exc:
+        logger.warning("Discord OAuth callback failed for %s: %s", record["admin_email"], exc)
+        return _admin_page_redirect(discord_error="exchange_failed")
+
+    save_discord_admin_link(
+        record["admin_email"],
+        discord_user_id=str(user.get("id") or ""),
+        username=str(user.get("username") or ""),
+        display_name=str(user.get("global_name") or user.get("username") or ""),
+        avatar=str(user.get("avatar") or ""),
+        guilds=[
+            {"id": g["id"], "name": g.get("name") or g["id"], "icon": g.get("icon") or "",
+             "owner": bool(g.get("owner")), "permissions": str(g.get("permissions") or "0")}
+            for g in guilds
+        ],
+    )
+    logger.info("Discord account %s linked by %s (purpose=%s)", user.get("username"), record["admin_email"], record["purpose"])
+    return _admin_page_redirect(discord="added" if record["purpose"] == "invite" else "connected", guild=guild_id or "")
+
+
+@router.get("/api/admin/discord/account")
+async def get_discord_account(token: Optional[str] = None):
+    from urllib.parse import urlencode
+
+    from core.database import get_discord_admin_link
+
+    email = _require_admin(token)
+    client_id, client_secret = _oauth_client()
+    link = get_discord_admin_link(email)
+    base = {
+        "oauth_configured": bool(client_id and client_secret),
+        "redirect_uri": _oauth_redirect_uri(),
+        "connect_url": f"{PUBLIC_API_BASE_URL}/api/admin/discord/oauth/start?purpose=connect",
+        "direct_delivery": bool(os.getenv("DISCORD_BOT_TOKEN", "").strip()),
+    }
+    if not link:
+        return {"success": True, "linked": False, **base}
+
+    bot_servers = _fetch_discord_servers()
+    bot_guild_ids = {s["id"] for s in bot_servers.get("servers") or []}
+    guilds = []
+    for guild in link["guilds"]:
+        if not _can_manage(guild):
+            continue
+        icon = guild.get("icon")
+        guilds.append({
+            "id": guild["id"],
+            "name": guild["name"],
+            "icon_url": f"https://cdn.discordapp.com/icons/{guild['id']}/{icon}.png?size=64" if icon else None,
+            "bot_present": guild["id"] in bot_guild_ids,
+            "add_url": f"{PUBLIC_API_BASE_URL}/api/admin/discord/oauth/start?"
+                       + urlencode({"purpose": "invite", "guild_id": guild["id"]}),
+        })
+    guilds.sort(key=lambda g: (not g["bot_present"], g["name"].lower()))
+    avatar = link.get("avatar")
+    return {
+        "success": True,
+        "linked": True,
+        **base,
+        "bot_list_stale": bool(bot_servers.get("stale")),
+        "account": {
+            "id": link["discord_user_id"],
+            "username": link["username"],
+            "display_name": link["display_name"],
+            "avatar_url": f"https://cdn.discordapp.com/avatars/{link['discord_user_id']}/{avatar}.png?size=64" if avatar else None,
+            "linked_at": link["linked_at"],
+        },
+        "guilds": guilds,
+    }
+
+
+@router.delete("/api/admin/discord/account")
+async def disconnect_discord_account(token: Optional[str] = None):
+    from core.database import delete_discord_admin_link
+
+    email = _require_admin(token)
+    delete_discord_admin_link(email)
+    return {"success": True}
