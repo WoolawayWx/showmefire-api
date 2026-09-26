@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib import error, request
 from urllib.parse import urlparse
@@ -14,8 +14,11 @@ from services.discord_notifier import (
     DISCORD_EVENT_SECRET,
     DISCORD_EVENT_TIMEOUT_SEC,
     DISCORD_EVENT_URL,
+    STAFF_ALERT_TYPES,
+    notify_fire_weather_alert,
     notify_forecast_ready,
     notify_outlook_published,
+    notify_staff_alert,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,8 +42,31 @@ class DiscordConfigUpdateRequest(BaseModel):
     image_fetch_retries: Optional[int] = Field(default=None, ge=1, le=10)
     image_fetch_timeout_ms: Optional[int] = Field(default=None, ge=1000, le=30000)
     dedupe_ttl_hours: Optional[int] = Field(default=None, ge=1, le=48)
+    fire_alert_channel_id: Optional[str] = None
+    fire_alert_channel_name: Optional[str] = None
+    fire_alert_role_ids: Optional[str] = None
+    staff_channel_id: Optional[str] = None
+    staff_channel_name: Optional[str] = None
+    staff_role_ids: Optional[str] = None
+    staff_alert_types: Optional[list[str]] = None
+
+    @field_validator("staff_alert_types")
+    @classmethod
+    def _validate_staff_alert_types(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is None:
+            return None
+        unknown = [item for item in value if item not in STAFF_ALERT_TYPES]
+        if unknown:
+            raise ValueError(f"unknown staff alert types: {', '.join(unknown)}")
+        return [key for key in STAFF_ALERT_TYPES if key in value]
 
     @field_validator(
+        "fire_alert_channel_id",
+        "fire_alert_channel_name",
+        "fire_alert_role_ids",
+        "staff_channel_id",
+        "staff_channel_name",
+        "staff_role_ids",
         "channel_id",
         "channel_name",
         "forecast_channel_id",
@@ -68,9 +94,33 @@ class DiscordTestEventRequest(BaseModel):
     @classmethod
     def _validate_event_type(cls, value: str) -> str:
         normalized = str(value).strip().lower()
-        if normalized not in {"outlook_published", "forecast_ready"}:
-            raise ValueError("event_type must be 'outlook_published' or 'forecast_ready'")
+        if normalized not in {"outlook_published", "forecast_ready", "fire_alert", "staff_alert"}:
+            raise ValueError("event_type must be 'outlook_published', 'forecast_ready', 'fire_alert', or 'staff_alert'")
         return normalized
+
+
+def _fire_alert_config(settings: dict) -> dict:
+    return {
+        "fire_alert_channel_id": settings.get("fire_alert_channel_id") or "",
+        "fire_alert_channel_name": settings.get("fire_alert_channel_name") or "",
+        "fire_alert_role_ids": settings.get("fire_alert_role_ids") or "",
+    }
+
+
+def _staff_config(settings: dict) -> dict:
+    raw_types = settings.get("staff_alert_types")
+    enabled = (
+        list(STAFF_ALERT_TYPES)
+        if raw_types is None
+        else [item for item in str(raw_types).split(",") if item in STAFF_ALERT_TYPES]
+    )
+    return {
+        "staff_channel_id": settings.get("staff_channel_id") or "",
+        "staff_channel_name": settings.get("staff_channel_name") or "",
+        "staff_role_ids": settings.get("staff_role_ids") or "",
+        "staff_alert_types": enabled,
+        "staff_alert_type_options": [{"key": key, "label": label} for key, label in STAFF_ALERT_TYPES.items()],
+    }
 
 
 def _require_admin(token: Optional[str] = None) -> str:
@@ -234,6 +284,8 @@ async def get_discord_config(token: Optional[str] = None):
             "image_fetch_retries": int(settings.get("image_fetch_retries") or 3),
             "image_fetch_timeout_ms": int(settings.get("image_fetch_timeout_ms") or 5000),
             "dedupe_ttl_hours": int((settings.get("dedupe_ttl_ms") or 21600000) / 3600000),
+            **_fire_alert_config(settings),
+            **_staff_config(settings),
             "updated_by": settings.get("updated_by"),
             "updated_at": settings.get("updated_at"),
             "restart_required_fields": ["bot_token", "webhook_secret", "webhook_port"],
@@ -271,6 +323,13 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Opti
         image_fetch_retries=payload.image_fetch_retries,
         image_fetch_timeout_ms=payload.image_fetch_timeout_ms,
         dedupe_ttl_ms=(payload.dedupe_ttl_hours * 3600000) if payload.dedupe_ttl_hours is not None else None,
+        fire_alert_channel_id=payload.fire_alert_channel_id,
+        fire_alert_channel_name=payload.fire_alert_channel_name,
+        fire_alert_role_ids=_normalize_role_csv(payload.fire_alert_role_ids) if payload.fire_alert_role_ids is not None else None,
+        staff_channel_id=payload.staff_channel_id,
+        staff_channel_name=payload.staff_channel_name,
+        staff_role_ids=_normalize_role_csv(payload.staff_role_ids) if payload.staff_role_ids is not None else None,
+        staff_alert_types=",".join(payload.staff_alert_types) if payload.staff_alert_types is not None else None,
         updated_by=email,
     )
 
@@ -303,6 +362,12 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Opti
         applied_fields.append("event_secret_override")
     if payload.clear_event_secret_override:
         applied_fields.append("clear_event_secret_override")
+    for staff_field in (
+        "fire_alert_channel_id", "fire_alert_channel_name", "fire_alert_role_ids",
+        "staff_channel_id", "staff_channel_name", "staff_role_ids", "staff_alert_types",
+    ):
+        if getattr(payload, staff_field) is not None:
+            applied_fields.append(staff_field)
 
     logger.info("Discord admin config updated by %s: %s", email, ",".join(applied_fields) or "none")
 
@@ -324,6 +389,8 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Opti
             "image_fetch_retries": int(updated.get("image_fetch_retries") or 3),
             "image_fetch_timeout_ms": int(updated.get("image_fetch_timeout_ms") or 5000),
             "dedupe_ttl_hours": int((updated.get("dedupe_ttl_ms") or 21600000) / 3600000),
+            **_fire_alert_config(updated),
+            **_staff_config(updated),
             "updated_by": updated.get("updated_by"),
             "updated_at": updated.get("updated_at"),
             "requires_restart": ["bot settings are env-based in production deployments"],
@@ -359,6 +426,16 @@ async def get_discord_status(token: Optional[str] = None):
                     "channel_name": settings.get("outlook_channel_name") or "",
                     "role_ids": settings.get("outlook_role_ids") or "",
                 },
+                "fire_alert": {
+                    "channel_id": settings.get("fire_alert_channel_id") or "",
+                    "channel_name": settings.get("fire_alert_channel_name") or "",
+                    "role_ids": settings.get("fire_alert_role_ids") or "",
+                },
+                "staff": {
+                    "channel_id": settings.get("staff_channel_id") or "",
+                    "channel_name": settings.get("staff_channel_name") or "",
+                    "role_ids": settings.get("staff_role_ids") or "",
+                },
             },
             "saved_delivery": {
                 "image_fetch_retries": int(settings.get("image_fetch_retries") or 3),
@@ -393,7 +470,37 @@ async def send_discord_test_event(payload: DiscordTestEventRequest, token: Optio
     now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
-        if payload.event_type == "forecast_ready":
+        if payload.event_type == "staff_alert":
+            settings = get_discord_admin_settings()
+            if not (settings.get("staff_channel_id") or settings.get("staff_channel_name")):
+                raise HTTPException(status_code=400, detail="Save a staff alert channel before sending a test")
+            sent = notify_staff_alert(
+                background=False,
+                force=True,
+                alert_type="burn_ban",
+                title="Test staff alert",
+                description="This is a test staff alert from the Show Me Fire admin panel.",
+                fields=[{"name": "Requested by", "value": email}],
+                admin_path="/admin/discord",
+            )
+        elif payload.event_type == "fire_alert":
+            later_iso = (now_dt + timedelta(hours=12)).isoformat()
+            sent = notify_fire_weather_alert(
+                {
+                    # Unique per test so the bot's dedupe doesn't swallow repeats.
+                    "id": f"test-{int(now_dt.timestamp())}",
+                    "event": "Red Flag Warning",
+                    "headline": "TEST: Red Flag Warning issued for central Missouri (admin panel test)",
+                    "areaDescription": "Boone; Cole; Callaway",
+                    "description": "This is a test fire weather alert from the Show Me Fire admin panel.",
+                    "severity": "Severe",
+                    "onset": now_iso,
+                    "expires": later_iso,
+                    "sent": now_iso,
+                },
+                image_version=str(int(now_dt.timestamp())),
+            )
+        elif payload.event_type == "forecast_ready":
             sent = notify_forecast_ready(
                 title="Test Forecast Event",
                 discussion="This is a test forecast notification from Show Me Fire admin panel.",
@@ -423,6 +530,8 @@ async def send_discord_test_event(payload: DiscordTestEventRequest, token: Optio
             "requested_by": email,
             "at": now_iso,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to send Discord test event for %s: %s", email, exc)
         raise HTTPException(status_code=500, detail="Failed to send Discord test event") from exc

@@ -25,6 +25,7 @@ from core.database import (
     update_feedback_status,
 )
 from core.security import SECRET_KEY, verify_token
+from services.discord_notifier import notify_staff_alert
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,12 @@ def submit_feedback(payload: FeedbackCreate, request: Request):
         details=payload.details,
         message=payload.message,
         submitter_ip_hash=ip_hash,
+    )
+    notify_staff_alert(
+        alert_type="site_feedback",
+        title=f"New site feedback: {payload.category}",
+        description=payload.message,
+        admin_path="/admin/feedback",
     )
 
     return {"success": True, "feedback": {"id": feedback["id"], "status": feedback["status"],

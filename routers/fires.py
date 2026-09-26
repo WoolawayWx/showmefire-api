@@ -69,6 +69,7 @@ from core.database import (
 from core.fire_events import FUEL_TYPES, MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN, VERIFICATION_TIERS
 from core.security import SECRET_KEY, verify_token
 from services.county_lookup import county_for_point
+from services.discord_notifier import notify_staff_alert
 from services.turnstile import verify_turnstile
 
 logger = logging.getLogger(__name__)
@@ -609,6 +610,20 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         county_fips=county_fips,
         county_name=county_name,
     )
+    notify_staff_alert(
+        alert_type="fire_report",
+        title=f"New fire report: {county_name + ' County' if county_name else 'Missouri'}",
+        description=payload.description,
+        fields=[
+            {"name": "Location", "value": address_text or f"{payload.latitude:.4f}, {payload.longitude:.4f}", "inline": False},
+            {"name": "Acres", "value": f"{'~' if payload.acres_is_estimate else ''}{payload.acres:g}"},
+            {"name": "Occurred", "value": payload.occurred_at},
+            {"name": "Fuel", "value": ", ".join(payload.fuel_types)},
+            {"name": "Reporter", "value": (payload.reporter_relationship or "").replace("_", " ")},
+            {"name": "Unusual", "value": payload.out_of_ordinary, "inline": False},
+        ],
+        admin_path=f"/admin/fires/{event['id']}",
+    )
 
     return {
         "success": True,
@@ -886,9 +901,20 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     )
     if not quota["allowed"]:
         raise HTTPException(status_code=429, detail="Too many feedback submissions. Please try again later.")
+    note = _clean_text(payload.note, required=False, field="note")
     create_fire_incident_feedback(
-        incident["id"], payload.classification, _clean_text(payload.note, required=False, field="note"),
+        incident["id"], payload.classification, note,
         _clean_text(payload.contact, required=False, field="contact"), ip_hash,
+    )
+    notify_staff_alert(
+        alert_type="incident_feedback",
+        title=f"Fire incident feedback: {incident.get('county_name') or slug}",
+        description=note,
+        fields=[
+            {"name": "Classification", "value": payload.classification.replace("_", " ")},
+            {"name": "Incident", "value": slug},
+        ],
+        admin_path="/admin/fires",
     )
     return {"success": True, "message": "Thanks—your fire information was received."}
 

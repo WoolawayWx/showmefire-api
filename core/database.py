@@ -15,6 +15,9 @@ from typing import Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 
+DISCORD_STAFF_ALERT_TYPES_DEFAULT = "burn_ban,fire_report,incident_feedback,site_feedback"
+
+
 def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS discord_admin_settings (
@@ -74,6 +77,85 @@ def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
         cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_url_override TEXT DEFAULT ''")
     if "event_secret_override" not in columns:
         cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN event_secret_override TEXT DEFAULT ''")
+    # Fire alert route: new NWS Red Flag Warnings / Fire Weather Watches.
+    if "fire_alert_channel_id" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN fire_alert_channel_id TEXT DEFAULT ''")
+    if "fire_alert_channel_name" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN fire_alert_channel_name TEXT DEFAULT ''")
+    if "fire_alert_role_ids" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN fire_alert_role_ids TEXT DEFAULT ''")
+    # Staff alert route: internal pings (new public submissions etc.). Never
+    # falls back to the public default channel.
+    if "staff_channel_id" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN staff_channel_id TEXT DEFAULT ''")
+    if "staff_channel_name" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN staff_channel_name TEXT DEFAULT ''")
+    if "staff_role_ids" not in columns:
+        cursor.execute("ALTER TABLE discord_admin_settings ADD COLUMN staff_role_ids TEXT DEFAULT ''")
+    if "staff_alert_types" not in columns:
+        cursor.execute(
+            "ALTER TABLE discord_admin_settings ADD COLUMN staff_alert_types TEXT "
+            f"DEFAULT '{DISCORD_STAFF_ALERT_TYPES_DEFAULT}'"
+        )
+
+def _ensure_discord_fire_alert_posts_table(cursor: sqlite3.Cursor) -> None:
+    """NWS fire weather alert IDs already posted to Discord (or seeded as
+    'already active' on first run so enabling the route doesn't flood)."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS discord_fire_alert_posts (
+            alert_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'posted',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
+def claim_unposted_discord_fire_alerts(alert_ids: List[str]) -> List[str]:
+    """Return which of ``alert_ids`` still need posting.
+
+    On the very first call nothing is returned: the current alerts are
+    recorded as a baseline instead, mirroring mobile push seeding.
+    """
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        _ensure_discord_fire_alert_posts_table(cursor)
+        cursor.execute("SELECT 1 FROM discord_fire_alert_posts WHERE alert_id = '__baseline__'")
+        if cursor.fetchone() is None:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO discord_fire_alert_posts (alert_id, status) VALUES (?, 'seeded')",
+                [(alert_id,) for alert_id in alert_ids] + [("__baseline__",)],
+            )
+            conn.commit()
+            return []
+        if not alert_ids:
+            return []
+        placeholders = ",".join("?" for _ in alert_ids)
+        cursor.execute(
+            f"SELECT alert_id FROM discord_fire_alert_posts WHERE alert_id IN ({placeholders})",
+            alert_ids,
+        )
+        seen = {row[0] for row in cursor.fetchall()}
+        return [alert_id for alert_id in alert_ids if alert_id not in seen]
+    finally:
+        conn.close()
+
+
+def mark_discord_fire_alert_posted(alert_id: str) -> None:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        _ensure_discord_fire_alert_posts_table(cursor)
+        cursor.execute(
+            "INSERT OR IGNORE INTO discord_fire_alert_posts (alert_id, status) VALUES (?, 'posted')",
+            (alert_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('''
@@ -1237,6 +1319,13 @@ def get_discord_admin_settings() -> Dict:
                 image_fetch_retries,
                 image_fetch_timeout_ms,
                 dedupe_ttl_ms,
+                fire_alert_channel_id,
+                fire_alert_channel_name,
+                fire_alert_role_ids,
+                staff_channel_id,
+                staff_channel_name,
+                staff_role_ids,
+                staff_alert_types,
                 updated_by,
                 updated_at
             FROM discord_admin_settings
@@ -1257,6 +1346,13 @@ def get_discord_admin_settings() -> Dict:
             "image_fetch_retries": 3,
             "image_fetch_timeout_ms": 5000,
             "dedupe_ttl_ms": 21600000,
+            "fire_alert_channel_id": "",
+            "fire_alert_channel_name": "",
+            "fire_alert_role_ids": "",
+            "staff_channel_id": "",
+            "staff_channel_name": "",
+            "staff_role_ids": "",
+            "staff_alert_types": DISCORD_STAFF_ALERT_TYPES_DEFAULT,
             "updated_by": None,
             "updated_at": None,
         }
@@ -1279,6 +1375,13 @@ def update_discord_admin_settings(
     image_fetch_retries: Optional[int] = None,
     image_fetch_timeout_ms: Optional[int] = None,
     dedupe_ttl_ms: Optional[int] = None,
+    fire_alert_channel_id: Optional[str] = None,
+    fire_alert_channel_name: Optional[str] = None,
+    fire_alert_role_ids: Optional[str] = None,
+    staff_channel_id: Optional[str] = None,
+    staff_channel_name: Optional[str] = None,
+    staff_role_ids: Optional[str] = None,
+    staff_alert_types: Optional[str] = None,
     updated_by: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
@@ -1302,6 +1405,13 @@ def update_discord_admin_settings(
                 image_fetch_retries = COALESCE(?, image_fetch_retries),
                 image_fetch_timeout_ms = COALESCE(?, image_fetch_timeout_ms),
                 dedupe_ttl_ms = COALESCE(?, dedupe_ttl_ms),
+                fire_alert_channel_id = COALESCE(?, fire_alert_channel_id),
+                fire_alert_channel_name = COALESCE(?, fire_alert_channel_name),
+                fire_alert_role_ids = COALESCE(?, fire_alert_role_ids),
+                staff_channel_id = COALESCE(?, staff_channel_id),
+                staff_channel_name = COALESCE(?, staff_channel_name),
+                staff_role_ids = COALESCE(?, staff_role_ids),
+                staff_alert_types = COALESCE(?, staff_alert_types),
                 updated_by = COALESCE(?, updated_by),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
@@ -1319,6 +1429,13 @@ def update_discord_admin_settings(
             image_fetch_retries,
             image_fetch_timeout_ms,
             dedupe_ttl_ms,
+            fire_alert_channel_id,
+            fire_alert_channel_name,
+            fire_alert_role_ids,
+            staff_channel_id,
+            staff_channel_name,
+            staff_role_ids,
+            staff_alert_types,
             updated_by,
         ))
         conn.commit()
@@ -1337,6 +1454,13 @@ def update_discord_admin_settings(
                 image_fetch_retries,
                 image_fetch_timeout_ms,
                 dedupe_ttl_ms,
+                fire_alert_channel_id,
+                fire_alert_channel_name,
+                fire_alert_role_ids,
+                staff_channel_id,
+                staff_channel_name,
+                staff_role_ids,
+                staff_alert_types,
                 updated_by,
                 updated_at
             FROM discord_admin_settings
@@ -3842,6 +3966,91 @@ def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
         cursor.execute(
             "ALTER TABLE burn_ban_submissions ADD COLUMN request_type TEXT NOT NULL DEFAULT 'issue'"
         )
+    if "submitter_comment" not in burn_ban_columns:
+        cursor.execute(
+            "ALTER TABLE burn_ban_submissions ADD COLUMN submitter_comment TEXT NOT NULL DEFAULT ''"
+        )
+    if "public_note" not in burn_ban_columns:
+        cursor.execute(
+            "ALTER TABLE burn_ban_submissions ADD COLUMN public_note TEXT NOT NULL DEFAULT ''"
+        )
+
+    # Public per-county timeline: one row each time a county's ban is issued,
+    # lifted, or expires. Kept separately from submissions so the history reads
+    # cleanly even as submissions are edited or moderated.
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='burn_ban_county_events'")
+    events_table_existed = cursor.fetchone() is not None
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burn_ban_county_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            county_fips TEXT NOT NULL,
+            county_name TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            submission_id INTEGER,
+            proof_url TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            actor TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_events_county '
+        'ON burn_ban_county_events(county_fips, occurred_at DESC)'
+    )
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_burn_ban_events_submission '
+        'ON burn_ban_county_events(submission_id)'
+    )
+    if not events_table_existed:
+        _backfill_burn_ban_county_events(cursor)
+
+
+def _backfill_burn_ban_county_events(cursor: sqlite3.Cursor) -> None:
+    """Seed county history from submissions that predate the events table."""
+    cursor.execute('''
+        SELECT * FROM burn_ban_submissions
+        WHERE status IN ('confirmed', 'expired')
+        ORDER BY effective_at ASC
+    ''')
+    columns = [col[0] for col in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    for row in rows:
+        kind = row.get("request_type") or "issue"
+        cursor.execute('''
+            INSERT INTO burn_ban_county_events (
+                county_fips, county_name, event_type, occurred_at, submission_id,
+                proof_url, note, actor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            row["county_fips"], row["county_name"],
+            "lifted" if kind == "lift" else "issued",
+            row["effective_at"], row["id"], row.get("proof_url") or "",
+            row.get("moderator_note") or "", row.get("moderated_by") or "",
+        ))
+        if kind == "issue" and row["status"] == "expired":
+            cursor.execute('''
+                SELECT actor, reason, created_at FROM burn_ban_moderation
+                WHERE submission_id = ? AND action = 'expired'
+                ORDER BY created_at DESC LIMIT 1
+            ''', (row["id"],))
+            expired = cursor.fetchone()
+            ended_by_lift = bool(expired and not str(expired[0]).startswith("system:"))
+            if ended_by_lift:
+                # A confirmed lift already contributed its own 'lifted' event.
+                continue
+            occurred = row.get("expires_at") or (
+                str(expired[2]).replace(" ", "T") + "Z" if expired else row["effective_at"]
+            )
+            cursor.execute('''
+                INSERT INTO burn_ban_county_events (
+                    county_fips, county_name, event_type, occurred_at, submission_id,
+                    proof_url, note, actor
+                ) VALUES (?, ?, 'expired', ?, ?, '', ?, 'system:auto-expire')
+            ''', (
+                row["county_fips"], row["county_name"], occurred, row["id"],
+                expired[1] if expired else "",
+            ))
 
 
 def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
@@ -4304,7 +4513,8 @@ def delete_forecast_discussion(discussion_id: int) -> bool:
 # --- County burn-ban helpers ---
 
 BURN_BAN_STATUSES = {"pending", "confirmed", "denied", "expired"}
-BURN_BAN_REQUEST_TYPES = {"issue", "lift"}
+BURN_BAN_REQUEST_TYPES = {"issue", "lift", "update"}
+BURN_BAN_EVENT_TYPES = {"issue": "issued", "lift": "lifted", "update": "updated"}
 
 
 def _burn_ban_row_to_dict(row: Optional[sqlite3.Row], *, admin: bool = False) -> Optional[Dict]:
@@ -4316,7 +4526,7 @@ def _burn_ban_row_to_dict(row: Optional[sqlite3.Row], *, admin: bool = False) ->
             "submitter_name", "submitter_contact", "submitter_ip_hash",
             "upload_token_hash", "captcha_verdict", "consent_version",
             "proof_stored_filename", "proof_original_filename", "proof_content_type",
-            "moderator_note", "moderated_by", "pii_purged_at",
+            "moderator_note", "moderated_by", "pii_purged_at", "submitter_comment",
         ):
             data.pop(key, None)
     return data
@@ -4344,6 +4554,29 @@ def _record_burn_ban_moderation(
     ))
 
 
+def _record_burn_ban_county_event(
+    cursor: sqlite3.Cursor,
+    *,
+    county_fips: str,
+    county_name: str,
+    event_type: str,
+    occurred_at: str,
+    submission_id: Optional[int],
+    proof_url: str = "",
+    note: str = "",
+    actor: str = "",
+) -> None:
+    cursor.execute('''
+        INSERT INTO burn_ban_county_events (
+            county_fips, county_name, event_type, occurred_at, submission_id,
+            proof_url, note, actor
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        county_fips, county_name, event_type, occurred_at, submission_id,
+        proof_url or "", note or "", actor or "",
+    ))
+
+
 def create_burn_ban_submission(
     *,
     county_fips: str,
@@ -4358,6 +4591,8 @@ def create_burn_ban_submission(
     captcha_verdict: str,
     consent_version: str,
     request_type: str = "issue",
+    submitter_comment: str = "",
+    public_note: str = "",
 ) -> Dict:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -4369,12 +4604,14 @@ def create_burn_ban_submission(
             INSERT INTO burn_ban_submissions (
                 status, county_fips, county_name, submitter_name, submitter_contact,
                 proof_url, request_type, effective_at, expires_at, submitter_ip_hash,
-                upload_token_hash, captcha_verdict, consent_version
-            ) VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                upload_token_hash, captcha_verdict, consent_version, submitter_comment,
+                public_note
+            ) VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             county_fips, county_name, submitter_name, submitter_contact,
             proof_url, kind, effective_at, expires_at or "", submitter_ip_hash,
-            upload_token_hash, captcha_verdict, consent_version,
+            upload_token_hash, captcha_verdict, consent_version, submitter_comment or "",
+            public_note or "",
         ))
         submission_id = cursor.lastrowid
         conn.commit()
@@ -4540,9 +4777,11 @@ def moderate_burn_ban_submission(
             return {"already_moderated": True, **current}
 
         changed: Dict = {}
-        updates = ["status = ?", "moderated_by = ?", "moderator_note = ?",
+        # An empty reason keeps any internal note an admin already wrote.
+        updates = ["status = ?", "moderated_by = ?",
+                   "moderator_note = CASE WHEN ? != '' THEN ? ELSE moderator_note END",
                    "moderated_at = CURRENT_TIMESTAMP", "updated_at = CURRENT_TIMESTAMP"]
-        params: List = [to_status, actor, reason]
+        params: List = [to_status, actor, reason or "", reason or ""]
         if effective_at is not None:
             updates.append("effective_at = ?")
             params.append(effective_at)
@@ -4563,6 +4802,19 @@ def moderate_burn_ban_submission(
             from_status=from_status, to_status=to_status, reason=reason,
             changed_fields=changed,
         )
+        if to_status == "confirmed":
+            kind = current.get("request_type") or "issue"
+            _record_burn_ban_county_event(
+                cursor,
+                county_fips=current["county_fips"],
+                county_name=current["county_name"],
+                event_type=BURN_BAN_EVENT_TYPES.get(kind, "issued"),
+                occurred_at=effective_at if effective_at is not None else current["effective_at"],
+                submission_id=submission_id,
+                proof_url=current.get("proof_url") or "",
+                note=reason,
+                actor=actor,
+            )
         conn.commit()
         cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
         return dict(cursor.fetchone())
@@ -4620,6 +4872,19 @@ def update_burn_ban_submission(
             from_status=current["status"], to_status=current["status"],
             reason=edit_reason, changed_fields=changed,
         )
+        event_fields = {
+            "occurred_at": changed.get("effective_at"),
+            "county_fips": changed.get("county_fips"),
+            "county_name": changed.get("county_name"),
+            "proof_url": changed.get("proof_url"),
+        }
+        event_updates = [(k, v) for k, v in event_fields.items() if v is not None]
+        if event_updates:
+            cursor.execute(
+                f"UPDATE burn_ban_county_events SET {', '.join(f'{k} = ?' for k, _ in event_updates)} "
+                "WHERE submission_id = ? AND event_type IN ('issued', 'lifted')",
+                [v for _, v in event_updates] + [submission_id],
+            )
         conn.commit()
         cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
         return dict(cursor.fetchone())
@@ -4644,8 +4909,119 @@ def delete_burn_ban_submission(submission_id: int, *, actor: str, reason: str = 
         )
         cursor.execute('DELETE FROM burn_ban_submissions WHERE id = ?', (submission_id,))
         deleted = cursor.rowcount > 0
+        # A deleted submission was entered in error, so it leaves the county timeline too.
+        cursor.execute('DELETE FROM burn_ban_county_events WHERE submission_id = ?', (submission_id,))
         conn.commit()
         return deleted
+    finally:
+        conn.close()
+
+
+def set_burn_ban_notes(
+    submission_id: int,
+    *,
+    actor: str,
+    public_note: Optional[str] = None,
+    internal_note: Optional[str] = None,
+) -> Optional[Dict]:
+    """Set (or clear, with "") a submission's public and/or internal note.
+
+    None leaves that note unchanged. Every change is recorded in the
+    moderation log with its previous value."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        current = dict(row)
+        changed: Dict = {}
+        clauses: List[str] = []
+        params: List = []
+        for column, value, label in (
+            ("public_note", public_note, "public_note"),
+            ("moderator_note", internal_note, "internal_note"),
+        ):
+            if value is None or value == (current.get(column) or ""):
+                continue
+            clauses.append(f"{column} = ?")
+            params.append(value)
+            changed[label] = {"from": current.get(column) or "", "to": value}
+        if changed:
+            cursor.execute(
+                f"UPDATE burn_ban_submissions SET {', '.join(clauses)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                params + [submission_id],
+            )
+            summary = ", ".join(
+                f"{label.replace('_', ' ')} {'cleared' if not diff['to'] else 'set'}"
+                for label, diff in changed.items()
+            )
+            _record_burn_ban_moderation(
+                cursor, submission_id, action="notes", actor=actor,
+                from_status=current["status"], to_status=current["status"],
+                reason=summary, changed_fields=changed,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_burn_ban_submission(submission_id, admin=True)
+
+
+def list_burn_ban_county_events(
+    *,
+    county_fips: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+    admin: bool = False,
+) -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where = "WHERE e.county_fips = ?" if county_fips else ""
+        params: List = [county_fips] if county_fips else []
+        # The public note lives on the submission so admin edits show up
+        # immediately. Auto-expiry events carry no note of their own.
+        cursor.execute(f'''
+            SELECT e.*,
+                   CASE WHEN e.event_type IN ('issued', 'lifted', 'updated')
+                        THEN COALESCE(s.public_note, '') ELSE '' END AS public_note
+            FROM burn_ban_county_events e
+            LEFT JOIN burn_ban_submissions s ON s.id = e.submission_id
+            {where}
+            ORDER BY e.occurred_at DESC, e.id DESC LIMIT ? OFFSET ?
+        ''', params + [max(1, min(limit, 1000)), max(0, offset)])
+        events = []
+        for row in cursor.fetchall():
+            data = dict(row)
+            if not admin:
+                for key in ("note", "actor"):
+                    data.pop(key, None)
+            events.append(data)
+        return events
+    finally:
+        conn.close()
+
+
+def count_burn_ban_county_events_by_county() -> Dict[str, Dict]:
+    """Per-county summary: number of bans issued and most recent event."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT county_fips, MAX(county_name) AS county_name,
+                   SUM(CASE WHEN event_type = 'issued' THEN 1 ELSE 0 END) AS bans_issued,
+                   MAX(occurred_at) AS last_event_at
+            FROM burn_ban_county_events
+            GROUP BY county_fips
+        ''')
+        return {row["county_fips"]: dict(row) for row in cursor.fetchall()}
     finally:
         conn.close()
 
@@ -4658,14 +5034,26 @@ def expire_stale_burn_bans(*, now: Optional[datetime] = None) -> int:
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            SELECT id FROM burn_ban_submissions
+            SELECT id, county_fips, county_name, expires_at, request_type FROM burn_ban_submissions
             WHERE status = 'confirmed'
               AND expires_at IS NOT NULL
               AND expires_at != ''
               AND expires_at <= ?
         ''', (now_iso,))
-        ids = [row[0] for row in cursor.fetchall()]
-        for submission_id in ids:
+        rows = cursor.fetchall()
+        ids = [row[0] for row in rows]
+        for submission_id, county_fips, county_name, expires_at, request_type in rows:
+            if (request_type or "issue") == "issue":
+                _record_burn_ban_county_event(
+                    cursor,
+                    county_fips=county_fips,
+                    county_name=county_name,
+                    event_type="expired",
+                    occurred_at=expires_at,
+                    submission_id=submission_id,
+                    note="expiration date reached",
+                    actor="system:auto-expire",
+                )
             cursor.execute('''
                 UPDATE burn_ban_submissions
                 SET status = 'expired', updated_at = CURRENT_TIMESTAMP
@@ -4726,7 +5114,7 @@ def purge_burn_ban_submission_pii(older_than_days: int = 90) -> int:
         cursor.execute('''
             UPDATE burn_ban_submissions
             SET submitter_name = '', submitter_contact = '', submitter_ip_hash = '',
-                upload_token_hash = '', pii_purged_at = CURRENT_TIMESTAMP
+                upload_token_hash = '', submitter_comment = '', pii_purged_at = CURRENT_TIMESTAMP
             WHERE moderated_at IS NOT NULL
               AND moderated_at <= datetime('now', ? || ' days')
               AND pii_purged_at IS NULL

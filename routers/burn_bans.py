@@ -6,8 +6,16 @@ Cloudflare Turnstile, honeypot, and rate limits. Submissions start as
 status='pending' until an administrator confirms or denies them.
 
 GET /api/burn-bans/active and /api/burn-bans/active.geojson expose only
-confirmed, in-effect bans. Submitter contact and uploaded proof files are
-admin-only.
+confirmed, in-effect bans. GET /api/burn-bans/history exposes the per-county
+timeline of issued/updated/lifted/expired bans.
+
+Each submission carries two notes: ``public_note`` (shown publicly once the
+submission is confirmed; submitted by the public, editable by admins) and the
+internal ``moderator_note``. Submitter contact, submitter comments, internal
+notes, and uploaded proof files are admin-only.
+
+request_type is one of issue (report a ban), update (change the county's
+current ban, e.g. its expiration), or lift (report that the ban ended).
 """
 import hashlib
 import hmac
@@ -17,7 +25,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
@@ -26,20 +34,24 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core.database import (
     consume_burn_ban_submission_quota,
+    count_burn_ban_county_events_by_county,
     create_burn_ban_submission,
     delete_burn_ban_submission,
     expire_confirmed_burn_bans_for_county,
     get_burn_ban_submission,
     get_burn_ban_upload_token_hash,
     list_active_burn_bans,
+    list_burn_ban_county_events,
     list_burn_ban_submissions,
     moderate_burn_ban_submission,
     purge_burn_ban_submission_pii,
     purge_burn_ban_throttle_rows,
+    set_burn_ban_notes,
     set_burn_ban_proof_file,
     update_burn_ban_submission,
 )
 from core.security import SECRET_KEY, verify_token
+from services.discord_notifier import notify_staff_alert
 from services.mobile_content import county_catalog
 from services.turnstile import verify_turnstile
 
@@ -70,7 +82,13 @@ MAX_PROOF_BYTES = 10 * 1024 * 1024
 PROOF_DIR = Path(os.getenv("BURN_BAN_PROOF_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "burn-ban-proofs")))
 
 STATUSES = {"pending", "confirmed", "denied", "expired"}
-REQUEST_TYPES = {"issue", "lift"}
+REQUEST_TYPES = {"issue", "lift", "update"}
+REQUEST_LABELS = {"issue": "New burn ban", "update": "Burn ban update", "lift": "Burn ban removal"}
+MAX_COMMENT_CHARS = 1000
+MAX_PUBLIC_NOTE_CHARS = 500
+MAX_BULK_ITEMS = 150
+STAFF_NAME = "Show Me Fire Staff"
+STAFF_CONTACT = "admin@showmefire.org"
 
 
 def _require_admin(token: Optional[str] = None) -> str:
@@ -146,6 +164,7 @@ def _public_ban_payload(submission: Dict) -> Dict:
         "effective_at": submission["effective_at"],
         "expires_at": submission.get("expires_at") or None,
         "proof_url": submission.get("proof_url") or None,
+        "public_note": submission.get("public_note") or None,
         "published_at": submission.get("published_at"),
         "updated_at": submission.get("updated_at"),
     }
@@ -185,9 +204,16 @@ class BurnBanCreate(BaseModel):
     proof_url: str = Field(default="", max_length=2000)
     effective_at: str = Field(min_length=8, max_length=40)
     expires_at: str = Field(default="", max_length=40)
+    comment: str = Field(default="", max_length=MAX_COMMENT_CHARS)
+    public_note: str = Field(default="", max_length=MAX_PUBLIC_NOTE_CHARS)
     consent_acknowledged: bool
     turnstile_token: str = Field(min_length=1, max_length=4096)
     website: str = Field(default="", max_length=200)
+
+    @field_validator("comment", "public_note")
+    @classmethod
+    def _clean_comment(cls, value: str) -> str:
+        return _clean_text(value, required=False, field="comment")
 
     @field_validator("county_fips")
     @classmethod
@@ -240,7 +266,7 @@ class BurnBanCreate(BaseModel):
     def _validate_request_type(cls, value: str) -> str:
         kind = str(value or "issue").strip().lower()
         if kind not in REQUEST_TYPES:
-            raise ValueError("request_type must be issue or lift")
+            raise ValueError("request_type must be issue, update, or lift")
         return kind
 
     @model_validator(mode="after")
@@ -317,9 +343,10 @@ class BurnBanAdminCreate(BaseModel):
     effective_at: str = Field(min_length=8, max_length=40)
     expires_at: str = Field(default="", max_length=40)
     proof_url: str = Field(default="", max_length=2000)
-    submitter_name: str = Field(default="Show Me Fire Staff", max_length=120)
-    submitter_contact: str = Field(default="admin@showmefire.org", max_length=120)
+    submitter_name: str = Field(default=STAFF_NAME, max_length=120)
+    submitter_contact: str = Field(default=STAFF_CONTACT, max_length=120)
     moderator_note: str = Field(default="", max_length=2000)
+    public_note: str = Field(default="", max_length=MAX_PUBLIC_NOTE_CHARS)
 
     @field_validator("county_fips")
     @classmethod
@@ -364,6 +391,257 @@ class BurnBanAdminCreate(BaseModel):
         return self
 
 
+class BurnBanNotes(BaseModel):
+    """None leaves a note unchanged; "" removes it."""
+    public_note: Optional[str] = Field(default=None, max_length=MAX_PUBLIC_NOTE_CHARS)
+    internal_note: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("public_note", "internal_note")
+    @classmethod
+    def _clean_note(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _clean_text(value, required=False, field="note")
+
+
+class BurnBanBulkItem(BaseModel):
+    """One row of an admin bulk change.
+
+    ``effective_at`` is when the change takes effect (defaults to now). On an
+    update, ``expires_at`` of None keeps the current expiration and "" makes
+    the ban until further notice; a blank ``proof_url`` keeps the current one.
+    ``note`` is internal; ``public_note`` is shown publicly."""
+    action: Literal["add", "update", "remove"]
+    county_fips: str = Field(min_length=5, max_length=5)
+    effective_at: Optional[str] = Field(default=None, max_length=40)
+    expires_at: Optional[str] = Field(default=None, max_length=40)
+    proof_url: Optional[str] = Field(default=None, max_length=2000)
+    note: str = Field(default="", max_length=2000)
+    public_note: str = Field(default="", max_length=MAX_PUBLIC_NOTE_CHARS)
+
+    @field_validator("county_fips")
+    @classmethod
+    def _validate_county(cls, value: str) -> str:
+        fips = str(value or "").strip()
+        if fips not in _known_county_fips():
+            raise ValueError("county_fips must be a Missouri county FIPS code")
+        return fips
+
+    @field_validator("effective_at", "expires_at")
+    @classmethod
+    def _normalize_optional_dates(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not str(value).strip():
+            return ""
+        return _parse_ban_datetime(value)
+
+    @field_validator("proof_url")
+    @classmethod
+    def _clean_proof_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = _clean_text(value, required=False, field="proof_url")
+        if text and not _URL_RE.fullmatch(text):
+            raise ValueError("proof_url must be an http or https URL")
+        return text
+
+    @field_validator("note", "public_note")
+    @classmethod
+    def _clean_note(cls, value: str) -> str:
+        return _clean_text(value, required=False, field="note")
+
+
+class BurnBanBulkRequest(BaseModel):
+    items: List[BurnBanBulkItem] = Field(min_length=1, max_length=MAX_BULK_ITEMS)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _publish_admin_ban(
+    *,
+    actor: str,
+    county_fips: str,
+    effective_at: str,
+    expires_at: str = "",
+    proof_url: str = "",
+    note: str = "",
+    public_note: str = "",
+    submitter_name: str = STAFF_NAME,
+    submitter_contact: str = STAFF_CONTACT,
+) -> Optional[Dict]:
+    submission = create_burn_ban_submission(
+        county_fips=county_fips,
+        county_name=_known_county_fips()[county_fips],
+        submitter_name=submitter_name,
+        submitter_contact=submitter_contact,
+        proof_url=proof_url,
+        effective_at=effective_at,
+        expires_at=expires_at,
+        submitter_ip_hash="admin",
+        upload_token_hash="",
+        captcha_verdict="admin",
+        consent_version=CONSENT_VERSION,
+        public_note=public_note,
+    )
+    return moderate_burn_ban_submission(
+        submission["id"],
+        to_status="confirmed",
+        actor=actor,
+        reason=note or "Created by administrator",
+        effective_at=effective_at,
+        expires_at=expires_at,
+    )
+
+
+def _lift_admin_ban(
+    *,
+    actor: str,
+    county_fips: str,
+    effective_at: str,
+    proof_url: str = "",
+    note: str = "",
+    public_note: str = "",
+) -> Optional[Dict]:
+    """Record an admin-initiated removal and expire the county's confirmed bans."""
+    submission = create_burn_ban_submission(
+        county_fips=county_fips,
+        county_name=_known_county_fips()[county_fips],
+        submitter_name=STAFF_NAME,
+        submitter_contact=STAFF_CONTACT,
+        proof_url=proof_url,
+        effective_at=effective_at,
+        expires_at="",
+        submitter_ip_hash="admin",
+        upload_token_hash="",
+        captcha_verdict="admin",
+        consent_version=CONSENT_VERSION,
+        request_type="lift",
+        public_note=public_note,
+    )
+    result = moderate_burn_ban_submission(
+        submission["id"],
+        to_status="confirmed",
+        actor=actor,
+        reason=note or "Removed by administrator",
+        effective_at=effective_at,
+        expires_at="",
+    )
+    expire_confirmed_burn_bans_for_county(
+        county_fips,
+        actor=actor,
+        reason=note or "Removed by administrator",
+        exclude_id=submission["id"],
+    )
+    return result
+
+
+def _apply_update_to_current_ban(update: Dict, *, actor: str, current_ban: Dict) -> Optional[Dict]:
+    """Copy a confirmed update request's expiration (and proof, if given) onto
+    the county's current ban."""
+    return update_burn_ban_submission(
+        current_ban["id"],
+        actor=actor,
+        edit_reason=f"Applied update #{update['id']}" + (
+            f": {update['moderator_note']}" if update.get("moderator_note") else ""
+        ),
+        expires_at=update.get("expires_at") or "",
+        proof_url=(update.get("proof_url") or None),
+    )
+
+
+def _update_admin_ban(
+    *,
+    actor: str,
+    current_ban: Dict,
+    effective_at: str,
+    expires_at: str,
+    proof_url: str = "",
+    note: str = "",
+    public_note: str = "",
+) -> Optional[Dict]:
+    """Record an admin-initiated update (for history) and apply it."""
+    county_fips = current_ban["county_fips"]
+    submission = create_burn_ban_submission(
+        county_fips=county_fips,
+        county_name=_known_county_fips()[county_fips],
+        submitter_name=STAFF_NAME,
+        submitter_contact=STAFF_CONTACT,
+        proof_url=proof_url,
+        effective_at=effective_at,
+        expires_at=expires_at,
+        submitter_ip_hash="admin",
+        upload_token_hash="",
+        captcha_verdict="admin",
+        consent_version=CONSENT_VERSION,
+        request_type="update",
+        public_note=public_note,
+    )
+    result = moderate_burn_ban_submission(
+        submission["id"],
+        to_status="confirmed",
+        actor=actor,
+        reason=note or "Updated by administrator",
+        effective_at=effective_at,
+        expires_at=expires_at,
+    )
+    if result:
+        _apply_update_to_current_ban(result, actor=actor, current_ban=current_ban)
+    return result
+
+
+def _discord_time(iso_value: str) -> str:
+    """Render a UTC ISO timestamp as a Discord timestamp (shown in each viewer's zone)."""
+    try:
+        parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso_value)
+    return f"<t:{int(parsed.timestamp())}:f>"
+
+
+def _staff_alert_for_submission(submission: Dict, *, comment: str, public_note: str) -> None:
+    kind = submission.get("request_type") or "issue"
+    date_label = {"lift": "Lifted as of", "update": "Update as of"}.get(kind, "Effective")
+    fields = [
+        {"name": "County", "value": f"{submission['county_name']} County"},
+        {"name": date_label, "value": _discord_time(submission["effective_at"])},
+    ]
+    if kind != "lift":
+        expires = submission.get("expires_at")
+        fields.append({
+            "name": "New expiration" if kind == "update" else "Expires",
+            "value": _discord_time(expires) if expires else "Until further notice",
+        })
+    if submission.get("proof_url"):
+        fields.append({"name": "Proof", "value": submission["proof_url"], "inline": False})
+    if public_note:
+        fields.append({"name": "Public note", "value": public_note, "inline": False})
+    if comment:
+        fields.append({"name": "Comment for reviewers", "value": comment, "inline": False})
+    notify_staff_alert(
+        alert_type="burn_ban",
+        title=f"{REQUEST_LABELS.get(kind, 'Burn ban')} submitted: {submission['county_name']} County",
+        description="A public burn ban submission is waiting for review.",
+        fields=fields,
+        admin_path=f"/admin/burn-bans/{submission['id']}",
+    )
+
+
+def _current_bans_by_county() -> Dict[str, Dict]:
+    """Latest confirmed (in effect or scheduled) issue ban per county."""
+    confirmed = list_burn_ban_submissions(status="confirmed", limit=1000, admin=True)
+    current: Dict[str, Dict] = {}
+    for item in confirmed:
+        if (item.get("request_type") or "issue") != "issue":
+            continue
+        existing = current.get(item["county_fips"])
+        if not existing or item["effective_at"] > existing["effective_at"]:
+            current[item["county_fips"]] = item
+    return current
+
+
 @router.get("/api/burn-bans/counties")
 def list_burn_ban_counties():
     return {"success": True, "counties": county_catalog()}
@@ -387,6 +665,28 @@ def list_public_active_burn_bans_geojson(response: Response):
     response.headers["Cache-Control"] = "public, max-age=300"
     from services.burn_ban_map import burn_ban_feature_collection
     return burn_ban_feature_collection(list_active_burn_bans())
+
+
+@router.get("/api/burn-bans/history")
+def list_public_burn_ban_history(
+    response: Response,
+    county_fips: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    response.headers["Cache-Control"] = "public, max-age=300"
+    if county_fips and county_fips not in _known_county_fips():
+        raise HTTPException(status_code=400, detail="unknown county_fips")
+    events = list_burn_ban_county_events(
+        county_fips=county_fips, limit=limit, offset=offset, admin=False,
+    )
+    return {
+        "success": True,
+        "county_fips": county_fips,
+        "count": len(events),
+        "events": events,
+        "summary": count_burn_ban_county_events_by_county(),
+    }
 
 
 @router.post("/api/burn-bans/submissions", status_code=201)
@@ -434,7 +734,10 @@ def submit_burn_ban(payload: BurnBanCreate, request: Request):
         captcha_verdict=verdict,
         consent_version=CONSENT_VERSION,
         request_type=payload.request_type,
+        submitter_comment=payload.comment,
+        public_note=payload.public_note,
     )
+    _staff_alert_for_submission(submission, comment=payload.comment, public_note=payload.public_note)
 
     return {
         "success": True,
@@ -521,32 +824,135 @@ def admin_list_burn_bans(
 @router.post("/api/admin/burn-bans", status_code=201)
 def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = None):
     actor = _require_admin(token)
-    county_name = _known_county_fips()[payload.county_fips]
-    submission = create_burn_ban_submission(
+    result = _publish_admin_ban(
+        actor=actor,
         county_fips=payload.county_fips,
-        county_name=county_name,
+        effective_at=payload.effective_at,
+        expires_at=payload.expires_at,
+        proof_url=payload.proof_url,
+        note=payload.moderator_note,
+        public_note=payload.public_note,
         submitter_name=payload.submitter_name,
         submitter_contact=payload.submitter_contact,
-        proof_url=payload.proof_url,
-        effective_at=payload.effective_at,
-        expires_at=payload.expires_at,
-        submitter_ip_hash="admin",
-        upload_token_hash="",
-        captcha_verdict="admin",
-        consent_version=CONSENT_VERSION,
-    )
-    result = moderate_burn_ban_submission(
-        submission["id"],
-        to_status="confirmed",
-        actor=actor,
-        reason=payload.moderator_note or "Created by administrator",
-        effective_at=payload.effective_at,
-        expires_at=payload.expires_at,
     )
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to publish burn ban")
     _maybe_regenerate_map()
     return {"success": True, "submission": result}
+
+
+@router.post("/api/admin/burn-bans/bulk")
+def admin_bulk_burn_bans(payload: BurnBanBulkRequest, token: Optional[str] = None):
+    """Apply several add/update/remove changes at once.
+
+    Every row is checked before anything is written; if any row is invalid the
+    whole batch is rejected with per-row errors so the admin can fix and resend.
+    """
+    actor = _require_admin(token)
+    current = _current_bans_by_county()
+    counties = _known_county_fips()
+    now_iso = _now_iso()
+
+    errors: List[Dict] = []
+    seen: Dict[str, int] = {}
+    for index, item in enumerate(payload.items):
+        def fail(message: str) -> None:
+            errors.append({"index": index, "county_fips": item.county_fips, "detail": message})
+
+        name = counties[item.county_fips]
+        if item.county_fips in seen:
+            fail(f"{name} appears more than once (row {seen[item.county_fips] + 1})")
+            continue
+        seen[item.county_fips] = index
+        existing = current.get(item.county_fips)
+        if item.action == "add":
+            if existing:
+                fail(f"{name} already has a burn ban; use Update instead")
+                continue
+            effective = item.effective_at or now_iso
+            if item.expires_at and item.expires_at <= effective:
+                fail("Expiration must be after the effective date")
+        elif item.action == "update":
+            if not existing:
+                fail(f"{name} has no current burn ban to update")
+                continue
+            expires = (existing.get("expires_at") or "") if item.expires_at is None else item.expires_at
+            if expires and expires <= existing["effective_at"]:
+                fail("Expiration must be after the ban's start date")
+        elif item.action == "remove":
+            if not existing:
+                fail(f"{name} has no current burn ban to remove")
+
+    if errors:
+        raise HTTPException(status_code=400, detail={"message": "No changes applied", "errors": errors})
+
+    results: List[Dict] = []
+    for index, item in enumerate(payload.items):
+        if item.action == "add":
+            submission = _publish_admin_ban(
+                actor=actor,
+                county_fips=item.county_fips,
+                effective_at=item.effective_at or now_iso,
+                expires_at=item.expires_at or "",
+                proof_url=item.proof_url or "",
+                note=item.note,
+                public_note=item.public_note,
+            )
+        elif item.action == "update":
+            existing = current[item.county_fips]
+            submission = _update_admin_ban(
+                actor=actor,
+                current_ban=existing,
+                effective_at=item.effective_at or now_iso,
+                expires_at=(existing.get("expires_at") or "") if item.expires_at is None else item.expires_at,
+                proof_url=item.proof_url or "",
+                note=item.note,
+                public_note=item.public_note,
+            )
+        else:
+            submission = _lift_admin_ban(
+                actor=actor,
+                county_fips=item.county_fips,
+                effective_at=item.effective_at or now_iso,
+                proof_url=item.proof_url or "",
+                note=item.note,
+                public_note=item.public_note,
+            )
+        results.append({
+            "index": index,
+            "action": item.action,
+            "county_fips": item.county_fips,
+            "county_name": counties[item.county_fips],
+            "submission_id": (submission or {}).get("id"),
+        })
+
+    _maybe_regenerate_map()
+    return {"success": True, "applied": len(results), "results": results}
+
+
+@router.get("/api/admin/burn-bans/current")
+def admin_current_burn_bans(token: Optional[str] = None):
+    """Confirmed bans (in effect or scheduled), one per county, for the bulk editor."""
+    _require_admin(token)
+    current = _current_bans_by_county()
+    return {
+        "success": True,
+        "bans": sorted(current.values(), key=lambda item: item["county_name"]),
+    }
+
+
+@router.get("/api/admin/burn-bans/history")
+def admin_burn_ban_history(
+    token: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    _require_admin(token)
+    events = list_burn_ban_county_events(
+        county_fips=county_fips, limit=limit, offset=offset, admin=True,
+    )
+    return {"success": True, "count": len(events), "events": events}
 
 
 @router.get("/api/admin/burn-bans/map")
@@ -606,6 +1012,24 @@ def admin_get_burn_ban_proof(submission_id: int, token: Optional[str] = None):
     )
 
 
+@router.put("/api/admin/burn-bans/{submission_id}/notes")
+def admin_set_burn_ban_notes(
+    submission_id: int,
+    payload: BurnBanNotes,
+    token: Optional[str] = None,
+):
+    actor = _require_admin(token)
+    result = set_burn_ban_notes(
+        submission_id,
+        actor=actor,
+        public_note=payload.public_note,
+        internal_note=payload.internal_note,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return {"success": True, "submission": result}
+
+
 @router.post("/api/admin/burn-bans/{submission_id}/confirm")
 def admin_confirm_burn_ban(
     submission_id: int,
@@ -624,10 +1048,20 @@ def admin_confirm_burn_ban(
         expires_at = payload.expires_at
     if request_type == "lift":
         expires_at = ""
-    if expires_at and expires_at <= effective_at:
+    current_ban = None
+    if request_type == "update":
+        current_ban = _current_bans_by_county().get(submission["county_fips"])
+        if not current_ban:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{submission['county_name']} County has no current burn ban to update. Deny this request or add a new ban instead.",
+            )
+        if expires_at and expires_at <= current_ban["effective_at"]:
+            raise HTTPException(status_code=400, detail="New expiration must be after the ban's start date")
+    elif expires_at and expires_at <= effective_at:
         raise HTTPException(status_code=400, detail="expires_at must be after effective_at")
     check = {**submission, "effective_at": effective_at, "expires_at": expires_at}
-    if request_type == "issue" and not _has_proof(check):
+    if request_type in {"issue", "update"} and not _has_proof(check):
         raise HTTPException(status_code=400, detail="A proof URL or uploaded document is required")
 
     result = moderate_burn_ban_submission(
@@ -642,6 +1076,8 @@ def admin_confirm_burn_ban(
         raise HTTPException(status_code=404, detail="Submission not found")
     if result.get("already_moderated"):
         raise HTTPException(status_code=409, detail="Submission already moderated")
+    if request_type == "update" and current_ban:
+        _apply_update_to_current_ban(result, actor=actor, current_ban=current_ban)
     if request_type == "lift":
         expire_confirmed_burn_bans_for_county(
             submission["county_fips"],

@@ -86,6 +86,13 @@ def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_pat
             maybe_regenerate_fire_weather_alert_map()
         except Exception as exc:
             print(f"Fire weather alert map regeneration failed: {exc}")
+        # After the map regenerates, so the posted image shows the new alert.
+        try:
+            from services.discord_notifier import process_fire_weather_alerts_for_discord
+            from services.mobile_content import active_fire_weather_alerts
+            process_fire_weather_alerts_for_discord(active_fire_weather_alerts(Path(out_path)))
+        except Exception as exc:
+            print(f"Discord fire weather alert posting failed: {exc}")
         return True
     return False
 
