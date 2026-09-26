@@ -202,6 +202,8 @@ def _fetch_discord_health() -> dict:
                 "channel_resolved": bool(payload.get("channel_resolved")),
                 "channel_id": payload.get("channel_id"),
                 "uptime_sec": payload.get("uptime_sec"),
+                "application_id": payload.get("application_id"),
+                "guild_count": payload.get("guild_count"),
             }
     except error.HTTPError as exc:
         return {
@@ -219,48 +221,160 @@ def _fetch_discord_health() -> dict:
         }
 
 
-def _fetch_discord_servers() -> dict:
+DISCORD_API_BASE = "https://discord.com/api/v10"
+# View Channel, Send Messages, Embed Links, Attach Files, Mention @everyone/roles
+BOT_INVITE_PERMISSIONS = 1024 | 2048 | 16384 | 32768 | 131072
+_TEXT_CHANNEL_TYPES = {0, 5}  # guild text, announcement
+
+
+def _discord_rest_get(path: str, bot_token: str):
+    import json
+
+    req = request.Request(
+        f"{DISCORD_API_BASE}{path}",
+        method="GET",
+        headers={
+            "Authorization": f"Bot {bot_token}",
+            "User-Agent": "ShowMeFire (https://showmefire.org, 1.0)",
+        },
+    )
+    with request.urlopen(req, timeout=8) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _discover_servers_via_rest(bot_token: str) -> dict:
+    """Ask Discord directly with the bot token; works even if the bot process is down."""
+    me = _discord_rest_get("/users/@me", bot_token)
+    guilds = _discord_rest_get("/users/@me/guilds", bot_token)
+    servers, errors = [], []
+    for guild in guilds:
+        try:
+            channels = _discord_rest_get(f"/guilds/{guild['id']}/channels", bot_token)
+            roles = _discord_rest_get(f"/guilds/{guild['id']}/roles", bot_token)
+        except Exception as exc:
+            errors.append({"id": guild["id"], "name": guild.get("name"), "error": str(exc)})
+            continue
+        servers.append({
+            "id": guild["id"],
+            "name": guild.get("name") or guild["id"],
+            "channels": sorted(
+                ({"id": c["id"], "name": c.get("name", "")} for c in channels if c.get("type") in _TEXT_CHANNEL_TYPES),
+                key=lambda c: c["name"],
+            ),
+            "roles": sorted(
+                (
+                    {"id": r["id"], "name": r.get("name", "")}
+                    for r in roles
+                    if r.get("name") != "@everyone" and not r.get("managed")
+                ),
+                key=lambda r: r["name"],
+            ),
+        })
+    servers.sort(key=lambda g: g["name"].lower())
+    return {"ok": True, "source": "discord_api", "application_id": me.get("id"), "servers": servers, "errors": errors}
+
+
+def _discover_servers_via_bot() -> dict:
+    import json
+
     servers_url = _build_servers_url()
     settings = get_discord_admin_settings()
     effective_secret = str(settings.get("event_secret_override") or DISCORD_EVENT_SECRET or "").strip()
-    headers = {}
-    if effective_secret:
-        headers["x-showmefire-secret"] = effective_secret
-
+    headers = {"x-showmefire-secret": effective_secret} if effective_secret else {}
     req = request.Request(servers_url, method="GET", headers=headers)
     try:
-        with request.urlopen(req, timeout=6) as resp:
-            status_code = getattr(resp, "status", 200)
-            body = resp.read().decode("utf-8", errors="replace")
-            if status_code >= 400:
-                return {
-                    "ok": False,
-                    "url": servers_url,
-                    "servers": [],
-                    "error": f"servers endpoint returned {status_code}",
-                }
-            import json
-
-            payload = json.loads(body)
-            return {
-                "ok": bool(payload.get("ok", True)),
-                "url": servers_url,
-                "servers": payload.get("servers") or [],
-            }
+        with request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except error.HTTPError as exc:
-        return {
-            "ok": False,
-            "url": servers_url,
-            "servers": [],
-            "error": f"HTTP {exc.code}",
-        }
+        try:
+            detail = json.loads(exc.read().decode("utf-8", errors="replace")).get("message") or ""
+        except Exception:
+            detail = ""
+        hint = {401: "bot rejected the shared secret (DISCORD_EVENT_SECRET mismatch)",
+                503: "bot is running but not connected to Discord"}.get(exc.code, "")
+        raise RuntimeError(f"bot /servers returned HTTP {exc.code}" + (f": {hint or detail}" if hint or detail else "")) from exc
     except Exception as exc:
+        raise RuntimeError(f"bot unreachable at {servers_url}: {exc}") from exc
+    return {
+        "ok": True,
+        "source": "bot",
+        "application_id": payload.get("application_id"),
+        "servers": payload.get("servers") or [],
+        "errors": payload.get("errors") or [],
+    }
+
+
+def _fetch_discord_servers() -> dict:
+    """Discover servers/channels/roles, preferring the Discord API, then the
+    bot, then the last good result so the admin page never goes blank."""
+    from core.database import get_discord_server_cache, save_discord_server_cache
+
+    attempts: list[str] = []
+    bot_token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    discoverers = []
+    if bot_token:
+        discoverers.append(("Discord API", lambda: _discover_servers_via_rest(bot_token)))
+    discoverers.append(("bot", _discover_servers_via_bot))
+
+    for label, discover in discoverers:
+        try:
+            result = discover()
+        except Exception as exc:
+            attempts.append(f"{label}: {exc}")
+            continue
+        try:
+            save_discord_server_cache({
+                "servers": result["servers"],
+                "application_id": result.get("application_id"),
+                "source": result["source"],
+            })
+        except Exception as exc:
+            logger.warning("Failed to cache Discord servers: %s", exc)
+        return {**result, "stale": False, "synced_at": datetime.now(timezone.utc).isoformat(), "url": _build_servers_url()}
+
+    cached = get_discord_server_cache()
+    message = "; ".join(attempts)
+    if cached:
         return {
-            "ok": False,
-            "url": servers_url,
-            "servers": [],
-            "error": str(exc),
+            "ok": True,
+            "source": "cache",
+            "stale": True,
+            "synced_at": cached.get("synced_at"),
+            "application_id": cached.get("application_id"),
+            "servers": cached.get("servers") or [],
+            "errors": [],
+            "error": message,
+            "url": _build_servers_url(),
         }
+    return {"ok": False, "stale": True, "servers": [], "errors": [], "error": message, "url": _build_servers_url()}
+
+
+def _bot_application_id(servers_payload: Optional[dict] = None) -> str:
+    configured = os.getenv("DISCORD_CLIENT_ID", "").strip()
+    if configured:
+        return configured
+    if servers_payload and servers_payload.get("application_id"):
+        return str(servers_payload["application_id"])
+    health = _fetch_discord_health()
+    if health.get("application_id"):
+        return str(health["application_id"])
+    from core.database import get_discord_server_cache
+    cached = get_discord_server_cache() or {}
+    return str(cached.get("application_id") or "")
+
+
+def _bot_invite_url(application_id: str, guild_id: Optional[str] = None) -> str:
+    from urllib.parse import urlencode
+
+    params = {
+        "client_id": application_id,
+        "scope": "bot applications.commands",
+        "permissions": str(BOT_INVITE_PERMISSIONS),
+    }
+    if guild_id:
+        params["guild_id"] = guild_id
+        params["disable_guild_select"] = "true"
+    return f"https://discord.com/oauth2/authorize?{urlencode(params)}"
 
 
 @router.get("/api/admin/discord/config")
@@ -450,11 +564,17 @@ async def get_discord_status(token: Optional[str] = None):
 async def get_discord_servers(token: Optional[str] = None):
     _require_admin(token)
     payload = _fetch_discord_servers()
+    application_id = _bot_application_id(payload)
     return {
         "success": payload.get("ok", False),
         "url": payload.get("url"),
+        "source": payload.get("source"),
+        "stale": payload.get("stale", False),
+        "synced_at": payload.get("synced_at"),
         "servers": payload.get("servers") or [],
+        "server_errors": payload.get("errors") or [],
         "error": payload.get("error"),
+        "invite_url": _bot_invite_url(application_id) if application_id else None,
     }
 
 

@@ -98,6 +98,45 @@ def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
             f"DEFAULT '{DISCORD_STAFF_ALERT_TYPES_DEFAULT}'"
         )
 
+def save_discord_server_cache(payload: Dict) -> None:
+    """Remember the last successful server/channel/role discovery."""
+    import json as _json
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS discord_server_cache (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payload_json TEXT NOT NULL,
+                synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute(
+            "INSERT INTO discord_server_cache (id, payload_json, synced_at) VALUES (1, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json, synced_at = CURRENT_TIMESTAMP",
+            (_json.dumps(payload),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_discord_server_cache() -> Optional[Dict]:
+    import json as _json
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        try:
+            row = conn.execute("SELECT payload_json, synced_at FROM discord_server_cache WHERE id = 1").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if not row:
+            return None
+        return {**_json.loads(row[0]), "synced_at": row[1]}
+    finally:
+        conn.close()
+
+
 def _ensure_discord_fire_alert_posts_table(cursor: sqlite3.Cursor) -> None:
     """NWS fire weather alert IDs already posted to Discord (or seeded as
     'already active' on first run so enabling the route doesn't flood)."""
