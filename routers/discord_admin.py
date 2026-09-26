@@ -279,7 +279,13 @@ def _discover_servers_via_bot() -> dict:
 
     servers_url = _build_servers_url()
     settings = get_discord_admin_settings()
-    effective_secret = str(settings.get("event_secret_override") or DISCORD_EVENT_SECRET or "").strip()
+    override = str(settings.get("event_secret_override") or "").strip()
+    effective_secret = override or str(DISCORD_EVENT_SECRET or "").strip()
+    secret_source = (
+        "the secret override saved on the admin Discord page"
+        if override
+        else ("DISCORD_EVENT_SECRET from the API environment" if effective_secret else "no secret (none configured on the API)")
+    )
     headers = {"x-showmefire-secret": effective_secret} if effective_secret else {}
     req = request.Request(servers_url, method="GET", headers=headers)
     try:
@@ -290,7 +296,8 @@ def _discover_servers_via_bot() -> dict:
             detail = json.loads(exc.read().decode("utf-8", errors="replace")).get("message") or ""
         except Exception:
             detail = ""
-        hint = {401: "bot rejected the shared secret (DISCORD_EVENT_SECRET mismatch)",
+        hint = {401: f"bot rejected the shared secret; the API is sending {secret_source}, "
+                     "which doesn't match the bot's DISCORD_WEBHOOK_SECRET",
                 503: "bot is running but not connected to Discord"}.get(exc.code, "")
         raise RuntimeError(f"bot /servers returned HTTP {exc.code}" + (f": {hint or detail}" if hint or detail else "")) from exc
     except Exception as exc:

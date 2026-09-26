@@ -89,5 +89,16 @@ class DiscordServerDiscoveryTests(unittest.TestCase):
         self.assertIn("permissions=183296", url)
 
 
+    def test_secret_mismatch_error_names_the_override_when_one_is_saved(self):
+        from urllib import error as urlerror
+        import io
+        database.update_discord_admin_settings(event_secret_override="autofilled-password")
+        http_401 = urlerror.HTTPError("http://bot/servers", 401, "Unauthorized", {}, io.BytesIO(b'{"error":"unauthorized"}'))
+        with patch.object(discord_admin.request, "urlopen", side_effect=http_401):
+            with self.assertRaises(RuntimeError) as ctx:
+                discord_admin._discover_servers_via_bot()
+        self.assertIn("secret override saved on the admin Discord page", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
