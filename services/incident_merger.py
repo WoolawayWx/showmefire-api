@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 MERGE_GAP_KM = float(os.getenv("FIRE_INCIDENT_MERGE_GAP_KM", "1.5"))
 MERGE_WINDOW_HOURS = float(os.getenv("FIRE_INCIDENT_MERGE_WINDOW_HOURS", "48.0"))
+MIN_FRAGMENT_DETECTIONS = 4
 MAX_MERGED_EXTENT_KM = float(os.getenv("FIRE_INCIDENT_MAX_MERGED_EXTENT_KM", "12.0"))
 
 
@@ -286,6 +287,23 @@ def _split_member_groups(members: list[dict], gap_km: float, max_extent_km: floa
             groups.extend([[kept[i]["id"] for i in idxs] for idxs in by_label.values()])
         else:
             groups.append([kept[i]["id"] for i in indexes])
+    # Fold tiny fragments back into the nearest bigger group when that keeps it
+    # reasonably compact - a 1-3 detection straggler is noise, not a fire.
+    geom_by_id = {kept[i]["id"]: geoms[i] for i in range(len(kept))}
+    groups.sort(key=len, reverse=True)
+    solid = [g for g in groups if len(g) >= MIN_FRAGMENT_DETECTIONS]
+    if solid:
+        result = [list(g) for g in solid]
+        for fragment in (g for g in groups if len(g) < MIN_FRAGMENT_DETECTIONS):
+            frag_geom = unary_union([geom_by_id[i] for i in fragment])
+            nearest = min(result, key=lambda g: frag_geom.distance(unary_union([geom_by_id[i] for i in g])))
+            merged = unary_union([geom_by_id[i] for i in nearest + fragment])
+            minx, miny, maxx, maxy = merged.bounds
+            if math.hypot(maxx - minx, maxy - miny) <= max_extent_km * 1.25:
+                nearest.extend(fragment)
+            else:
+                result.append(fragment)
+        groups = result
     dropped = [m["id"] for m in members if m not in kept]  # members with no usable geometry
     if dropped:
         groups[0].extend(dropped)
