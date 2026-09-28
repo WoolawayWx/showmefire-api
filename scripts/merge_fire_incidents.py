@@ -6,6 +6,7 @@ Usage:
     python scripts/merge_fire_incidents.py --dry-run
     python scripts/merge_fire_incidents.py --since-hours 168
     python scripts/merge_fire_incidents.py
+    python scripts/merge_fire_incidents.py --split --dry-run   # undo over-merging
 """
 import argparse
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.database import init_database
-from services.incident_merger import MERGE_GAP_KM, MAX_MERGED_EXTENT_KM, merge_touching_incidents
+from services.incident_merger import MERGE_GAP_KM, MAX_MERGED_EXTENT_KM, merge_touching_incidents, split_oversized_incidents
 
 
 def main():
@@ -24,10 +25,22 @@ def main():
     parser.add_argument("--since-hours", type=float, default=None, help="Only consider incidents active in the last N hours.")
     parser.add_argument("--gap-km", type=float, default=MERGE_GAP_KM)
     parser.add_argument("--max-extent-km", type=float, default=MAX_MERGED_EXTENT_KM)
+    parser.add_argument("--split", action="store_true", help="Instead of merging, re-split active incidents wider than --max-extent-km.")
     parser.add_argument("--json", action="store_true", help="Print the full report as JSON.")
     args = parser.parse_args()
 
     init_database()
+    if args.split:
+        result = split_oversized_incidents(dry_run=args.dry_run, max_extent_km=args.max_extent_km, gap_km=args.gap_km)
+        if args.json:
+            print(json.dumps(result, indent=2))
+            return
+        verb = "Would split" if args.dry_run else "Split"
+        print(f"Examined {result['examined']} incidents (gap {args.gap_km} km, max extent {args.max_extent_km} km).")
+        print(f"{verb} {len(result['split'])} oversized incidents:")
+        for item in sorted(result["split"], key=lambda i: -i["from_extent_km"]):
+            print(f"  #{item['incident_id']} ({item['from_extent_km']} km) -> groups of {item['into']}")
+        return
     result = merge_touching_incidents(
         dry_run=args.dry_run, since_hours=args.since_hours,
         gap_km=args.gap_km, max_extent_km=args.max_extent_km,

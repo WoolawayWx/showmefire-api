@@ -116,6 +116,30 @@ class IncidentMergerTests(unittest.TestCase):
         self.assertEqual(result["merged_away"], 1)
         self.assertEqual(self._status(b)[0], "active")
 
+    def test_split_breaks_an_overmerged_chain_and_keeps_the_original_slug(self):
+        ids = [self._incident(-90.030 + 0.018 * i, 36.900)[0] for i in range(8)]  # ~16 km chain of touching pixels
+        incident_merger.merge_touching_incidents(max_extent_km=50.0)
+        survivor = ids[0]
+        self.assertEqual(self._status(survivor)[2], 8)
+
+        dry = incident_merger.split_oversized_incidents(dry_run=True, max_extent_km=8.0)
+        self.assertEqual(len(dry["split"]), 1)
+        self.assertEqual(self._status(survivor)[2], 8)  # dry run wrote nothing
+
+        result = incident_merger.split_oversized_incidents(max_extent_km=8.0)
+        self.assertEqual(len(result["split"]), 1)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            active = conn.execute("SELECT id, detection_count FROM fire_incidents WHERE status = 'active'").fetchall()
+        finally:
+            conn.close()
+        self.assertGreaterEqual(len(active), 2)
+        self.assertEqual(sum(count for _, count in active), 8)
+        self.assertIn(survivor, [i for i, _ in active])
+
+        # a second split pass finds nothing left to do
+        self.assertEqual(incident_merger.split_oversized_incidents(max_extent_km=8.0)["split"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

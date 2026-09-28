@@ -455,7 +455,34 @@ def _event_to_geojson_feature(event: dict) -> dict:
     }
 
 
-def _incident_popup_properties(incident: dict) -> dict:
+def _incident_marker_coordinates(incident: dict, members: list) -> list:
+    """Where the incident's icon should sit: on the hottest (highest-FRP)
+    detection of its most recent scan window, so the icon lands on the glow
+    instead of at the average of a spread-out incident (which can fall
+    between hot spots). Falls back to the stored centroid."""
+    fallback = [incident["centroid_longitude"], incident["centroid_latitude"]]
+    usable = [m for m in members if m.get("latitude") is not None and m.get("longitude") is not None]
+    if not usable:
+        return fallback
+    def _parsed(member):
+        try:
+            value = datetime.fromisoformat(str(member.get("occurred_at")).replace("Z", "+00:00"))
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    stamped = [(m, _parsed(m)) for m in usable]
+    times = [t for _, t in stamped if t is not None]
+    if times:
+        cutoff = max(times) - timedelta(hours=3)
+        recent = [m for m, t in stamped if t is not None and t >= cutoff] or usable
+    else:
+        recent = usable
+    hottest = max(recent, key=lambda m: float(m.get("frp") or 0.0))
+    return [float(hottest["longitude"]), float(hottest["latitude"])]
+
+
+def _incident_popup_properties(incident: dict, members: Optional[list] = None) -> dict:
     """Shared property set for every incident map feature - the point
     marker (_incident_to_geojson_feature) and the ML shape
     (_footprint... see list_public_fire_incident_shapes_geojson) both use
@@ -465,7 +492,8 @@ def _incident_popup_properties(incident: dict) -> dict:
     # latest detection's own readings rather than incident-level aggregates,
     # since FRP/brightness/confidence are properties of a single pass, not
     # the cluster as a whole.
-    members = list_fire_incident_members(incident["id"])
+    if members is None:
+        members = list_fire_incident_members(incident["id"])
     latest = members[-1] if members else {}
     confidence_values = [m.get("detection_confidence_pct") for m in members if m.get("detection_confidence_pct") is not None]
 
@@ -497,10 +525,11 @@ def _incident_popup_properties(incident: dict) -> dict:
 
 
 def _incident_to_geojson_feature(incident: dict) -> dict:
+    members = list_fire_incident_members(incident["id"])
     return {
         "type": "Feature",
-        "geometry": {"type": "Point", "coordinates": [incident["centroid_longitude"], incident["centroid_latitude"]]},
-        "properties": _incident_popup_properties(incident),
+        "geometry": {"type": "Point", "coordinates": _incident_marker_coordinates(incident, members)},
+        "properties": _incident_popup_properties(incident, members),
     }
 
 

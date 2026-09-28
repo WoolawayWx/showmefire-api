@@ -34,9 +34,9 @@ from core.database import _parse_occurred_at, get_db_path
 
 logger = logging.getLogger(__name__)
 
-MERGE_GAP_KM = float(os.getenv("FIRE_INCIDENT_MERGE_GAP_KM", "2.5"))
+MERGE_GAP_KM = float(os.getenv("FIRE_INCIDENT_MERGE_GAP_KM", "1.5"))
 MERGE_WINDOW_HOURS = float(os.getenv("FIRE_INCIDENT_MERGE_WINDOW_HOURS", "48.0"))
-MAX_MERGED_EXTENT_KM = float(os.getenv("FIRE_INCIDENT_MAX_MERGED_EXTENT_KM", "25.0"))
+MAX_MERGED_EXTENT_KM = float(os.getenv("FIRE_INCIDENT_MAX_MERGED_EXTENT_KM", "12.0"))
 
 
 def _km_projector(reference_lat: float):
@@ -117,20 +117,13 @@ def _extent_km(geometries: list) -> float:
     return math.hypot(maxx - minx, maxy - miny)
 
 
-def _apply_merge(cursor: sqlite3.Cursor, survivor_id: int, loser_ids: list[int]) -> None:
-    placeholders = ",".join("?" * len(loser_ids))
-    cursor.execute(
-        f"UPDATE fire_events SET incident_id = ? WHERE incident_id IN ({placeholders})",
-        [survivor_id, *loser_ids],
-    )
-    cursor.execute(
-        f"UPDATE fire_incident_feedback SET incident_id = ? WHERE incident_id IN ({placeholders})",
-        [survivor_id, *loser_ids],
-    )
-
+def _recompute_incident_stats(cursor: sqlite3.Cursor, incident_id: int) -> None:
+    """Rebuild an incident's centroid (FRP-weighted), counts, time span and
+    county from its current member rows, and drop its cached shape/graphic so
+    both regenerate."""
     cursor.execute(
         "SELECT latitude, longitude, frp, occurred_at, county_fips, county_name FROM fire_events WHERE incident_id = ?",
-        (survivor_id,),
+        (incident_id,),
     )
     rows = cursor.fetchall()
     weights = [max(1.0, float(r["frp"] or 0.0)) for r in rows]
@@ -149,8 +142,22 @@ def _apply_merge(cursor: sqlite3.Cursor, survivor_id: int, loser_ids: list[int])
                shape_geojson = NULL, shape_detection_count = NULL, graphic_filename = NULL,
                updated_at = CURRENT_TIMESTAMP
            WHERE id = ?""",
-        (centroid_lat, centroid_lon, len(rows), min(times), max(times), county_fips, county_name, survivor_id),
+        (centroid_lat, centroid_lon, len(rows), min(times), max(times), county_fips, county_name, incident_id),
     )
+
+
+def _apply_merge(cursor: sqlite3.Cursor, survivor_id: int, loser_ids: list[int]) -> None:
+    placeholders = ",".join("?" * len(loser_ids))
+    cursor.execute(
+        f"UPDATE fire_events SET incident_id = ? WHERE incident_id IN ({placeholders})",
+        [survivor_id, *loser_ids],
+    )
+    cursor.execute(
+        f"UPDATE fire_incident_feedback SET incident_id = ? WHERE incident_id IN ({placeholders})",
+        [survivor_id, *loser_ids],
+    )
+
+    _recompute_incident_stats(cursor, survivor_id)
     cursor.execute(
         f"UPDATE fire_incidents SET status = 'merged', merged_into_id = ?, updated_at = CURRENT_TIMESTAMP "
         f"WHERE id IN ({placeholders})",
@@ -234,4 +241,119 @@ def merge_touching_incidents(
         "incident_merger: considered=%d groups=%d merged_away=%d oversized=%d dry_run=%s",
         summary["considered"], len(summary["groups"]), summary["merged_away"], len(summary["oversized"]), dry_run,
     )
+    return summary
+
+
+def _split_member_groups(members: list[dict], gap_km: float, max_extent_km: float) -> list[list[int]]:
+    """Group one incident's members (as lists of fire_events ids): first by
+    touching footprints (single link, gap_km), then any group still wider than
+    max_extent_km is cut with complete-linkage clustering, which by
+    construction never produces a cluster wider than the threshold."""
+    import numpy as np
+    from scipy.cluster.hierarchy import fcluster, linkage
+
+    from services.incident_shape_extractor import _member_polygons
+
+    project = _km_projector(sum(float(m["latitude"]) for m in members) / len(members))
+    geoms, kept = [], []
+    for member in members:
+        polygons = _member_polygons([member])
+        if polygons:
+            geoms.append(transform(project, unary_union(polygons)))
+            kept.append(member)
+    if len(kept) < 2:
+        return [[m["id"] for m in members]]
+
+    tree = STRtree(geoms)
+    sets = _DisjointSet(range(len(kept)))
+    for idx, geom in enumerate(geoms):
+        for other in tree.query(geom.buffer(gap_km)):
+            other = int(other)
+            if other > idx and geom.distance(geoms[other]) <= gap_km:
+                sets.union(idx, other)
+    components: dict[int, list[int]] = {}
+    for idx in range(len(kept)):
+        components.setdefault(sets.find(idx), []).append(idx)
+
+    groups: list[list[int]] = []
+    for indexes in components.values():
+        if len(indexes) > 1 and _extent_km([geoms[i] for i in indexes]) > max_extent_km:
+            points = np.array([[geoms[i].centroid.x, geoms[i].centroid.y] for i in indexes])
+            labels = fcluster(linkage(points, method="complete"), t=max_extent_km, criterion="distance")
+            by_label: dict[int, list[int]] = {}
+            for i, label in zip(indexes, labels):
+                by_label.setdefault(int(label), []).append(i)
+            groups.extend([[kept[i]["id"] for i in idxs] for idxs in by_label.values()])
+        else:
+            groups.append([kept[i]["id"] for i in indexes])
+    dropped = [m["id"] for m in members if m not in kept]  # members with no usable geometry
+    if dropped:
+        groups[0].extend(dropped)
+    return groups
+
+
+def split_oversized_incidents(
+    dry_run: bool = False,
+    max_extent_km: float = MAX_MERGED_EXTENT_KM,
+    gap_km: float = MERGE_GAP_KM,
+) -> dict:
+    """Undo over-merging: re-cluster every active incident wider than
+    max_extent_km under the stricter rule. The largest resulting group keeps
+    the original incident (id, slug, feedback); every other group becomes a
+    new incident. Returns a summary; with dry_run nothing is written."""
+    import secrets
+
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    summary = {"examined": 0, "split": [], "dry_run": dry_run}
+    try:
+        cursor.execute("SELECT * FROM fire_incidents WHERE status = 'active' AND detection_count >= 2")
+        incidents = [dict(r) for r in cursor.fetchall()]
+        for incident in incidents:
+            cursor.execute(
+                "SELECT id, latitude, longitude, source, footprint_geojson FROM fire_events "
+                "WHERE incident_id = ? AND latitude IS NOT NULL AND longitude IS NOT NULL",
+                (incident["id"],),
+            )
+            members = [dict(r) for r in cursor.fetchall()]
+            if len(members) < 2:
+                continue
+            summary["examined"] += 1
+            from services.incident_shape_extractor import _member_polygons
+            project = _km_projector(incident["centroid_latitude"])
+            extent = _extent_km([transform(project, unary_union(_member_polygons([m]))) for m in members if _member_polygons([m])])
+            if extent <= max_extent_km:
+                continue
+
+            groups = sorted(_split_member_groups(members, gap_km, max_extent_km), key=len, reverse=True)
+            if len(groups) < 2:
+                continue
+            summary["split"].append({
+                "incident_id": incident["id"], "slug": incident.get("public_slug"),
+                "from_extent_km": round(extent, 1), "into": [len(g) for g in groups],
+            })
+            if dry_run:
+                continue
+            for group in groups[1:]:
+                cursor.execute(
+                    """INSERT INTO fire_incidents
+                           (centroid_latitude, centroid_longitude, first_detected_at, last_detected_at,
+                            detection_count, county_fips, county_name, public_slug)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (incident["centroid_latitude"], incident["centroid_longitude"], incident["first_detected_at"],
+                     incident["last_detected_at"], len(group), incident.get("county_fips"), incident.get("county_name"),
+                     secrets.token_urlsafe(9)),
+                )
+                new_id = cursor.lastrowid
+                placeholders = ",".join("?" * len(group))
+                cursor.execute(f"UPDATE fire_events SET incident_id = ? WHERE id IN ({placeholders})", [new_id, *group])
+                _recompute_incident_stats(cursor, new_id)
+            _recompute_incident_stats(cursor, incident["id"])
+        if not dry_run:
+            conn.commit()
+    finally:
+        conn.close()
+
+    logger.info("incident_merger: split examined=%d split=%d dry_run=%s", summary["examined"], len(summary["split"]), dry_run)
     return summary
