@@ -15,6 +15,7 @@ near-empty labels. Signals (max points):
   cross-sensor  20  more than one instrument (e.g. GOES + VIIRS) agrees
   sensor grade  15  the sensors' own confidence flags
   land cover   -25  cropland / water pixels are common false-positive sources
+  long-lived   -10  active for over a week (likely recurring source)
   public review +/- admin-approved feedback on the incident
 
 Enabled with FIRE_INCIDENT_CONFIDENCE_VERSION=v2 (default v1 = legacy scorer).
@@ -26,6 +27,15 @@ import os
 from datetime import datetime, timezone
 
 SCAN_BUCKET_MINUTES = 10
+# Full-cropland incidents are usually agricultural burning, not wildfire, so
+# the penalty is large enough that persistence and heat alone can't carry them
+# to "high" (tuned against a 7-day production comparison).
+CROPLAND_PENALTY = 25
+WATER_PENALTY = 15
+# An "incident" active this long is more likely a recurring heat source (or
+# chained detections) than one fire.
+LONG_LIVED_DAYS = 7
+LONG_LIVED_PENALTY = 10
 HIGH_THRESHOLD = 65
 MODERATE_THRESHOLD = 40
 
@@ -155,12 +165,18 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
     lc = [m.get("land_cover") for m in members if m.get("land_cover")]
     cropland = sum(_land_cover_fraction(v, "Cropland", "Agricult") for v in lc) / len(lc) if lc else 0.0
     water = sum(_land_cover_fraction(v, "Water") for v in lc) / len(lc) if lc else 0.0
-    land_penalty = 15 * cropland + 10 * water
+    land_penalty = CROPLAND_PENALTY * cropland + WATER_PENALTY * water
     if cropland >= 0.25:
         factors.append({"label": f"Mostly cropland ({cropland:.0%}) - often agricultural burning or false alarms",
-                        "effect": "lowers", "points": -int(round(15 * cropland))})
+                        "effect": "lowers", "points": -int(round(CROPLAND_PENALTY * cropland))})
     if water >= 0.25:
-        factors.append({"label": f"Partly over water ({water:.0%})", "effect": "lowers", "points": -int(round(10 * water))})
+        factors.append({"label": f"Partly over water ({water:.0%})", "effect": "lowers", "points": -int(round(WATER_PENALTY * water))})
+
+    long_penalty = 0.0
+    if duration_h >= LONG_LIVED_DAYS * 24:
+        long_penalty = LONG_LIVED_PENALTY
+        factors.append({"label": f"Active for {duration_h / 24:.0f} days - may be a recurring heat source rather than one fire",
+                        "effect": "lowers", "points": -LONG_LIVED_PENALTY})
 
     # --- public review (admin-approved only) -------------------------------
     approved = incident.get("approved_feedback_counts") or {}
@@ -175,7 +191,7 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
         review -= 10
         factors.append({"label": "Reported as a controlled burn", "effect": "lowers", "points": -10})
 
-    total = persistence + intensity + cross + grade - land_penalty + review
+    total = persistence + intensity + cross + grade - land_penalty - long_penalty + review
     score = int(round(max(0.0, min(100.0, total))))
     factors.sort(key=lambda f: -abs(f["points"]))
     return {"score": score, "label": _label(score), "factors": factors,

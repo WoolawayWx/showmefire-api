@@ -48,6 +48,13 @@ class IncidentConfidenceTests(unittest.TestCase):
         farm = score_incident({}, _fire(6, land_cover="Cropland:100"))["score"]
         self.assertLess(farm, plain)
 
+    def test_heavy_cropland_cannot_reach_high_and_long_lived_is_flagged(self):
+        farm = score_incident({}, _fire(16, frp=60.0, land_cover="Cropland:95"))
+        self.assertNotEqual(farm["label"], "high")
+        weeks = _fire(6) + [{"occurred_at": "2026-10-20T12:00:00Z", "source": "ngfs", "frp": 20.0, "confidence": "nominal"}]
+        result = score_incident({}, weeks)
+        self.assertTrue(any("recurring heat source" in f["label"] for f in result["factors"]))
+
     def test_public_feedback_moves_score(self):
         members = _fire(6)
         base = score_incident({}, members)["score"]
