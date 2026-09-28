@@ -475,6 +475,7 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("graphic_filename", "TEXT"),
         ("shape_geojson", "TEXT"),
         ("shape_detection_count", "INTEGER"),
+        ("merged_into_id", "INTEGER"),
     ):
         if name not in incident_columns:
             cursor.execute(f"ALTER TABLE fire_incidents ADD COLUMN {name} {definition}")
@@ -2963,6 +2964,7 @@ def find_or_create_incident_for_detection(
         FROM fire_incidents
         WHERE centroid_latitude BETWEEN ? AND ? AND centroid_longitude BETWEEN ? AND ?
           AND last_detected_at >= ? AND first_detected_at <= ?
+          AND status NOT IN ('merged', 'deleted')
     ''', (min_lat, max_lat, min_lon, max_lon, window_start, window_end))
 
     best_row, best_distance = None, None
@@ -3230,7 +3232,7 @@ def list_fire_incidents_in_geometry(geometry_geojson: str) -> List[Dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT id, centroid_latitude, centroid_longitude FROM fire_incidents WHERE status != 'deleted'")
+        cursor.execute("SELECT id, centroid_latitude, centroid_longitude FROM fire_incidents WHERE status NOT IN ('deleted', 'merged')")
         return [
             dict(row) for row in cursor.fetchall()
             if polygon.contains(Point(row["centroid_longitude"], row["centroid_latitude"]))
@@ -3284,7 +3286,9 @@ def list_fire_incidents(
         safe_limit = max(1, min(limit, 500))
         safe_offset = max(0, offset)
 
-        clauses = []
+        # Incidents folded into another by services/incident_merger.py stay in
+        # the table (old slugs/feedback still resolve) but are never listed.
+        clauses = ["status != 'merged'"]
         params: List = []
         if since:
             clauses.append("last_detected_at >= ?")
@@ -3403,7 +3407,15 @@ def get_public_fire_incident(slug: str) -> Optional[Dict]:
             "SELECT * FROM fire_incidents WHERE public_slug = ? AND status != 'deleted'",
             (slug,),
         ).fetchone()
-        if not row:
+        # A merged incident's old link keeps working: follow it to the survivor.
+        hops = 0
+        while row is not None and row["status"] == "merged" and row["merged_into_id"] and hops < 10:
+            row = conn.execute(
+                "SELECT * FROM fire_incidents WHERE id = ? AND status != 'deleted'",
+                (row["merged_into_id"],),
+            ).fetchone()
+            hops += 1
+        if not row or row["status"] == "merged":
             return None
         incident = dict(row)
         incident["sources"] = _fire_incident_sources(conn.cursor(), incident["id"])

@@ -272,6 +272,13 @@ async def ingest_fire_detections_job():
     """
     try:
         await asyncio.to_thread(ingest_detection_files)
+        # Fold side-by-side incidents of one fire together before anything
+        # downstream (scoring, graphics, shapes) works on them.
+        # Off until the dry-run report (scripts/merge_fire_incidents.py
+        # --dry-run) has been reviewed: set FIRE_INCIDENT_MERGE_ENABLED=1.
+        if os.getenv("FIRE_INCIDENT_MERGE_ENABLED", "").strip().lower() in {"1", "true", "yes"}:
+            from services.incident_merger import merge_touching_incidents
+            await asyncio.to_thread(merge_touching_incidents, since_hours=72)
         # Per-detection ML confidence (0-100%, detection-pattern features
         # only) - distinct from and complementary to the incident-cluster
         # confidence below, which scores a group of detections together.
