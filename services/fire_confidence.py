@@ -78,7 +78,12 @@ def build_confidence_geojson() -> dict:
     features = []
     for incident in list_fire_incidents(limit=500):
         members = list_fire_incident_members(incident["id"])
-        score, label, method = _score(_features(incident, members))
+        from services.incident_confidence import score_incident, use_v2
+        if use_v2():
+            result = score_incident(incident, members)
+            score, label, method = round(result["score"] / 100, 3), result["label"], result["method"]
+        else:
+            score, label, method = _score(_features(incident, members))
         radius = min(3.0, max(0.5, 0.45 + len(members) * 0.08))
         features.append({
             "type": "Feature",

@@ -50,6 +50,13 @@ def _land_cover_context(members: list) -> dict:
 
 
 def _incident_confidence(incident: dict, members: list) -> dict:
+    from services.incident_confidence import score_incident, use_v2
+
+    if use_v2():
+        result = score_incident(incident, members)
+        return {"score": round(result["score"] / 100, 3), "pct": result["score"], "label": result["label"],
+                "reasons": result["reasons"], "factors": result["factors"], "method": result["method"]}
+
     from services.fire_confidence import _features, _score
 
     score, label, method = _score(_features(incident, members))
@@ -126,7 +133,14 @@ def get_incident_v2(slug: str):
     if not incident:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Incident not found")
-    return {"success": True, "incident": _incident_v2(incident)}
+    detail = _incident_v2(incident)
+    # Wind is a live external lookup, so it belongs on the single-incident
+    # detail (opened on demand from the map popup), never the 500-item list.
+    from services.incident_wind import get_wind
+
+    lat, lon = incident.get("centroid_latitude"), incident.get("centroid_longitude")
+    detail["wind"] = get_wind(float(lat), float(lon)) if lat is not None and lon is not None else None
+    return {"success": True, "incident": detail}
 
 
 @router.get("/admin/fires/queue")

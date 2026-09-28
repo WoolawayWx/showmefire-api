@@ -3345,6 +3345,7 @@ def list_fire_incidents(
                 elif fb_row["status"] == "pending":
                     pending_count += fb_row["n"]
             incident["feedback_counts"] = feedback_counts
+            incident["approved_feedback_counts"] = approved_counts
             incident["feedback_count"] = sum(feedback_counts.values())
             incident["pending_feedback_count"] = pending_count
             # 'Confirmed' requires an admin-approved 'confirmed_fire' submission -

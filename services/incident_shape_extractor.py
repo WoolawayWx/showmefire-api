@@ -75,6 +75,10 @@ DEFAULT_POINT_BUFFER_KM = 0.3
 SMOOTHING_DEGREES = float(os.getenv("FIRE_SHAPE_SMOOTHING_DEGREES", "0.0015"))
 MAX_SMOOTHING_DOUBLINGS = 6
 
+# Running count of convex-hull fallbacks (see _merge_to_single_polygon); reset
+# and reported by refresh_incident_shapes.
+hull_fallbacks = 0
+
 
 def extract_hot_mask(rgb: np.ndarray) -> np.ndarray:
     """Boolean mask of pixels that break the product's cool-cyan background
@@ -108,7 +112,7 @@ def _incident_extent(members: list[dict]) -> tuple[float, float, float, float]:
     return (min(lons) - margin, max(lons) + margin, min(lats) - margin, max(lats) + margin)
 
 
-def _merge_to_single_polygon(combined):
+def _merge_to_single_polygon(combined, incident_id=None):
     """An incident is one thing - it must always render as exactly one
     shape, never several disconnected polygons for detections that happen
     to sit further apart. Grows the same closing-buffer used for corner
@@ -124,6 +128,13 @@ def _merge_to_single_polygon(combined):
         radius *= 2
         merged = combined.buffer(radius).buffer(-radius)
     if merged.geom_type == "MultiPolygon":
+        # A convex hull is the blobbiest possible outline - it means this
+        # incident's detections don't connect even after MAX_SMOOTHING_DOUBLINGS,
+        # which usually points at grouping that is too loose. Counted so
+        # refresh_incident_shapes can report how often it happens.
+        global hull_fallbacks
+        hull_fallbacks += 1
+        logger.warning("incident_shape_extractor: convex-hull fallback for incident %s (detections do not connect)", incident_id)
         merged = combined.convex_hull
     return merged if not merged.is_empty else combined
 
@@ -225,7 +236,7 @@ def compute_incident_shape(incident: dict, members: list[dict]) -> dict | None:
         # Round sharp pixel-corner joints into curves and merge every piece
         # into one contiguous outline - one incident is always exactly one
         # shape, never several disconnected polygons.
-        rounded = _merge_to_single_polygon(combined)
+        rounded = _merge_to_single_polygon(combined, incident.get("id"))
         simplified = rounded.simplify(0.0004, preserve_topology=True)
         return json.loads(json.dumps(simplified.__geo_interface__))
     except Exception:
@@ -262,6 +273,8 @@ def refresh_incident_shapes(incident_id: int | None = None, force: bool = False)
     since the last shape computation (or on force) - avoids re-fetching and
     re-analyzing imagery for an incident that hasn't changed, same
     compute-cost-conscious design as the recurring-source suppression."""
+    global hull_fallbacks
+    hull_fallbacks = 0
     updated = 0
     skipped = 0
     failed = 0
@@ -280,6 +293,6 @@ def refresh_incident_shapes(incident_id: int | None = None, force: bool = False)
         set_fire_incident_shape(incident["id"], json.dumps(geometry, separators=(",", ":")), incident["detection_count"])
         updated += 1
 
-    summary = {"updated": updated, "skipped": skipped, "failed": failed}
+    summary = {"updated": updated, "skipped": skipped, "failed": failed, "hull_fallbacks": hull_fallbacks}
     logger.info("incident_shape_extractor: %s", summary)
     return summary

@@ -497,7 +497,7 @@ def _incident_popup_properties(incident: dict, members: Optional[list] = None) -
     latest = members[-1] if members else {}
     confidence_values = [m.get("detection_confidence_pct") for m in members if m.get("detection_confidence_pct") is not None]
 
-    return {
+    props = {
         "SOURCE": "SHOWMEFIRE_INCIDENT",
         "TYPENAME": "incident",
         "INCIDENT_ID": incident["id"],
@@ -522,6 +522,16 @@ def _incident_popup_properties(incident: dict, members: Optional[list] = None) -
         "CONFIRMED": bool(incident.get("confirmed")),
         "FEEDBACK_COUNT": incident.get("feedback_count", 0),
     }
+    from services.incident_confidence import score_incident, use_v2
+    if use_v2():
+        result = score_incident(incident, members)
+        props.update({
+            "INCIDENT_CONFIDENCE_PCT": result["score"],
+            "INCIDENT_CONFIDENCE_LABEL": result["label"],
+            "INCIDENT_CONFIDENCE_REASONS": result["reasons"],
+            "INCIDENT_CONFIDENCE_FACTORS": result["factors"],
+        })
+    return props
 
 
 def _incident_to_geojson_feature(incident: dict) -> dict:
