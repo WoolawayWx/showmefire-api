@@ -15,7 +15,7 @@ near-empty labels. Signals (max points):
   cross-sensor  20  more than one instrument (e.g. GOES + VIIRS) agrees
   sensor grade  15  the sensors' own confidence flags
   land cover   -25  cropland / water pixels are common false-positive sources
-  long-lived   -10  active for over a week (likely recurring source)
+  long-lived   -15  active for over a week (likely recurring source)
   public review +/- admin-approved feedback on the incident
 
 Enabled with FIRE_INCIDENT_CONFIDENCE_VERSION=v2 (default v1 = legacy scorer).
@@ -35,7 +35,8 @@ WATER_PENALTY = 15
 # An "incident" active this long is more likely a recurring heat source (or
 # chained detections) than one fire.
 LONG_LIVED_DAYS = 7
-LONG_LIVED_PENALTY = 10
+CROPLAND_HIGH_CAP_FRACTION = 0.75
+LONG_LIVED_PENALTY = 15
 HIGH_THRESHOLD = 65
 MODERATE_THRESHOLD = 40
 
@@ -193,6 +194,13 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
 
     total = persistence + intensity + cross + grade - land_penalty - long_penalty + review
     score = int(round(max(0.0, min(100.0, total))))
+    # Mostly-cropland incidents are usually agricultural burning. Persistence
+    # and heat alone can't make one "high": that takes independent evidence -
+    # a second satellite or an admin-approved public confirmation.
+    if cropland >= CROPLAND_HIGH_CAP_FRACTION and score >= HIGH_THRESHOLD             and cross_unit < 0.8 and not approved.get("confirmed_fire"):
+        score = HIGH_THRESHOLD - 1
+        factors.append({"label": "Held at Moderate: mostly cropland with no second satellite or public report to back it up",
+                        "effect": "lowers", "points": 0})
     factors.sort(key=lambda f: -abs(f["points"]))
     return {"score": score, "label": _label(score), "factors": factors,
             "reasons": [f["label"] for f in factors], "method": "rules-v2"}
