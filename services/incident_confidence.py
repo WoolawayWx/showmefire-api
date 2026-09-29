@@ -14,8 +14,8 @@ near-empty labels. Signals (max points):
   intensity     25  peak fire radiative power, nudged up if rising
   cross-sensor  20  more than one instrument (e.g. GOES + VIIRS) agrees
   sensor grade  15  the sensors' own confidence flags
-  land cover   -25  cropland / water pixels are common false-positive sources
-  long-lived   -15  active for over a week (likely recurring source)
+  land cover   -20  bright cropland / open-water pixels can cause false detections
+  long-lived   -15  active for over a week (a recurring heat source, not a fire)
   public review +/- admin-approved feedback on the incident
 
 Enabled with FIRE_INCIDENT_CONFIDENCE_VERSION=v2 (default v1 = legacy scorer).
@@ -27,15 +27,15 @@ import os
 from datetime import datetime, timezone
 
 SCAN_BUCKET_MINUTES = 10
-# Full-cropland incidents are usually agricultural burning, not wildfire, so
-# the penalty is large enough that persistence and heat alone can't carry them
-# to "high" (tuned against a 7-day production comparison).
-CROPLAND_PENALTY = 25
+# The score answers "is this really a fire?" - NOT "is it a wildfire": a field
+# or prescribed burn is a real fire and must not be marked down for that.
+# Cropland pixels only cost a few points because bright, bare fields can
+# produce false detections at some sun angles; open water likewise (glint).
+CROPLAND_PENALTY = 5
 WATER_PENALTY = 15
 # An "incident" active this long is more likely a recurring heat source (or
 # chained detections) than one fire.
 LONG_LIVED_DAYS = 7
-CROPLAND_HIGH_CAP_FRACTION = 0.75
 LONG_LIVED_PENALTY = 15
 HIGH_THRESHOLD = 65
 MODERATE_THRESHOLD = 40
@@ -167,8 +167,8 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
     cropland = sum(_land_cover_fraction(v, "Cropland", "Agricult") for v in lc) / len(lc) if lc else 0.0
     water = sum(_land_cover_fraction(v, "Water") for v in lc) / len(lc) if lc else 0.0
     land_penalty = CROPLAND_PENALTY * cropland + WATER_PENALTY * water
-    if cropland >= 0.25:
-        factors.append({"label": f"Mostly cropland ({cropland:.0%}) - often agricultural burning or false alarms",
+    if cropland >= 0.5:
+        factors.append({"label": f"Satellite pixels are {cropland:.0%} cropland - bright bare fields can occasionally cause false detections",
                         "effect": "lowers", "points": -int(round(CROPLAND_PENALTY * cropland))})
     if water >= 0.25:
         factors.append({"label": f"Partly over water ({water:.0%})", "effect": "lowers", "points": -int(round(WATER_PENALTY * water))})
@@ -176,7 +176,7 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
     long_penalty = 0.0
     if duration_h >= LONG_LIVED_DAYS * 24:
         long_penalty = LONG_LIVED_PENALTY
-        factors.append({"label": f"Active for {duration_h / 24:.0f} days - may be a recurring heat source rather than one fire",
+        factors.append({"label": f"Active for {duration_h / 24:.0f} days - may be a recurring heat source (mill, flare, kiln), not a fire",
                         "effect": "lowers", "points": -LONG_LIVED_PENALTY})
 
     # --- public review (admin-approved only) -------------------------------
@@ -194,13 +194,5 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
 
     total = persistence + intensity + cross + grade - land_penalty - long_penalty + review
     score = int(round(max(0.0, min(100.0, total))))
-    # Mostly-cropland incidents are usually agricultural burning. Persistence
-    # and heat alone can't make one "high": that takes independent evidence -
-    # a second satellite or an admin-approved public confirmation.
-    if cropland >= CROPLAND_HIGH_CAP_FRACTION and score >= HIGH_THRESHOLD             and cross_unit < 0.8 and not approved.get("confirmed_fire"):
-        score = HIGH_THRESHOLD - 1
-        factors.append({"label": "Held at Moderate: mostly cropland with no second satellite or public report to back it up",
-                        "effect": "lowers", "points": 0})
-    factors.sort(key=lambda f: -abs(f["points"]))
     return {"score": score, "label": _label(score), "factors": factors,
             "reasons": [f["label"] for f in factors], "method": "rules-v2"}

@@ -48,20 +48,16 @@ class IncidentConfidenceTests(unittest.TestCase):
         farm = score_incident({}, _fire(6, land_cover="Cropland:100"))["score"]
         self.assertLess(farm, plain)
 
-    def test_heavy_cropland_cannot_reach_high_and_long_lived_is_flagged(self):
+    def test_a_strong_persistent_fire_in_cropland_is_still_high(self):
+        # A field burn is a real fire - cropland must not keep it out of "high".
         farm = score_incident({}, _fire(16, frp=60.0, land_cover="Cropland:95"))
-        self.assertNotEqual(farm["label"], "high")
+        self.assertEqual(farm["label"], "high")
+        self.assertTrue(any("cropland" in f["label"] for f in farm["factors"]))
+
+    def test_long_lived_incident_is_flagged_as_possible_recurring_source(self):
         weeks = _fire(6) + [{"occurred_at": "2026-10-20T12:00:00Z", "source": "ngfs", "frp": 20.0, "confidence": "nominal"}]
         result = score_incident({}, weeks)
         self.assertTrue(any("recurring heat source" in f["label"] for f in result["factors"]))
-
-    def test_cropland_cap_is_lifted_by_independent_evidence(self):
-        heavy = _fire(25, frp=80.0, land_cover="Cropland:85")
-        self.assertNotEqual(score_incident({}, heavy)["label"], "high")
-        with_viirs = heavy + [_member(30, source="viirs", frp=80.0, confidence="high", land_cover="Cropland:85")]
-        confirmed = score_incident({"approved_feedback_counts": {"confirmed_fire": 1}}, heavy)
-        self.assertGreaterEqual(confirmed["score"], score_incident({}, heavy)["score"])
-        self.assertGreaterEqual(score_incident({}, with_viirs)["score"], score_incident({}, heavy)["score"])
 
     def test_public_feedback_moves_score(self):
         members = _fire(6)
