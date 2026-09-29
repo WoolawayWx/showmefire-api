@@ -45,8 +45,22 @@ COPY requirements.pyretechnics.txt .
 # Pyretechnics pins NumPy 1.24.x, while goes2go requires NumPy 2.2.5+.
 # Its surface-fire extension is compatible with the locked NumPy 2.2.6,
 # so install the pinned package without asking pip to resolve that stale pin.
+#
+# The sdist ships pre-generated .c files but no .pxd files. When the sdist is
+# unpacked by the installer the .py sources can end up newer than the .c files,
+# which makes cythonize regenerate them and fail on the missing .pxd files.
+# Unpack it ourselves and touch the .c files so cythonize reuses them.
+ARG PYRETECHNICS_SDIST_URL=https://files.pythonhosted.org/packages/85/b1/6daa98ee282c62bcf5303703906901a62ec6f5dc19925da409b42af96c30/pyretechnics-2025.5.15.tar.gz
+ARG PYRETECHNICS_SDIST_SHA256=cfb6c70f68a1eb5248c679e49644fad7891e0e4b62032e70f571a7c0b91de324
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --no-deps -r requirements.pyretechnics.txt \
+    grep -qx 'pyretechnics==2025.5.15' requirements.pyretechnics.txt \
+    && curl -fsSL "$PYRETECHNICS_SDIST_URL" -o /tmp/pyretechnics.tar.gz \
+    && echo "$PYRETECHNICS_SDIST_SHA256  /tmp/pyretechnics.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/pyretechnics-src \
+    && tar -xzf /tmp/pyretechnics.tar.gz -C /tmp/pyretechnics-src --strip-components=1 \
+    && touch /tmp/pyretechnics-src/src/pyretechnics/*.c \
+    && uv pip install --no-deps /tmp/pyretechnics-src \
+    && rm -rf /tmp/pyretechnics.tar.gz /tmp/pyretechnics-src \
     && python -c "import numpy, pyretechnics.surface_fire; assert numpy.__version__ == '2.2.6'"
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
 RUN python - <<'PY'
