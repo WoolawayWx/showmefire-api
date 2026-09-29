@@ -112,16 +112,18 @@ def list_incidents_v2(
     since: Optional[str] = None,
     until: Optional[str] = None,
     source: Optional[str] = None,
+    county_fips: Optional[str] = None,
     has_feedback: Optional[bool] = None,
     confirmed_only: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
 ):
     """Consolidated incident read model - see module docstring. Public,
-    same cache policy as v1's incident endpoints."""
+    same cache policy as v1's incident endpoints. `county_fips` accepts a
+    comma-separated list to scope results to one or more Missouri counties."""
     incidents = list_fire_incidents(
-        since=since, until=until, source=source, has_feedback=has_feedback,
-        confirmed_only=confirmed_only, limit=limit, offset=offset,
+        since=since, until=until, source=source, county_fips=county_fips,
+        has_feedback=has_feedback, confirmed_only=confirmed_only, limit=limit, offset=offset,
     )
     response.headers["Cache-Control"] = "public, max-age=60"
     return {"success": True, "incidents": [_incident_v2(incident) for incident in incidents], "count": len(incidents)}

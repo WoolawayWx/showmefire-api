@@ -856,12 +856,20 @@ def get_public_fire_event(event_id: int, response: Response):
 
 
 @router.get("/api/fires/incidents.geojson")
-def list_public_fire_incidents_geojson(response: Response, since: Optional[str] = None, limit: int = 200, offset: int = 0):
+def list_public_fire_incidents_geojson(
+    response: Response,
+    since: Optional[str] = None,
+    county_fips: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+):
     """Consolidated satellite detections, one map feature per incident.
     `since` (ISO timestamp) filters to incidents last detected at/after it -
-    the frontend's Active (last 24h) / Archive (last 7 days) toggle."""
+    the frontend's Active (last 24h) / Archive (last 7 days) toggle.
+    `county_fips` accepts a comma-separated list to scope results to one or
+    more Missouri counties (e.g. the mobile app's selected-county filter)."""
     response.headers["Cache-Control"] = "public, max-age=60"
-    incidents = list_fire_incidents(since=since, limit=limit, offset=offset)
+    incidents = list_fire_incidents(since=since, county_fips=county_fips, limit=limit, offset=offset)
     return {
         "type": "FeatureCollection",
         "features": [_incident_to_geojson_feature(incident) for incident in incidents if incident.get("public_slug")],

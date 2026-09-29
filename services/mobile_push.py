@@ -59,11 +59,12 @@ def upsert_subscription(
     forecast: bool,
     sitrep: bool,
     fire_weather: bool,
+    fire_detection: bool,
     county_fips: list[str],
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as connection:
-        if not (forecast or sitrep or fire_weather):
+        if not (forecast or sitrep or fire_weather or fire_detection):
             _delete_subscription_rows(connection, installation_id)
             return {"registered": False, "updatedAt": now}
 
@@ -78,9 +79,9 @@ def upsert_subscription(
             '''
             INSERT INTO mobile_push_subscriptions (
                 installation_id, expo_push_token, platform, app_version,
-                forecast_enabled, sitrep_enabled, fire_weather_enabled,
+                forecast_enabled, sitrep_enabled, fire_weather_enabled, fire_detection_enabled,
                 county_fips_json, enabled, created_at, updated_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(installation_id) DO UPDATE SET
                 expo_push_token = excluded.expo_push_token,
                 platform = excluded.platform,
@@ -88,6 +89,7 @@ def upsert_subscription(
                 forecast_enabled = excluded.forecast_enabled,
                 sitrep_enabled = excluded.sitrep_enabled,
                 fire_weather_enabled = excluded.fire_weather_enabled,
+                fire_detection_enabled = excluded.fire_detection_enabled,
                 county_fips_json = excluded.county_fips_json,
                 enabled = 1,
                 updated_at = excluded.updated_at,
@@ -101,6 +103,7 @@ def upsert_subscription(
                 int(forecast),
                 int(sitrep),
                 int(fire_weather),
+                int(fire_detection),
                 json.dumps(sorted(set(county_fips))),
                 now,
                 now,
@@ -149,6 +152,7 @@ def _eligible_subscriptions(event_type: str, county_fips: Iterable[str] | None =
         "forecast": "forecast_enabled",
         "sitrep": "sitrep_enabled",
         "fire_weather": "fire_weather_enabled",
+        "fire_detection": "fire_detection_enabled",
     }[event_type]
     with _connect() as connection:
         rows = connection.execute(
@@ -156,7 +160,7 @@ def _eligible_subscriptions(event_type: str, county_fips: Iterable[str] | None =
         ).fetchall()
     result: list[dict[str, str]] = []
     for row in rows:
-        if event_type == "fire_weather":
+        if event_type in {"fire_weather", "fire_detection"}:
             try:
                 selected = set(json.loads(row["county_fips_json"] or "[]"))
             except json.JSONDecodeError:
@@ -210,7 +214,12 @@ def send_mobile_event(
         return 0
 
     subscriptions = _eligible_subscriptions(event_type, county_fips)
-    channel = {"forecast": "forecast", "sitrep": "sitrep", "fire_weather": "fire-weather"}[event_type]
+    channel = {
+        "forecast": "forecast",
+        "sitrep": "sitrep",
+        "fire_weather": "fire-weather",
+        "fire_detection": "fire-detection",
+    }[event_type]
     sent = 0
     for start in range(0, len(subscriptions), 100):
         batch_subscriptions = subscriptions[start:start + 100]
@@ -221,7 +230,7 @@ def send_mobile_event(
                 "title": title,
                 "body": body[:500],
                 "sound": "default",
-                "priority": "high" if event_type == "fire_weather" else "default",
+                "priority": "high" if event_type in {"fire_weather", "fire_detection"} else "default",
                 "channelId": channel,
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
             }
@@ -289,6 +298,42 @@ def process_fire_weather_alerts(alerts: list[dict[str, Any]]) -> int:
             url=f"/alert/{quote(alert_id, safe='')}",
             county_fips=alert.get("countyFips") or [],
             extra_data={"alertId": alert_id},
+        )
+    return sent
+
+
+def notify_new_high_confidence_incidents(incidents: list[dict[str, Any]]) -> int:
+    """Push one alert per newly high-confidence fire incident.
+
+    Idempotent per incident_id via mobile_push_events (event_key), so this can be
+    called every ingest cycle without re-notifying the same incident. Seeds a
+    baseline on first run so a fresh deploy doesn't blast every currently-active
+    high-confidence incident, mirroring process_fire_weather_alerts.
+    """
+    baseline_key = "fire_detection:baseline:v1"
+    with _connect() as connection:
+        baseline_exists = connection.execute(
+            "SELECT 1 FROM mobile_push_events WHERE event_key = ?", (baseline_key,)
+        ).fetchone() is not None
+    if not baseline_exists:
+        for incident in incidents:
+            record_event(f"fire_detection:{incident['incident_id']}", "fire_detection", incident)
+        record_event(baseline_key, "fire_detection", {"seeded": len(incidents)})
+        return 0
+
+    sent = 0
+    for incident in incidents:
+        incident_id = incident["incident_id"]
+        slug = incident.get("incident_slug")
+        county_fips = incident.get("county_fips")
+        sent += send_mobile_event(
+            event_type="fire_detection",
+            event_key=f"fire_detection:{incident_id}",
+            title="New high-confidence fire detected",
+            body=f"A likely wildfire was detected near {incident.get('county_name') or 'your area'}.",
+            url=f"/detections/{quote(slug, safe='')}/feedback" if slug else "/fires",
+            county_fips=[county_fips] if county_fips else [],
+            extra_data={"incidentSlug": slug} if slug else {},
         )
     return sent
 

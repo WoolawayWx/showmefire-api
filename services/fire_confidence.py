@@ -93,6 +93,27 @@ def build_confidence_geojson() -> dict:
     return {"type": "FeatureCollection", "features": features, "metadata": {"generated_at": datetime.now(timezone.utc).isoformat(), "model": "fire-confidence-v1"}}
 
 
+def list_high_confidence_incidents() -> list[dict]:
+    """Active incidents currently scoring 'high' confidence, shaped for mobile
+    push (incident_id/slug/county_fips/county_name). Reuses the same scoring
+    function as build_confidence_geojson/fires_v2, just filtered and flattened."""
+    result = []
+    for incident in list_fire_incidents(limit=500):
+        if incident.get("status") == "deleted":
+            continue
+        members = list_fire_incident_members(incident["id"])
+        score, label, _method = _score(_features(incident, members))
+        if label == "high":
+            result.append({
+                "incident_id": incident["id"],
+                "incident_slug": incident.get("public_slug"),
+                "county_fips": incident.get("county_fips"),
+                "county_name": incident.get("county_name"),
+                "score": score,
+            })
+    return result
+
+
 def refresh_confidence_shapes() -> dict:
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = build_confidence_geojson()

@@ -17,6 +17,7 @@ class NotificationPreferences(BaseModel):
     forecast: bool = False
     sitrep: bool = False
     fireWeather: bool = False
+    fireDetection: bool = False
     countyFips: list[str] = Field(default_factory=list, max_length=115)
 
     @field_validator("countyFips")
@@ -62,6 +63,7 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
         forecast=payload.preferences.forecast,
         sitrep=payload.preferences.sitrep,
         fire_weather=payload.preferences.fireWeather,
+        fire_detection=payload.preferences.fireDetection,
         county_fips=payload.preferences.countyFips,
     )
 

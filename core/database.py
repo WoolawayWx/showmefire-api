@@ -1085,6 +1085,7 @@ def init_database():
             forecast_enabled INTEGER NOT NULL DEFAULT 0,
             sitrep_enabled INTEGER NOT NULL DEFAULT 0,
             fire_weather_enabled INTEGER NOT NULL DEFAULT 0,
+            fire_detection_enabled INTEGER NOT NULL DEFAULT 0,
             county_fips_json TEXT NOT NULL DEFAULT '[]',
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1093,6 +1094,12 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mobile_push_enabled ON mobile_push_subscriptions(enabled)')
+    cursor.execute("PRAGMA table_info(mobile_push_subscriptions)")
+    subscription_columns = {row[1] for row in cursor.fetchall()}
+    if "fire_detection_enabled" not in subscription_columns:
+        cursor.execute(
+            "ALTER TABLE mobile_push_subscriptions ADD COLUMN fire_detection_enabled INTEGER NOT NULL DEFAULT 0"
+        )
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_events (
             event_key TEXT PRIMARY KEY,
@@ -3268,6 +3275,7 @@ def list_fire_incidents(
     since: Optional[str] = None,
     until: Optional[str] = None,
     source: Optional[str] = None,
+    county_fips: Optional[str] = None,
     bbox: Optional[tuple] = None,
     has_feedback: Optional[bool] = None,
     confirmed_only: Optional[bool] = None,
@@ -3305,6 +3313,16 @@ def list_fire_incidents(
                 SELECT 1 FROM fire_events fe WHERE fe.incident_id = fire_incidents.id AND fe.source = ?
             )''')
             params.append(source)
+        if county_fips:
+            # Accept a comma-separated list (e.g. "29019,29021") so callers
+            # can fetch several counties in a single request.
+            counties = [value.strip() for value in county_fips.split(",") if value.strip()]
+            if len(counties) > 1:
+                clauses.append(f"county_fips IN ({', '.join('?' for _ in counties)})")
+                params.extend(counties)
+            elif counties:
+                clauses.append("county_fips = ?")
+                params.append(counties[0])
         if has_feedback:
             clauses.append('EXISTS (SELECT 1 FROM fire_incident_feedback fb WHERE fb.incident_id = fire_incidents.id)')
         if confirmed_only:

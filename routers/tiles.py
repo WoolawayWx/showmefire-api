@@ -18,7 +18,10 @@ from PIL import Image
 from rio_tiler.io import Reader
 from rio_tiler.colormap import cmap as rio_cmap
 from rio_tiler.models import ImageData
-from rasterio.warp import transform_bounds
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+from rasterio.warp import transform_bounds, transform_geom
+from shapely.geometry import box, shape, mapping
 
 from core.config import GIS_DIR
 from forecast_v1.repository import asset_for_layer, ensure_schema as ensure_forecast_v1_schema, transaction as forecast_v1_transaction
@@ -110,6 +113,52 @@ def _render_multiband_png(img: ImageData) -> bytes:
         return buf.getvalue()
 
 
+MISSOURI_BORDER_PATH = Path(__file__).resolve().parent.parent / "assets" / "missouri_border.geojson"
+_MASK_SUPERSAMPLE = 4
+_mo_border_cache: dict[str, object] = {}
+
+
+def _missouri_border_3857():
+    """Missouri outline in Web Mercator, loaded once."""
+    geom = _mo_border_cache.get("geom")
+    if geom is None:
+        import json
+        with open(MISSOURI_BORDER_PATH) as fh:
+            collection = json.load(fh)
+        wgs84 = shape(collection["features"][0]["geometry"])
+        geom = shape(transform_geom("EPSG:4326", "EPSG:3857", mapping(wgs84)))
+        _mo_border_cache["geom"] = geom
+    return geom
+
+
+def _apply_missouri_mask(png: bytes, img: ImageData) -> bytes:
+    """Zero the alpha of every pixel outside Missouri (anti-aliased at the border)."""
+    bounds = tuple(img.bounds)
+    tile_box = box(*bounds)
+    clipped = _missouri_border_3857().intersection(tile_box)
+    rgba = Image.open(BytesIO(png)).convert("RGBA")
+    width, height = rgba.size
+    if clipped.is_empty:
+        coverage = np.zeros((height, width), dtype=np.float32)
+    elif clipped.equals(tile_box):
+        return png
+    else:
+        scale = _MASK_SUPERSAMPLE
+        fine = rasterize(
+            [(mapping(clipped), 1)],
+            out_shape=(height * scale, width * scale),
+            transform=from_bounds(*bounds, width * scale, height * scale),
+            fill=0,
+            dtype="uint8",
+        )
+        coverage = fine.reshape(height, scale, width, scale).mean(axis=(1, 3)).astype(np.float32)
+    arr = np.asarray(rgba).copy()
+    arr[..., 3] = (arr[..., 3].astype(np.float32) * coverage).astype(np.uint8)
+    with BytesIO() as buf:
+        Image.fromarray(arr, mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
+
 def _transparent_tile_png(size: int = 256) -> bytes:
     """Return a transparent PNG tile for out-of-bounds requests."""
     with BytesIO() as buf:
@@ -158,7 +207,7 @@ async def cog_info(filename: str = "peak_fire_danger.tif"):
     return await asyncio.to_thread(_cog_info_sync, filename)
 
 
-def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale: str) -> Response:
+def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale: str, mask: Optional[str] = None) -> Response:
     tif_path = _safe_gis_path(filename)
 
     if not tif_path.exists():
@@ -190,7 +239,10 @@ def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale
                 except KeyError:
                     colormap_dict = rio_cmap.get("rdylgn_r")
                 png_data = img.render(img_format="PNG", colormap=colormap_dict)
-            
+
+            if mask == "missouri":
+                png_data = _apply_missouri_mask(png_data, img)
+
             return Response(
                 content=png_data,
                 media_type="image/png",
@@ -219,7 +271,8 @@ async def cog_tile(
     y: int,
     filename: str = Query("peak_fire_danger.tif", description="GeoTIFF filename"),
     colormap: str = Query("fire_danger", description="Colormap name"),
-    rescale: str = Query("0,4", description="Min,max values for rescaling")
+    rescale: str = Query("0,4", description="Min,max values for rescaling"),
+    mask: Optional[str] = Query(None, description="Set to 'missouri' to make pixels outside the state transparent"),
 ):
     """
     Generate a map tile from GeoTIFF.
@@ -233,10 +286,11 @@ async def cog_tile(
     - filename: GeoTIFF filename (default: peak_fire_danger.tif)
     - colormap: Color ramp to apply (default: fire_danger)
     - rescale: Min,max values for data rescaling (default: 0,4)
+    - mask: 'missouri' to clip the tile to the state border (default: no clipping)
 
     Returns: PNG tile image
     """
-    return await asyncio.to_thread(_cog_tile_sync, z, x, y, filename, colormap, rescale)
+    return await asyncio.to_thread(_cog_tile_sync, z, x, y, filename, colormap, rescale, mask)
 
 
 def _cog_preview_sync(filename: str, colormap: str, rescale: str, max_size: int) -> Response:
@@ -306,7 +360,7 @@ async def cog_preview(
     return await asyncio.to_thread(_cog_preview_sync, filename, colormap, rescale, max_size)
 
 
-def _forecast_tile_sync(run_id: str, variable: str, lead_hour: int, z: int, x: int, y: int) -> Response:
+def _forecast_tile_sync(run_id: str, variable: str, lead_hour: int, z: int, x: int, y: int, mask: Optional[str] = None) -> Response:
     if variable not in PUBLIC_LAYER_STYLES:
         raise HTTPException(status_code=404, detail="Forecast layer not found")
     if not 0 <= lead_hour <= 72:
@@ -333,6 +387,8 @@ def _forecast_tile_sync(run_id: str, variable: str, lead_hour: int, z: int, x: i
                 except KeyError:
                     color_map = rio_cmap.get("viridis")
                 png = image.render(img_format="PNG", colormap=color_map)
+            if mask == "missouri":
+                png = _apply_missouri_mask(png, image)
         return Response(content=png, media_type="image/png", headers={"Cache-Control": "public, max-age=31536000, immutable"})
     except HTTPException:
         raise
@@ -344,6 +400,14 @@ def _forecast_tile_sync(run_id: str, variable: str, lead_hour: int, z: int, x: i
 
 
 @router.get("/forecast/{run_id}/{variable}/{lead_hour}/{z}/{x}/{y}.png")
-async def forecast_tile(run_id: str, variable: str, lead_hour: int, z: int, x: int, y: int):
+async def forecast_tile(
+    run_id: str,
+    variable: str,
+    lead_hour: int,
+    z: int,
+    x: int,
+    y: int,
+    mask: Optional[str] = Query(None, description="Set to 'missouri' to clip to the state border"),
+):
     """Render one allow-listed band from an immutable forecast-v1 COG."""
-    return await asyncio.to_thread(_forecast_tile_sync, run_id, variable, lead_hour, z, x, y)
+    return await asyncio.to_thread(_forecast_tile_sync, run_id, variable, lead_hour, z, x, y, mask)

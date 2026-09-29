@@ -291,6 +291,13 @@ async def ingest_fire_detections_job():
         await asyncio.to_thread(refresh_incident_shapes)
         from services.fire_confidence import refresh_confidence_shapes
         await asyncio.to_thread(refresh_confidence_shapes)
+        try:
+            from services.fire_confidence import list_high_confidence_incidents
+            from services.mobile_push import notify_new_high_confidence_incidents
+            high_confidence = await asyncio.to_thread(list_high_confidence_incidents)
+            await asyncio.to_thread(notify_new_high_confidence_incidents, high_confidence)
+        except Exception as push_error:
+            logger.error("Fire detection push notify failed: %s", push_error, exc_info=True)
     except Exception as error:
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
 

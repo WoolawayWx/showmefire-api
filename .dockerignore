@@ -14,3 +14,8 @@ data_archive_day/
 logs/
 maps/shapefiles/MO_MoDOT_Roads_Arcs/
 images/
+**/__pycache__/
+.pytest_cache/
+tests/
+.docker-test-data/
+fire-danger-model/data/

@@ -29,16 +29,24 @@ RUN python -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
-# Upgrade pip to avoid the notice in your logs
-RUN pip install --upgrade pip
+# uv is a drop-in, much faster replacement for pip. The BuildKit cache mount
+# keeps downloaded/built wheels across builds, so even when this layer is
+# invalidated (lockfile change, builder cache GC) nothing is re-downloaded
+# or re-compiled from sdist unless it actually changed.
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON=/opt/venv/bin/python
 
 COPY requirements.lock.txt .
-RUN python -m pip install --no-cache-dir -r requirements.lock.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements.lock.txt
 COPY requirements.pyretechnics.txt .
 # Pyretechnics pins NumPy 1.24.x, while goes2go requires NumPy 2.2.5+.
 # Its surface-fire extension is compatible with the locked NumPy 2.2.6,
 # so install the pinned package without asking pip to resolve that stale pin.
-RUN python -m pip install --no-cache-dir --no-deps -r requirements.pyretechnics.txt \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-deps -r requirements.pyretechnics.txt \
     && python -c "import numpy, pyretechnics.surface_fire; assert numpy.__version__ == '2.2.6'"
 COPY patches/rrfs.py /opt/venv/lib/python3.11/site-packages/herbie/models/rrfs.py
 RUN python - <<'PY'
@@ -106,9 +114,6 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 COPY --from=builder /opt/venv /opt/venv
 
-COPY . .
-
-
 # Ensure a writable data directory (compose mounts ./api/data -> /app/data)
 ENV DATA_DIR=/app/data
 RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
@@ -151,6 +156,9 @@ RUN echo "TZ=UTC" > /etc/cron.d/maps \
 # Copy entrypoint to run DB init before starting the server
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# App source last: it changes on every deploy, so everything above stays cached.
+COPY . .
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 8000
