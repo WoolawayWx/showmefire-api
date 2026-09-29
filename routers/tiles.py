@@ -14,14 +14,16 @@ from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import Response
 import numpy as np
+import rasterio
 from PIL import Image
 from rio_tiler.io import Reader
 from rio_tiler.colormap import cmap as rio_cmap
 from rio_tiler.models import ImageData
-from rasterio.features import rasterize
+from rasterio.features import rasterize, shapes as raster_shapes
 from rasterio.transform import from_bounds
 from rasterio.warp import transform_bounds, transform_geom
 from shapely.geometry import box, shape, mapping
+from shapely.ops import unary_union
 
 from core.config import GIS_DIR
 from forecast_v1.repository import asset_for_layer, ensure_schema as ensure_forecast_v1_schema, transaction as forecast_v1_transaction
@@ -118,6 +120,17 @@ _MASK_SUPERSAMPLE = 4
 _mo_border_cache: dict[str, object] = {}
 
 
+def _missouri_border_wgs84():
+    """Missouri outline in lon/lat, loaded once."""
+    geom = _mo_border_cache.get("wgs84")
+    if geom is None:
+        import json
+        with open(MISSOURI_BORDER_PATH) as fh:
+            geom = shape(json.load(fh)["features"][0]["geometry"])
+        _mo_border_cache["wgs84"] = geom
+    return geom
+
+
 def _missouri_border_3857():
     """Missouri outline in Web Mercator, loaded once."""
     geom = _mo_border_cache.get("geom")
@@ -157,6 +170,69 @@ def _apply_missouri_mask(png: bytes, img: ImageData) -> bytes:
     with BytesIO() as buf:
         Image.fromarray(arr, mode="RGBA").save(buf, format="PNG")
         return buf.getvalue()
+
+
+FIRE_DANGER_LABELS = {0: "Low", 1: "Moderate", 2: "Elevated", 3: "Critical", 4: "Extreme"}
+# ~400 m: well under the raster's own cell size, so it only thins vertices.
+_POLYGON_SIMPLIFY_DEGREES = 0.004
+_polygon_cache: dict[tuple[str, int], dict] = {}
+
+
+def _fire_danger_polygons_sync(filename: str) -> dict:
+    tif_path = _safe_gis_path(filename)
+    if not tif_path.exists():
+        raise HTTPException(status_code=404, detail=f"GeoTIFF {filename} not found")
+
+    cache_key = (str(tif_path), tif_path.stat().st_mtime_ns)
+    cached = _polygon_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    with rasterio.open(tif_path) as src:
+        if src.count != 1:
+            raise HTTPException(status_code=400, detail="Polygons are only available for single-band classified rasters")
+        classes = src.read(1)
+        valid = src.dataset_mask() > 0
+        transform = src.transform
+        crs = src.crs
+
+    if crs and str(crs).upper() not in {"EPSG:4326", "CRS84"}:
+        raise HTTPException(status_code=400, detail="Raster must be in EPSG:4326")
+
+    classes = np.nan_to_num(classes, nan=255).astype(np.int16)
+    valid &= (classes >= 0) & (classes <= 4)
+    by_level: dict[int, list] = {}
+    for geometry, value in raster_shapes(classes.astype(np.uint8), mask=valid, transform=transform, connectivity=4):
+        by_level.setdefault(int(value), []).append(shape(geometry))
+
+    border = _missouri_border_wgs84()
+    features = []
+    for level in sorted(by_level):
+        clipped = unary_union(by_level[level]).intersection(border)
+        if clipped.is_empty:
+            continue
+        clipped = clipped.simplify(_POLYGON_SIMPLIFY_DEGREES, preserve_topology=True)
+        features.append({
+            "type": "Feature",
+            "properties": {"level": level, "label": FIRE_DANGER_LABELS.get(level, str(level))},
+            "geometry": mapping(clipped),
+        })
+
+    result = {"type": "FeatureCollection", "features": features}
+    _polygon_cache.clear()
+    _polygon_cache[cache_key] = result
+    return result
+
+
+@router.get("/cog/polygons")
+async def cog_polygons(filename: str = Query("peak_fire_danger.tif", description="Classified GeoTIFF filename")):
+    """
+    Fire-danger classes as GeoJSON polygons clipped to the Missouri border.
+
+    One feature per danger level (`level` 0-4, `label`), for clients that draw the
+    layer as native vector overlays instead of raster tiles.
+    """
+    return await asyncio.to_thread(_fire_danger_polygons_sync, filename)
 
 
 def _transparent_tile_png(size: int = 256) -> bytes:
