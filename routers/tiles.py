@@ -196,13 +196,14 @@ def _fire_danger_polygons_sync(filename: str) -> dict:
         transform = src.transform
         crs = src.crs
 
-    if crs and str(crs).upper() not in {"EPSG:4326", "CRS84"}:
-        raise HTTPException(status_code=400, detail="Raster must be in EPSG:4326")
+    needs_reproject = bool(crs) and str(crs).upper() not in {"EPSG:4326", "CRS84"}
 
     classes = np.nan_to_num(classes, nan=255).astype(np.int16)
     valid &= (classes >= 0) & (classes <= 4)
     by_level: dict[int, list] = {}
     for geometry, value in raster_shapes(classes.astype(np.uint8), mask=valid, transform=transform, connectivity=4):
+        if needs_reproject:
+            geometry = transform_geom(crs, "EPSG:4326", geometry)
         by_level.setdefault(int(value), []).append(shape(geometry))
 
     border = _missouri_border_wgs84()
