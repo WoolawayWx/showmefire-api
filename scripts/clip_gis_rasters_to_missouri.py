@@ -13,6 +13,7 @@ Originals are copied to ``<publish dir>/latest_preclip_backup/`` first.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -44,6 +45,9 @@ def clip_raster(path: Path, *, apply: bool, backup_dir: Path) -> str:
     backup_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_dir / path.name)
     gis_publisher._write_raster(path, clipped, categorical=categorical, tags=tags)
+    # _write_raster goes through mkstemp(), which creates files 0600; the
+    # QGIS container runs as another user and needs to read them.
+    os.chmod(path, 0o644)
     return f"blanked {removed} of {int(valid.sum())} valid pixels"
 
 
