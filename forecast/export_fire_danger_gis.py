@@ -728,6 +728,21 @@ def export_all_gis_formats(peak_risk_smooth: np.ndarray,
     ok = export_shapefile_from_contourf(peak_risk_smooth, lon, lat, shp_zip_path, run_date)
     results['shapefile'] = shp_zip_path if ok else None
 
+    # ── Smooth high-resolution polygons (additional product) ──────────────────
+    # Written to its own file after everything above; it never raises and does
+    # not touch the production outputs. Disable with SMF_SMOOTH_POLYGONS=0.
+    try:
+        try:
+            from forecast import export_smooth_polygons as smooth
+        except ImportError:  # script-style import (forecast/ on sys.path)
+            import export_smooth_polygons as smooth
+        if smooth.enabled():
+            smooth_path = out_dir / f'peak_fire_danger_smooth_polygons{filename_suffix}.geojson'
+            ok = smooth.export_smooth_geojson_polygons(peak_risk_smooth, lon, lat, smooth_path, run_date)
+            results['smooth_polygons'] = smooth_path if ok else None
+    except Exception:
+        logger.error("Smooth polygon step failed (non-fatal)", exc_info=True)
+
     # ── Summary ───────────────────────────────────────────────────────────────
     for fmt, path in results.items():
         if path:

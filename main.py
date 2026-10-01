@@ -89,7 +89,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, bulletins
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, bulletins, arcgis_feature_service
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -237,6 +237,7 @@ app.include_router(verification.router)
 app.include_router(feedback.router)
 app.include_router(forecast_discussions.router)
 app.include_router(burn_bans.router)
+app.include_router(arcgis_feature_service.router)
 app.include_router(fire_weather_alerts.router)
 app.include_router(testbed.router)
 app.include_router(forecast_admin.router)
