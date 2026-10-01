@@ -17,6 +17,13 @@ The forecast raster is intentionally referenced through the stable
 `/data/latest/forecast_peak_fire_danger.tif` path. The forecast publisher can
 replace that file on each run without changing the QGIS project.
 
+The publisher replaces `latest/*.tif` with a new file on every run. QGIS Server
+caches the loaded project (and its open raster handles), so with the default
+cache it keeps serving the file it opened first. The image sets
+`QGIS_SERVER_PROJECT_CACHE_STRATEGY=off` so each request reopens the data. If
+you run the service from compose without rebuilding, set the same variable
+under `environment:`.
+
 The polygon layer is categorized by `danger_level` and the burn-ban layer is
 categorized by `status` (`active` / `inactive`). The forecast polygon
 publisher buffers cell regions by 250 meters and clips them to the Missouri

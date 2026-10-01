@@ -33,6 +33,31 @@ def test_categorical_regrid_does_not_invent_classes():
     assert set(np.unique(projected[np.isfinite(projected)])) <= {0, 1, 2, 3, 4}
 
 
+def _pixel(lon, lat):
+    from pyproj import Transformer
+    grid = gis_publisher.canonical_grid()
+    x, y = Transformer.from_crs("EPSG:4326", grid["crs"], always_xy=True).transform(lon, lat)
+    col, row = ~grid["transform"] * (x, y)
+    return int(row), int(col)
+
+
+def test_categorical_regrid_is_trimmed_to_missouri():
+    lon, lat = np.meshgrid(np.linspace(-96.5, -88.5, 60), np.linspace(35.5, 41.5, 60))
+    values = np.ones(lon.shape)
+    projected = gis_publisher.regrid_lonlat(values, lon, lat, categorical=True)
+    assert projected[_pixel(-92.5, 38.4)] == 1            # Jefferson City area
+    assert np.isnan(projected[_pixel(-95.7, 36.1)])       # SW corner of the box: Oklahoma/Kansas
+    assert np.isnan(projected[_pixel(-89.3, 40.7)])       # NE corner of the box: Illinois/Iowa
+
+
+def test_categorical_regrid_does_not_smear_across_missing_data():
+    lon, lat = np.meshgrid(np.linspace(-96.5, -88.5, 60), np.linspace(35.5, 41.5, 60))
+    values = np.where(lon < -93.5, 2.0, np.nan)           # data only in the west
+    projected = gis_publisher.regrid_lonlat(values, lon, lat, categorical=True)
+    assert projected[_pixel(-94.2, 38.4)] == 2
+    assert np.isnan(projected[_pixel(-90.5, 38.4)])       # inside Missouri but far from any data
+
+
 def test_accumulated_regrid_preserves_domain_mean():
     values, lon, lat = _source_grid()
     values = np.maximum(values, 0)

@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -19,9 +20,11 @@ import numpy as np
 import rasterio
 from pyproj import Transformer
 from rasterio.enums import Resampling
+from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 from rasterio.warp import transform_bounds
 from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
 from shapely.geometry import box
 
 from core.config import GIS_DIR
@@ -33,6 +36,12 @@ RESOLUTION_METERS = int(os.getenv("SMF_GIS_RESOLUTION_METERS", "3000"))
 RETENTION_DAYS = int(os.getenv("SMF_GIS_RETENTION_DAYS", "30"))
 SCHEMA_VERSION = "1.0.0"
 PUBLISH_ROOT = Path(os.getenv("SMF_GIS_PUBLISH_DIR", str(GIS_DIR)))
+STATE_BOUNDARY_SHP = (
+    Path(__file__).resolve().parents[1] / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp"
+)
+# Target pixels farther than this many source-cell spacings from any valid
+# source cell are left empty instead of copying the nearest value outward.
+MAX_GAP_CELLS = 2.0
 
 
 def _utc(value: datetime | str | None = None) -> str:
@@ -65,6 +74,22 @@ def canonical_grid(resolution: int = RESOLUTION_METERS) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=2)
+def _state_mask(bounds: tuple, resolution: int, width: int, height: int) -> np.ndarray | None:
+    """True for canonical-grid pixels whose centre lies inside Missouri.
+
+    Returns None when the boundary shapefile is unavailable, so publication
+    still works (the distance limit in ``regrid_lonlat`` is then the only trim).
+    """
+    try:
+        boundary = gpd.read_file(STATE_BOUNDARY_SHP).to_crs(CRS)
+        geometry = boundary.geometry.union_all() if hasattr(boundary.geometry, "union_all") else boundary.unary_union
+        transform = from_origin(bounds[0], bounds[3], resolution, resolution)
+        return geometry_mask([geometry], out_shape=(height, width), transform=transform, invert=True)
+    except Exception:
+        return None
+
+
 def regrid_lonlat(
     values: np.ndarray,
     longitude: np.ndarray,
@@ -92,13 +117,25 @@ def regrid_lonlat(
     valid = np.isfinite(values) & np.isfinite(source_x) & np.isfinite(source_y)
     if not valid.any():
         return np.full((grid["height"], grid["width"]), np.nan, dtype=np.float32)
+    points = np.column_stack((source_x[valid], source_y[valid]))
     result = griddata(
-        np.column_stack((source_x[valid], source_y[valid])),
+        points,
         values[valid],
         (xx, yy),
         method="nearest" if categorical else "linear",
         fill_value=np.nan,
     )
+    # "nearest" ignores fill_value and copies the closest valid cell into every
+    # target pixel, which smears the state edge across the whole bounding box.
+    # Trim to cells near real data, then to the Missouri boundary itself.
+    tree = cKDTree(points)
+    spacing = float(np.median(tree.query(points, k=2)[0][:, 1])) if len(points) > 1 else 0.0
+    if spacing > 0:
+        distance, _ = tree.query(np.column_stack((xx.ravel(), yy.ravel())))
+        result = np.where(distance.reshape(xx.shape) <= MAX_GAP_CELLS * spacing, result, np.nan)
+    inside = _state_mask(tuple(grid["bounds"]), grid["resolution"], grid["width"], grid["height"])
+    if inside is not None:
+        result = np.where(inside, result, np.nan)
     # Curvilinear accumulated fields are interpolated in projected space and
     # then mean-corrected. This preserves the domain-integrated magnitude to a
     # tight tolerance without blending categorical fields.
