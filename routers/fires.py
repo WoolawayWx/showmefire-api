@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from core.database import (
     add_ip_to_blocklist,
     add_fire_event_media,
+    bulk_set_incident_event_status,
     consume_fire_submission_quota,
     correlate_report_with_incident,
     count_fire_event_media,
@@ -43,6 +44,7 @@ from core.database import (
     create_fire_exclusion_zone,
     delete_fire_event,
     delete_fire_incident,
+    delete_fire_incident_and_members,
     export_fire_labels,
     get_fire_event,
     get_fire_incident,
@@ -60,6 +62,7 @@ from core.database import (
     list_fire_incident_members,
     list_fire_incident_feedback,
     list_fire_incidents,
+    list_incidents_with_pending_members,
     list_nearby_fire_events,
     list_pending_fire_incident_feedback,
     set_fire_event_status,
@@ -1018,10 +1021,14 @@ def admin_list_fire_reports(
     source: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    ungrouped_only: bool = False,
 ):
-    """List fire reports for moderation (admin only)"""
+    """List fire reports for moderation (admin only). ungrouped_only=true
+    excludes reports already linked to an incident - pair with GET
+    /api/admin/fires/incidents/pending-queue for the grouped queue view, so
+    nothing shows up twice between the two lists."""
     _require_admin(token)
-    events = list_fire_events(status=status, source=source, limit=limit, offset=offset, admin=True)
+    events = list_fire_events(status=status, source=source, limit=limit, offset=offset, admin=True, ungrouped_only=ungrouped_only)
     return {"success": True, "reports": events, "count": len(events)}
 
 
@@ -1234,6 +1241,65 @@ def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, token: Opt
     graphic_result = refresh_incident_graphics(incident_id=incident_id, force=True)
     confidence_result = refresh_confidence_shapes()
     return {"success": True, "graphics": graphic_result, "confidence": confidence_result}
+
+
+@router.get("/api/admin/fires/incidents/pending-queue")
+def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 100):
+    """Grouped moderation queue: every incident with at least one pending
+    member, with a live per-status member breakdown and an incident_confidence
+    reading (when FIRE_INCIDENT_CONFIDENCE_VERSION=v2) - lets a moderator
+    review a whole detection cluster (satellite + OSINT leads together) in
+    one pass instead of one raw detection at a time. Reports that aren't
+    linked to any incident yet (e.g. a fresh public submission, which only
+    joins a cluster on approval - see correlate_report_with_incident) are not
+    included here; fetch those with GET /api/admin/fires/reports?
+    status=pending&ungrouped_only=true (admin only)."""
+    _require_admin(token)
+    from services.incident_confidence import score_incident, use_v2
+
+    incidents = list_incidents_with_pending_members(limit=limit)
+    if use_v2():
+        for incident in incidents:
+            result = score_incident(incident, incident["members"])
+            incident["incident_confidence"] = {
+                "score": result["score"], "label": result["label"], "reasons": result["reasons"],
+            }
+    return {"success": True, "incidents": incidents, "count": len(incidents)}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/approve-all")
+def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, token: Optional[str] = None):
+    """Approve every currently-pending member of this incident at once (admin only)."""
+    actor = _require_admin(token)
+    result = bulk_set_incident_event_status(
+        incident_id, to_status="approved", actor=actor,
+        to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref, reason=payload.moderator_note,
+    )
+    if result["count"] == 0:
+        raise HTTPException(status_code=404, detail="No pending members found for this incident")
+    return {"success": True, **result}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/reject-all")
+def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, token: Optional[str] = None):
+    """Reject every currently-pending member of this incident at once (admin only)."""
+    actor = _require_admin(token)
+    result = bulk_set_incident_event_status(incident_id, to_status="rejected", actor=actor, reason=payload.reason)
+    if result["count"] == 0:
+        raise HTTPException(status_code=404, detail="No pending members found for this incident")
+    return {"success": True, **result}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/delete")
+def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, token: Optional[str] = None):
+    """Delete this whole incident and every one of its member detections in
+    one action (soft delete - audit trail retained on each event and on the
+    incident) - the easy 'this cluster is bogus' button (admin only)."""
+    actor = _require_admin(token)
+    result = delete_fire_incident_and_members(incident_id, actor=actor, reason=payload.reason)
+    if not result["incident_deleted"]:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    return {"success": True, **result}
 
 
 @router.get("/api/admin/fires/incidents/{incident_id}")

@@ -2867,11 +2867,15 @@ def list_fire_events(
     limit: int = 200,
     offset: int = 0,
     admin: bool = False,
+    ungrouped_only: bool = False,
 ) -> List[Dict]:
     """
     List fire events. Public callers must pass status='approved' (the
     router enforces this); admin callers may omit it to see everything.
-    bbox is (min_lon, min_lat, max_lon, max_lat).
+    bbox is (min_lon, min_lat, max_lon, max_lat). ungrouped_only=True adds
+    incident_id IS NULL - used by the admin queue to list only reports not
+    already shown grouped under an incident (see
+    list_incidents_with_pending_members).
     """
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -2914,6 +2918,8 @@ def list_fire_events(
             min_lon, min_lat, max_lon, max_lat = bbox
             clauses.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
             params.extend([min_lat, max_lat, min_lon, max_lon])
+        if ungrouped_only:
+            clauses.append("incident_id IS NULL")
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cursor.execute(f'''
@@ -3300,9 +3306,11 @@ def list_fire_incidents(
         safe_limit = max(1, min(limit, 500))
         safe_offset = max(0, offset)
 
-        # Incidents folded into another by services/incident_merger.py stay in
-        # the table (old slugs/feedback still resolve) but are never listed.
-        clauses = ["status != 'merged'"]
+        # Incidents folded into another by services/incident_merger.py, or
+        # soft-deleted (delete_fire_incident), stay in the table (old slugs/
+        # feedback still resolve for 'merged'; 'deleted' audit is retained)
+        # but are never listed.
+        clauses = ["status NOT IN ('merged', 'deleted')"]
         params: List = []
         if since:
             clauses.append("last_detected_at >= ?")
@@ -3764,6 +3772,102 @@ def delete_fire_incident(incident_id: int, reason: str = "") -> bool:
         return True
     finally:
         conn.close()
+
+
+def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
+    """Incidents that currently have at least one pending (unreviewed) member
+    event - the data source for the admin queue's grouped-by-incident view,
+    so a moderator reviews a whole cluster (e.g. one fire seen by VIIRS,
+    NGFS, and a Muse OSINT lead) at once instead of one raw detection at a
+    time. Status counts are computed live from current member rows rather
+    than trusting fire_incidents.detection_count, which only ever
+    increments at ingest (find_or_create_incident_for_detection) and does
+    not reflect later approvals/rejections/deletes of individual members."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        rows = cursor.execute('''
+            SELECT * FROM fire_incidents
+            WHERE status NOT IN ('merged', 'deleted')
+              AND EXISTS (SELECT 1 FROM fire_events WHERE fire_events.incident_id = fire_incidents.id AND status = 'pending')
+            ORDER BY last_detected_at DESC
+            LIMIT ?
+        ''', (max(1, min(limit, 500)),)).fetchall()
+
+        incidents = []
+        for row in rows:
+            incident = dict(row)
+            members = cursor.execute('''
+                SELECT id, source, status, verification_tier, latitude, longitude, occurred_at,
+                       satellite, confidence, frp, acres, description, county_name
+                FROM fire_events WHERE incident_id = ? AND status != 'deleted'
+                ORDER BY occurred_at ASC
+            ''', (incident["id"],)).fetchall()
+            members = [dict(m) for m in members]
+            status_counts: Dict[str, int] = {}
+            for member in members:
+                status_counts[member["status"]] = status_counts.get(member["status"], 0) + 1
+            incident["members"] = members
+            incident["status_counts"] = status_counts
+            incident["pending_count"] = status_counts.get("pending", 0)
+            incidents.append(incident)
+        return incidents
+    finally:
+        conn.close()
+
+
+def bulk_set_incident_event_status(
+    incident_id: int, to_status: str, actor: str,
+    to_tier: Optional[str] = None, official_source_ref: Optional[str] = None, reason: str = "",
+) -> Dict:
+    """Approve or reject every currently-pending member of one incident in a
+    single action, reusing set_fire_event_status per event (same validation/
+    audit trail as a single approve/reject - just looped) rather than
+    reimplementing that logic here."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM fire_events WHERE incident_id = ? AND status = 'pending'", (incident_id,)
+        ).fetchall()
+        event_ids = [row[0] for row in rows]
+    finally:
+        conn.close()
+
+    updated_event_ids = []
+    for event_id in event_ids:
+        result = set_fire_event_status(
+            event_id, to_status=to_status, actor=actor,
+            to_tier=to_tier, official_source_ref=official_source_ref, reason=reason,
+        )
+        if result and not result.get("already_moderated"):
+            updated_event_ids.append(event_id)
+    return {"incident_id": incident_id, "updated_event_ids": updated_event_ids, "count": len(updated_event_ids)}
+
+
+def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str = "") -> Dict:
+    """The 'remove this whole bogus cluster' action: soft-deletes every
+    non-deleted member event (delete_fire_event, so each keeps its own
+    moderation audit trail) and then the incident row itself
+    (delete_fire_incident), so it disappears from every incident listing.
+    Connects two code paths that were previously independent - deleting one
+    event never touched its incident, and delete_fire_incident (previously
+    only used by exclusion-zone cleanup) never touched member events."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM fire_events WHERE incident_id = ? AND status != 'deleted'", (incident_id,)
+        ).fetchall()
+        event_ids = [row[0] for row in rows]
+    finally:
+        conn.close()
+
+    deleted_event_ids = [event_id for event_id in event_ids if delete_fire_event(event_id, actor=actor, reason=reason or "incident deleted")]
+    incident_deleted = delete_fire_incident(incident_id, reason=reason or f"deleted by {actor}")
+    return {"incident_id": incident_id, "deleted_event_ids": deleted_event_ids, "incident_deleted": incident_deleted}
 
 
 def export_fire_labels(
