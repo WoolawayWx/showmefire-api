@@ -2,6 +2,7 @@
 SQLite Database - core/database.py
 """
 import sqlite3
+import hashlib
 import logging
 import os
 import json
@@ -1241,6 +1242,11 @@ def init_database():
 
     # 21. Department static graphics API and publication control plane.
     _ensure_graphics_tables(cursor)
+
+    # 21b. OSINT/social-monitoring fire-report ingestion (e.g. Muse scanning
+    # Facebook) - separate control plane from graphics licensing since it
+    # carries none of that billing/terms machinery.
+    _ensure_fire_ingest_tables(cursor)
 
     # 22. Field-deployed dowel fuel-moisture sensor readings (own hardware,
     # not RAWS). See SMF_FuelMoistureSensor/.
@@ -4468,6 +4474,245 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
         )
     if "terms_accepted_at" not in user_columns:
         cursor.execute("ALTER TABLE graphic_department_users ADD COLUMN terms_accepted_at TIMESTAMP")
+
+
+def _ensure_fire_ingest_tables(cursor: sqlite3.Cursor) -> None:
+    """Control-plane tables for machine ingestion of OSINT/social-monitoring
+    fire leads (e.g. Muse scanning Facebook). Kept separate from the
+    graphics department tables - this isn't a billed product, just a
+    narrower-scoped Bearer API key that may write pending fire_events rows."""
+    cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS fire_ingest_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            slug TEXT NOT NULL UNIQUE,
+            contact_email TEXT,
+            daily_limit INTEGER NOT NULL DEFAULT 200,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS fire_ingest_api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            revoked_at TIMESTAMP,
+            last_used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_id) REFERENCES fire_ingest_sources(id)
+        );
+    ''')
+
+
+def create_fire_ingest_source(name: str, slug: str, daily_limit: int = 200, contact_email: str = "") -> Dict:
+    """Create an ingest source and its first API key. Returns the source row
+    plus the raw key under "api_key" - the only time the raw key is ever
+    available; only its SHA-256 hash is stored."""
+    raw_key = secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO fire_ingest_sources (name, slug, contact_email, daily_limit) VALUES (?, ?, ?, ?)",
+            (name, slug, contact_email or None, daily_limit),
+        )
+        source_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO fire_ingest_api_keys (source_id, key_hash) VALUES (?, ?)",
+            (source_id, key_hash),
+        )
+        conn.commit()
+        return {"id": source_id, "name": name, "slug": slug, "daily_limit": daily_limit, "api_key": raw_key}
+    finally:
+        conn.close()
+
+
+def get_ingest_source_by_key(authorization_token: str) -> Optional[Dict]:
+    """Look up the (source, api_key) pair for a raw Bearer token and bump
+    last_used_at. Returns None for an invalid or revoked key."""
+    key_hash = hashlib.sha256(authorization_token.encode()).hexdigest()
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        row = cursor.execute(
+            """SELECT k.id api_key_id, s.id source_id, s.slug source_slug, s.name source_name, s.daily_limit
+               FROM fire_ingest_api_keys k JOIN fire_ingest_sources s ON s.id = k.source_id
+               WHERE k.key_hash = ? AND k.revoked_at IS NULL""",
+            (key_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        cursor.execute("UPDATE fire_ingest_api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", (row["api_key_id"],))
+        conn.commit()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def revoke_ingest_api_key(source_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE fire_ingest_api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE source_id = ? AND revoked_at IS NULL",
+            (source_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def create_ingest_api_key_for_source(source_id: int) -> str:
+    """Issue a new key for an existing ingest source (key rotation) without
+    revoking any currently-active key - the admin UI revokes separately so a
+    rotation can't accidentally lock out an in-flight integration."""
+    raw_key = secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO fire_ingest_api_keys (source_id, key_hash) VALUES (?, ?)", (source_id, key_hash))
+        conn.commit()
+        return raw_key
+    finally:
+        conn.close()
+
+
+def list_fire_ingest_sources() -> List[Dict]:
+    """List ingest sources with their most recently issued key's status, for
+    the admin "Ingest Sources" page. A source may have had several keys
+    issued/revoked over time (rotation); only the latest is shown."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        rows = cursor.execute('''
+            SELECT s.id, s.name, s.slug, s.contact_email, s.daily_limit, s.created_at,
+                   k.id AS key_id, k.revoked_at, k.last_used_at, k.created_at AS key_created_at
+            FROM fire_ingest_sources s
+            LEFT JOIN fire_ingest_api_keys k ON k.id = (
+                SELECT id FROM fire_ingest_api_keys WHERE source_id = s.id ORDER BY id DESC LIMIT 1
+            )
+            ORDER BY s.created_at DESC
+        ''').fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def upsert_ingest_report(
+    source: str,
+    external_id: str,
+    title: str,
+    description: str,
+    source_url: str,
+    source_name: str,
+    latitude: float,
+    longitude: float,
+    occurred_at: str,
+    occurred_at_precision: str,
+    acres: Optional[float],
+    county_fips: Optional[str],
+    county_name: Optional[str],
+) -> tuple:
+    """Idempotent upsert for an OSINT/social-monitoring fire lead, keyed on
+    the same (source, external_id) unique index upsert_detection_event uses.
+    Always lands as status='pending'/verification_tier='unverified' - these
+    are unverified social-media leads and go through the same moderation
+    queue as any other public report. A repost with an updated acres/
+    description count refreshes those fields but never silently moves the
+    pin or occurred_at once a human may have corrected them during review.
+    Returns (event_dict, created: bool).
+
+    source_url is folded into `description` rather than stored in
+    `official_source_ref` - that column is cleared to '' by the normal
+    admin-approve flow whenever the moderator doesn't type an explicit
+    citation (COALESCE against FireReportModeration's default ""), which
+    would silently lose the Facebook link on the overwhelmingly common
+    admin_reviewed approval path. Keeping it in `description` means it
+    survives approval untouched, same as every other narrative field here.
+
+    On first ingest (not a repost), this also runs
+    find_or_create_incident_for_detection() immediately - the same
+    spatial/temporal clustering call satellite ingest uses - so a Muse lead
+    joins (or starts) an incident cluster right away instead of waiting for
+    moderation. The report itself still lands status='pending'; only cluster
+    membership (and therefore confidence scoring/the public incident marker,
+    same as an unreviewed satellite blip today) happens before review.
+    """
+    full_description = f"{title}\n\n{description}".strip() if description else title
+    full_description = f"{full_description}\n\nSource: {source_url}"
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM fire_events WHERE source = ? AND external_id = ?", (source, external_id))
+        is_new = cursor.fetchone() is None
+        cursor.execute('''
+            INSERT INTO fire_events (
+                source, external_id, status, verification_tier,
+                latitude, longitude, county_fips, county_name,
+                occurred_at, occurred_at_precision, acres,
+                description, reporter_org,
+                first_seen_at, last_seen_at
+            ) VALUES (?, ?, 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(source, external_id) DO UPDATE SET
+                last_seen_at = CURRENT_TIMESTAMP,
+                description = excluded.description,
+                acres = COALESCE(excluded.acres, fire_events.acres),
+                updated_at = CURRENT_TIMESTAMP
+        ''', (
+            source, external_id, latitude, longitude, county_fips, county_name,
+            occurred_at, occurred_at_precision, acres,
+            full_description, source_name or "",
+        ))
+        cursor.execute("SELECT id FROM fire_events WHERE source = ? AND external_id = ?", (source, external_id))
+        event_id = cursor.fetchone()[0]
+        if is_new:
+            incident_id = find_or_create_incident_for_detection(
+                cursor, latitude, longitude, occurred_at, county_fips, county_name
+            )
+            cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
+            record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
+                                    to_status="pending", to_tier="unverified")
+        conn.commit()
+        event = _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
+        return event, is_new
+    finally:
+        conn.close()
+
+
+def add_ingest_media_links(event_id: int, urls: List[str]) -> None:
+    """Best-effort external (CDN) media links attached to an ingested report.
+    Stored as fire_event_media rows with kind='external_link' so they show
+    up in the admin single-report view, but with no local file behind them -
+    unlike photo/document uploads, these are often expiring CDN URLs and are
+    never fetched/stored server-side."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        for url in urls:
+            try:
+                cursor.execute(
+                    """INSERT INTO fire_event_media
+                       (event_id, stored_filename, original_filename, content_type, kind)
+                       VALUES (?, ?, ?, 'text/uri-list', 'external_link')""",
+                    (event_id, url[:2000], url[:2000]),
+                )
+            except sqlite3.IntegrityError:
+                continue
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def record_fire_weather_alert_day(

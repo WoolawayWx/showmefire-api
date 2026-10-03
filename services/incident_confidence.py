@@ -17,6 +17,9 @@ near-empty labels. Signals (max points):
   land cover   -20  bright cropland / open-water pixels can cause false detections
   long-lived   -15  active for over a week (a recurring heat source, not a fire)
   public review +/- admin-approved feedback on the incident
+  OSINT report  +8  a social-monitoring lead (e.g. Muse/Facebook) is also
+                    linked to this cluster - corroboration, not proof, since
+                    it carries none of the satellite signals above
 
 Enabled with FIRE_INCIDENT_CONFIDENCE_VERSION=v2 (default v1 = legacy scorer).
 """
@@ -39,6 +42,15 @@ LONG_LIVED_DAYS = 7
 LONG_LIVED_PENALTY = 15
 HIGH_THRESHOLD = 65
 MODERATE_THRESHOLD = 40
+
+# Sources that carry the satellite-style signals this scorer is built around.
+# Anything else linked to an incident (e.g. an ingest-source slug like
+# "muse") is treated as an independent human/OSINT lead worth a small
+# corroboration boost - it's a different kind of evidence, not a stronger
+# version of the same one, so it earns a flat bonus rather than feeding the
+# satellite-tuned components above.
+_SATELLITE_AND_KNOWN_SOURCES = {"modis", "viirs", "ngfs", "user_submission", "official"}
+OSINT_CORROBORATION_BONUS = 8
 
 
 def use_v2() -> bool:
@@ -144,14 +156,19 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
     if rising:
         factors.append({"label": "Heat output is rising", "effect": "raises", "points": 2})
 
-    # --- cross-sensor agreement -------------------------------------------
-    sources = {str(m.get("source") or "").lower() for m in members} - {""}
-    if "ngfs" in sources and sources & {"viirs", "modis"}:
+    # --- cross-sensor agreement ---------------------------------------
+    # Restricted to actual satellite sources - an OSINT lead (e.g. Muse)
+    # sharing the cluster is real corroboration but not a second *sensor*,
+    # so it must not count here (it gets its own bonus below instead).
+    satellite_sources = {str(m.get("source") or "").lower() for m in members} & {"modis", "viirs", "ngfs"}
+    if "ngfs" in satellite_sources and satellite_sources & {"viirs", "modis"}:
         cross_unit, cross_label = 1.0, "Confirmed by more than one satellite (GOES + polar orbiter)"
-    elif len(sources) > 1:
+    elif len(satellite_sources) > 1:
         cross_unit, cross_label = 0.8, "Confirmed by more than one satellite"
-    else:
+    elif satellite_sources:
         cross_unit, cross_label = 0.4, "Only one satellite source has seen it"
+    else:
+        cross_unit, cross_label = 0.0, "No satellite source has seen it yet"
     cross = 20 * cross_unit
     _factor(factors, cross_label, cross, 20)
 
@@ -192,7 +209,17 @@ def score_incident(incident: dict, members: list[dict]) -> dict:
         review -= 10
         factors.append({"label": "Reported as a controlled burn", "effect": "lowers", "points": -10})
 
-    total = persistence + intensity + cross + grade - land_penalty - long_penalty + review
+    # --- OSINT corroboration (e.g. a Muse/Facebook lead on this cluster) ---
+    osint_sources = {str(m.get("source") or "").lower() for m in members} - _SATELLITE_AND_KNOWN_SOURCES
+    osint_bonus = 0.0
+    if osint_sources:
+        osint_bonus = OSINT_CORROBORATION_BONUS
+        factors.append({
+            "label": "Also reported by an OSINT/social-monitoring source (e.g. Muse)",
+            "effect": "raises", "points": OSINT_CORROBORATION_BONUS,
+        })
+
+    total = persistence + intensity + cross + grade - land_penalty - long_penalty + review + osint_bonus
     score = int(round(max(0.0, min(100.0, total))))
     return {"score": score, "label": _label(score), "factors": factors,
             "reasons": [f["label"] for f in factors], "method": "rules-v2"}

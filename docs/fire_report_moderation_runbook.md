@@ -51,6 +51,36 @@ MDC, MO DNR, USFS Mark Twain National Forest, or a NFIRS-linked incident
 number. A news article alone is not sufficient for `official_source_confirmed`
 unless it quotes an official incident number or department statement.
 
+## OSINT/social-monitoring ingested reports (`source='muse'` etc.)
+
+`POST /fires/ingest/reports` is a Bearer-API-key-authenticated write path for
+automated social-media monitoring tools (e.g. Muse scanning department
+Facebook pages) to submit fire leads without a human re-typing them. These
+rows land in the exact same pending queue as public submissions and use the
+same approve/reject UI - there is no separate review surface.
+
+What's different about them:
+
+- **`source` is the tool's slug** (e.g. `muse`), not `user_submission`. Use
+  this to filter the queue (`GET /api/admin/fires/reports?status=pending`
+  and check `source`) if you want to triage OSINT leads separately.
+- **Coordinates are frequently geocoded from a county/city string**, not a
+  precise pin - the submitting tool rarely has exact lat/lng from a social
+  post. Treat the pin as approximate and correct it via
+  `PUT /api/admin/fires/events/{id}` if you can pin down a better location.
+- **The original post link is folded into `description`** (a trailing
+  `Source: <url>` line) rather than stored in `official_source_ref` - that
+  field is reserved for an official citation you add yourself and is
+  cleared to empty on a normal `admin_reviewed` approval, so it would lose
+  the Facebook link if reused for it.
+- **Default to `admin_reviewed`**, same as any other unverified report.
+  Only use `official_source_confirmed` if you can independently verify the
+  post against NFIRS, MDC, an official department statement, or similar -
+  the social post itself is never sufficient grounds for that tier.
+- Ingest sources and their API keys are managed via
+  `POST /api/admin/fires/ingest-sources` (create, returns the raw key once)
+  and `POST /api/admin/fires/ingest-sources/{id}/revoke`.
+
 ## Abuse-spike playbook
 
 If the pending queue fills with obvious spam or the throttle table shows
