@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.security import verify_token
-from forecast.endOfDayReport import run_report
+from forecast.endOfDayReport import run_report, STABLE_FORECAST_GLOB
 from core.config import REPORTS_DIR
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ def _require_admin(token: Optional[str] = None) -> str:
 class RerunRequest(BaseModel):
     date: str
     suffix: Optional[str] = ""
-    forecast_glob: Optional[str] = "station_forecasts_*.json"
+    forecast_glob: Optional[str] = STABLE_FORECAST_GLOB
 
 
 @router.post("/rerun")
@@ -46,7 +46,7 @@ async def rerun_verification(payload: RerunRequest, token: Optional[str] = None)
         generate_rtma_peak_for_verification(payload.date)
         report = run_report(
             date=payload.date,
-            forecast_glob=payload.forecast_glob or "station_forecasts_*.json",
+            forecast_glob=payload.forecast_glob or STABLE_FORECAST_GLOB,
             report_suffix=payload.suffix or "",
         )
     except RuntimeError as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
@@ -258,10 +259,16 @@ def prune_hot_storage(forecast_root: str | Path, *, archive_verified: bool, now:
                     removed_files += 1
                 connection.execute("UPDATE forecast_assets SET local_path=NULL WHERE rowid=?", (asset["rowid"],))
     cache_root = root / "download-cache"
-    cache_cutoff = (current - timedelta(days=7)).timestamp()
+    # Each cycle's raw downloads are ~6 GB and are archived to R2 on publish,
+    # so only keep enough locally to retry a recent cycle.
+    cache_days = float(os.getenv("SMF_FORECAST_V1_CACHE_RETENTION_DAYS", "2"))
+    cache_cutoff = (current - timedelta(days=cache_days)).timestamp()
     if cache_root.is_dir():
         for path in cache_root.rglob("*"):
             if path.is_file() and path.stat().st_mtime < cache_cutoff:
                 path.unlink()
                 removed_cache += 1
+        for cycle_dir in sorted(cache_root.rglob("*"), reverse=True):
+            if cycle_dir.is_dir() and not any(cycle_dir.iterdir()):
+                cycle_dir.rmdir()
     return {"pointRunsPruned": len(old_runs), "artifactFilesRemoved": removed_files, "cacheFilesRemoved": removed_cache}

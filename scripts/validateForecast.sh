@@ -62,7 +62,7 @@ HAS_09Z=false
 if [[ -f "archive/forecasts/station_forecasts_${TODAY_COMPACT}_09.json" ]]; then
 	HAS_09Z=true
 	"$PYTHON" forecast/endOfDayReport.py \
-		--forecast-glob "station_forecasts_*_09.json" \
+		--forecast-glob "station_forecasts_[0-9]*_09.json" \
 		--report-suffix 09z
 	"$PYTHON" scripts/compare_09z_rtma.py --date "$TODAY_DASH"
 else

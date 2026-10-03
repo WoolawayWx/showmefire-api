@@ -217,7 +217,7 @@ def main():
     
     # Process all forecast files
     all_comparisons = []
-    forecast_files = sorted(list(Path(args.forecast_dir).glob("station_forecasts_*.json")))
+    forecast_files = sorted(list(Path(args.forecast_dir).glob("station_forecasts_[0-9]*.json")))
     
     # Filter by date if specified
     if args.date:

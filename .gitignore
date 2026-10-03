@@ -47,3 +47,7 @@ plots/
 .docker-test-data/
 fire-media/*
 maps/shapefiles/MO_MoDOT_Roads_Arcs/*
+
+# Local backups
+*.bak
+*.bak/

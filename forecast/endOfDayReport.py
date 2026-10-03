@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 ARCHIVE_DIR = Path(BASE_DIR) / "archive"
 FORECAST_DIR = ARCHIVE_DIR / "forecasts"
+# Date-stamped stable forecasts only; a bare "station_forecasts_*" would also match
+# station_forecasts_model_shadow_* and station_forecasts_beta_*.
+STABLE_FORECAST_GLOB = "station_forecasts_[0-9]*.json"
 RAW_DATA_DIR = ARCHIVE_DIR / "raw_data"
 REPORTS_DIR = Path(BASE_DIR) / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -123,7 +126,7 @@ def extract_date_token(filename: str):
     return m.group(1) if m else None
 
 
-def find_matching_files(forecast_dir, raw_dir, forecast_glob_pattern="station_forecasts_*.json"):
+def find_matching_files(forecast_dir, raw_dir, forecast_glob_pattern=STABLE_FORECAST_GLOB):
     """
     Attempts to find a forecast file and a raw data file that share the same date.
     Returns (forecast_data, forecast_file, raw_data, raw_file)
@@ -171,7 +174,7 @@ def find_matching_files(forecast_dir, raw_dir, forecast_glob_pattern="station_fo
         
     return fc_data, fc_file, raw_data, raw_file
 
-def find_files_for_date(forecast_dir, raw_dir, target_date_str, forecast_glob_pattern="station_forecasts_*.json"):
+def find_files_for_date(forecast_dir, raw_dir, target_date_str, forecast_glob_pattern=STABLE_FORECAST_GLOB):
     """Like find_matching_files, but targets a specific YYYYMMDD date instead
     of always taking the latest files - used for rerunning verification for a
     past date. Kept separate from find_matching_files so the no-`--date` cron
@@ -739,7 +742,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="End-of-day forecast validation report generator")
     parser.add_argument(
         "--forecast-glob",
-        default="station_forecasts_*.json",
+        default=STABLE_FORECAST_GLOB,
         help="Glob pattern in archive/forecasts used to select forecast JSON files",
     )
     parser.add_argument(
@@ -757,7 +760,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_report(date=None, forecast_glob="station_forecasts_*.json", report_suffix=""):
+def run_report(date=None, forecast_glob=STABLE_FORECAST_GLOB, report_suffix=""):
     """Core report-generation logic, callable directly (e.g. from an admin
     endpoint) as well as via the CLI. Raises RuntimeError on any condition
     that should abort the run - callers that need process-exit-on-failure
