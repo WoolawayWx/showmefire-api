@@ -8,17 +8,21 @@ code itself is the credential, and it can be revoked at any time.
 """
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from core import security
 from core.database import (
+    count_burn_ban_submissions,
+    count_fire_events,
     create_display_access_code,
+    get_display_code_settings,
     list_active_display_access_codes,
     list_display_access_codes,
     revoke_display_access_code,
+    set_display_code_settings,
     touch_display_access_code_usage,
 )
 from core.security import hash_password, verify_password, verify_token
@@ -85,6 +89,44 @@ def display_logout(response: Response):
     return {"success": True}
 
 
+def _require_display_code_id(request: Request) -> int:
+    token = request.cookies.get(security.DISPLAY_ACCESS_COOKIE_NAME)
+    code_id = security.verify_display_access_token(token)
+    if code_id is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return code_id
+
+
+@router.get("/api/display/review-queue")
+def display_review_queue(request: Request):
+    """Pending-item counts (unreviewed fire reports, unreviewed burn-ban
+    submissions) for the kiosk sidebar. Reuses the same data the admin
+    badge counts draw from, but exposes only counts - not report contents
+    or submitter contact info - and is gated by the display code instead of
+    a full admin session, so the kiosk can show "N awaiting review" without
+    needing an admin logged in."""
+    _require_display_code_id(request)
+    pending_reports = count_fire_events(status="pending")
+    pending_burn_bans = count_burn_ban_submissions(status="pending")
+    return {
+        "success": True,
+        "pending_fire_reports": pending_reports,
+        "pending_burn_bans": pending_burn_bans,
+    }
+
+
+@router.get("/api/display/settings")
+def display_settings(request: Request):
+    """Per-screen config (which views/tiles to show, timing, confidence
+    threshold) so one code system can drive multiple kiosks that each want
+    something different - see core.database.DEFAULT_DISPLAY_SETTINGS.
+    code_id is included so the kiosk's own in-screen settings editor (gated
+    behind a fresh admin login, see pages/display/dashboard.vue) knows which
+    code's settings to fetch/save via the /api/admin/display-codes endpoints."""
+    code_id = _require_display_code_id(request)
+    return {"success": True, "code_id": code_id, "settings": get_display_code_settings(code_id)}
+
+
 class DisplayCodeCreateRequest(BaseModel):
     label: str = ""
     valid_days: int = Field(default=180, ge=1, le=DISPLAY_MAX_VALID_DAYS)
@@ -125,3 +167,21 @@ def admin_revoke_display_code(code_id: int, token: Optional[str] = None):
     if not revoke_display_access_code(code_id):
         raise HTTPException(status_code=404, detail="Code not found or already revoked")
     return {"success": True}
+
+
+@router.get("/api/admin/display-codes/{code_id}/settings")
+def admin_get_display_code_settings(code_id: int, token: Optional[str] = None):
+    _require_admin(token)
+    return {"success": True, "settings": get_display_code_settings(code_id)}
+
+
+@router.put("/api/admin/display-codes/{code_id}/settings")
+def admin_set_display_code_settings(code_id: int, settings: Dict[str, Any], token: Optional[str] = None):
+    """Body is the complete settings object (the admin UI always submits the
+    full, already-merged-with-defaults form) - stored as-is; new default keys
+    added later still apply to old codes via merge_display_settings at read
+    time, so this never needs a migration when the schema grows."""
+    _require_admin(token)
+    if not set_display_code_settings(code_id, settings):
+        raise HTTPException(status_code=404, detail="Code not found")
+    return {"success": True, "settings": get_display_code_settings(code_id)}

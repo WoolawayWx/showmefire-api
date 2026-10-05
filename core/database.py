@@ -2944,6 +2944,22 @@ def list_fire_events(
         conn.close()
 
 
+def count_fire_events(status: Optional[str] = None) -> int:
+    """True count, unlike list_fire_events (hard-capped at 500) - for
+    badge/tile displays that need the real backlog size, not a page of it."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute("SELECT COUNT(*) FROM fire_events WHERE status = ?", (status,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM fire_events")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+
 INCIDENT_CLUSTER_RADIUS_KM = float(os.getenv("FIRE_INCIDENT_CLUSTER_RADIUS_KM", "2.0"))
 INCIDENT_CLUSTER_WINDOW_HOURS = float(os.getenv("FIRE_INCIDENT_CLUSTER_WINDOW_HOURS", "48.0"))
 
@@ -3424,7 +3440,7 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source,
+            SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source, status,
                    bright_t7, land_cover, detection_confidence_pct, footprint_geojson
             FROM fire_events
             WHERE incident_id = ?
@@ -3512,12 +3528,18 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
 def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
     """Feedback awaiting admin review, most recent first, joined with just
     enough incident context (slug/county) for the moderation queue to link
-    back to the incident without a second round-trip per row."""
+    back to the incident without a second round-trip per row. Each item also
+    carries the underlying incident's detection sources (see
+    _fire_incident_sources) so the queue can show, at a glance, whether this
+    feedback is about a satellite detection, a user report, an official
+    record, or an OSINT ingest source - not just the feedback submitter's own
+    (always-public) origin."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
     try:
-        rows = conn.execute(
+        cursor.execute(
             '''SELECT fb.id, fb.incident_id, fb.classification, fb.note, fb.contact, fb.created_at,
                       fi.public_slug, fi.county_name, fi.detection_count
                FROM fire_incident_feedback fb
@@ -3526,8 +3548,11 @@ def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
                ORDER BY fb.created_at DESC
                LIMIT ?''',
             (max(1, min(limit, 500)),),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        )
+        items = [dict(row) for row in cursor.fetchall()]
+        for item in items:
+            item["sources"] = _fire_incident_sources(cursor, item["incident_id"])
+        return items
     finally:
         conn.close()
 
@@ -4370,6 +4395,54 @@ def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
     )
 
 
+# Per-code kiosk configuration (routers/display_auth.py). NULL/missing keys
+# on a stored code fall back to these - see _merge_display_settings. Keeping
+# the schema's authoritative defaults here, not in the router, so the DB
+# layer and any future script/admin tooling share one source of truth.
+DEFAULT_DISPLAY_SETTINGS: Dict = {
+    "views": {
+        "danger": True,
+        "peak": True,
+        "observedPeak": True,
+        "conditions": True,
+        "burnban": True,
+        "detections": True,
+        "spotlight": True,
+    },
+    "tiles": {
+        "incidentsToday": True,
+        "pendingReports": True,
+        "burnBans": True,
+        "pendingBurnBans": True,
+        "alerts": True,
+        "redFlag": True,
+        "elevated": True,
+        "stationsReporting": True,
+    },
+    "timing": {
+        "viewRotateMs": 25_000,
+        "detectionsStaticMs": 8_000,
+        "detectionsAnimateMs": 15_000,
+        "spotlightCycleMs": 11_000,
+        "pollMs": 60_000,
+    },
+    "minConfidencePct": 70,
+}
+
+
+def merge_display_settings(stored: Optional[Dict]) -> Dict:
+    """One level of dict-merge over DEFAULT_DISPLAY_SETTINGS - a code only
+    needs to persist the keys it overrides, everything else (including keys
+    added to the schema later) keeps working via the default."""
+    merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_DISPLAY_SETTINGS.items()}
+    for key, value in (stored or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _ensure_display_access_tables(cursor: sqlite3.Cursor) -> None:
     """Shared access codes for the read-only kiosk display at /display/dashboard."""
     cursor.execute('''
@@ -4388,6 +4461,12 @@ def _ensure_display_access_tables(cursor: sqlite3.Cursor) -> None:
         'CREATE INDEX IF NOT EXISTS idx_display_access_codes_active '
         'ON display_access_codes(revoked_at, expires_at)'
     )
+    # Per-screen overrides (views shown, tile selection, timing, confidence
+    # threshold) so the same code system can drive multiple kiosks that each
+    # want something different - NULL means "use DEFAULT_DISPLAY_SETTINGS".
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(display_access_codes)").fetchall()}
+    if "settings_json" not in columns:
+        cursor.execute("ALTER TABLE display_access_codes ADD COLUMN settings_json TEXT")
 
 
 def create_display_access_code(*, label: str, code_hash: str, created_by: str, expires_at: str) -> Dict:
@@ -4459,6 +4538,46 @@ def revoke_display_access_code(code_id: int) -> bool:
             'UPDATE display_access_codes SET revoked_at = CURRENT_TIMESTAMP '
             'WHERE id = ? AND revoked_at IS NULL',
             (code_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_display_access_code(code_id: int) -> Optional[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        row = cursor.execute('SELECT * FROM display_access_codes WHERE id = ?', (code_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_display_code_settings(code_id: int) -> Dict:
+    """Always returns a complete settings dict (stored overrides merged onto
+    DEFAULT_DISPLAY_SETTINGS), never raw/partial data or None."""
+    row = get_display_access_code(code_id)
+    stored = None
+    if row and row.get("settings_json"):
+        try:
+            stored = json.loads(row["settings_json"])
+        except (TypeError, ValueError):
+            stored = None
+    return merge_display_settings(stored)
+
+
+def set_display_code_settings(code_id: int, settings: Dict) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'UPDATE display_access_codes SET settings_json = ? WHERE id = ?',
+            (json.dumps(settings), code_id),
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -5315,6 +5434,22 @@ def list_burn_ban_submissions(
             _burn_ban_row_to_dict(row, admin=admin)
             for row in cursor.fetchall()
         ]
+    finally:
+        conn.close()
+
+
+def count_burn_ban_submissions(status: Optional[str] = None) -> int:
+    """True count, for badge/tile displays - list_burn_ban_submissions takes
+    a limit/offset meant for paginated moderation views, not a dashboard tile."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        if status:
+            cursor.execute("SELECT COUNT(*) FROM burn_ban_submissions WHERE status = ?", (status,))
+        else:
+            cursor.execute("SELECT COUNT(*) FROM burn_ban_submissions")
+        return cursor.fetchone()[0]
     finally:
         conn.close()
 
