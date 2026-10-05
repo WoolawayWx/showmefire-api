@@ -1346,6 +1346,11 @@ def init_database():
         cursor.execute("ALTER TABLE newsletter_deliveries ADD COLUMN claimed_at TIMESTAMP")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_newsletter_deliveries_status ON newsletter_deliveries(status, created_at)')
 
+    # 25. Shared 6-digit access codes for the read-only kiosk display
+    # (routers/display_auth.py) - admin-minted, long-lived, independent of
+    # the admin/graphics login systems.
+    _ensure_display_access_tables(cursor)
+
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {db_path}")
@@ -4363,6 +4368,102 @@ def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
         'CREATE INDEX IF NOT EXISTS idx_fire_weather_alert_history_county_date '
         'ON fire_weather_alert_history(county_fips, alert_date)'
     )
+
+
+def _ensure_display_access_tables(cursor: sqlite3.Cursor) -> None:
+    """Shared access codes for the read-only kiosk display at /display/dashboard."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS display_access_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL DEFAULT '',
+            code_hash TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            revoked_at TIMESTAMP,
+            last_used_at TIMESTAMP
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_display_access_codes_active '
+        'ON display_access_codes(revoked_at, expires_at)'
+    )
+
+
+def create_display_access_code(*, label: str, code_hash: str, created_by: str, expires_at: str) -> Dict:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO display_access_codes (label, code_hash, created_by, expires_at)
+            VALUES (?, ?, ?, ?)
+        ''', (label, code_hash, created_by, expires_at))
+        code_id = cursor.lastrowid
+        conn.commit()
+        cursor.execute('SELECT * FROM display_access_codes WHERE id = ?', (code_id,))
+        return dict(cursor.fetchone())
+    finally:
+        conn.close()
+
+
+def list_display_access_codes() -> List[Dict]:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM display_access_codes ORDER BY created_at DESC')
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def list_active_display_access_codes() -> List[Dict]:
+    """Candidates eligible to be matched against a supplied login code."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            SELECT * FROM display_access_codes
+            WHERE revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+        ''')
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def touch_display_access_code_usage(code_id: int) -> None:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'UPDATE display_access_codes SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?',
+            (code_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def revoke_display_access_code(code_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'UPDATE display_access_codes SET revoked_at = CURRENT_TIMESTAMP '
+            'WHERE id = ? AND revoked_at IS NULL',
+            (code_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:

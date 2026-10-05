@@ -25,6 +25,7 @@ ACCESS_COOKIE_NAME = os.getenv("ACCESS_COOKIE_NAME", "admin_access")
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "admin_refresh")
 GRAPHICS_ACCESS_COOKIE_NAME = os.getenv("GRAPHICS_ACCESS_COOKIE_NAME", "graphics_access")
 GRAPHICS_REFRESH_COOKIE_NAME = os.getenv("GRAPHICS_REFRESH_COOKIE_NAME", "graphics_refresh")
+DISPLAY_ACCESS_COOKIE_NAME = os.getenv("DISPLAY_ACCESS_COOKIE_NAME", "display_access")
 AUTH_COOKIE_SECURE = os.getenv(
     "AUTH_COOKIE_SECURE",
     "true" if os.getenv("ENVIRONMENT", "development").lower() == "production" else "false",
@@ -153,4 +154,25 @@ def verify_graphics_token(token: Optional[str] = None, expected_type: str = "gra
             return None
         return payload
     except JWTError:
+        return None
+
+def create_display_access_token(code_id: int, expires_delta: timedelta) -> str:
+    """Session token for the read-only kiosk display, scoped to a single
+    shared access code (see routers/display_auth.py). Its lifetime tracks
+    the code's own expiry rather than the short admin/graphics sessions."""
+    return create_access_token(
+        {"sub": str(code_id), "type": "display_access"},
+        expires_delta,
+    )
+
+def verify_display_access_token(token: Optional[str] = None) -> Optional[int]:
+    """Verify a display-access JWT and return the display_access_codes row id."""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "display_access":
+            return None
+        return int(payload.get("sub"))
+    except (JWTError, TypeError, ValueError):
         return None
