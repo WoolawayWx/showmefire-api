@@ -4467,18 +4467,39 @@ def _ensure_display_access_tables(cursor: sqlite3.Cursor) -> None:
     columns = {row[1] for row in cursor.execute("PRAGMA table_info(display_access_codes)").fetchall()}
     if "settings_json" not in columns:
         cursor.execute("ALTER TABLE display_access_codes ADD COLUMN settings_json TEXT")
+    # Plaintext copy of the code so an admin can look it up again later
+    # instead of it only ever being shown once at creation time. code_hash
+    # remains the source of truth for login verification; this column is
+    # purely for the admin dashboard's "view code" display. Codes created
+    # before this column existed will have NULL here and can't be recovered
+    # - they must be revoked and reissued if the label needs its code shown.
+    if "code_plain" not in columns:
+        cursor.execute("ALTER TABLE display_access_codes ADD COLUMN code_plain TEXT")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS display_access_code_usages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_id INTEGER NOT NULL REFERENCES display_access_codes(id),
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ip_address TEXT NOT NULL DEFAULT '',
+            user_agent TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+    cursor.execute(
+        'CREATE INDEX IF NOT EXISTS idx_display_access_code_usages_code_id '
+        'ON display_access_code_usages(code_id, used_at DESC)'
+    )
 
 
-def create_display_access_code(*, label: str, code_hash: str, created_by: str, expires_at: str) -> Dict:
+def create_display_access_code(*, label: str, code_hash: str, code_plain: str, created_by: str, expires_at: str) -> Dict:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO display_access_codes (label, code_hash, created_by, expires_at)
-            VALUES (?, ?, ?, ?)
-        ''', (label, code_hash, created_by, expires_at))
+            INSERT INTO display_access_codes (label, code_hash, code_plain, created_by, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (label, code_hash, code_plain, created_by, expires_at))
         code_id = cursor.lastrowid
         conn.commit()
         cursor.execute('SELECT * FROM display_access_codes WHERE id = ?', (code_id,))
@@ -4515,7 +4536,7 @@ def list_active_display_access_codes() -> List[Dict]:
         conn.close()
 
 
-def touch_display_access_code_usage(code_id: int) -> None:
+def touch_display_access_code_usage(code_id: int, *, ip_address: str = "", user_agent: str = "") -> None:
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -4524,7 +4545,39 @@ def touch_display_access_code_usage(code_id: int) -> None:
             'UPDATE display_access_codes SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?',
             (code_id,),
         )
+        cursor.execute(
+            'INSERT INTO display_access_code_usages (code_id, ip_address, user_agent) VALUES (?, ?, ?)',
+            (code_id, ip_address, user_agent),
+        )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def list_display_access_code_usages(code_id: int, limit: int = 50) -> List[Dict]:
+    """Most-recent-first login history for one code, for the admin dashboard's
+    "who's used this code" view - see touch_display_access_code_usage."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'SELECT * FROM display_access_code_usages WHERE code_id = ? ORDER BY used_at DESC LIMIT ?',
+            (code_id, limit),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def count_display_access_code_usages(code_id: int) -> int:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT COUNT(*) FROM display_access_code_usages WHERE code_id = ?', (code_id,))
+        return int(cursor.fetchone()[0])
     finally:
         conn.close()
 

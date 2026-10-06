@@ -18,8 +18,10 @@ from core.database import (
     count_burn_ban_submissions,
     count_fire_events,
     create_display_access_code,
+    get_display_access_code,
     get_display_code_settings,
     list_active_display_access_codes,
+    list_display_access_code_usages,
     list_display_access_codes,
     revoke_display_access_code,
     set_display_code_settings,
@@ -60,7 +62,7 @@ class DisplayLoginRequest(BaseModel):
 
 
 @router.post("/api/display/auth/login")
-def display_login(payload: DisplayLoginRequest, response: Response):
+def display_login(payload: DisplayLoginRequest, request: Request, response: Response):
     now = datetime.now(timezone.utc)
     for candidate in list_active_display_access_codes():
         if not verify_password(payload.code, candidate["code_hash"]):
@@ -71,7 +73,11 @@ def display_login(payload: DisplayLoginRequest, response: Response):
             continue
         token = security.create_display_access_token(candidate["id"], remaining)
         _set_display_cookie(response, token, int(remaining.total_seconds()))
-        touch_display_access_code_usage(candidate["id"])
+        touch_display_access_code_usage(
+            candidate["id"],
+            ip_address=request.client.host if request.client else "",
+            user_agent=request.headers.get("user-agent", ""),
+        )
         return {"success": True}
     raise HTTPException(status_code=401, detail="Invalid or expired code")
 
@@ -121,10 +127,44 @@ def display_settings(request: Request):
     threshold) so one code system can drive multiple kiosks that each want
     something different - see core.database.DEFAULT_DISPLAY_SETTINGS.
     code_id is included so the kiosk's own in-screen settings editor (gated
-    behind a fresh admin login, see pages/display/dashboard.vue) knows which
-    code's settings to fetch/save via the /api/admin/display-codes endpoints."""
+    behind re-entering this code, see /api/display/settings/verify and
+    pages/display/dashboard.vue) knows which code's settings it's editing."""
     code_id = _require_display_code_id(request)
     return {"success": True, "code_id": code_id, "settings": get_display_code_settings(code_id)}
+
+
+class DisplaySettingsVerifyRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+@router.post("/api/display/settings/verify")
+def display_settings_verify(payload: DisplaySettingsVerifyRequest, request: Request):
+    """Lets whoever is at the kiosk edit its own settings by re-entering the
+    same 6-digit code already on the door, instead of requiring a full admin
+    login (see components/display/SettingsModal.vue). The display-access
+    cookie already proves "knows a valid code" - this re-checks the code
+    against this specific kiosk's code_id and, on match, mints a short-lived
+    token the editor UI sends back with the save request."""
+    code_id = _require_display_code_id(request)
+    row = get_display_access_code(code_id)
+    if not row or row.get("revoked_at") or not verify_password(payload.code, row["code_hash"]):
+        raise HTTPException(status_code=401, detail="Incorrect code")
+    return {"success": True, "settings_token": security.create_display_settings_token(code_id)}
+
+
+class DisplaySettingsSaveRequest(BaseModel):
+    settings_token: str
+    settings: Dict[str, Any]
+
+
+@router.put("/api/display/settings")
+def display_settings_save(payload: DisplaySettingsSaveRequest, request: Request):
+    code_id = _require_display_code_id(request)
+    if not security.verify_display_settings_token(payload.settings_token, code_id):
+        raise HTTPException(status_code=401, detail="Re-enter the display code to save changes")
+    if not set_display_code_settings(code_id, payload.settings):
+        raise HTTPException(status_code=404, detail="Code not found")
+    return {"success": True, "settings": get_display_code_settings(code_id)}
 
 
 class DisplayCodeCreateRequest(BaseModel):
@@ -138,6 +178,7 @@ def admin_list_display_codes(token: Optional[str] = None):
     codes = list_display_access_codes()
     for item in codes:
         item.pop("code_hash", None)
+        item["code"] = item.pop("code_plain", None)
     return {"success": True, "codes": codes}
 
 
@@ -149,6 +190,7 @@ def admin_create_display_code(payload: DisplayCodeCreateRequest, token: Optional
     row = create_display_access_code(
         label=payload.label.strip(),
         code_hash=hash_password(code),
+        code_plain=code,
         created_by=admin_email,
         expires_at=expires_at.isoformat(),
     )
@@ -167,6 +209,14 @@ def admin_revoke_display_code(code_id: int, token: Optional[str] = None):
     if not revoke_display_access_code(code_id):
         raise HTTPException(status_code=404, detail="Code not found or already revoked")
     return {"success": True}
+
+
+@router.get("/api/admin/display-codes/{code_id}/usage")
+def admin_get_display_code_usage(code_id: int, token: Optional[str] = None):
+    """Recent logins for this code, so an admin can see who's actually using
+    a shared code (by IP/user-agent, since there's no per-user identity)."""
+    _require_admin(token)
+    return {"success": True, "usage": list_display_access_code_usages(code_id)}
 
 
 @router.get("/api/admin/display-codes/{code_id}/settings")

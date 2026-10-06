@@ -21,6 +21,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(
 )
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 CONFIRM_TOKEN_EXPIRE_MINUTES = int(os.getenv("ADMIN_CONFIRM_TOKEN_EXPIRE_MINUTES", "2"))
+DISPLAY_SETTINGS_TOKEN_EXPIRE_MINUTES = int(os.getenv("DISPLAY_SETTINGS_TOKEN_EXPIRE_MINUTES", "15"))
 ACCESS_COOKIE_NAME = os.getenv("ACCESS_COOKIE_NAME", "admin_access")
 REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "admin_refresh")
 GRAPHICS_ACCESS_COOKIE_NAME = os.getenv("GRAPHICS_ACCESS_COOKIE_NAME", "graphics_access")
@@ -176,3 +177,30 @@ def verify_display_access_token(token: Optional[str] = None) -> Optional[int]:
         return int(payload.get("sub"))
     except (JWTError, TypeError, ValueError):
         return None
+
+
+def create_display_settings_token(code_id: int) -> str:
+    """Short-lived proof that whoever is sitting at this kiosk just re-entered
+    its 6-digit code, authorizing them to edit this screen's settings (see
+    routers/display_auth.py). Scoped to the same code_id as the viewing
+    session so it can't be replayed against a different kiosk's settings."""
+    return create_access_token(
+        {"sub": str(code_id), "type": "display_settings"},
+        timedelta(minutes=DISPLAY_SETTINGS_TOKEN_EXPIRE_MINUTES),
+    )
+
+
+def verify_display_settings_token(token: Optional[str], code_id: int) -> bool:
+    """Verify a display-settings confirm token was minted for exactly this code_id."""
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    if payload.get("type") != "display_settings":
+        return False
+    try:
+        return int(payload.get("sub")) == code_id
+    except (TypeError, ValueError):
+        return False
