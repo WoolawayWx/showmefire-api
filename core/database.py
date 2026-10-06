@@ -3304,6 +3304,57 @@ def _fire_incident_sources(cursor: sqlite3.Cursor, incident_id: int) -> Dict[str
     return {row["source"]: row["n"] for row in cursor.fetchall()}
 
 
+def _fire_incident_feedback_summary(cursor: sqlite3.Cursor, incident_id: int) -> Dict:
+    """Shared by list_fire_incidents and list_incidents_with_pending_members
+    so both "all incidents" and "pending review queue" views agree on what
+    counts as public feedback and what counts as admin-confirmed."""
+    feedback_rows = cursor.execute(
+        "SELECT classification, status, COUNT(*) as n FROM fire_incident_feedback WHERE incident_id = ? GROUP BY classification, status",
+        (incident_id,),
+    ).fetchall()
+    feedback_counts: Dict[str, int] = {}
+    approved_counts: Dict[str, int] = {}
+    pending_count = 0
+    for fb_row in feedback_rows:
+        feedback_counts[fb_row["classification"]] = feedback_counts.get(fb_row["classification"], 0) + fb_row["n"]
+        if fb_row["status"] == "approved":
+            approved_counts[fb_row["classification"]] = approved_counts.get(fb_row["classification"], 0) + fb_row["n"]
+        elif fb_row["status"] == "pending":
+            pending_count += fb_row["n"]
+    return {
+        "feedback_counts": feedback_counts,
+        "approved_feedback_counts": approved_counts,
+        "feedback_count": sum(feedback_counts.values()),
+        "pending_feedback_count": pending_count,
+        # 'Confirmed' requires an admin-approved 'confirmed_fire' submission -
+        # a pending or rejected one doesn't count (see set_fire_incident_feedback_status).
+        "confirmed": approved_counts.get("confirmed_fire", 0) > 0,
+    }
+
+
+# Sources that only ever arrive automatically from a satellite/ML pipeline,
+# with no human having looked at or corroborated this specific fire yet.
+# Used to decide "additional info" below - the opposite of these (a public
+# submission, an official record, or an OSINT lead someone wrote up) always
+# counts as additional info on its own.
+_RAW_SATELLITE_SOURCES = {"modis", "viirs", "ngfs"}
+
+
+def _incident_has_additional_info(incident: Dict, members: List[Dict]) -> bool:
+    """True once a pending incident has more going for it than a bare
+    satellite ping: public feedback, a non-satellite member (a user report,
+    an official record, an OSINT lead), or a member with a written
+    description/note - see /api/admin/fires/incidents/pending-queue."""
+    if incident.get("feedback_count"):
+        return True
+    for member in members:
+        if member.get("source") not in _RAW_SATELLITE_SOURCES:
+            return True
+        if (member.get("description") or "").strip():
+            return True
+    return False
+
+
 def list_fire_incidents(
     since: Optional[str] = None,
     until: Optional[str] = None,
@@ -3384,26 +3435,7 @@ def list_fire_incidents(
             ).fetchall()
             incident["county_names"] = [item[0] for item in counties]
             incident["county_name"] = ", ".join(incident["county_names"]) or incident.get("county_name")
-            feedback_rows = cursor.execute(
-                "SELECT classification, status, COUNT(*) as n FROM fire_incident_feedback WHERE incident_id = ? GROUP BY classification, status",
-                (incident["id"],),
-            ).fetchall()
-            feedback_counts: Dict[str, int] = {}
-            approved_counts: Dict[str, int] = {}
-            pending_count = 0
-            for fb_row in feedback_rows:
-                feedback_counts[fb_row["classification"]] = feedback_counts.get(fb_row["classification"], 0) + fb_row["n"]
-                if fb_row["status"] == "approved":
-                    approved_counts[fb_row["classification"]] = approved_counts.get(fb_row["classification"], 0) + fb_row["n"]
-                elif fb_row["status"] == "pending":
-                    pending_count += fb_row["n"]
-            incident["feedback_counts"] = feedback_counts
-            incident["approved_feedback_counts"] = approved_counts
-            incident["feedback_count"] = sum(feedback_counts.values())
-            incident["pending_feedback_count"] = pending_count
-            # 'Confirmed' requires an admin-approved 'confirmed_fire' submission -
-            # a pending or rejected one doesn't count (see set_fire_incident_feedback_status).
-            incident["confirmed"] = approved_counts.get("confirmed_fire", 0) > 0
+            incident.update(_fire_incident_feedback_summary(cursor, incident["id"]))
             incidents.append(incident)
         return incidents
     finally:
@@ -3842,6 +3874,8 @@ def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
             incident["members"] = members
             incident["status_counts"] = status_counts
             incident["pending_count"] = status_counts.get("pending", 0)
+            incident.update(_fire_incident_feedback_summary(cursor, incident["id"]))
+            incident["has_additional_info"] = _incident_has_additional_info(incident, members)
             incidents.append(incident)
         return incidents
     finally:

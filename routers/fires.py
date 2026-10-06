@@ -1244,7 +1244,7 @@ def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, token: Opt
 
 
 @router.get("/api/admin/fires/incidents/pending-queue")
-def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 100):
+def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 100, has_additional_info: Optional[bool] = None):
     """Grouped moderation queue: every incident with at least one pending
     member, with a live per-status member breakdown and an incident_confidence
     reading (when FIRE_INCIDENT_CONFIDENCE_VERSION=v2) - lets a moderator
@@ -1253,11 +1253,19 @@ def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 
     linked to any incident yet (e.g. a fresh public submission, which only
     joins a cluster on approval - see correlate_report_with_incident) are not
     included here; fetch those with GET /api/admin/fires/reports?
-    status=pending&ungrouped_only=true (admin only)."""
+    status=pending&ungrouped_only=true (admin only).
+
+    has_additional_info=true narrows the list to incidents with something
+    beyond a bare satellite ping - public feedback, a non-satellite member,
+    or a written description (see core.database._incident_has_additional_info)
+    - so a moderator can triage the ones worth a closer look first without
+    paging through every raw MODIS/VIIRS/NGFS detection."""
     _require_admin(token)
     from services.incident_confidence import score_incident, use_v2
 
     incidents = list_incidents_with_pending_members(limit=limit)
+    if has_additional_info:
+        incidents = [incident for incident in incidents if incident.get("has_additional_info")]
     if use_v2():
         for incident in incidents:
             result = score_incident(incident, incident["members"])
