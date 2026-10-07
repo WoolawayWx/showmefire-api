@@ -16,6 +16,13 @@ notes, and uploaded proof files are admin-only.
 
 request_type is one of issue (report a ban), update (change the county's
 current ban, e.g. its expiration), or lift (report that the ban ended).
+
+GET /api/admin/burn-bans, GET /api/admin/burn-bans/{id}, and
+GET /api/admin/burn-bans/{id}/proof also accept a read-only Bearer API key
+(see create_burn_ban_verifier_key / POST /api/admin/burn-bans/verifier-keys)
+as an alternative to an admin session, for automated pre-publish review
+(e.g. the Burn Ban Verifier agent). Every mutating admin endpoint still
+requires a full admin session.
 """
 import hashlib
 import hmac
@@ -28,7 +35,7 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -36,16 +43,20 @@ from core.database import (
     consume_burn_ban_submission_quota,
     count_burn_ban_county_events_by_county,
     create_burn_ban_submission,
+    create_burn_ban_verifier_key,
     delete_burn_ban_submission,
     expire_confirmed_burn_bans_for_county,
     get_burn_ban_submission,
     get_burn_ban_upload_token_hash,
+    get_burn_ban_verifier_key,
     list_active_burn_bans,
     list_burn_ban_county_events,
     list_burn_ban_submissions,
+    list_burn_ban_verifier_keys,
     moderate_burn_ban_submission,
     purge_burn_ban_submission_pii,
     purge_burn_ban_throttle_rows,
+    revoke_burn_ban_verifier_key,
     set_burn_ban_notes,
     set_burn_ban_proof_file,
     update_burn_ban_submission,
@@ -96,6 +107,25 @@ def _require_admin(token: Optional[str] = None) -> str:
     if not email:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return email
+
+
+def _require_read_access(
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+) -> str:
+    """An admin session OR a read-only verifier Bearer API key (see
+    create_burn_ban_verifier_key). Used only on endpoints that expose the
+    pending-review queue and proof files to automated verification (e.g. the
+    Burn Ban Verifier agent) - every endpoint that moderates or mutates a
+    submission still requires a full admin session via _require_admin."""
+    email = verify_token(token)
+    if email:
+        return email
+    if authorization and authorization.lower().startswith("bearer "):
+        key = get_burn_ban_verifier_key(authorization[7:].strip())
+        if key:
+            return f"verifier:{key['name']}"
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _client_ip(request: Request) -> str:
@@ -813,8 +843,9 @@ def admin_list_burn_bans(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
 ):
-    _require_admin(token)
+    _require_read_access(token, authorization)
     if status and status not in STATUSES:
         raise HTTPException(status_code=400, detail=f"unknown status: {status!r}")
     items = list_burn_ban_submissions(status=status, limit=limit, offset=offset, admin=True)
@@ -985,8 +1016,12 @@ def admin_regenerate_burn_ban_map(token: Optional[str] = None):
 
 
 @router.get("/api/admin/burn-bans/{submission_id}")
-def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_burn_ban(
+    submission_id: int,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    _require_read_access(token, authorization)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -994,8 +1029,12 @@ def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
 
 
 @router.get("/api/admin/burn-bans/{submission_id}/proof")
-def admin_get_burn_ban_proof(submission_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_burn_ban_proof(
+    submission_id: int,
+    token: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    _require_read_access(token, authorization)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1152,6 +1191,42 @@ def admin_delete_burn_ban(
         raise HTTPException(status_code=404, detail="Submission not found")
     if was_confirmed:
         _maybe_regenerate_map()
+    return {"success": True}
+
+
+class VerifierKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+@router.get("/api/admin/burn-bans/verifier-keys")
+def admin_list_burn_ban_verifier_keys(token: Optional[str] = None):
+    """List read-only verifier keys (admin only). Raw keys are never
+    returned - only name, status, and usage timestamps."""
+    _require_admin(token)
+    return {"success": True, "keys": list_burn_ban_verifier_keys()}
+
+
+@router.post("/api/admin/burn-bans/verifier-keys", status_code=201)
+def admin_create_burn_ban_verifier_key(payload: VerifierKeyCreate, token: Optional[str] = None):
+    """Mint a new read-only verifier key (admin only). The raw key is
+    returned exactly once - only its SHA-256 hash is ever stored. Present it
+    as `Authorization: Bearer <key>` against GET /api/admin/burn-bans,
+    GET /api/admin/burn-bans/{id}, and GET /api/admin/burn-bans/{id}/proof;
+    every other admin endpoint still requires a full admin session."""
+    actor = _require_admin(token)
+    key = create_burn_ban_verifier_key(payload.name)
+    logger.info("Burn-ban verifier key %r issued by %s", payload.name, actor)
+    return {"success": True, "key": key}
+
+
+@router.post("/api/admin/burn-bans/verifier-keys/{key_id}/revoke")
+def admin_revoke_burn_ban_verifier_key(key_id: int, token: Optional[str] = None):
+    """Revoke a verifier key (admin only)."""
+    actor = _require_admin(token)
+    revoked = revoke_burn_ban_verifier_key(key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="No active key found with that id")
+    logger.info("Burn-ban verifier key id=%s revoked by %s", key_id, actor)
     return {"success": True}
 
 

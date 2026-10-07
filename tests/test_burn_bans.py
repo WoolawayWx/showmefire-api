@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from core import database
@@ -561,6 +562,85 @@ class DiscordFireAlertTests(unittest.TestCase):
         self.assertEqual(payload["target_channel_id"], "555")
         self.assertEqual(payload["mention_role_ids"], ["777"])
         self.assertIn("mo-firewx-alerts.png", payload["image_url"])
+
+
+class BurnBanVerifierKeyTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmpdir.name) / "test.db"
+        self._db_patcher = patch.object(database, "get_db_path", return_value=self._db_path)
+        self._db_patcher.start()
+        database.init_database()
+        self.token = create_access_token({"sub": "staff@showmefire.org"})
+
+    def tearDown(self):
+        self._db_patcher.stop()
+        self._tmpdir.cleanup()
+
+    def test_create_key_requires_admin_session(self):
+        with self.assertRaises(HTTPException) as ctx:
+            burn_bans_router.admin_create_burn_ban_verifier_key(
+                burn_bans_router.VerifierKeyCreate(name="Burn Ban Verifier"), None,
+            )
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_minted_key_reads_pending_queue_but_not_raw_key_in_list(self):
+        issued = burn_bans_router.admin_create_burn_ban_verifier_key(
+            burn_bans_router.VerifierKeyCreate(name="Burn Ban Verifier"), self.token,
+        )
+        raw_key = issued["key"]["api_key"]
+
+        listed = burn_bans_router.admin_list_burn_ban_verifier_keys(self.token)
+        self.assertEqual(len(listed["keys"]), 1)
+        self.assertNotIn("api_key", listed["keys"][0])
+        self.assertNotIn("key_hash", listed["keys"][0])
+
+        result = burn_bans_router.admin_list_burn_bans(
+            authorization=f"Bearer {raw_key}",
+        )
+        self.assertTrue(result["success"])
+
+    def test_missing_or_bad_bearer_token_is_rejected(self):
+        with self.assertRaises(HTTPException) as ctx:
+            burn_bans_router.admin_list_burn_bans(authorization=None)
+        self.assertEqual(ctx.exception.status_code, 401)
+
+        with self.assertRaises(HTTPException) as ctx:
+            burn_bans_router.admin_list_burn_bans(authorization="Bearer not-a-real-key")
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_revoked_key_is_rejected(self):
+        issued = burn_bans_router.admin_create_burn_ban_verifier_key(
+            burn_bans_router.VerifierKeyCreate(name="Burn Ban Verifier"), self.token,
+        )
+        raw_key = issued["key"]["api_key"]
+        key_id = issued["key"]["id"]
+
+        burn_bans_router.admin_revoke_burn_ban_verifier_key(key_id, self.token)
+
+        with self.assertRaises(HTTPException) as ctx:
+            burn_bans_router.admin_list_burn_bans(authorization=f"Bearer {raw_key}")
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_verifier_key_cannot_mutate_submissions(self):
+        """A read-only key is never consulted by _require_admin, so mutating
+        endpoints stay admin-session-only regardless of what's passed as
+        `token`."""
+        issued = burn_bans_router.admin_create_burn_ban_verifier_key(
+            burn_bans_router.VerifierKeyCreate(name="Burn Ban Verifier"), self.token,
+        )
+        raw_key = issued["key"]["api_key"]
+        with self.assertRaises(HTTPException) as ctx:
+            burn_bans_router.admin_create_burn_ban(
+                burn_bans_router.BurnBanAdminCreate(
+                    county_fips="29019",
+                    proof_url="",
+                    effective_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    expires_at="",
+                ),
+                raw_key,
+            )
+        self.assertEqual(ctx.exception.status_code, 401)
 
 
 if __name__ == "__main__":
