@@ -4360,6 +4360,99 @@ def _ensure_burn_ban_tables(cursor: sqlite3.Cursor) -> None:
     if not events_table_existed:
         _backfill_burn_ban_county_events(cursor)
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burn_ban_verifier_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            revoked_at TIMESTAMP,
+            last_used_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+
+def create_burn_ban_verifier_key(name: str) -> Dict:
+    """Mint a read-only Bearer API key for automated burn-ban verification
+    (admin only, see routers/burn_bans.py). Returns the raw key under
+    "api_key" - the only time it is ever available; only its SHA-256 hash is
+    stored. Unlike fire_ingest_sources, this is a flat list of keys (no
+    separate "source" row) since every key carries the exact same read-only
+    scope - the pending-review queue and proof files, nothing else."""
+    raw_key = secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO burn_ban_verifier_keys (name, key_hash) VALUES (?, ?)",
+            (name, key_hash),
+        )
+        key_id = cursor.lastrowid
+        conn.commit()
+        return {"id": key_id, "name": name, "api_key": raw_key}
+    finally:
+        conn.close()
+
+
+def get_burn_ban_verifier_key(authorization_token: str) -> Optional[Dict]:
+    """Look up an active verifier key by its raw Bearer token and bump
+    last_used_at. Returns None for an invalid or revoked key."""
+    key_hash = hashlib.sha256(authorization_token.encode()).hexdigest()
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        row = cursor.execute(
+            "SELECT id, name FROM burn_ban_verifier_keys WHERE key_hash = ? AND revoked_at IS NULL",
+            (key_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        cursor.execute(
+            "UPDATE burn_ban_verifier_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (row["id"],),
+        )
+        conn.commit()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def revoke_burn_ban_verifier_key(key_id: int) -> bool:
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE burn_ban_verifier_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL",
+            (key_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_burn_ban_verifier_keys() -> List[Dict]:
+    """List verifier keys for the admin UI. Raw keys are never returned -
+    only name, status, and usage timestamps."""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        rows = cursor.execute('''
+            SELECT id, name, revoked_at, last_used_at, created_at
+            FROM burn_ban_verifier_keys
+            ORDER BY created_at DESC
+        ''').fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
 
 def _backfill_burn_ban_county_events(cursor: sqlite3.Cursor) -> None:
     """Seed county history from submissions that predate the events table."""
