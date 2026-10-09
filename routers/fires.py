@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from core.database import (
     add_ip_to_blocklist,
     add_fire_event_media,
-    bulk_set_incident_event_status,
+    set_incident_review_decision,
     consume_fire_submission_quota,
     correlate_report_with_incident,
     count_fire_event_media,
@@ -404,10 +404,17 @@ class BlocklistCreate(BaseModel):
     reason: str = Field(default="", max_length=500)
 
 
+# Sources that are satellite pixel detections; every other fire_events source
+# is a human report (user_submission) or an ingest-source/OSINT lead.
+SATELLITE_EVENT_SOURCES = {"modis", "viirs", "ngfs"}
+
+
 class FireIncidentFeedback(BaseModel):
     classification: Literal["confirmed_fire", "controlled_burn", "not_a_fire", "unsure"]
     note: str = Field(default="", max_length=2000)
     contact: str = Field(default="", max_length=120)
+    # Which client sent it. Optional so older clients keep working (stored as NULL).
+    source: Optional[Literal["website", "mobile"]] = None
 
 
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
@@ -955,6 +962,7 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     create_fire_incident_feedback(
         incident["id"], payload.classification, note,
         _clean_text(payload.contact, required=False, field="contact"), ip_hash,
+        submission_source=payload.source,
     )
     notify_staff_alert(
         alert_type="incident_feedback",
@@ -998,7 +1006,12 @@ def admin_approve_incident_feedback(feedback_id: int, token: Optional[str] = Non
         raise HTTPException(status_code=404, detail="Feedback not found")
     from services.fire_labeling import apply_feedback_label
     labeled = apply_feedback_label(feedback["incident_id"], feedback["classification"], reviewed_by=actor)
-    return {"success": True, "feedback": feedback, "labeled_event_count": len(labeled)}
+    # One click decides the whole incident: current pending detections are
+    # approved now and later ones inherit the decision as they arrive.
+    decision = set_incident_review_decision(
+        feedback["incident_id"], "approved", actor, reason=f"incident_feedback:{feedback_id}",
+    )
+    return {"success": True, "feedback": feedback, "labeled_event_count": len(labeled), "incident_decision": decision}
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/reject")
@@ -1009,7 +1022,10 @@ def admin_reject_incident_feedback(feedback_id: int, token: Optional[str] = None
     feedback = set_fire_incident_feedback_status(feedback_id, "rejected", reviewed_by=actor)
     if not feedback:
         raise HTTPException(status_code=404, detail="Feedback not found")
-    return {"success": True, "feedback": feedback}
+    decision = set_incident_review_decision(
+        feedback["incident_id"], "rejected", actor, reason=f"incident_feedback:{feedback_id}",
+    )
+    return {"success": True, "feedback": feedback, "incident_decision": decision}
 
 
 # --- Admin: moderation ---
@@ -1277,24 +1293,20 @@ def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/approve-all")
 def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, token: Optional[str] = None):
-    """Approve every currently-pending member of this incident at once (admin only)."""
+    """Approve every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
     actor = _require_admin(token)
-    result = bulk_set_incident_event_status(
-        incident_id, to_status="approved", actor=actor,
-        to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref, reason=payload.moderator_note,
+    result = set_incident_review_decision(
+        incident_id, "approved", actor, reason="admin_bulk_action",
+        to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref, note=payload.moderator_note,
     )
-    if result["count"] == 0:
-        raise HTTPException(status_code=404, detail="No pending members found for this incident")
     return {"success": True, **result}
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/reject-all")
 def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, token: Optional[str] = None):
-    """Reject every currently-pending member of this incident at once (admin only)."""
+    """Reject every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
     actor = _require_admin(token)
-    result = bulk_set_incident_event_status(incident_id, to_status="rejected", actor=actor, reason=payload.reason)
-    if result["count"] == 0:
-        raise HTTPException(status_code=404, detail="No pending members found for this incident")
+    result = set_incident_review_decision(incident_id, "rejected", actor, reason="admin_bulk_action", note=payload.reason)
     return {"success": True, **result}
 
 
@@ -1317,7 +1329,18 @@ def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
     incident = get_fire_incident(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
-    incident["detections"] = list_fire_incident_members(incident_id)
+    members = list_fire_incident_members(incident_id)
+    incident["detections"] = members
+    # Public reports and OSINT leads (e.g. Muse) are not satellite pixels: they
+    # carry narrative (description/source link/reporter), so return their full
+    # admin records separately for the review UI to show beside, not among,
+    # the satellite detections.
+    incident["reports"] = [
+        event for event in (
+            get_fire_event(member["id"], admin=True)
+            for member in members if member.get("source") not in SATELLITE_EVENT_SOURCES
+        ) if event
+    ]
     incident["feedback"] = list_fire_incident_feedback(incident_id)
     return {"success": True, "incident": incident}
 

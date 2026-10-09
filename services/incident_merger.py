@@ -145,6 +145,10 @@ def _recompute_incident_stats(cursor: sqlite3.Cursor, incident_id: int) -> None:
            WHERE id = ?""",
         (centroid_lat, centroid_lon, len(rows), min(times), max(times), county_fips, county_name, incident_id),
     )
+    # The merged incident's outline changed: rebuild its join area from all
+    # members and add the buffer to the new combined shape.
+    from core.database import rebuild_incident_area
+    rebuild_incident_area(cursor, incident_id)
 
 
 def _apply_merge(cursor: sqlite3.Cursor, survivor_id: int, loser_ids: list[int]) -> None:

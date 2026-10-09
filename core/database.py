@@ -477,6 +477,19 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("shape_geojson", "TEXT"),
         ("shape_detection_count", "INTEGER"),
         ("merged_into_id", "INTEGER"),
+        # Admin's standing decision for the whole incident. All nullable:
+        # NULL = no decision yet (every pre-existing incident).
+        ("review_decision", "TEXT"),        # 'approved' | 'rejected' | NULL
+        ("review_decided_by", "TEXT"),
+        ("review_decided_at", "TIMESTAMP"),
+        ("review_decision_reason", "TEXT"),  # why/how: e.g. 'incident_feedback:12', 'admin_bulk_action'
+        # Buffered outline new detections can join by shape (services/incident_area.py),
+        # plus its bounding box for a cheap SQL prefilter. NULL until first built.
+        ("join_area_geojson", "TEXT"),
+        ("join_min_lat", "REAL"),
+        ("join_max_lat", "REAL"),
+        ("join_min_lon", "REAL"),
+        ("join_max_lon", "REAL"),
     ):
         if name not in incident_columns:
             cursor.execute(f"ALTER TABLE fire_incidents ADD COLUMN {name} {definition}")
@@ -508,6 +521,10 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("status", "TEXT NOT NULL DEFAULT 'pending'"),
         ("reviewed_by", "TEXT NOT NULL DEFAULT ''"),
         ("reviewed_at", "TIMESTAMP"),
+        # Both nullable on purpose: rows from before these existed stay NULL
+        # ("unknown") instead of being backfilled with a guess.
+        ("submission_source", "TEXT"),  # how it arrived: 'website' | 'mobile' | NULL
+        ("status_reason", "TEXT"),      # why it holds its current status (see FEEDBACK_STATUS_REASONS)
     ):
         if name not in feedback_columns:
             cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
@@ -2487,6 +2504,45 @@ def record_fire_moderation(
           _json.dumps(changed_fields or {})))
 
 
+def carry_forward_incident_label(cursor: sqlite3.Cursor, event_id: int, incident_id: int) -> bool:
+    """A detection just joined `incident_id`: if an admin already approved a
+    labelling public classification for that incident (confirmed_fire /
+    controlled_burn / not_a_fire), give the new detection the same label so the
+    incident stays consistently labelled as it grows. The newest approved
+    labelling feedback wins. Uses the caller's cursor/transaction (opening a
+    second connection mid-ingest would hit SQLite's write lock) and records the
+    same audit row update_fire_event would. Returns True if a label was applied."""
+    from services.fire_labeling import CLASSIFICATION_TO_CAUSE  # lazy: fire_labeling imports this module
+
+    row = cursor.execute(
+        """SELECT id, classification, reviewed_by FROM fire_incident_feedback
+           WHERE incident_id = ? AND status = 'approved'
+             AND classification IN ('confirmed_fire', 'controlled_burn', 'not_a_fire')
+           ORDER BY reviewed_at DESC, id DESC LIMIT 1""",
+        (incident_id,),
+    ).fetchone()
+    if not row:
+        return False
+    feedback_id, classification, reviewed_by = row[0], row[1], row[2]
+    cause = CLASSIFICATION_TO_CAUSE[classification]
+    prior = cursor.execute("SELECT verification_tier FROM fire_events WHERE id = ?", (event_id,)).fetchone()
+    from_tier = prior[0] if prior else ""
+    cursor.execute(
+        """UPDATE fire_events
+           SET verification_tier = 'admin_reviewed', cause_category = ?, revised_at = CURRENT_TIMESTAMP,
+               label_revision = label_revision + 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (cause, event_id),
+    )
+    record_fire_moderation(
+        cursor, event_id, action="edited", actor=reviewed_by or "system:incident_label",
+        from_tier=from_tier, to_tier="admin_reviewed",
+        reason=f"carried forward from approved incident feedback #{feedback_id}: {classification}",
+        changed_fields={"verification_tier": "admin_reviewed", "cause_category": cause},
+    )
+    return True
+
+
 def create_fire_report(
     latitude: float,
     longitude: float,
@@ -2661,6 +2717,8 @@ def upsert_detection_event(
                     cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
                                     to_status=initial_status, to_tier=verification_tier)
+            if not (exclusion_zone is not None or recurring_source is not None):
+                apply_incident_review_to_new_event(cursor, event_id, incident_id)
         conn.commit()
         return {"event_id": event_id, "inserted": is_new, "updated": not is_new}
     finally:
@@ -2968,6 +3026,119 @@ def _parse_occurred_at(occurred_at: str) -> datetime:
     return datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
 
 
+def _store_incident_area(cursor: sqlite3.Cursor, incident_id: int, area) -> None:
+    import json as _json
+    if area is None or area.is_empty:
+        cursor.execute(
+            "UPDATE fire_incidents SET join_area_geojson = NULL, join_min_lat = NULL, join_max_lat = NULL, "
+            "join_min_lon = NULL, join_max_lon = NULL WHERE id = ?", (incident_id,),
+        )
+        return
+    min_lon, min_lat, max_lon, max_lat = area.bounds
+    cursor.execute(
+        "UPDATE fire_incidents SET join_area_geojson = ?, join_min_lat = ?, join_max_lat = ?, "
+        "join_min_lon = ?, join_max_lon = ? WHERE id = ?",
+        (_json.dumps(area.__geo_interface__, separators=(",", ":")), min_lat, max_lat, min_lon, max_lon, incident_id),
+    )
+
+
+def rebuild_incident_area(cursor: sqlite3.Cursor, incident_id: int) -> None:
+    """Recompute an incident's join area from all of its current members -
+    the merged outline, then the buffer. Used after merges/splits and to
+    backfill incidents that predate the column. Never raises (a failure just
+    leaves the incident on the centroid-radius rule)."""
+    try:
+        from services.incident_area import build_area
+        from services.incident_shape_extractor import _member_polygons
+        rows = cursor.execute(
+            "SELECT latitude, longitude, source, footprint_geojson FROM fire_events "
+            "WHERE incident_id = ? AND status NOT IN ('deleted', 'rejected') "
+            "AND latitude IS NOT NULL AND longitude IS NOT NULL",
+            (incident_id,),
+        ).fetchall()
+        members = [{"latitude": r[0], "longitude": r[1], "source": r[2], "footprint_geojson": r[3]} for r in rows]
+        _store_incident_area(cursor, incident_id, build_area(_member_polygons(members)))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("rebuild_incident_area failed for incident %s", incident_id, exc_info=True)
+
+
+def grow_incident_area(cursor: sqlite3.Cursor, event_id: int, incident_id: int) -> None:
+    """A detection just joined the incident: extend its join area to cover it
+    (building the area from all members the first time). Never raises."""
+    try:
+        import json as _json
+        from shapely.geometry import shape as _shape
+        from services.incident_area import grow_area
+        from services.incident_shape_extractor import _member_polygons
+        row = cursor.execute("SELECT join_area_geojson FROM fire_incidents WHERE id = ?", (incident_id,)).fetchone()
+        if not row or not row[0]:
+            rebuild_incident_area(cursor, incident_id)
+            return
+        ev = cursor.execute(
+            "SELECT latitude, longitude, source, footprint_geojson, status FROM fire_events WHERE id = ?", (event_id,),
+        ).fetchone()
+        if not ev or ev[0] is None or ev[1] is None or ev[4] in ("rejected", "deleted"):
+            return
+        member = {"latitude": ev[0], "longitude": ev[1], "source": ev[2], "footprint_geojson": ev[3]}
+        _store_incident_area(cursor, incident_id, grow_area(_shape(_json.loads(row[0])), _member_polygons([member])))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("grow_incident_area failed for incident %s", incident_id, exc_info=True)
+
+
+def backfill_incident_areas(limit: int = 200) -> int:
+    """Build the join area for active incidents that don't have one yet
+    (everything that existed before the column). Returns how many were built."""
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        ids = [r[0] for r in cursor.execute(
+            "SELECT id FROM fire_incidents WHERE join_area_geojson IS NULL AND status NOT IN ('merged', 'deleted') "
+            "ORDER BY last_detected_at DESC LIMIT ?", (max(1, limit),),
+        ).fetchall()]
+        for incident_id in ids:
+            rebuild_incident_area(cursor, incident_id)
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def _find_incident_by_area(cursor: sqlite3.Cursor, latitude: float, longitude: float, window_start: str, window_end: str):
+    """Active incident whose join area contains this point (nearest centroid
+    wins if several do), or None. Incidents whose area has grown past
+    MAX_AREA_EXTENT_KM don't attract by shape."""
+    import json as _json
+    from shapely.geometry import Point, shape as _shape
+    from core.geo import haversine_km
+    from services.incident_area import MAX_AREA_EXTENT_KM, extent_km
+
+    cursor.execute('''
+        SELECT id, centroid_latitude, centroid_longitude, detection_count,
+               first_detected_at, last_detected_at, join_area_geojson
+        FROM fire_incidents
+        WHERE join_area_geojson IS NOT NULL
+          AND ? BETWEEN join_min_lat AND join_max_lat AND ? BETWEEN join_min_lon AND join_max_lon
+          AND last_detected_at >= ? AND first_detected_at <= ?
+          AND status NOT IN ('merged', 'deleted')
+    ''', (latitude, longitude, window_start, window_end))
+    point = Point(longitude, latitude)
+    best_row, best_distance = None, None
+    for row in cursor.fetchall():
+        try:
+            area = _shape(_json.loads(row["join_area_geojson"]))
+            if not area.contains(point) or extent_km(area) > MAX_AREA_EXTENT_KM:
+                continue
+        except Exception:
+            continue
+        distance = haversine_km(latitude, longitude, row["centroid_latitude"], row["centroid_longitude"])
+        if best_distance is None or distance < best_distance:
+            best_row, best_distance = row, distance
+    return best_row
+
+
 def find_or_create_incident_for_detection(
     cursor: sqlite3.Cursor,
     latitude: float,
@@ -2998,20 +3169,25 @@ def find_or_create_incident_for_detection(
     window_end = (occurred_dt + timedelta(hours=window_hours)).isoformat()
     min_lat, max_lat, min_lon, max_lon = degree_box(latitude, longitude, radius_km)
 
-    cursor.execute('''
-        SELECT id, centroid_latitude, centroid_longitude, detection_count,
-               first_detected_at, last_detected_at
-        FROM fire_incidents
-        WHERE centroid_latitude BETWEEN ? AND ? AND centroid_longitude BETWEEN ? AND ?
-          AND last_detected_at >= ? AND first_detected_at <= ?
-          AND status NOT IN ('merged', 'deleted')
-    ''', (min_lat, max_lat, min_lon, max_lon, window_start, window_end))
-
-    best_row, best_distance = None, None
-    for row in cursor.fetchall():
-        distance = haversine_km(latitude, longitude, row["centroid_latitude"], row["centroid_longitude"])
-        if distance <= radius_km and (best_distance is None or distance < best_distance):
-            best_row, best_distance = row, distance
+    # A detection inside an incident's outline (plus buffer) belongs to it even
+    # when it is far from the centroid; otherwise fall back to nearest centroid.
+    # (The area lookup runs first: it reuses this cursor, so it must not sit
+    # between the centroid query and its fetchall.)
+    best_row = _find_incident_by_area(cursor, latitude, longitude, window_start, window_end)
+    best_distance = None
+    if best_row is None:
+        cursor.execute('''
+            SELECT id, centroid_latitude, centroid_longitude, detection_count,
+                   first_detected_at, last_detected_at
+            FROM fire_incidents
+            WHERE centroid_latitude BETWEEN ? AND ? AND centroid_longitude BETWEEN ? AND ?
+              AND last_detected_at >= ? AND first_detected_at <= ?
+              AND status NOT IN ('merged', 'deleted')
+        ''', (min_lat, max_lat, min_lon, max_lon, window_start, window_end))
+        for row in cursor.fetchall():
+            distance = haversine_km(latitude, longitude, row["centroid_latitude"], row["centroid_longitude"])
+            if distance <= radius_km and (best_distance is None or distance < best_distance):
+                best_row, best_distance = row, distance
 
     if best_row is not None:
         n = best_row["detection_count"]
@@ -3511,17 +3687,28 @@ def get_public_fire_incident(slug: str) -> Optional[Dict]:
         conn.close()
 
 
+# Identifiers for fire_incident_feedback.status_reason: why a row holds its
+# current status. NULL means the row predates the column.
+FEEDBACK_STATUS_REASONS = {
+    "pending": "awaiting_admin_review",
+    "approved": "approved_by_admin",
+    "rejected": "rejected_by_admin",
+}
+
+
 def create_fire_incident_feedback(
     incident_id: int, classification: str, note: str, contact: str, ip_hash: str,
+    submission_source: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO fire_incident_feedback
-               (incident_id, classification, note, contact, submitter_ip_hash)
-               VALUES (?, ?, ?, ?, ?)""",
-            (incident_id, classification, note, contact, ip_hash),
+               (incident_id, classification, note, contact, submitter_ip_hash, submission_source, status_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (incident_id, classification, note, contact, ip_hash, submission_source,
+             FEEDBACK_STATUS_REASONS["pending"]),
         )
         conn.commit()
         return {"id": cursor.lastrowid, "incident_id": incident_id, "classification": classification}
@@ -3550,7 +3737,8 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
     with sqlite3.connect(get_db_path()) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at "
+            "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at, "
+            "submission_source, status_reason "
             "FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
             (incident_id,),
         ).fetchall()
@@ -3573,10 +3761,11 @@ def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
     try:
         cursor.execute(
             '''SELECT fb.id, fb.incident_id, fb.classification, fb.note, fb.contact, fb.created_at,
+                      fb.submission_source, fb.status_reason,
                       fi.public_slug, fi.county_name, fi.detection_count
                FROM fire_incident_feedback fb
                JOIN fire_incidents fi ON fi.id = fb.incident_id
-               WHERE fb.status = 'pending'
+               WHERE fb.status = 'pending' AND fi.status NOT IN ('deleted', 'merged')
                ORDER BY fb.created_at DESC
                LIMIT ?''',
             (max(1, min(limit, 500)),),
@@ -3597,8 +3786,8 @@ def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
-            "UPDATE fire_incident_feedback SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (status, reviewed_by, feedback_id),
+            "UPDATE fire_incident_feedback SET status = ?, status_reason = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (status, FEEDBACK_STATUS_REASONS[status], reviewed_by, feedback_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM fire_incident_feedback WHERE id = ?", (feedback_id,)).fetchone()
@@ -3722,6 +3911,7 @@ def correlate_report_with_incident(event_id: int) -> Optional[int]:
             row["county_fips"], row["county_name"],
         )
         cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
+        apply_incident_review_to_new_event(cursor, event_id, incident_id)
         conn.commit()
         return incident_id
     finally:
@@ -3909,6 +4099,61 @@ def bulk_set_incident_event_status(
         if result and not result.get("already_moderated"):
             updated_event_ids.append(event_id)
     return {"incident_id": incident_id, "updated_event_ids": updated_event_ids, "count": len(updated_event_ids)}
+
+
+def set_incident_review_decision(
+    incident_id: int, decision: str, actor: str, reason: str = "admin_bulk_action",
+    to_tier: Optional[str] = None, official_source_ref: Optional[str] = None, note: str = "",
+) -> Dict:
+    """One-click incident decision: record it on the incident (so detections
+    that join later inherit it, see apply_incident_review_to_new_event) and
+    apply it to every member still pending right now. Members an admin already
+    moderated individually are left alone. `reason` is the identifier of why
+    the decision was made, e.g. 'incident_feedback:12' or 'admin_bulk_action'."""
+    if decision not in ("approved", "rejected"):
+        raise ValueError(f"invalid incident decision: {decision}")
+    with sqlite3.connect(get_db_path()) as conn:
+        conn.execute(
+            """UPDATE fire_incidents
+               SET review_decision = ?, review_decided_by = ?, review_decided_at = CURRENT_TIMESTAMP,
+                   review_decision_reason = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (decision, actor, reason, incident_id),
+        )
+        conn.commit()
+    result = bulk_set_incident_event_status(
+        incident_id, to_status=decision, actor=actor, to_tier=to_tier,
+        official_source_ref=official_source_ref, reason=note or reason,
+    )
+    result["decision"] = decision
+    return result
+
+
+def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, incident_id: int) -> None:
+    """A detection just joined `incident_id`: give it the incident's standing
+    decision (approved/rejected) if it is still pending, plus any approved
+    label (carry_forward_incident_label), and extend the incident's join area to
+    cover it (grow_incident_area). Uses the caller's cursor/transaction."""
+    row = cursor.execute(
+        "SELECT review_decision, review_decided_by, review_decision_reason FROM fire_incidents WHERE id = ?",
+        (incident_id,),
+    ).fetchone()
+    if row and row[0] in ("approved", "rejected"):
+        decision, actor, why = row[0], row[1] or "system:incident_decision", row[2] or ""
+        prior = cursor.execute("SELECT status, verification_tier FROM fire_events WHERE id = ?", (event_id,)).fetchone()
+        if prior and prior[0] == "pending":
+            cursor.execute(
+                """UPDATE fire_events SET status = ?, moderated_by = ?, moderated_at = CURRENT_TIMESTAMP,
+                       updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (decision, actor, event_id),
+            )
+            record_fire_moderation(
+                cursor, event_id, action=decision, actor=actor, from_status="pending", to_status=decision,
+                from_tier=prior[1], to_tier=prior[1],
+                reason=f"inherited incident decision ({why or 'incident review'})",
+            )
+    carry_forward_incident_label(cursor, event_id, incident_id)
+    grow_incident_area(cursor, event_id, incident_id)  # after the decision, so a rejected detection doesn't extend the area
 
 
 def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str = "") -> Dict:
@@ -5094,6 +5339,7 @@ def upsert_ingest_report(
             cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
                                     to_status="pending", to_tier="unverified")
+            apply_incident_review_to_new_event(cursor, event_id, incident_id)
         conn.commit()
         event = _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
         return event, is_new

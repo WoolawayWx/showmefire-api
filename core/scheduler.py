@@ -272,6 +272,9 @@ async def ingest_fire_detections_job():
     """
     try:
         await asyncio.to_thread(ingest_detection_files)
+        # Give incidents that predate shape-based joining their join area.
+        from core.database import backfill_incident_areas
+        await asyncio.to_thread(backfill_incident_areas)
         # Fold side-by-side incidents of one fire together before anything
         # downstream (scoring, graphics, shapes) works on them.
         # Off until the dry-run report (scripts/merge_fire_incidents.py
