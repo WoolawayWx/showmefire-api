@@ -229,6 +229,12 @@ _transformers: dict[tuple[int, int], Transformer] = {}
 
 
 def _wkid(value: Any, default: int = 4326) -> int:
+    if isinstance(value, str) and value.strip().startswith("{"):
+        # ArcGIS clients send inSR/outSR as a JSON spatial-reference object.
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return default
     if isinstance(value, dict):
         value = value.get("latestWkid") or value.get("wkid")
     try:
