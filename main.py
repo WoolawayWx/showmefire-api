@@ -89,7 +89,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, bulletins, arcgis_feature_service, display_auth
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -211,6 +211,7 @@ for static_directory in (IMAGES_DIR, GIS_DIR, FORECAST_V1_DIR, REPORTS_DIR, PUBL
 app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images")
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
 app.mount("/forecast-v1-assets", ForecastStaticFiles(directory=str(FORECAST_V1_DIR)), name="forecast-v1-assets")
+app.mount("/home-video", StaticFiles(directory=str(home_video.HOME_VIDEO_DIR)), name="home-video")
 app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
 app.mount("/testbed-assets", NoCacheStaticFiles(directory=str(BETA_ROOT)), name="testbed-assets")
 OPSBRIEF_DIR = Path(__file__).resolve().parent / "files" / "opsbrief"
@@ -221,6 +222,7 @@ OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 app.include_router(admin_confirm.router)
 app.include_router(archive_admin.router)
 app.include_router(tiles.router)
+app.include_router(conditions.router)
 app.include_router(outlook.router)
 app.include_router(discord_admin.router)
 app.include_router(afds.router)
@@ -229,6 +231,8 @@ app.include_router(model_admin.router)
 app.include_router(verification_admin.router)
 app.include_router(rtma_peak_admin.router)
 app.include_router(mobile.router)
+app.include_router(admin_notifications.router)
+app.include_router(home_video.router)
 app.include_router(posts.router)
 app.include_router(post_media.router)
 app.include_router(fires.router)

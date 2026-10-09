@@ -146,7 +146,11 @@ def record_event(event_key: str, event_type: str, payload: dict[str, Any]) -> bo
         return cursor.rowcount == 1
 
 
-def _eligible_subscriptions(event_type: str, county_fips: Iterable[str] | None = None) -> list[dict[str, str]]:
+def _eligible_subscriptions(
+    event_type: str, county_fips: Iterable[str] | None = None, *, all_counties: bool = False,
+) -> list[dict[str, str]]:
+    """Subscribers opted into `event_type`. County-scoped channels also need a
+    county match unless `all_counties` (manual statewide broadcast) is set."""
     county_set = set(county_fips or [])
     column = {
         "forecast": "forecast_enabled",
@@ -160,7 +164,7 @@ def _eligible_subscriptions(event_type: str, county_fips: Iterable[str] | None =
         ).fetchall()
     result: list[dict[str, str]] = []
     for row in rows:
-        if event_type in {"fire_weather", "fire_detection"}:
+        if event_type in {"fire_weather", "fire_detection"} and not (all_counties and not county_set):
             try:
                 selected = set(json.loads(row["county_fips_json"] or "[]"))
             except json.JSONDecodeError:
@@ -206,6 +210,7 @@ def send_mobile_event(
     county_fips: Iterable[str] | None = None,
     extra_data: dict[str, Any] | None = None,
     image_url: str | None = None,
+    all_counties: bool = False,
 ) -> int:
     payload = {"title": title, "body": body, "url": url, **(extra_data or {})}
     if image_url:
@@ -213,7 +218,7 @@ def send_mobile_event(
     if not record_event(event_key, event_type, payload):
         return 0
 
-    subscriptions = _eligible_subscriptions(event_type, county_fips)
+    subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
     channel = {
         "forecast": "forecast",
         "sitrep": "sitrep",

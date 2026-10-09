@@ -348,6 +348,58 @@ def _clip_and_project_axes(dataset: xr.Dataset) -> xr.Dataset:
     return clipped
 
 
+def _query_leads(
+    make_client: Callable[[tuple[int, ...]], object],
+    leads: tuple[int, ...],
+    search: str,
+    cycle: datetime,
+) -> xr.Dataset:
+    """Run one GRIB search over many lead hours without exhausting memory.
+
+    Two failure modes used to sink an otherwise-good query:
+    * one query over every lead loaded the full CONUS grid for all hours
+      before clipping (MemoryError, e.g. RRFS soil moisture 73 x 9 levels);
+    * a field that simply is not published at some hours (RRFS APCP at f000,
+      GEFS TCDC/APCP/DSWRF at f000) leaves Herbie with no subset file for
+      that hour, and the FileNotFoundError discarded every other hour too.
+    Leads are queried in small chunks, each clipped/loaded before the next
+    starts; a chunk that hits a missing subset file is retried hour by hour
+    and hours with no such field are skipped. Only if no hour yields data does
+    the error propagate.
+    """
+    chunk_size = max(1, int(os.getenv("SMF_HERBIE_LEAD_CHUNK", "8")))
+    parts: list[xr.Dataset] = []
+    missing: list[int] = []
+    last_missing: Exception | None = None
+
+    def run(batch: tuple[int, ...]) -> xr.Dataset:
+        return _load_clipped_herbie_result(make_client(batch).xarray(search, remove_grib=False), cycle)
+
+    for start in range(0, len(leads), chunk_size):
+        batch = tuple(leads[start:start + chunk_size])
+        try:
+            parts.append(run(batch))
+            continue
+        except FileNotFoundError as error:
+            if len(batch) == 1:
+                missing.append(batch[0])
+                last_missing = error
+                continue
+        for lead in batch:
+            try:
+                parts.append(run((lead,)))
+            except FileNotFoundError as error:
+                missing.append(lead)
+                last_missing = error
+    if not parts:
+        raise last_missing if last_missing is not None else RuntimeError("no query results")
+    if missing:
+        logger.info("%s unavailable at lead hours %s", search, sorted(missing))
+    if len(parts) == 1:
+        return parts[0]
+    return xr.concat(parts, dim="time", join="outer", compat="override", coords="minimal").sortby("time")
+
+
 def _fetch_member(
     spec: AcquisitionSpec,
     cycle: datetime,
@@ -355,16 +407,18 @@ def _fetch_member(
     save_dir: Path,
     factory: Callable,
 ) -> xr.Dataset:
-    kwargs = dict(
-        DATES=[cycle.replace(tzinfo=None)], fxx=list(spec.leads), model=spec.herbie_model,
-        product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "1")),
-        verbose=False,
-    )
-    if member is not None:
-        kwargs["member"] = member
-    if spec.domain is not None or spec.herbie_model == "rrfs":
-        kwargs["domain"] = spec.domain
-    client = factory(**kwargs)
+    def make_client(leads):
+        kwargs = dict(
+            DATES=[cycle.replace(tzinfo=None)], fxx=list(leads), model=spec.herbie_model,
+            product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "1")),
+            verbose=False,
+        )
+        if member is not None:
+            kwargs["member"] = member
+        if spec.domain is not None or spec.herbie_model == "rrfs":
+            kwargs["domain"] = spec.domain
+        return factory(**kwargs)
+
     groups = []
     errors = []
     for search in SURFACE_SEARCHES:
@@ -374,7 +428,7 @@ def _fetch_member(
                 # Herbie/cfgrib arrays are lazy. Removing the subset here used
                 # to leave later merge/load operations pointing at a deleted
                 # file. Cache retention removes these files after seven days.
-                groups.append(_load_clipped_herbie_result(client.xarray(search, remove_grib=False), cycle))
+                groups.append(_query_leads(make_client, spec.leads, search, cycle))
                 break
             except Exception as error:
                 if attempt == attempts:
@@ -392,7 +446,7 @@ def _fetch_member(
     if errors:
         surface.attrs["acquisition_warnings"] = ";".join(errors)
     try:
-        upper = _load_clipped_herbie_result(client.xarray(UPPER_AIR_SEARCH, remove_grib=False), cycle)
+        upper = _query_leads(make_client, spec.leads, UPPER_AIR_SEARCH, cycle)
         surface = xr.merge([surface, upper], compat="override", join="outer")
     except Exception as error:
         logger.info("%s optional upper-air fields unavailable for %s: %s", spec.public_name, member, error)

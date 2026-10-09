@@ -525,6 +525,11 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         # ("unknown") instead of being backfilled with a guess.
         ("submission_source", "TEXT"),  # how it arrived: 'website' | 'mobile' | NULL
         ("status_reason", "TEXT"),      # why it holds its current status (see FEEDBACK_STATUS_REASONS)
+        # Where/what it was sent from, from Cloudflare edge headers + User-Agent.
+        # Coarse on purpose (country/region, never a raw IP); NULL = not available.
+        ("submitter_country", "TEXT"),
+        ("submitter_region", "TEXT"),
+        ("user_agent", "TEXT"),
     ):
         if name not in feedback_columns:
             cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
@@ -1136,6 +1141,34 @@ def init_database():
         )
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_mobile_ticket_created ON mobile_push_tickets(created_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS manual_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            channel TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            url TEXT NOT NULL,
+            county_fips_json TEXT NOT NULL DEFAULT '[]',
+            recipients INTEGER NOT NULL DEFAULT 0,
+            sent INTEGER NOT NULL DEFAULT 0,
+            sent_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS home_video (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'youtube',
+            youtube_id TEXT NOT NULL DEFAULT '',
+            filename TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            caption TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_receipts (
             ticket_id TEXT PRIMARY KEY,
@@ -3699,16 +3732,20 @@ FEEDBACK_STATUS_REASONS = {
 def create_fire_incident_feedback(
     incident_id: int, classification: str, note: str, contact: str, ip_hash: str,
     submission_source: Optional[str] = None,
+    submitter_country: Optional[str] = None,
+    submitter_region: Optional[str] = None,
+    user_agent: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO fire_incident_feedback
-               (incident_id, classification, note, contact, submitter_ip_hash, submission_source, status_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (incident_id, classification, note, contact, submitter_ip_hash, submission_source, status_reason,
+                submitter_country, submitter_region, user_agent)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (incident_id, classification, note, contact, ip_hash, submission_source,
-             FEEDBACK_STATUS_REASONS["pending"]),
+             FEEDBACK_STATUS_REASONS["pending"], submitter_country, submitter_region, user_agent),
         )
         conn.commit()
         return {"id": cursor.lastrowid, "incident_id": incident_id, "classification": classification}
@@ -3738,7 +3775,8 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at, "
-            "submission_source, status_reason "
+            "submission_source, status_reason, submitter_country, submitter_region, user_agent, "
+            "substr(submitter_ip_hash, 1, 8) AS submitter_ref "
             "FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
             (incident_id,),
         ).fetchall()
@@ -3762,6 +3800,8 @@ def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
         cursor.execute(
             '''SELECT fb.id, fb.incident_id, fb.classification, fb.note, fb.contact, fb.created_at,
                       fb.submission_source, fb.status_reason,
+                      fb.submitter_country, fb.submitter_region, fb.user_agent,
+                      substr(fb.submitter_ip_hash, 1, 8) AS submitter_ref,
                       fi.public_slug, fi.county_name, fi.detection_count
                FROM fire_incident_feedback fb
                JOIN fire_incidents fi ON fi.id = fb.incident_id

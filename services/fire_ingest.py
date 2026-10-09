@@ -60,6 +60,10 @@ def _ingest_satdet_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         return None
 
     county_fips, county_name = county_for_point(lat, lon)
+    if county_fips is None:
+        # Inside the coarse bbox but not in any Missouri county polygon
+        # (IL/KS/AR/etc. corners of the box) - not our incident.
+        return None
     fuel_model_fbfm40, canopy_cover_pct = sample_static_context(lat, lon)
     return upsert_detection_event(
         source=source,
@@ -100,6 +104,10 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         return None
 
     county_fips, county_name = county_for_point(lat, lon)
+    if county_fips is None:
+        # Same rule as satdet: the bbox is a loose filter, the county
+        # polygons are the real Missouri boundary.
+        return None
     geometry = feature.get("geometry")
     footprint_geojson = json.dumps(geometry, separators=(",", ":")) if geometry and geometry.get("type") == "Polygon" else None
     fuel_model_fbfm40, canopy_cover_pct = sample_static_context(lat, lon)
@@ -111,7 +119,7 @@ def _ingest_ngfs_feature(feature: Dict[str, Any]) -> Optional[Dict]:
         longitude=lon,
         occurred_at=occurred_at,
         county_fips=county_fips,
-        county_name=county_name or props.get("county"),
+        county_name=county_name,
         frp=props.get("frp"),
         confidence=props.get("confidence"),
         satellite=props.get("satellite"),

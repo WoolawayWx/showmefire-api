@@ -300,3 +300,44 @@ def test_synoptic_observations_normalize_and_match_completed_forecast(tmp_path):
         assert row[0] == pytest.approx(20.0)
         assert row[1] == pytest.approx(4.4704)
         assert connection.execute("SELECT COUNT(*) FROM forecast_verification WHERE qc_eligible=1").fetchone()[0] == 4
+
+
+def _lead_dataset(leads):
+    coords = {
+        "step": ("step", np.array([lead * 3600 for lead in leads], dtype="timedelta64[s]").astype("timedelta64[ns]")),
+        "latitude": ("y", [36.0, 37.0]), "longitude": ("x", [-94.0, -93.0]),
+    }
+    return xr.Dataset({"tp": (("step", "y", "x"), np.ones((len(leads), 2, 2), dtype=np.float32))}, coords=coords)
+
+
+def test_query_leads_chunks_and_skips_hours_without_the_field(monkeypatch):
+    from forecast_v1.acquisition import _query_leads
+
+    monkeypatch.setenv("SMF_HERBIE_LEAD_CHUNK", "3")
+    requested = []
+
+    def make_client(leads):
+        requested.append(tuple(leads))
+
+        class Client:
+            def xarray(self, search, **kwargs):
+                if 0 in leads:  # field is not published at f000 -> Herbie leaves no subset file
+                    raise FileNotFoundError("subset_x__f000")
+                return _lead_dataset(leads)
+        return Client()
+
+    result = _query_leads(make_client, tuple(range(7)), ":APCP:surface:", CYCLE)
+
+    assert result.sizes["time"] == 6  # f001..f006; f000 skipped instead of failing the query
+    assert max(len(batch) for batch in requested) == 3  # never asked for all hours at once
+
+
+def test_query_leads_raises_when_no_hour_has_the_field(monkeypatch):
+    from forecast_v1.acquisition import _query_leads
+
+    class Client:
+        def xarray(self, search, **kwargs):
+            raise FileNotFoundError("subset_x")
+
+    with pytest.raises(FileNotFoundError):
+        _query_leads(lambda leads: Client(), (0, 1, 2), ":APCP:surface:", CYCLE)

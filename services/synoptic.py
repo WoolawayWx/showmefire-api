@@ -25,6 +25,40 @@ SYNOPTIC_API_TOKEN = os.getenv("SYNOPTIC_API_TOKEN")
 from core.ignored_stations import get_ignored_stations
 
 
+# Synoptic's "latest" endpoint returns each sensor's last-ever value, however old (a RAWS fuel-moisture
+# probe once reported 22.3% with a 2015 timestamp and was contoured into today's map). Drop readings that
+# are too old or physically implausible before they reach any product.
+MAX_OBSERVATION_AGE = timedelta(minutes=int(os.getenv("SMF_MAX_OBSERVATION_AGE_MINUTES", "360")))
+OBSERVATION_LIMITS = {
+    "air_temp": (-60.0, 130.0),
+    "relative_humidity": (0.0, 105.0),
+    "dew_point_temperature": (-80.0, 100.0),
+    "wind_speed": (0.0, 150.0),
+    "wind_gust": (0.0, 200.0),
+    "fuel_moisture": (0.0, 60.0),
+    "precip_accum": (0.0, 500.0),
+}
+
+
+def observation_is_usable(key, value, observed_at, now=None):
+    """True when a reading is recent enough and inside the plausible range for its variable."""
+    if value is None:
+        return False
+    if observed_at:
+        try:
+            when = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if (now or datetime.now(timezone.utc)) - when > MAX_OBSERVATION_AGE:
+                return False
+        except ValueError:
+            pass  # unparseable timestamp: let the value through rather than hide a live station
+    limits = OBSERVATION_LIMITS.get(key)
+    if limits and isinstance(value, (int, float)) and not limits[0] <= value <= limits[1]:
+        return False
+    return True
+
+
 def resolve_fuel_moisture_target_time(target_date=None, hour_utc=None, now=None):
     """Resolve an optional date/hour request to an aware UTC datetime."""
     if hour_utc is not None and not 0 <= hour_utc <= 23:
@@ -93,6 +127,8 @@ def flatten_station_data(weather_station, metadata_station):
     for key, data in raw_obs.items():
         if isinstance(data, dict) and "value" in data:
             clean_key = key.replace("_value_1d", "").replace("_value_1", "")
+            if not observation_is_usable(clean_key, data.get("value"), data.get("date_time")):
+                continue
             if clean_key not in observations or not key.endswith("_value_1d"):
                 observations[clean_key] = {
                     "value": data.get("value"),

@@ -952,6 +952,9 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     incident = get_public_fire_incident(slug)
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
+    if not incident.get("county_fips"):
+        # No Missouri county = out-of-state or unresolved cluster; nothing to review.
+        raise HTTPException(status_code=422, detail="Feedback is only accepted for incidents in Missouri.")
     ip_hash = _ip_bucket_key(_client_ip(request))
     quota = consume_fire_submission_quota(
         f"incident-feedback:{ip_hash}", datetime.now(timezone.utc), 10, 20
@@ -963,6 +966,9 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
         incident["id"], payload.classification, note,
         _clean_text(payload.contact, required=False, field="contact"), ip_hash,
         submission_source=payload.source,
+        submitter_country=(request.headers.get("cf-ipcountry") or "").strip()[:8] or None if TRUST_PROXY_HEADERS else None,
+        submitter_region=(request.headers.get("cf-region-code") or "").strip()[:16] or None if TRUST_PROXY_HEADERS else None,
+        user_agent=(request.headers.get("user-agent") or "").strip()[:200] or None,
     )
     notify_staff_alert(
         alert_type="incident_feedback",

@@ -284,6 +284,14 @@ async def cog_info(filename: str = "peak_fire_danger.tif"):
     return await asyncio.to_thread(_cog_info_sync, filename)
 
 
+def _parse_rescale(value: str):
+    try:
+        lo, hi = (float(part) for part in value.split(","))
+    except ValueError:
+        return None
+    return (lo, hi) if hi > lo else None
+
+
 def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale: str, mask: Optional[str] = None) -> Response:
     tif_path = _safe_gis_path(filename)
 
@@ -315,6 +323,11 @@ def _cog_tile_sync(z: int, x: int, y: int, filename: str, colormap: str, rescale
                     colormap_dict = rio_cmap.get(colormap)
                 except KeyError:
                     colormap_dict = rio_cmap.get("rdylgn_r")
+                # Continuous (float) rasters must be scaled to 0-255 before a
+                # colormap applies; `rescale` was accepted but never used.
+                lo_hi = _parse_rescale(rescale)
+                if lo_hi is not None and img.array.dtype != np.uint8:
+                    img.rescale(in_range=(lo_hi,))
                 png_data = img.render(img_format="PNG", colormap=colormap_dict)
 
             if mask == "missouri":
