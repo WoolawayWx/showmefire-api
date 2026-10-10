@@ -92,6 +92,7 @@ from core.config import (
 from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
+from core.public_cors import PublicTileCorsMiddleware
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -271,6 +272,9 @@ origins = [
     "https://preview.showmefire.org",# Your production frontend domain
     # You can also add specific port numbers if your frontend is served from one
 ]
+# Extra browser origins that may call the API with credentials, comma separated, for example the
+# address the ShowMeFire Field web app is hosted at: CORS_EXTRA_ORIGINS=https://field.showmefire.org
+origins += [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -283,6 +287,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Added after CORSMiddleware so it runs outside it: public map tiles always answer
+# "Access-Control-Allow-Origin: *" so a CDN cache can never hand out a copy that some site rejects.
+app.add_middleware(PublicTileCorsMiddleware)
 
 class LoginRequest(BaseModel):
     email:str
