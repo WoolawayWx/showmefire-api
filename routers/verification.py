@@ -9,7 +9,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
@@ -168,6 +168,112 @@ def _combined_tif_path(date: str) -> Path:
 
 def _rainfall_adjusted_station_tif_path(date: str) -> Path:
     return Path(GIS_DIR) / "station_peak_rainfall_adjusted" / "archive" / f"{date}.tif"
+
+
+def _forecast_peak_archive_dir() -> Path:
+    return Path(GIS_DIR) / "forecast_peak" / "archive"
+
+
+def _station_peak_archive_dir() -> Path:
+    return Path(GIS_DIR) / "observed_peak" / "archive"
+
+
+def _rtma_peak_archive_dir() -> Path:
+    return Path(GIS_DIR) / "rtma_peak" / "archive"
+
+
+def _max_class_single_band(path: Path) -> Optional[int]:
+    """Statewide peak category from a single-band 0-4 (255=nodata) GeoTIFF.
+
+    Used for forecast_peak and rtma_peak archives, which both come from
+    export_fire_danger_gis.export_geotiff.
+    """
+    if not path.is_file():
+        return None
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            band = src.read(1)
+            nodata = src.nodata
+        valid = band != nodata if nodata is not None else (band <= 4)
+        if not valid.any():
+            return None
+        return int(band[valid].max())
+    except Exception:
+        logger.exception("Unable to read peak class from %s", path)
+        return None
+
+
+def _max_class_rgba(path: Path, class_colors: Mapping[int, Tuple[int, int, int, int]]) -> Optional[int]:
+    """Statewide peak category from an RGBA GeoTIFF colored by fixed class colors.
+
+    Used for observed_peak (station-based) archives, which are written by
+    maps.realtime_geotiff.export_discrete_rgba_geotiff - there's no raw class
+    band, just colors, so match pixels back to the class that produced them.
+    """
+    if not path.is_file():
+        return None
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            red, green, blue = src.read(1), src.read(2), src.read(3)
+            alpha = src.read(4) if src.count >= 4 else None
+        present = [
+            value for value, color in class_colors.items()
+            if ((alpha is None or alpha > 0) & (red == color[0]) & (green == color[1]) & (blue == color[2])).any()
+        ]
+        return max(present) if present else None
+    except Exception:
+        logger.exception("Unable to read peak class from %s", path)
+        return None
+
+
+@router.get("/peak-history")
+async def get_peak_verification_history(limit: int = Query(90, ge=1, le=366)):
+    """Daily statewide peak fire-danger category: forecasted vs. station-observed vs. RTMA-observed.
+
+    Bias is forecast minus observed (matching the sign convention used by
+    /history and /report/{date}'s directional_metrics): positive means the
+    forecast ran higher than what was actually observed that day.
+    """
+    from maps.observed_peak_history import DANGER_CLASS_COLORS as STATION_CLASS_COLORS
+
+    forecast_dir = _forecast_peak_archive_dir()
+    station_dir = _station_peak_archive_dir()
+    rtma_dir = _rtma_peak_archive_dir()
+
+    dates = set()
+    for directory in (forecast_dir, station_dir, rtma_dir):
+        if directory.is_dir():
+            dates.update(path.stem for path in directory.glob("*.tif"))
+
+    days = []
+    for date in dates:
+        normalized = _normalize_date(date)
+        if normalized is None or not _report_covers_closed_window({"date": normalized}):
+            continue
+        forecast_class = _max_class_single_band(forecast_dir / f"{date}.tif")
+        station_class = _max_class_rgba(station_dir / f"{date}.tif", STATION_CLASS_COLORS)
+        rtma_class = _max_class_single_band(rtma_dir / f"{date}.tif")
+        if forecast_class is None and station_class is None and rtma_class is None:
+            continue
+        days.append({
+            "date": normalized,
+            "forecast_peak_class": forecast_class,
+            "station_peak_class": station_class,
+            "rtma_peak_class": rtma_class,
+            "station_bias": (
+                forecast_class - station_class if forecast_class is not None and station_class is not None else None
+            ),
+            "rtma_bias": (
+                forecast_class - rtma_class if forecast_class is not None and rtma_class is not None else None
+            ),
+        })
+
+    days.sort(key=lambda row: row["date"], reverse=True)
+    return {"days": sorted(days[:limit], key=lambda row: row["date"])}
 
 
 def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:

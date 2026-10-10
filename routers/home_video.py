@@ -3,6 +3,7 @@ import logging
 import re
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import parse_qs, urlparse
@@ -55,20 +56,40 @@ def _row() -> dict:
         row = connection.execute("SELECT * FROM home_video WHERE id = 1").fetchone()
     return dict(row) if row else {
         "enabled": 0, "source": "youtube", "youtube_id": "", "filename": "", "title": "", "caption": "",
+        "expires_at": "",
     }
+
+
+def _parse_expires_at(value: str) -> Optional[datetime]:
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="That doesn't look like a valid expiration date/time.")
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_expired(row: dict) -> bool:
+    expires_at = _parse_expires_at(row.get("expires_at") or "")
+    return expires_at is not None and expires_at <= datetime.now(timezone.utc)
 
 
 def _present(row: dict) -> dict:
     source = row.get("source") or "youtube"
     playable = bool(row.get("youtube_id")) if source == "youtube" else bool(row.get("filename"))
+    expired = _is_expired(row)
     return {
-        "enabled": bool(row.get("enabled")) and playable,
+        "enabled": bool(row.get("enabled")) and playable and not expired,
         "source": source,
         "youtube_id": row.get("youtube_id") or "",
         "video_url": f"/home-video/{row['filename']}" if source == "upload" and row.get("filename") else "",
         "has_upload": bool(row.get("filename")),
         "title": row.get("title") or "",
         "caption": row.get("caption") or "",
+        "expires_at": row.get("expires_at") or "",
+        "expired": expired,
         "updated_at": row.get("updated_at"),
     }
 
@@ -91,6 +112,7 @@ class HomeVideoUpdate(BaseModel):
     youtube_url: str = Field(default="", max_length=300)
     title: str = Field(default="", max_length=120)
     caption: str = Field(default="", max_length=500)
+    expires_at: str = Field(default="", max_length=40)
 
 
 def _save(email: str, **fields) -> None:
@@ -98,13 +120,14 @@ def _save(email: str, **fields) -> None:
     merged = {**current, **fields}
     with sqlite3.connect(get_db_path()) as connection:
         connection.execute(
-            """INSERT INTO home_video (id, enabled, source, youtube_id, filename, title, caption, updated_by, updated_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """INSERT INTO home_video (id, enabled, source, youtube_id, filename, title, caption, expires_at, updated_by, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, source=excluded.source,
                  youtube_id=excluded.youtube_id, filename=excluded.filename, title=excluded.title,
-                 caption=excluded.caption, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP""",
+                 caption=excluded.caption, expires_at=excluded.expires_at, updated_by=excluded.updated_by,
+                 updated_at=CURRENT_TIMESTAMP""",
             (int(bool(merged["enabled"])), merged["source"], merged["youtube_id"], merged["filename"],
-             merged["title"], merged["caption"], email),
+             merged["title"], merged["caption"], merged["expires_at"], email),
         )
 
 
@@ -121,8 +144,12 @@ def admin_update_home_video(payload: HomeVideoUpdate, token: Optional[str] = Non
         raise HTTPException(status_code=400, detail="Add a YouTube link before enabling the video.")
     if payload.enabled and payload.source == "upload" and not current.get("filename"):
         raise HTTPException(status_code=400, detail="Upload a video file before enabling the video.")
+    expires_at = payload.expires_at.strip()
+    expires_at_parsed = _parse_expires_at(expires_at)
+    if payload.enabled and expires_at_parsed is not None and expires_at_parsed <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="The expiration date/time is in the past.")
     _save(email, enabled=payload.enabled, source=payload.source, youtube_id=youtube_id,
-          title=payload.title.strip(), caption=payload.caption.strip())
+          title=payload.title.strip(), caption=payload.caption.strip(), expires_at=expires_at)
     return {"success": True, **_present(_row())}
 
 

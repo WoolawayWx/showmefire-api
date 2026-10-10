@@ -1165,10 +1165,14 @@ def init_database():
             filename TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
             caption TEXT NOT NULL DEFAULT '',
+            expires_at TEXT NOT NULL DEFAULT '',
             updated_by TEXT NOT NULL DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("PRAGMA table_info(home_video)")
+    if "expires_at" not in {row[1] for row in cursor.fetchall()}:
+        cursor.execute("ALTER TABLE home_video ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_receipts (
             ticket_id TEXT PRIMARY KEY,
