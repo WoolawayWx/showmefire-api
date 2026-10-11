@@ -101,6 +101,7 @@ def _incident_v2(incident: dict) -> dict:
             "count": incident.get("feedback_count", 0),
             "pending_count": incident.get("pending_feedback_count", 0),
             "confirmed": bool(incident.get("confirmed")),
+            "latest_note": incident.get("latest_feedback_note"),
         },
         "graphic_url": graphic_url,
         "feedback_url": feedback_url,

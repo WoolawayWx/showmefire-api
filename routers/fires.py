@@ -954,7 +954,7 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     if not quota["allowed"]:
         raise HTTPException(status_code=429, detail="Too many feedback submissions. Please try again later.")
     note = _clean_text(payload.note, required=False, field="note")
-    create_fire_incident_feedback(
+    feedback_record = create_fire_incident_feedback(
         incident["id"], payload.classification, note,
         _clean_text(payload.contact, required=False, field="contact"), ip_hash,
         submission_source=payload.source,
@@ -962,17 +962,66 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
         submitter_region=(request.headers.get("cf-region-code") or "").strip()[:16] or None if TRUST_PROXY_HEADERS else None,
         user_agent=(request.headers.get("user-agent") or "").strip()[:200] or None,
     )
+    fields = [
+        {"name": "Classification", "value": payload.classification.replace("_", " ")},
+        {"name": "Incident", "value": slug},
+    ]
+    # Score it inline so staff see *why* the review queue would trust (or
+    # distrust) this submission straight from the Discord alert, without
+    # having to open the admin page first - same heuristic
+    # admin_list_pending_incident_feedback shows later, just surfaced earlier.
+    try:
+        from services.feedback_confidence import score_feedback
+        scored = score_feedback(feedback_record["id"])
+        if scored:
+            fields.append({"name": "Confidence", "value": f"{scored['score']}% likely correct", "inline": True})
+            why = _format_confidence_factors(scored["factors"])
+            if why:
+                fields.append({"name": "Why", "value": why, "inline": False})
+    except Exception:
+        logger.warning("Failed to score incident feedback %s for staff alert", feedback_record.get("id"), exc_info=True)
     notify_staff_alert(
         alert_type="incident_feedback",
         title=f"Fire incident feedback: {incident.get('county_name') or slug}",
         description=note,
-        fields=[
-            {"name": "Classification", "value": payload.classification.replace("_", " ")},
-            {"name": "Incident", "value": slug},
-        ],
+        fields=fields,
         admin_path="/admin/fires",
     )
     return {"success": True, "message": "Thanks—your fire information was received."}
+
+
+def _format_confidence_factors(factors: dict) -> str:
+    """Render feedback_confidence.py's factor breakdown as short bullet lines
+    for a Discord field - the same evidence the admin queue's confidence
+    score is based on, in plain language."""
+    lines: list[str] = []
+    ml_pct = factors.get("satellite_ml_confidence_pct")
+    if ml_pct is not None:
+        lines.append(f"• Satellite ML confidence on this detection: {ml_pct}%")
+    frp_pct = factors.get("peak_frp_signal_pct")
+    if frp_pct:
+        lines.append(f"• Fire radiative power signal strength: {frp_pct}%")
+    water_pct = factors.get("water_fraction_pct")
+    if water_pct:
+        lines.append(f"• Water land-cover under detection: {water_pct}% (possible sun glint)")
+    cropland_pct = factors.get("cropland_fraction_pct")
+    if cropland_pct:
+        lines.append(f"• Cropland land-cover under detection: {cropland_pct}%")
+    if factors.get("officially_confirmed_detection"):
+        lines.append("• A detection on this incident is already officially/admin confirmed")
+    if factors.get("sustained_multi_pass_incident"):
+        lines.append("• Sustained multi-pass signature, not a single blip")
+    corroborating = factors.get("corroborating_reports") or 0
+    if corroborating:
+        lines.append(f"• {corroborating} other independent report(s) agree with this classification")
+    repeats = factors.get("recent_submissions_from_source") or 0
+    if repeats:
+        lines.append(f"• ⚠ {repeats} other submission(s) from this same source in the last 24h")
+    if factors.get("contact_provided"):
+        lines.append("• Submitter left contact info")
+    if factors.get("detailed_note"):
+        lines.append("• Submitter left a detailed note")
+    return "\n".join(lines)
 
 
 # --- Admin: incident feedback review ---

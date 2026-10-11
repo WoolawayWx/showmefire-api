@@ -2,6 +2,7 @@
 SQLite Database - core/database.py
 """
 import sqlite3
+import copy
 import hashlib
 import logging
 import os
@@ -16,7 +17,7 @@ from typing import Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 
-DISCORD_STAFF_ALERT_TYPES_DEFAULT = "burn_ban,fire_report,incident_feedback,site_feedback"
+DISCORD_STAFF_ALERT_TYPES_DEFAULT = "burn_ban,fire_report,incident_feedback,site_feedback,system_issue"
 
 
 def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:
@@ -3545,6 +3546,21 @@ def _fire_incident_feedback_summary(cursor: sqlite3.Cursor, incident_id: int) ->
     }
 
 
+def _latest_feedback_note(cursor: sqlite3.Cursor, incident_id: int) -> Optional[Dict]:
+    """Most recent public feedback note with actual text, for display
+    surfaces (e.g. the station-TV kiosk) that want to show "what someone
+    said" about an incident, not just counts. Like the rest of public
+    feedback (see list_fire_incidents docstring), this is unmoderated - a
+    public signal, not a review gate."""
+    row = cursor.execute(
+        "SELECT classification, note, created_at FROM fire_incident_feedback "
+        "WHERE incident_id = ? AND note IS NOT NULL AND trim(note) != '' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (incident_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 # Sources that only ever arrive automatically from a satellite/ML pipeline,
 # with no human having looked at or corroborated this specific fire yet.
 # Used to decide "additional info" below - the opposite of these (a public
@@ -3649,6 +3665,7 @@ def list_fire_incidents(
             incident["county_names"] = [item[0] for item in counties]
             incident["county_name"] = ", ".join(incident["county_names"]) or incident.get("county_name")
             incident.update(_fire_incident_feedback_summary(cursor, incident["id"]))
+            incident["latest_feedback_note"] = _latest_feedback_note(cursor, incident["id"])
             incidents.append(incident)
         return incidents
     finally:
@@ -4722,26 +4739,41 @@ def _ensure_fire_weather_alert_history_table(cursor: sqlite3.Cursor) -> None:
 # on a stored code fall back to these - see _merge_display_settings. Keeping
 # the schema's authoritative defaults here, not in the router, so the DB
 # layer and any future script/admin tooling share one source of truth.
+# The kiosk is a free-form widget grid (see pages/display/dashboard.vue) -
+# this reproduces the pre-grid fixed layout (two stat-tile columns flanking
+# one rotating map stage) as grid coordinates on a 12-column grid, so an
+# existing/new code with no saved layout yet looks exactly like it always
+# did. widgetId values must match an id in website/app/display/tiles.ts
+# (TILE_REGISTRY) or views.ts (VIEW_REGISTRY).
+_LEFT_TILE_IDS = ["incidentsToday", "pendingReports", "burnBans", "pendingBurnBans"]
+_RIGHT_TILE_IDS = ["alerts", "redFlag", "elevated", "stationsReporting"]
+_ROTATING_VIEW_IDS = [
+    "danger", "peak", "observedPeak", "conditions", "burnban", "detections", "spotlight", "recentIncidents",
+]
+
+
+def _default_display_layout() -> list:
+    layout = []
+    for col_x, tile_ids in ((0, _LEFT_TILE_IDS), (9, _RIGHT_TILE_IDS)):
+        for row, widget_id in enumerate(tile_ids):
+            layout.append({
+                "i": f"default-tile-{widget_id}",
+                "widgetId": widget_id,
+                "kind": "tile",
+                "x": col_x, "y": row * 4, "w": 3, "h": 4,
+            })
+    layout.append({
+        "i": "default-rotating-view",
+        "widgetId": _ROTATING_VIEW_IDS[0],
+        "kind": "view",
+        "x": 3, "y": 0, "w": 6, "h": 16,
+        "rotate": {"enabled": True, "viewIds": _ROTATING_VIEW_IDS, "intervalMs": 25_000},
+    })
+    return layout
+
+
 DEFAULT_DISPLAY_SETTINGS: Dict = {
-    "views": {
-        "danger": True,
-        "peak": True,
-        "observedPeak": True,
-        "conditions": True,
-        "burnban": True,
-        "detections": True,
-        "spotlight": True,
-    },
-    "tiles": {
-        "incidentsToday": True,
-        "pendingReports": True,
-        "burnBans": True,
-        "pendingBurnBans": True,
-        "alerts": True,
-        "redFlag": True,
-        "elevated": True,
-        "stationsReporting": True,
-    },
+    "layout": _default_display_layout(),
     "timing": {
         "viewRotateMs": 25_000,
         "detectionsStaticMs": 8_000,
@@ -4756,8 +4788,13 @@ DEFAULT_DISPLAY_SETTINGS: Dict = {
 def merge_display_settings(stored: Optional[Dict]) -> Dict:
     """One level of dict-merge over DEFAULT_DISPLAY_SETTINGS - a code only
     needs to persist the keys it overrides, everything else (including keys
-    added to the schema later) keeps working via the default."""
-    merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_DISPLAY_SETTINGS.items()}
+    added to the schema later) keeps working via the default.
+
+    Deep-copies every default value (not just dicts) - `layout` is a list of
+    dicts, and without a real copy every call would hand back a reference to
+    the same shared DEFAULT_DISPLAY_SETTINGS list, so one caller mutating its
+    "copy" would corrupt the default for every other code."""
+    merged = copy.deepcopy(DEFAULT_DISPLAY_SETTINGS)
     for key, value in (stored or {}).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key].update(value)

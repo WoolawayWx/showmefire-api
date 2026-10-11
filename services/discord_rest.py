@@ -31,6 +31,7 @@ STAFF_COLORS = {
     "fire_report": 0xDC2626,
     "incident_feedback": 0xF59E0B,
     "site_feedback": 0x2563EB,
+    "system_issue": 0x991B1B,
 }
 FIRE_ALERT_COLORS = {"Red Flag Warning": 0xDC2626, "Fire Weather Watch": 0xF59E0B}
 

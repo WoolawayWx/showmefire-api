@@ -104,6 +104,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+from services.system_alerts import install_discord_log_handler, notify_system_issue
+
+# Forwards any ERROR+ log record app-wide to the Discord staff-alert channel -
+# this is what turns core/scheduler.py's ~25 existing
+# logger.error(..., exc_info=True) job-failure calls into a Discord ping,
+# with no need to touch each job individually. See services/system_alerts.py.
+install_discord_log_handler()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
@@ -169,6 +177,25 @@ app = FastAPI(
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json"
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler for anything a route didn't already turn into an
+    HTTPException - logs it (as before) and alerts staff on Discord via
+    services/system_alerts.py. Starlette dispatches HTTPException to its own
+    more-specific default handler first, so deliberate `raise
+    HTTPException(...)` calls never reach this."""
+    logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=True)
+    try:
+        notify_system_issue(
+            source=f"{request.method} {request.url.path}",
+            message=f"{type(exc).__name__}: {exc}",
+        )
+    except Exception:
+        logger.warning("Failed to send system issue alert for unhandled exception", exc_info=True)
+    return JSONResponse(status_code=500, content={"success": False, "error": "Internal server error"})
+
 
 class NoCacheStaticFiles(StaticFiles):
     async def get_response(self, path, scope):

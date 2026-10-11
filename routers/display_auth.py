@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from core import security
@@ -28,6 +28,7 @@ from core.database import (
     touch_display_access_code_usage,
 )
 from core.security import hash_password, require_admin, verify_password
+from services import display_broadcast
 
 router = APIRouter(tags=["display-auth"])
 
@@ -96,6 +97,28 @@ def _require_display_code_id(request: Request) -> int:
     return code_id
 
 
+@router.websocket("/api/display/ws")
+async def display_ws(websocket: WebSocket):
+    """Live-sync channel for one kiosk ("board"). The client never sends
+    anything meaningful - it just holds the connection open and reloads
+    whenever display_settings_save/admin_set_display_code_settings below
+    broadcast a change for this code_id (see services/display_broadcast.py)."""
+    token = websocket.cookies.get(security.DISPLAY_ACCESS_COOKIE_NAME)
+    code_id = security.verify_display_access_token(token)
+    if code_id is None:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    display_broadcast.register(code_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        display_broadcast.unregister(code_id, websocket)
+
+
 @router.get("/api/display/review-queue")
 def display_review_queue(request: Request):
     """Pending-item counts (unreviewed fire reports, unreviewed burn-ban
@@ -151,12 +174,13 @@ class DisplaySettingsSaveRequest(BaseModel):
 
 
 @router.put("/api/display/settings")
-def display_settings_save(payload: DisplaySettingsSaveRequest, request: Request):
+async def display_settings_save(payload: DisplaySettingsSaveRequest, request: Request):
     code_id = _require_display_code_id(request)
     if not security.verify_display_settings_token(payload.settings_token, code_id):
         raise HTTPException(status_code=401, detail="Re-enter the display code to save changes")
     if not set_display_code_settings(code_id, payload.settings):
         raise HTTPException(status_code=404, detail="Code not found")
+    await display_broadcast.notify_settings_changed(code_id)
     return {"success": True, "settings": get_display_code_settings(code_id)}
 
 
@@ -214,11 +238,12 @@ def admin_get_display_code_settings(code_id: int, _admin: str = Depends(require_
 
 
 @router.put("/api/admin/display-codes/{code_id}/settings")
-def admin_set_display_code_settings(code_id: int, settings: Dict[str, Any], _admin: str = Depends(require_admin)):
+async def admin_set_display_code_settings(code_id: int, settings: Dict[str, Any], _admin: str = Depends(require_admin)):
     """Body is the complete settings object (the admin UI always submits the
     full, already-merged-with-defaults form) - stored as-is; new default keys
     added later still apply to old codes via merge_display_settings at read
     time, so this never needs a migration when the schema grows."""
     if not set_display_code_settings(code_id, settings):
         raise HTTPException(status_code=404, detail="Code not found")
+    await display_broadcast.notify_settings_changed(code_id)
     return {"success": True, "settings": get_display_code_settings(code_id)}
