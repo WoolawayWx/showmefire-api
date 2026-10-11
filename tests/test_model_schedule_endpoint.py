@@ -36,7 +36,7 @@ def _fake_request(scheduler):
 
 class ModelScheduleEndpointTests(unittest.TestCase):
     def setUp(self):
-        self._admin_patcher = patch.object(model_admin, "_require_admin", return_value="tester@example.com")
+        self._admin_patcher = patch.object(model_admin, "require_admin", return_value="tester@example.com")
         self._admin_patcher.start()
 
     def tearDown(self):

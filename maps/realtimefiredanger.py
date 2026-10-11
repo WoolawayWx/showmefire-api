@@ -32,6 +32,7 @@ from logging.handlers import RotatingFileHandler
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from core.fire_danger import calculate_fire_danger as canonical_fire_danger
+from core.fire_danger import CATEGORY_BINS, CATEGORY_HEX_COLORS, CATEGORY_LABELS, CATEGORY_RGBA_COLORS
 
 from realtime_geotiff import export_discrete_rgba_geotiff
 from station_danger_history import (
@@ -261,10 +262,10 @@ if rh_points and wind_points and fuel_points:
                 wind_grid[i, j]
             )
 
-    # Define fire danger categories (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
-    bins = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
-    labels = ['Low', 'Moderate', 'Elevated', 'Critical', 'Extreme']
-    colors = ["#90EE90", '#FFED4E', '#FFA500', '#FF0000', '#8B0000']
+    # Fire danger categories (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
+    bins = list(CATEGORY_BINS)
+    labels = list(CATEGORY_LABELS)
+    colors = list(CATEGORY_HEX_COLORS)
     cmap = ListedColormap(colors)
     norm = BoundaryNorm(bins, len(colors))
 
@@ -286,13 +287,7 @@ if rh_points and wind_points and fuel_points:
         state_filter='MO',
     )
 
-    danger_class_colors = {
-        0: (144, 238, 144, 255),  # Low
-        1: (255, 237, 78, 255),   # Moderate
-        2: (255, 165, 0, 255),    # Elevated
-        3: (255, 0, 0, 255),      # Critical
-        4: (139, 0, 0, 255),      # Extreme
-    }
+    danger_class_colors = CATEGORY_RGBA_COLORS
     geotiff_ok = export_discrete_rgba_geotiff(
         grid_values=grid_values,
         lon_mesh=grid_lon_mesh,

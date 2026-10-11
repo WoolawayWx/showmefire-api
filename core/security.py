@@ -3,6 +3,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
+from fastapi import HTTPException
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -125,6 +126,28 @@ def verify_token(token: Optional[str] = None, expected_type: str = "access") -> 
         return email
     except JWTError:
         return None
+
+def require_admin(token: Optional[str] = None) -> str:
+    """FastAPI dependency: the current Show Me Fire administrator's email.
+
+    Normally authenticates via the admin_access cookie alone -
+    admin_cookie_context (core/admin_session.py), registered as global
+    middleware in main.py, already populates the request-scoped token this
+    reads via verify_token() on every request, so an endpoint using this
+    dependency does not need to declare its own `token` param at all. The
+    optional `token` override is kept (not removed) only because the test
+    suite (tests/test_admin_confirm.py and others) authenticates by passing
+    `params={"token": ...}` directly rather than a cookie - no production
+    caller relies on it. Replaces ~19 duplicate per-router copies of this
+    same 4-line check.
+
+    Usage: `admin_email: str = Depends(require_admin)`.
+    """
+    email = verify_token(token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return email
+
 
 def set_graphics_request_token(token: Optional[str]):
     return _graphics_request_token.set(token)

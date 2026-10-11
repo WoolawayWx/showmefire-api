@@ -6,7 +6,7 @@ import os
 from typing import List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from core.database import (
@@ -25,7 +25,7 @@ from core.database import (
     update_bulletin,
     upsert_newsletter_subscriber,
 )
-from core.security import verify_token
+from core.security import require_admin
 from services.graphics_email import (
     set_audience_contact_properties,
     send_bulletin_broadcast,
@@ -103,13 +103,6 @@ class BulletinCreate(BaseModel):
 
 class NewsletterManage(NewsletterSignup):
     token: str = Field(min_length=20)
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _validate_preferences(counties: List[CountyPreference]) -> List[dict]:
@@ -241,20 +234,17 @@ def newsletter_counties():
 
 
 @router.get("/api/admin/bulletins")
-def admin_list_bulletins(token: Optional[str] = None):
-    _require_admin(token)
+def admin_list_bulletins(_admin: str = Depends(require_admin)):
     return {"bulletins": list_bulletins()}
 
 
 @router.post("/api/admin/bulletins")
-def admin_create_bulletin(payload: BulletinCreate, token: Optional[str] = None):
-    _require_admin(token)
+def admin_create_bulletin(payload: BulletinCreate, _admin: str = Depends(require_admin)):
     return create_bulletin(payload.subject, payload.html_body, payload.text_body)
 
 
 @router.get("/api/admin/bulletins/{bulletin_id}")
-def admin_get_bulletin(bulletin_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
     bulletin = get_bulletin(bulletin_id)
     if not bulletin:
         raise HTTPException(status_code=404, detail="Bulletin not found")
@@ -262,8 +252,7 @@ def admin_get_bulletin(bulletin_id: int, token: Optional[str] = None):
 
 
 @router.put("/api/admin/bulletins/{bulletin_id}")
-def admin_update_bulletin(bulletin_id: int, payload: BulletinCreate, token: Optional[str] = None):
-    _require_admin(token)
+def admin_update_bulletin(bulletin_id: int, payload: BulletinCreate, _admin: str = Depends(require_admin)):
     bulletin = update_bulletin(bulletin_id, payload.subject, payload.html_body, payload.text_body)
     if not bulletin:
         raise HTTPException(status_code=404, detail="Draft bulletin not found")
@@ -271,8 +260,7 @@ def admin_update_bulletin(bulletin_id: int, payload: BulletinCreate, token: Opti
 
 
 @router.post("/api/admin/bulletins/{bulletin_id}/preview")
-def admin_preview_bulletin(bulletin_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_preview_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
     bulletin = get_bulletin(bulletin_id)
     if not bulletin:
         raise HTTPException(status_code=404, detail="Bulletin not found")
@@ -285,8 +273,7 @@ def admin_preview_bulletin(bulletin_id: int, token: Optional[str] = None):
 
 
 @router.post("/api/admin/bulletins/{bulletin_id}/send")
-def admin_send_bulletin(bulletin_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
     bulletin = get_bulletin(bulletin_id)
     if not bulletin:
         raise HTTPException(status_code=404, detail="Bulletin not found")
@@ -305,15 +292,13 @@ def admin_send_bulletin(bulletin_id: int, token: Optional[str] = None):
 
 
 @router.get("/api/admin/newsletter/preferences")
-def admin_newsletter_preferences(token: Optional[str] = None):
-    _require_admin(token)
+def admin_newsletter_preferences(_admin: str = Depends(require_admin)):
     return {"preferences": get_newsletter_preferences()}
 
 
 @router.post("/api/admin/newsletter/sync-manage-urls")
-def admin_sync_newsletter_manage_urls(token: Optional[str] = None):
+def admin_sync_newsletter_manage_urls(_admin: str = Depends(require_admin)):
     """Backfill Resend's manage_url property for existing subscribers."""
-    _require_admin(token)
     synced = 0
     failed = []
     for subscriber in list_newsletter_subscribers():

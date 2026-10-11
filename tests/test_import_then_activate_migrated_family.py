@@ -33,7 +33,7 @@ class ImportThenActivateTests(unittest.TestCase):
             patch.multiple(versioning, API_DIR=root, MODELS_DIR=root / "models",
                            CONFIG_PATH=root / "models" / "config.json", VERSIONS_DIR=root / "models" / "versions"),
             patch.object(shadow_bundles, "BUNDLES_ROOT", root / "model-bundles"),
-            patch.object(model_admin, "_require_admin", return_value="tester@example.com"),
+            patch.object(model_admin, "require_admin", return_value="tester@example.com"),
             patch.object(model_admin, "_require_confirmation", return_value=None),
             patch.dict("os.environ", {"SMF_GITHUB_REPO": "owner/ShowMeFire-Models"}, clear=False),
         )

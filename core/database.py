@@ -124,7 +124,7 @@ def _ensure_discord_oauth_tables(cursor: sqlite3.Cursor) -> None:
 
 
 def create_discord_oauth_state(state: str, *, admin_email: str, purpose: str) -> None:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.cursor()
         _ensure_discord_oauth_tables(cursor)
@@ -140,7 +140,7 @@ def create_discord_oauth_state(state: str, *, admin_email: str, purpose: str) ->
 
 def consume_discord_oauth_state(state: str, *, max_age_minutes: int = 10) -> Optional[Dict]:
     """Single-use: returns the state's admin/purpose once, if it's still fresh."""
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
@@ -163,7 +163,7 @@ def consume_discord_oauth_state(state: str, *, max_age_minutes: int = 10) -> Opt
 def save_discord_admin_link(admin_email: str, *, discord_user_id: str, username: str,
                             display_name: str, avatar: str, guilds: List[Dict]) -> None:
     import json as _json
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.cursor()
         _ensure_discord_oauth_tables(cursor)
@@ -183,7 +183,7 @@ def save_discord_admin_link(admin_email: str, *, discord_user_id: str, username:
 
 def get_discord_admin_link(admin_email: str) -> Optional[Dict]:
     import json as _json
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
@@ -200,7 +200,7 @@ def get_discord_admin_link(admin_email: str) -> Optional[Dict]:
 
 
 def delete_discord_admin_link(admin_email: str) -> None:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.cursor()
         _ensure_discord_oauth_tables(cursor)
@@ -214,7 +214,7 @@ def save_discord_server_cache(payload: Dict) -> None:
     """Remember the last successful server/channel/role discovery."""
     import json as _json
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS discord_server_cache (
@@ -236,7 +236,7 @@ def save_discord_server_cache(payload: Dict) -> None:
 def get_discord_server_cache() -> Optional[Dict]:
     import json as _json
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         try:
             row = conn.execute("SELECT payload_json, synced_at FROM discord_server_cache WHERE id = 1").fetchone()
@@ -268,7 +268,7 @@ def claim_unposted_discord_fire_alerts(alert_ids: List[str]) -> List[str]:
     recorded as a baseline instead, mirroring mobile push seeding.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         _ensure_discord_fire_alert_posts_table(cursor)
@@ -295,7 +295,7 @@ def claim_unposted_discord_fire_alerts(alert_ids: List[str]) -> List[str]:
 
 def mark_discord_fire_alert_posted(alert_id: str) -> None:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         _ensure_discord_fire_alert_posts_table(cursor)
@@ -712,7 +712,7 @@ def _ensure_shadow_model_settings_table(cursor: sqlite3.Cursor) -> None:
 
 
 def get_shadow_model_setting(family: str) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -729,7 +729,7 @@ def get_shadow_model_setting(family: str) -> Optional[Dict]:
 
 
 def set_shadow_model_setting(family: str, enabled: bool, updated_by: Optional[str]) -> Dict:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -745,7 +745,7 @@ def set_shadow_model_setting(family: str, enabled: bool, updated_by: Optional[st
 
 
 def list_shadow_model_settings() -> Dict[str, Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -821,7 +821,7 @@ def _migrate_forecasts_off_legacy_valid_time_unique(conn: sqlite3.Connection) ->
 def init_database():
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
 
     # Persistent, database-level setting (stored in the file header) so every
     # future connection from any process uses WAL: readers no longer block
@@ -1417,7 +1417,7 @@ def get_latest_forecast(cycle: int = 12):
     or when a secondary-cycle (e.g. 9z) forecast has also been written.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1442,7 +1442,7 @@ def get_forecast_by_time(valid_time, cycle: int = 12):
     Retrieves a forecast by its valid_time and HRRR cycle (default 12).
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1460,7 +1460,7 @@ def get_recent_forecasts(limit=5, cycle: int = 12):
     cycle (default 12 = the operational forecast).
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1481,7 +1481,7 @@ def get_forecast_count():
     Returns the total number of forecasts in the database.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     
     cursor.execute('SELECT COUNT(*) FROM forecasts')
@@ -1492,7 +1492,7 @@ def get_forecast_count():
 
 def get_website_version():
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1506,7 +1506,7 @@ def get_website_version():
 
 def set_website_version(version: str):
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('UPDATE website_info SET version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1', (version,))
@@ -1521,7 +1521,7 @@ def set_website_version(version: str):
 
 def get_discord_admin_settings() -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1608,7 +1608,7 @@ def update_discord_admin_settings(
     updated_by: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1699,7 +1699,7 @@ def update_discord_admin_settings(
 def get_all_stations():
     """Returns all stations from the database."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -1711,7 +1711,7 @@ def get_all_stations():
 def get_unprocessed_snapshots():
     """Returns all snapshots that haven't been mined yet."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -1727,7 +1727,7 @@ def get_unprocessed_snapshots():
 def save_hrrr_features(snapshot_id, features, station_id):
     db_path = get_db_path()
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(db_path, timeout=15) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO weather_features 
@@ -1751,7 +1751,7 @@ def save_hrrr_features(snapshot_id, features, station_id):
 def mark_snapshot_processed(snapshot_id: int):
     """Marks a snapshot as fully processed."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('UPDATE snapshots SET is_processed = 1 WHERE id = ?', (snapshot_id,))
@@ -1763,7 +1763,7 @@ def mark_snapshot_processed(snapshot_id: int):
 
 def set_hrrr_filename(snapshot_id: int, filename: str):
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE snapshots SET hrrr_filename = ? WHERE id = ?",
@@ -1803,7 +1803,7 @@ def insert_forecast(valid_time, title, discussion, cycle: int = 12):
         int: The ID of the inserted forecast.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
 
     try:
@@ -1840,7 +1840,7 @@ def insert_forecast(valid_time, title, discussion, cycle: int = 12):
 def list_dev_projects() -> List[Dict]:
     """Return all development projects ordered by sort_order then id."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
@@ -1861,7 +1861,7 @@ def create_dev_project(
     sort_order: Optional[int] = None
 ) -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1894,7 +1894,7 @@ def update_dev_project(
     sort_order: Optional[int] = None
 ) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -1915,7 +1915,7 @@ def update_dev_project(
 
 def delete_dev_project(project_id: int) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('DELETE FROM dev_projects WHERE id = ?', (project_id,))
@@ -1930,7 +1930,7 @@ def delete_dev_project(project_id: int) -> bool:
 def list_briefings() -> List[Dict]:
     """Return all briefings ordered by newest first."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
@@ -1946,7 +1946,7 @@ def list_briefings() -> List[Dict]:
 def get_briefing_config() -> Dict:
     """Return the singleton briefing configuration row (id=1)."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
@@ -1972,7 +1972,7 @@ def create_briefing(
     expires_at should be an ISO timestamp string (or None).
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2006,7 +2006,7 @@ def update_briefing(
 ) -> bool:
     """Update one briefing row. Pass only fields you want to change."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         is_active_db = None if is_active is None else (1 if is_active else 0)
@@ -2031,7 +2031,7 @@ def get_active_briefings() -> List[Dict]:
     Uses UTC CURRENT_TIMESTAMP from SQLite.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
@@ -2051,7 +2051,7 @@ def get_active_briefings() -> List[Dict]:
 def get_known_afd_product_ids(office: Optional[str] = None) -> set:
     """Return known AFD product IDs, optionally filtered by office."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         if office:
@@ -2090,7 +2090,7 @@ def insert_afd_records(records: Iterable[Dict]) -> int:
         return 0
 
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         before = conn.total_changes
@@ -2114,7 +2114,7 @@ def insert_afd_records(records: Iterable[Dict]) -> int:
 def get_afds_by_office(office: str, limit: int = 10, since: Optional[str] = None) -> List[Dict]:
     """Return most recent AFDs for an office, newest first."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -2179,7 +2179,7 @@ def create_post(title: str, body: str, author_name: str, tags: List[str], excerp
                 seo_title: Optional[str] = None, seo_description: Optional[str] = None,
                 body_format: str = "plain") -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2212,7 +2212,7 @@ def create_post(title: str, body: str, author_name: str, tags: List[str], excerp
 def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0,
                category: Optional[str] = None, status: Optional[str] = "published") -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2251,7 +2251,7 @@ def list_posts(tag: Optional[str] = None, limit: int = 50, offset: int = 0,
 
 def list_post_tags() -> List[str]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT DISTINCT tag FROM post_tags ORDER BY tag')
@@ -2262,7 +2262,7 @@ def list_post_tags() -> List[str]:
 
 def list_post_categories() -> List[str]:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM post_categories ORDER BY name")
         return [row[0] for row in cursor.fetchall()]
@@ -2272,7 +2272,7 @@ def create_post_category(name: str) -> str:
     value = str(name or "").strip()
     if not value:
         raise ValueError("category name is required")
-    with sqlite3.connect(get_db_path()) as conn:
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.execute("INSERT OR IGNORE INTO post_categories (name) VALUES (?)", (value,))
         conn.commit()
     return value
@@ -2280,7 +2280,7 @@ def create_post_category(name: str) -> str:
 
 def get_post(post_id: int, slug: Optional[str] = None) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2326,7 +2326,7 @@ def update_post(
     slug: Optional[str] = None
 ) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT id FROM posts WHERE id = ?', (post_id,))
@@ -2366,7 +2366,7 @@ def update_post(
 
 def delete_post(post_id: int) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('DELETE FROM post_comments WHERE post_id = ?', (post_id,))
@@ -2381,7 +2381,7 @@ def delete_post(post_id: int) -> bool:
 
 def create_comment(post_id: int, author_name: str, body: str) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2408,7 +2408,7 @@ def create_comment(post_id: int, author_name: str, body: str) -> Optional[Dict]:
 
 def delete_comment(post_id: int, comment_id: int) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('DELETE FROM post_comments WHERE id = ? AND post_id = ?', (comment_id, post_id))
@@ -2429,7 +2429,7 @@ def create_post_media_record(
     uploaded_by: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2447,7 +2447,7 @@ def create_post_media_record(
 
 def list_post_media_records(limit: int = 100, offset: int = 0) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2605,7 +2605,7 @@ def create_fire_report(
 ) -> Dict:
     """Insert a public, anonymous fire report as status='pending'."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2680,7 +2680,7 @@ def upsert_detection_event(
     """
     initial_status = "pending" if source in ("modis", "viirs", "ngfs") else "approved"
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2773,7 +2773,7 @@ def update_detection_confidence(
     it. Separate from upsert_detection_event because scoring runs as its own
     pass after ingest, once a detection's full feature set is committed."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         conn.execute(
             '''UPDATE fire_events
@@ -2793,7 +2793,7 @@ def list_detection_footprints(limit: int = 500) -> List[Dict]:
     polygon (currently only NGFS - see fire_ingest.py's _ingest_ngfs_feature),
     newest first, for the map's optional 'Pixel Footprints' layer."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2817,7 +2817,7 @@ def list_detection_events_for_scoring(limit: int = 2000) -> List[Dict]:
     detections already attributed to a confirmed recurring non-fire source -
     scoring a known mill's "confidence" would be wasted compute."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2842,7 +2842,7 @@ def list_labeled_detection_events(limit: int = 5000) -> List[Dict]:
     detection-confidence model - same bootstrap set fire_confidence.py's
     incident-level scorer already draws on."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2866,7 +2866,7 @@ def list_labeled_detection_events(limit: int = 5000) -> List[Dict]:
 
 def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -2887,7 +2887,7 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
 
 def count_fire_event_media(event_id: int, kind: Optional[str] = None) -> int:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         if kind is None:
             row = conn.execute(
                 "SELECT COUNT(*) FROM fire_event_media WHERE event_id = ?", (event_id,)
@@ -2901,7 +2901,7 @@ def count_fire_event_media(event_id: int, kind: Optional[str] = None) -> int:
 
 def get_fire_upload_token_hash(event_id: int) -> Optional[str]:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         row = conn.execute(
             "SELECT upload_token_hash FROM fire_events WHERE id = ?", (event_id,)
         ).fetchone()
@@ -2918,7 +2918,7 @@ def add_fire_event_media(
     kind: str = "photo",
 ) -> Dict:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
@@ -2943,7 +2943,7 @@ def add_fire_event_media(
 
 def get_fire_event_media(event_id: int) -> List[Dict]:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -2978,7 +2978,7 @@ def list_fire_events(
     list_incidents_with_pending_members).
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3043,7 +3043,7 @@ def count_fire_events(status: Optional[str] = None) -> int:
     """True count, unlike list_fire_events (hard-capped at 500) - for
     badge/tile displays that need the real backlog size, not a page of it."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         if status:
@@ -3127,7 +3127,7 @@ def grow_incident_area(cursor: sqlite3.Cursor, event_id: int, incident_id: int) 
 def backfill_incident_areas(limit: int = 200) -> int:
     """Build the join area for active incidents that don't have one yet
     (everything that existed before the column). Returns how many were built."""
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
@@ -3298,7 +3298,7 @@ def find_confirmed_recurring_source(latitude: float, longitude: float) -> Option
     read-only callers outside an existing transaction (e.g. tests, other
     services)."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3323,7 +3323,7 @@ def _bump_recurring_source_detection(cursor: sqlite3.Cursor, source_id: int, occ
 
 def list_recurring_sources(status: Optional[str] = None) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3343,7 +3343,7 @@ def find_recurring_source_near(latitude: float, longitude: float, radius_km: flo
     from core.geo import haversine_km
 
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3363,7 +3363,7 @@ def create_recurring_source_candidate(
     first_detected_at: str, last_detected_at: str, radius_km: float = 1.5,
 ) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         cursor = conn.execute(
             '''INSERT INTO recurring_fire_sources
@@ -3385,7 +3385,7 @@ def update_recurring_source_stats(
     touching its status - the detector job never promotes/demotes a row,
     only a human via set_recurring_source_status can."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         conn.execute(
             '''UPDATE recurring_fire_sources
@@ -3405,7 +3405,7 @@ def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, l
     if status not in ("candidate", "confirmed", "dismissed"):
         raise ValueError(f"invalid recurring source status: {status}")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -3424,7 +3424,7 @@ def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, l
 
 def list_fire_exclusion_zones(status: Optional[str] = "active") -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3439,7 +3439,7 @@ def list_fire_exclusion_zones(status: Optional[str] = "active") -> List[Dict]:
 
 def create_fire_exclusion_zone(name: str, geometry_geojson: str, created_by: str, notes: str = "") -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
@@ -3458,7 +3458,7 @@ def set_fire_exclusion_zone_status(zone_id: int, status: str) -> Optional[Dict]:
     if status not in ("active", "deleted"):
         raise ValueError(f"invalid exclusion zone status: {status}")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -3481,7 +3481,7 @@ def list_fire_incidents_in_geometry(geometry_geojson: str) -> List[Dict]:
 
     polygon = shape(_json.loads(geometry_geojson))
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3497,7 +3497,7 @@ def list_fire_incidents_in_geometry(geometry_geojson: str) -> List[Dict]:
 def list_unclustered_satellite_events() -> List[Dict]:
     """Satellite-sourced fire_events rows with no incident_id yet, oldest first."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3584,7 +3584,7 @@ def list_fire_incidents(
     'confirmed_fire' (see fire_incident_feedback/create_fire_incident_feedback) -
     that feedback is unmoderated, so this is a public signal, not a review gate."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3657,7 +3657,7 @@ def list_fire_incidents(
 
 def get_fire_incident(incident_id: int) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3680,7 +3680,7 @@ def get_fire_incident(incident_id: int) -> Optional[Dict]:
 
 def list_fire_incident_members(incident_id: int) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3699,7 +3699,7 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
 def get_public_fire_incident(slug: str) -> Optional[Dict]:
     """Return a public incident and its non-sensitive detection summary."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
@@ -3741,7 +3741,7 @@ def create_fire_incident_feedback(
     user_agent: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=15) as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO fire_incident_feedback
@@ -3756,7 +3756,7 @@ def create_fire_incident_feedback(
 
 
 def set_fire_incident_graphic(incident_id: int, filename: str) -> None:
-    with sqlite3.connect(get_db_path()) as conn:
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.execute("UPDATE fire_incidents SET graphic_filename = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (filename, incident_id))
         conn.commit()
 
@@ -3766,7 +3766,7 @@ def set_fire_incident_shape(incident_id: int, shape_geojson: str, detection_coun
     services/incident_shape_extractor.py) along with the detection_count it
     was computed at, so refresh_incident_shapes() can skip recomputing an
     incident that hasn't changed."""
-    with sqlite3.connect(get_db_path()) as conn:
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.execute(
             "UPDATE fire_incidents SET shape_geojson = ?, shape_detection_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (shape_geojson, detection_count, incident_id),
@@ -3775,7 +3775,7 @@ def set_fire_incident_shape(incident_id: int, shape_geojson: str, detection_coun
 
 
 def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
-    with sqlite3.connect(get_db_path()) as conn:
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at, "
@@ -3797,7 +3797,7 @@ def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
     record, or an OSINT ingest source - not just the feedback submitter's own
     (always-public) origin."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3826,7 +3826,7 @@ def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by
     if status not in ("pending", "approved", "rejected"):
         raise ValueError(f"invalid feedback status: {status}")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -3859,7 +3859,7 @@ def list_nearby_fire_events(
 
     min_lat, max_lat, min_lon, max_lon = degree_box(latitude, longitude, radius_km)
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3899,7 +3899,7 @@ def set_fire_event_status(
 ) -> Optional[Dict]:
     """Approve/reject a pending report. Refuses (returns a sentinel) if not currently pending."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3937,7 +3937,7 @@ def correlate_report_with_incident(event_id: int) -> Optional[int]:
     an incident_id. Returns the (possibly newly created) incident_id, or
     None if the event doesn't exist."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -3970,7 +3970,7 @@ def update_fire_event(event_id: int, actor: str, edit_reason: str, **fields) -> 
     None values leave the column untouched (COALESCE), matching update_post.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4031,7 +4031,7 @@ def delete_fire_event(event_id: int, actor: str, reason: str = "") -> bool:
     breaks, but document this in the runbook).
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT status FROM fire_events WHERE id = ?', (event_id,))
@@ -4057,7 +4057,7 @@ def delete_fire_incident(incident_id: int, reason: str = "") -> bool:
     (e.g. "inside exclusion zone <id>"); there's no incident-level moderation
     log table the way fire_events has, so it isn't persisted."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT id FROM fire_incidents WHERE id = ?', (incident_id,))
@@ -4080,7 +4080,7 @@ def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
     increments at ingest (find_or_create_incident_for_detection) and does
     not reflect later approvals/rejections/deletes of individual members."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4125,7 +4125,7 @@ def bulk_set_incident_event_status(
     audit trail as a single approve/reject - just looped) rather than
     reimplementing that logic here."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         rows = conn.execute(
             "SELECT id FROM fire_events WHERE incident_id = ? AND status = 'pending'", (incident_id,)
@@ -4156,7 +4156,7 @@ def set_incident_review_decision(
     the decision was made, e.g. 'incident_feedback:12' or 'admin_bulk_action'."""
     if decision not in ("approved", "rejected"):
         raise ValueError(f"invalid incident decision: {decision}")
-    with sqlite3.connect(get_db_path()) as conn:
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.execute(
             """UPDATE fire_incidents
                SET review_decision = ?, review_decided_by = ?, review_decided_at = CURRENT_TIMESTAMP,
@@ -4209,7 +4209,7 @@ def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str =
     event never touched its incident, and delete_fire_incident (previously
     only used by exclusion-zone cleanup) never touched member events."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
         rows = conn.execute(
             "SELECT id FROM fire_events WHERE incident_id = ? AND status != 'deleted'", (incident_id,)
@@ -4239,7 +4239,7 @@ def export_fire_labels(
     placeholders = ",".join("?" for _ in allowed)
 
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4332,7 +4332,7 @@ def consume_fire_submission_quota(bucket_key: str, now: datetime, per_hour_limit
 
 def is_ip_blocked(ip_hash: str) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT 1 FROM fire_submission_blocklist WHERE ip_hash = ?', (ip_hash,))
@@ -4343,7 +4343,7 @@ def is_ip_blocked(ip_hash: str) -> bool:
 
 def add_ip_to_blocklist(ip_hash: str, reason: str, created_by: str) -> None:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -4359,7 +4359,7 @@ def add_ip_to_blocklist(ip_hash: str, reason: str, created_by: str) -> None:
 def purge_fire_submission_pii(older_than_days: int = 90) -> int:
     """Clear reporter_contact/submitter_ip_hash on reports moderated more than N days ago."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -4383,7 +4383,7 @@ def purge_fire_submission_pii(older_than_days: int = 90) -> int:
 def expire_unmoderated_fire_reports(older_than_days: int = 30) -> int:
     """Auto-reject reports still pending after N days - an unbounded pending queue is an unbounded PII store."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -4408,7 +4408,7 @@ def expire_unmoderated_fire_reports(older_than_days: int = 30) -> int:
 
 def purge_fire_throttle_rows(older_than_hours: int = 48) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -4436,7 +4436,7 @@ def create_feedback_submission(*, name: str, email: str, category: str, details:
     """Insert a public feedback submission as status='new'."""
     import json as _json
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4453,7 +4453,7 @@ def create_feedback_submission(*, name: str, email: str, category: str, details:
 
 def list_feedback(status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4470,7 +4470,7 @@ def list_feedback(status: Optional[str] = None, limit: int = 50, offset: int = 0
 
 def update_feedback_status(feedback_id: int, status: str) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4815,7 +4815,7 @@ def _ensure_display_access_tables(cursor: sqlite3.Cursor) -> None:
 
 def create_display_access_code(*, label: str, code_hash: str, code_plain: str, created_by: str, expires_at: str) -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4833,7 +4833,7 @@ def create_display_access_code(*, label: str, code_hash: str, code_plain: str, c
 
 def list_display_access_codes() -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4846,7 +4846,7 @@ def list_display_access_codes() -> List[Dict]:
 def list_active_display_access_codes() -> List[Dict]:
     """Candidates eligible to be matched against a supplied login code."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4861,7 +4861,7 @@ def list_active_display_access_codes() -> List[Dict]:
 
 def touch_display_access_code_usage(code_id: int, *, ip_address: str = "", user_agent: str = "") -> None:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -4881,7 +4881,7 @@ def list_display_access_code_usages(code_id: int, limit: int = 50) -> List[Dict]
     """Most-recent-first login history for one code, for the admin dashboard's
     "who's used this code" view - see touch_display_access_code_usage."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4896,7 +4896,7 @@ def list_display_access_code_usages(code_id: int, limit: int = 50) -> List[Dict]
 
 def count_display_access_code_usages(code_id: int) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('SELECT COUNT(*) FROM display_access_code_usages WHERE code_id = ?', (code_id,))
@@ -4907,7 +4907,7 @@ def count_display_access_code_usages(code_id: int) -> int:
 
 def revoke_display_access_code(code_id: int) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -4923,7 +4923,7 @@ def revoke_display_access_code(code_id: int) -> bool:
 
 def get_display_access_code(code_id: int) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -4948,7 +4948,7 @@ def get_display_code_settings(code_id: int) -> Dict:
 
 def set_display_code_settings(code_id: int, settings: Dict) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -5209,7 +5209,7 @@ def create_fire_ingest_source(name: str, slug: str, daily_limit: int = 200, cont
     raw_key = secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5233,7 +5233,7 @@ def get_ingest_source_by_key(authorization_token: str) -> Optional[Dict]:
     last_used_at. Returns None for an invalid or revoked key."""
     key_hash = hashlib.sha256(authorization_token.encode()).hexdigest()
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5254,7 +5254,7 @@ def get_ingest_source_by_key(authorization_token: str) -> Optional[Dict]:
 
 def revoke_ingest_api_key(source_id: int) -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -5274,7 +5274,7 @@ def create_ingest_api_key_for_source(source_id: int) -> str:
     raw_key = secrets.token_urlsafe(32)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO fire_ingest_api_keys (source_id, key_hash) VALUES (?, ?)", (source_id, key_hash))
@@ -5289,7 +5289,7 @@ def list_fire_ingest_sources() -> List[Dict]:
     the admin "Ingest Sources" page. A source may have had several keys
     issued/revoked over time (rotation); only the latest is shown."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5350,7 +5350,7 @@ def upsert_ingest_report(
     full_description = f"{title}\n\n{description}".strip() if description else title
     full_description = f"{full_description}\n\nSource: {source_url}"
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5398,7 +5398,7 @@ def add_ingest_media_links(event_id: int, urls: List[str]) -> None:
     unlike photo/document uploads, these are often expiring CDN URLs and are
     never fetched/stored server-side."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         for url in urls:
@@ -5432,7 +5432,7 @@ def record_fire_weather_alert_day(
     that county/event pair is kept.
     """
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -5466,7 +5466,7 @@ def list_fire_weather_alert_history(
         params.append(county_fips)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -5481,7 +5481,7 @@ def list_fire_weather_alert_history(
 
 def purge_feedback_throttle_rows(older_than_hours: int = 48) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -5501,7 +5501,7 @@ def _forecast_discussion_row(row: Optional[sqlite3.Row]) -> Optional[Dict]:
 
 
 def list_forecast_discussions(status: Optional[str] = None, limit: int = 50, offset: int = 0, public_only: bool = False) -> List[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         if public_only:
@@ -5528,7 +5528,7 @@ def list_forecast_discussions(status: Optional[str] = None, limit: int = 50, off
 
 
 def get_forecast_discussion(discussion_id: int) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         return _forecast_discussion_row(conn.execute(
@@ -5539,7 +5539,7 @@ def get_forecast_discussion(discussion_id: int) -> Optional[Dict]:
 
 
 def get_latest_forecast_discussion() -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         return _forecast_discussion_row(conn.execute(
@@ -5552,7 +5552,7 @@ def get_latest_forecast_discussion() -> Optional[Dict]:
 
 def create_forecast_discussion(title: str, body: str, author_name: Optional[str] = None,
                                status: str = "draft") -> Dict:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         issued_at = "CURRENT_TIMESTAMP" if status == "published" else None
@@ -5586,7 +5586,7 @@ def update_forecast_discussion(discussion_id: int, title: Optional[str] = None, 
         "author_name": current["author_name"] if author_name is None else (author_name.strip() or None),
         "status": current["status"] if status is None else status,
     }
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -5605,7 +5605,7 @@ def update_forecast_discussion(discussion_id: int, title: Optional[str] = None, 
 
 
 def publish_forecast_discussion(discussion_id: int) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("UPDATE forecast_discussions SET status = 'archived', updated_at = CURRENT_TIMESTAMP "
@@ -5628,7 +5628,7 @@ def archive_forecast_discussion(discussion_id: int) -> Optional[Dict]:
 
 
 def delete_forecast_discussion(discussion_id: int) -> bool:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.execute("DELETE FROM forecast_discussions WHERE id = ?", (discussion_id,))
         conn.commit()
@@ -5722,7 +5722,7 @@ def create_burn_ban_submission(
     public_note: str = "",
 ) -> Dict:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5750,7 +5750,7 @@ def create_burn_ban_submission(
 
 def get_burn_ban_submission(submission_id: int, *, admin: bool = False) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5772,7 +5772,7 @@ def get_burn_ban_submission(submission_id: int, *, admin: bool = False) -> Optio
 
 def get_burn_ban_upload_token_hash(submission_id: int) -> Optional[str]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute(
@@ -5793,7 +5793,7 @@ def list_burn_ban_submissions(
     admin: bool = False,
 ) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5819,7 +5819,7 @@ def count_burn_ban_submissions(status: Optional[str] = None) -> int:
     """True count, for badge/tile displays - list_burn_ban_submissions takes
     a limit/offset meant for paginated moderation views, not a dashboard tile."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         if status:
@@ -5847,7 +5847,7 @@ def list_active_burn_bans(*, now: Optional[datetime] = None) -> List[Dict]:
     now = now or datetime.utcnow()
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5874,7 +5874,7 @@ def set_burn_ban_proof_file(
     content_type: str,
 ) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5906,7 +5906,7 @@ def moderate_burn_ban_submission(
     if to_status not in BURN_BAN_STATUSES:
         raise ValueError(f"invalid status: {to_status}")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -5977,7 +5977,7 @@ def update_burn_ban_submission(
     county_name: Optional[str] = None,
 ) -> Optional[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -6037,7 +6037,7 @@ def update_burn_ban_submission(
 
 def delete_burn_ban_submission(submission_id: int, *, actor: str, reason: str = "") -> bool:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -6072,7 +6072,7 @@ def set_burn_ban_notes(
     None leaves that note unchanged. Every change is recorded in the
     moderation log with its previous value."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -6121,7 +6121,7 @@ def list_burn_ban_county_events(
     admin: bool = False,
 ) -> List[Dict]:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -6153,7 +6153,7 @@ def list_burn_ban_county_events(
 def count_burn_ban_county_events_by_county() -> Dict[str, Dict]:
     """Per-county summary: number of bans issued and most recent event."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -6173,7 +6173,7 @@ def expire_stale_burn_bans(*, now: Optional[datetime] = None) -> int:
     now = now or datetime.utcnow()
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -6221,7 +6221,7 @@ def expire_confirmed_burn_bans_for_county(
     exclude_id: Optional[int] = None,
 ) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -6251,7 +6251,7 @@ def expire_confirmed_burn_bans_for_county(
 
 def purge_burn_ban_submission_pii(older_than_days: int = 90) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -6317,7 +6317,7 @@ def consume_burn_ban_submission_quota(
 
 def purge_burn_ban_throttle_rows(older_than_hours: int = 48) -> int:
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
         cursor.execute('''
@@ -6340,7 +6340,7 @@ def upsert_newsletter_subscriber(
 ) -> Dict:
     normalized = email.strip().lower()
     subscription_json = json.dumps(subscription_types or ["fire-weather-forecasts"])
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         existing = conn.execute(
@@ -6375,7 +6375,7 @@ def upsert_newsletter_subscriber(
 
 def list_newsletter_subscribers() -> List[Dict]:
     """Return subscriber identity fields needed for provider synchronization."""
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         return [
@@ -6392,7 +6392,7 @@ def list_newsletter_subscribers() -> List[Dict]:
 
 def replace_newsletter_preferences(email: str, preferences: List[Dict]) -> List[Dict]:
     normalized = email.strip().lower()
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("DELETE FROM newsletter_preferences WHERE email = ?", (normalized,))
@@ -6414,7 +6414,7 @@ def replace_newsletter_preferences(email: str, preferences: List[Dict]) -> List[
 
 
 def get_newsletter_preferences(email: Optional[str] = None) -> List[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         query = """
@@ -6433,7 +6433,7 @@ def get_newsletter_preferences(email: Optional[str] = None) -> List[Dict]:
 
 
 def get_newsletter_account_by_token(token: str) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         subscriber = conn.execute(
@@ -6465,7 +6465,7 @@ def update_newsletter_account(
     account = get_newsletter_account_by_token(token)
     if not account:
         return None
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         conn.execute(
             '''UPDATE newsletter_subscribers
@@ -6488,7 +6488,7 @@ def update_newsletter_account(
 
 
 def unsubscribe_newsletter(token: str) -> bool:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.execute(
             '''UPDATE newsletter_subscribers
@@ -6503,7 +6503,7 @@ def unsubscribe_newsletter(token: str) -> bool:
 
 
 def create_bulletin(subject: str, html_body: str, text_body: str) -> Dict:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
@@ -6517,7 +6517,7 @@ def create_bulletin(subject: str, html_body: str, text_body: str) -> Dict:
 
 
 def get_bulletin(bulletin_id: int) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
@@ -6527,7 +6527,7 @@ def get_bulletin(bulletin_id: int) -> Optional[Dict]:
 
 
 def list_bulletins() -> List[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         return [dict(row) for row in conn.execute("SELECT * FROM bulletins ORDER BY created_at DESC, id DESC").fetchall()]
@@ -6536,7 +6536,7 @@ def list_bulletins() -> List[Dict]:
 
 
 def update_bulletin(bulletin_id: int, subject: str, html_body: str, text_body: str) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
@@ -6555,7 +6555,7 @@ def update_bulletin(bulletin_id: int, subject: str, html_body: str, text_body: s
 
 
 def mark_bulletin_sent(bulletin_id: int, resend_broadcast_id: str) -> Optional[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -6573,7 +6573,7 @@ def mark_bulletin_sent(bulletin_id: int, resend_broadcast_id: str) -> Optional[D
 
 
 def set_bulletin_error(bulletin_id: int, error: str) -> None:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         conn.execute(
             "UPDATE bulletins SET status = 'draft', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -6585,7 +6585,7 @@ def set_bulletin_error(bulletin_id: int, error: str) -> None:
 
 
 def claim_bulletin_send(bulletin_id: int) -> bool:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         cursor = conn.execute(
             "UPDATE bulletins SET status = 'sending', last_error = NULL, updated_at = CURRENT_TIMESTAMP "
@@ -6602,7 +6602,7 @@ def upsert_county_forecast_day(
     forecast_date: str, county_fips: str, danger_level: int,
     summary: str = "", forecast_run_id: str = "",
 ) -> Dict:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(
@@ -6626,7 +6626,7 @@ def upsert_county_forecast_day(
 
 
 def list_matching_newsletter_forecasts(forecast_date: str) -> List[Dict]:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         return [dict(row) for row in conn.execute(
@@ -6689,7 +6689,7 @@ def complete_newsletter_delivery(
     email: str, county_fips: str, forecast_date: str,
     status: str, provider_message_id: str = "", error: str = "",
 ) -> None:
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         conn.execute(
             '''UPDATE newsletter_deliveries

@@ -24,7 +24,7 @@ from __future__ import annotations
 import statistics
 from typing import Optional
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 
 from core.database import (
     get_public_fire_incident,
@@ -33,7 +33,8 @@ from core.database import (
     list_fire_incidents,
     list_pending_fire_incident_feedback,
 )
-from routers.fires import PUBLIC_API_BASE_URL, _require_admin
+from core.security import require_admin
+from routers.fires import PUBLIC_API_BASE_URL
 
 router = APIRouter(prefix="/api/v2", tags=["fires-v2"])
 
@@ -146,7 +147,7 @@ def get_incident_v2(slug: str):
 
 
 @router.get("/admin/fires/queue")
-def admin_queue_v2(token: Optional[str] = None, limit: int = 50, offset: int = 0):
+def admin_queue_v2(limit: int = 50, offset: int = 0, _admin: str = Depends(require_admin)):
     """Combined moderation queue: pending reports/detections annotated with
     a renamed (not re-derived) feedback_priority_score where applicable, and
     an ai_summary read from cache (never generated here - see the dedicated
@@ -155,7 +156,6 @@ def admin_queue_v2(token: Optional[str] = None, limit: int = 50, offset: int = 0
     from ai.report_summary import report_summary_status
     from services.feedback_confidence import score_feedback
 
-    _require_admin(token)
     events = list_fire_events(status="pending", admin=True, limit=limit, offset=offset)
     pending_feedback = list_pending_fire_incident_feedback(limit=limit)
     for item in pending_feedback:
@@ -171,12 +171,11 @@ def admin_queue_v2(token: Optional[str] = None, limit: int = 50, offset: int = 0
 
 
 @router.get("/admin/fires/reports/{event_id}/summary")
-def get_report_summary_v2(event_id: int, token: Optional[str] = None):
+def get_report_summary_v2(event_id: int, _admin: str = Depends(require_admin)):
     from ai.report_summary import report_summary_status
     from core.database import get_fire_event
     from fastapi import HTTPException
 
-    _require_admin(token)
     event = get_fire_event(event_id, admin=True)
     if not event:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -184,7 +183,7 @@ def get_report_summary_v2(event_id: int, token: Optional[str] = None):
 
 
 @router.post("/admin/fires/reports/{event_id}/summary")
-def generate_report_summary_v2(event_id: int, token: Optional[str] = None):
+def generate_report_summary_v2(event_id: int, _admin: str = Depends(require_admin)):
     """Generates (and caches) the AI summary for one report/detection - a
     separate, explicit call from the queue listing above so viewing the
     queue never itself triggers a billed Cloudflare call."""
@@ -192,7 +191,6 @@ def generate_report_summary_v2(event_id: int, token: Optional[str] = None):
     from core.database import get_fire_event
     from fastapi import HTTPException
 
-    _require_admin(token)
     event = get_fire_event(event_id, admin=True)
     if not event:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -200,11 +198,10 @@ def generate_report_summary_v2(event_id: int, token: Optional[str] = None):
 
 
 @router.post("/admin/fires/overview")
-def generate_queue_overview_v2(token: Optional[str] = None, limit: int = 20):
+def generate_queue_overview_v2(limit: int = 20, _admin: str = Depends(require_admin)):
     """Generates a short AI overview of the current pending queue - explicit
     POST (not GET) for the same reason as the per-report summary above."""
     from ai.report_summary import generate_queue_overview
 
-    _require_admin(token)
     events = list_fire_events(status="pending", admin=True, limit=limit)
     return {"success": True, "overview": generate_queue_overview(events)}

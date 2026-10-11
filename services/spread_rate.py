@@ -52,6 +52,22 @@ ROS_CLASS_BOUNDS = (0.0, 2.0, 5.0, 20.0, 50.0, 150.0)
 ROS_CLASS_LABELS = ("Very Low", "Low", "Moderate", "High", "Very High", "Extreme")
 ROS_CLASS_COLORS = ("#90EE90", "#ADFF2F", "#FFFF00", "#FFA500", "#FF4500", "#8B0000")
 
+# Scott-Burgan fuel codes 91-99 are split into two buckets rather than one
+# "non-burnable" catch-all. Cropland (93) genuinely burns (stubble/grass
+# fires) - Rothermel just has no calibrated fuel bed for it because loading
+# varies too much by crop/residue/season, so it's a model-coverage gap, not
+# an incombustible surface. Water/urban/snow/barren (91, 92, 98, 99) really
+# can't carry fire. Both get a flat fill instead of a transparent hole so the
+# map covers the whole state, but they're labeled - and colored - distinctly
+# so "agricultural" doesn't read as "won't burn."
+AGRICULTURAL_FUEL_CODE = 93
+AGRICULTURAL_INDEX = len(ROS_CLASS_LABELS)
+AGRICULTURAL_LABEL = "Agricultural (not modeled)"
+AGRICULTURAL_COLOR = "#D9C66B"
+NON_BURNABLE_INDEX = AGRICULTURAL_INDEX + 1
+NON_BURNABLE_LABEL = "Non-burnable (water/urban/barren)"
+NON_BURNABLE_COLOR = "#C9C2B2"
+
 NODATA_CLASS = 255
 NODATA_FLOAT = -9999.0
 
@@ -217,6 +233,15 @@ def compute_spread_rate_grid(static: dict, moisture: dict) -> dict[str, np.ndarr
             continue
         ros[row, col], direction[row, col] = result
     classes = classify_ros_ch_per_h(ros)
+    # Cells that have real static/weather data but no computed spread rate
+    # (unmodeled fuel code, moisturize failure, etc.) are land, not missing
+    # data - give them their own class(es) rather than NODATA_CLASS so they
+    # don't render as transparent holes. Cropland is split out from true
+    # non-burnable surfaces; see the constants' docstring above.
+    uncomputed = valid & (classes == NODATA_CLASS)
+    fuel_code = static["fuel_model_code"]
+    classes[uncomputed & (fuel_code == AGRICULTURAL_FUEL_CODE)] = AGRICULTURAL_INDEX
+    classes[uncomputed & (fuel_code != AGRICULTURAL_FUEL_CODE)] = NON_BURNABLE_INDEX
     return {
         "ros_ch_per_h": ros,
         "class": classes,
@@ -280,12 +305,28 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
     import geopandas as gpd
     import matplotlib.pyplot as plt
     from matplotlib.colors import BoundaryNorm, ListedColormap
+    from shapely.ops import unary_union
+    from shapely.vectorized import contains
+
+    from forecast.map_style import add_boundaries, add_title_and_branding
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    all_labels = (*ROS_CLASS_LABELS, AGRICULTURAL_LABEL, NON_BURNABLE_LABEL)
+    all_colors = (*ROS_CLASS_COLORS, AGRICULTURAL_COLOR, NON_BURNABLE_COLOR)
     classes = grids["class"].astype(np.float32)
     classes[classes == NODATA_CLASS] = np.nan
-    cmap = ListedColormap(ROS_CLASS_COLORS)
-    norm = BoundaryNorm(np.arange(-0.5, len(ROS_CLASS_LABELS) + 0.5, 1.0), len(ROS_CLASS_LABELS))
+    cmap = ListedColormap(all_colors)
+    norm = BoundaryNorm(np.arange(-0.5, len(all_labels) + 0.5, 1.0), len(all_labels))
+
+    maps_dir = Path(__file__).resolve().parent.parent / "maps"
+    state_path = maps_dir / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
+    if state_path.is_file():
+        # Grid cells outside Missouri come from the static bundle's buffer
+        # margin, not the modeled area - masking them keeps the speckle of
+        # scattered fuel types from spilling past the state line.
+        state_geom = unary_union(gpd.read_file(state_path).to_crs("EPSG:4326").geometry)
+        in_state = contains(state_geom, static["lon"], static["lat"])
+        classes[~in_state] = np.nan
 
     pixel_width, pixel_height, dpi = 2048, 1152, 144
     data_crs = ccrs.PlateCarree()
@@ -316,55 +357,12 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
         zorder=2,
     )
 
-    maps_dir = Path(__file__).resolve().parent.parent / "maps"
-    county_path = maps_dir / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
-    state_path = maps_dir / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
-    if county_path.is_file():
-        counties = gpd.read_file(county_path).to_crs("EPSG:4326")
-        ax.add_geometries(
-            counties.geometry,
-            crs=data_crs,
-            edgecolor="#B6B6B6",
-            facecolor="none",
-            linewidth=0.7,
-            zorder=4,
-        )
-    if state_path.is_file():
-        state = gpd.read_file(state_path).to_crs("EPSG:4326")
-        ax.add_geometries(
-            state.geometry,
-            crs=data_crs,
-            edgecolor="#111111",
-            facecolor="none",
-            linewidth=1.5,
-            zorder=5,
-        )
+    add_boundaries(ax, data_crs, Path(__file__).resolve().parent.parent)
 
-    cax = fig.add_axes([0.02, 0.12, 0.018, 0.58])
-    cbar = fig.colorbar(mesh, cax=cax, ticks=np.arange(len(ROS_CLASS_LABELS)))
-    cbar.ax.set_yticklabels(ROS_CLASS_LABELS)
-    cbar.set_label("Potential Head-Fire Spread Rate")
-
-    fig.text(
-        0.98,
-        0.95,
+    add_title_and_branding(
+        fig,
         "Observed Rothermel Spread Rate",
-        fontsize=25,
-        fontweight="bold",
-        ha="right",
-        va="top",
-    )
-    fig.text(
-        0.98,
-        0.885,
         "Experimental potential head-fire rate",
-        fontsize=15,
-        ha="right",
-        va="top",
-    )
-    fig.text(
-        0.77,
-        0.68,
         f"Analysis: {metadata.get('analysis_hour', 'n/a')}\n\n"
         f"Generated: {metadata.get('generated_at', 'n/a')}\n\n"
         f"Maximum: {metadata.get('max_ros_ch_per_h', 'n/a')} ch/h\n\n"
@@ -374,15 +372,21 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
         "Moderate: 5–20 ch/h\n"
         "High: 20–50 ch/h\n"
         "Very High: 50–150 ch/h\n"
-        "Extreme: ≥ 150 ch/h\n\n"
+        "Extreme: ≥ 150 ch/h\n"
+        "Agricultural: cropland, fuel model not modeled\n"
+        "Non-burnable: water/urban/barren\n\n"
         "Inputs: RTMA weather, conditioned fuel\n"
         "moisture, LANDFIRE fuels/canopy, USGS 3DEP\n\n"
         "Experimental—not an operational fire forecast",
-        fontsize=12,
-        ha="left",
-        va="top",
-        linespacing=1.35,
+        metadata.get("analysis_hour", ""),
+        Path(__file__).resolve().parent,
     )
+
+    cax = fig.add_axes([0.02, 0.12, 0.018, 0.58])
+    cbar = fig.colorbar(mesh, cax=cax, ticks=np.arange(len(all_labels)))
+    cbar.ax.set_yticklabels(all_labels)
+    cbar.set_label("Potential Head-Fire Spread Rate")
+
     fd, temporary = tempfile.mkstemp(prefix=".spread_rate.", suffix=".png", dir=out_path.parent)
     os.close(fd)
     temp_path = Path(temporary)

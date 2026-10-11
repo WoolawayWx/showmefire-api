@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from core.security import verify_token
+from core.security import require_admin
 from services.rtma_peak import generate_rainfall_impact_map, generate_rtma_peak
 
 router = APIRouter(prefix="/api/admin/rtma-peak", tags=["rtma-peak-admin"])
@@ -22,16 +22,8 @@ class RainfallImpactGenerateRequest(BaseModel):
     days: int = 7
 
 
-def _require_admin(token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
-
-
 @router.get("/status")
-async def rtma_peak_status(date: str, token: Optional[str] = None):
-    _require_admin(token)
+async def rtma_peak_status(date: str, _admin: str = Depends(require_admin)):
     from services.rtma_peak import RTMA_PEAK_IMAGE_ARCHIVE_DIR, RTMA_PEAK_ARCHIVE_DIR
     metadata = {}
     try:
@@ -53,8 +45,7 @@ async def rtma_peak_status(date: str, token: Optional[str] = None):
 
 
 @router.post("/generate")
-async def generate_rtma_peak_admin(payload: GenerateRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+async def generate_rtma_peak_admin(payload: GenerateRequest, email: str = Depends(require_admin)):
     try:
         result = await __import__("asyncio").to_thread(generate_rtma_peak, payload.date)
     except ValueError as exc:
@@ -67,13 +58,12 @@ async def generate_rtma_peak_admin(payload: GenerateRequest, token: Optional[str
 
 
 @router.get("/fuel-moisture/status")
-async def fuel_moisture_status(date: str, token: Optional[str] = None):
+async def fuel_moisture_status(date: str, _admin: str = Depends(require_admin)):
     """Status of the calibrated (RTMA + RAWS) fuel-moisture map for one date.
 
     Generated automatically as part of /generate; there is no separate
     fuel-moisture generate endpoint.
     """
-    _require_admin(token)
     from services.rtma_peak import RTMA_FUEL_MOISTURE_ARCHIVE_DIR, RTMA_FUEL_MOISTURE_IMAGE_ARCHIVE_DIR
     return {
         "date": date,
@@ -87,9 +77,8 @@ async def fuel_moisture_status(date: str, token: Optional[str] = None):
 
 
 @router.get("/rainfall-impact/status")
-async def rainfall_impact_status(date: str, token: Optional[str] = None):
+async def rainfall_impact_status(date: str, _admin: str = Depends(require_admin)):
     """Status of the trailing-window rainfall-suppression map for one generation date."""
-    _require_admin(token)
     from services.rtma_peak import RTMA_IMPACT_ARCHIVE_DIR, RTMA_IMPACT_IMAGE_ARCHIVE_DIR
     return {
         "date": date,
@@ -103,14 +92,13 @@ async def rainfall_impact_status(date: str, token: Optional[str] = None):
 
 
 @router.post("/rainfall-impact/generate")
-async def generate_rainfall_impact_admin(payload: RainfallImpactGenerateRequest, token: Optional[str] = None):
+async def generate_rainfall_impact_admin(payload: RainfallImpactGenerateRequest, email: str = Depends(require_admin)):
     """Rebuild the trailing-window rainfall-impact map without rerunning the full day's RTMA peak.
 
     Useful for backfilling with a different window size, or after a fix to
     this map's own rendering - the underlying daily rtma_rainfall_reduction
     archives it reads are only ever (re)written by /generate.
     """
-    email = _require_admin(token)
     try:
         result = await __import__("asyncio").to_thread(
             generate_rainfall_impact_map, payload.date, payload.days

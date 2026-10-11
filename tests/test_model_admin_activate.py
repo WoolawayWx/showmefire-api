@@ -27,7 +27,7 @@ class ActivateRiskFusionGlmTests(unittest.TestCase):
             patch.multiple(versioning, API_DIR=root, MODELS_DIR=root / "reg-models",
                            CONFIG_PATH=root / "reg-models" / "config.json", VERSIONS_DIR=root / "reg-models" / "versions"),
             patch.object(shadow_bundles, "BUNDLES_ROOT", root / "model-bundles"),
-            patch.object(model_admin, "_require_admin", return_value="tester@example.com"),
+            patch.object(model_admin, "require_admin", return_value="tester@example.com"),
             patch.object(model_admin, "_require_confirmation", return_value=None),
         )
 

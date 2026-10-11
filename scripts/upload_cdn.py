@@ -95,7 +95,8 @@ def generate_image_timeline(hours=12, cdn_base_url='https://cdn.showmefire.org',
         'fuelmoisture': 'mo-fuelmoisture.png',
         'rh': 'mo-rh.png',
         'windfilmap': 'mo-windfilmap.png',
-        'observedpeakfiredanger': 'mo-observedpeakfiredanger.png'
+        'observedpeakfiredanger': 'mo-observedpeakfiredanger.png',
+        'forecastfiredangerbias': 'mo-forecastfiredangerbias.png'
     }
     
     timeline = {
@@ -333,15 +334,28 @@ def run_upload(files_to_upload=None):
 if __name__ == "__main__":
     # Get optional test prefix from environment
     test_prefix = os.getenv('CDN_TEST_PREFIX', None)
-    
-    # Example: Quarter-hour files
-    quarter_hour_files = [
-        PROJECT_ROOT / "images" / "mo-windfilmap.png",
-        PROJECT_ROOT / "images" / "mo-rh.png",
-        PROJECT_ROOT / "images" / "mo-realtimefiredanger.png",
-        PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
-        PROJECT_ROOT / "images" / "mo-observedpeakfiredanger.png",
-    ]
+
+    # scripts/maps.sh sets MAPS_SH_NEW_IMAGES to the exact files its map-script
+    # loop touched this run (via mtime), so a new maps/*.py script's output is
+    # picked up automatically instead of silently never reaching the CDN
+    # unless someone remembers to add its filename below (this is exactly
+    # what happened with mo-forecastfiredangerbias.png before it was caught).
+    # The images/ folder also holds beta/test/precip-composite artifacts that
+    # must NOT ride along on the 15-minute push, so this can't just glob the
+    # whole folder - the hardcoded list below remains the fallback for manual/
+    # standalone runs (e.g. `python scripts/upload_cdn.py` outside maps.sh).
+    new_images_env = os.getenv('MAPS_SH_NEW_IMAGES', '').strip()
+    if new_images_env:
+        quarter_hour_files = [Path(line) for line in new_images_env.splitlines() if line.strip()]
+    else:
+        quarter_hour_files = [
+            PROJECT_ROOT / "images" / "mo-windfilmap.png",
+            PROJECT_ROOT / "images" / "mo-rh.png",
+            PROJECT_ROOT / "images" / "mo-realtimefiredanger.png",
+            PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
+            PROJECT_ROOT / "images" / "mo-observedpeakfiredanger.png",
+            PROJECT_ROOT / "images" / "mo-forecastfiredangerbias.png",
+        ]
     upload_quarter_hour_files(files_to_upload=quarter_hour_files, path_prefix=test_prefix)
     
     # Example: Forecast files

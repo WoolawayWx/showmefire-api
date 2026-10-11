@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
 from core.database import (
@@ -14,17 +14,10 @@ from core.database import (
     publish_forecast_discussion,
     update_forecast_discussion,
 )
-from core.security import verify_token
+from core.security import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["forecast-discussions"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 class ForecastDiscussionCreate(BaseModel):
@@ -99,14 +92,12 @@ def public_get_forecast_discussion(discussion_id: int):
 
 
 @router.get("/api/admin/forecast-discussions")
-def admin_list_forecast_discussions(token: Optional[str] = None, limit: int = 100, offset: int = 0):
-    _require_admin(token)
+def admin_list_forecast_discussions(limit: int = 100, offset: int = 0, _admin: str = Depends(require_admin)):
     return {"success": True, "discussions": list_forecast_discussions(limit=limit, offset=offset)}
 
 
 @router.post("/api/admin/forecast-discussions")
-def admin_create_forecast_discussion(payload: ForecastDiscussionCreate, token: Optional[str] = None):
-    _require_admin(token)
+def admin_create_forecast_discussion(payload: ForecastDiscussionCreate, _admin: str = Depends(require_admin)):
     discussion = create_forecast_discussion(
         payload.title, payload.body, payload.author_name, payload.status
     )
@@ -116,8 +107,7 @@ def admin_create_forecast_discussion(payload: ForecastDiscussionCreate, token: O
 
 
 @router.get("/api/admin/forecast-discussions/{discussion_id}")
-def admin_get_forecast_discussion(discussion_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_forecast_discussion(discussion_id: int, _admin: str = Depends(require_admin)):
     discussion = get_forecast_discussion(discussion_id)
     if not discussion:
         raise HTTPException(status_code=404, detail="Forecast discussion not found")
@@ -126,9 +116,8 @@ def admin_get_forecast_discussion(discussion_id: int, token: Optional[str] = Non
 
 @router.put("/api/admin/forecast-discussions/{discussion_id}")
 def admin_update_forecast_discussion(
-    discussion_id: int, payload: ForecastDiscussionUpdate, token: Optional[str] = None
+    discussion_id: int, payload: ForecastDiscussionUpdate, _admin: str = Depends(require_admin)
 ):
-    _require_admin(token)
     discussion = update_forecast_discussion(
         discussion_id, payload.title, payload.body, payload.author_name, payload.status
     )
@@ -140,16 +129,14 @@ def admin_update_forecast_discussion(
 
 
 @router.post("/api/admin/forecast-discussions/{discussion_id}/publish")
-def admin_publish_forecast_discussion(discussion_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_publish_forecast_discussion(discussion_id: int, _admin: str = Depends(require_admin)):
     if not get_forecast_discussion(discussion_id):
         raise HTTPException(status_code=404, detail="Forecast discussion not found")
     return {"success": True, "discussion": publish_forecast_discussion(discussion_id)}
 
 
 @router.post("/api/admin/forecast-discussions/{discussion_id}/archive")
-def admin_archive_forecast_discussion(discussion_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_archive_forecast_discussion(discussion_id: int, _admin: str = Depends(require_admin)):
     discussion = archive_forecast_discussion(discussion_id)
     if not discussion:
         raise HTTPException(status_code=404, detail="Forecast discussion not found")
@@ -157,8 +144,7 @@ def admin_archive_forecast_discussion(discussion_id: int, token: Optional[str] =
 
 
 @router.delete("/api/admin/forecast-discussions/{discussion_id}")
-def admin_delete_forecast_discussion(discussion_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_delete_forecast_discussion(discussion_id: int, _admin: str = Depends(require_admin)):
     if not delete_forecast_discussion(discussion_id):
         raise HTTPException(status_code=404, detail="Forecast discussion not found")
     return {"success": True}

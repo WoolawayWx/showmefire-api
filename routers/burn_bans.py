@@ -50,7 +50,7 @@ from core.database import (
     set_burn_ban_proof_file,
     update_burn_ban_submission,
 )
-from core.security import SECRET_KEY, verify_token
+from core.security import SECRET_KEY, require_admin
 from services.discord_notifier import notify_staff_alert
 from services.mobile_content import county_catalog
 from services.turnstile import verify_turnstile
@@ -90,12 +90,6 @@ MAX_BULK_ITEMS = 150
 STAFF_NAME = "Show Me Fire Staff"
 STAFF_CONTACT = "admin@showmefire.org"
 
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _client_ip(request: Request) -> str:
@@ -814,7 +808,7 @@ def admin_list_burn_bans(
     limit: int = 50,
     offset: int = 0,
 ):
-    _require_admin(token)
+    require_admin(token)
     if status and status not in STATUSES:
         raise HTTPException(status_code=400, detail=f"unknown status: {status!r}")
     items = list_burn_ban_submissions(status=status, limit=limit, offset=offset, admin=True)
@@ -823,7 +817,7 @@ def admin_list_burn_bans(
 
 @router.post("/api/admin/burn-bans", status_code=201)
 def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = None):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     result = _publish_admin_ban(
         actor=actor,
         county_fips=payload.county_fips,
@@ -848,7 +842,7 @@ def admin_bulk_burn_bans(payload: BurnBanBulkRequest, token: Optional[str] = Non
     Every row is checked before anything is written; if any row is invalid the
     whole batch is rejected with per-row errors so the admin can fix and resend.
     """
-    actor = _require_admin(token)
+    actor = require_admin(token)
     current = _current_bans_by_county()
     counties = _known_county_fips()
     now_iso = _now_iso()
@@ -933,7 +927,7 @@ def admin_bulk_burn_bans(payload: BurnBanBulkRequest, token: Optional[str] = Non
 @router.get("/api/admin/burn-bans/current")
 def admin_current_burn_bans(token: Optional[str] = None):
     """Confirmed bans (in effect or scheduled), one per county, for the bulk editor."""
-    _require_admin(token)
+    require_admin(token)
     current = _current_bans_by_county()
     return {
         "success": True,
@@ -948,7 +942,7 @@ def admin_burn_ban_history(
     limit: int = 200,
     offset: int = 0,
 ):
-    _require_admin(token)
+    require_admin(token)
     events = list_burn_ban_county_events(
         county_fips=county_fips, limit=limit, offset=offset, admin=True,
     )
@@ -957,7 +951,7 @@ def admin_burn_ban_history(
 
 @router.get("/api/admin/burn-bans/map")
 def admin_get_burn_ban_map(token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     from services.burn_ban_map import burn_ban_map_public_meta
     meta = burn_ban_map_public_meta()
     active = list_active_burn_bans()
@@ -970,7 +964,7 @@ def admin_get_burn_ban_map(token: Optional[str] = None):
 
 @router.post("/api/admin/burn-bans/map/regenerate")
 def admin_regenerate_burn_ban_map(token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     from services.burn_ban_map import generate_burn_ban_map
     result = generate_burn_ban_map()
     return {
@@ -986,7 +980,7 @@ def admin_regenerate_burn_ban_map(token: Optional[str] = None):
 
 @router.get("/api/admin/burn-bans/{submission_id}")
 def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -995,7 +989,7 @@ def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
 
 @router.get("/api/admin/burn-bans/{submission_id}/proof")
 def admin_get_burn_ban_proof(submission_id: int, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1018,7 +1012,7 @@ def admin_set_burn_ban_notes(
     payload: BurnBanNotes,
     token: Optional[str] = None,
 ):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     result = set_burn_ban_notes(
         submission_id,
         actor=actor,
@@ -1036,7 +1030,7 @@ def admin_confirm_burn_ban(
     payload: BurnBanModeration,
     token: Optional[str] = None,
 ):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1095,7 +1089,7 @@ def admin_deny_burn_ban(
     payload: BurnBanRejection,
     token: Optional[str] = None,
 ):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     result = moderate_burn_ban_submission(
         submission_id,
         to_status="denied",
@@ -1115,7 +1109,7 @@ def admin_update_burn_ban(
     payload: BurnBanUpdate,
     token: Optional[str] = None,
 ):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     county_name = None
     if payload.county_fips:
         county_name = _known_county_fips()[payload.county_fips]
@@ -1142,7 +1136,7 @@ def admin_delete_burn_ban(
     token: Optional[str] = None,
     reason: str = "",
 ):
-    actor = _require_admin(token)
+    actor = require_admin(token)
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")

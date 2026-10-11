@@ -323,6 +323,7 @@ def test_station_api_uses_null_safe_nested_contract(tmp_path, monkeypatch):
 
 
 def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypatch):
+    from core import security
     from routers import forecast_v1_admin
 
     db = tmp_path / "admin.db"
@@ -343,12 +344,18 @@ def test_forecast_admin_status_and_run_controls_require_admin(tmp_path, monkeypa
     app.include_router(forecast_v1_admin.router)
     client = TestClient(app)
 
-    monkeypatch.setattr(forecast_v1_admin, "verify_token", lambda token=None: None)
+    # require_admin (core.security) is what the routes now depend on via
+    # Depends(require_admin), captured by reference at route-registration
+    # time - patching forecast_v1_admin's own namespace wouldn't affect an
+    # already-built dependency. require_admin calls verify_token(token) by
+    # bare name against core.security's own globals at request time, so
+    # patching it there is what actually takes effect.
+    monkeypatch.setattr(security, "verify_token", lambda token=None: None)
     assert client.get("/api/admin/forecast-v1/status").status_code == 401
     assert client.get("/api/admin/forecast-v1/job").status_code == 401
     assert client.post("/api/admin/forecast-v1/run").status_code == 401
 
-    monkeypatch.setattr(forecast_v1_admin, "verify_token", lambda token=None: "admin@example.org")
+    monkeypatch.setattr(security, "verify_token", lambda token=None: "admin@example.org")
     monkeypatch.setattr(forecast_v1_admin, "get_forecast_v1_job_status", lambda: {"status": "idle"})
     monkeypatch.setattr(forecast_v1_admin, "trigger_forecast_v1", lambda email: {"status": "queued", "requested_by": email})
     status_response = client.get("/api/admin/forecast-v1/status")

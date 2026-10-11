@@ -6,20 +6,13 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from core.database import get_db_path
-from core.security import verify_token
+from core.security import require_admin
 
 
 router = APIRouter(prefix="/api/admin/fuel-sensors", tags=["fuel-sensor-admin"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _as_utc(value: object) -> datetime | None:
@@ -47,7 +40,7 @@ def _health_for(last_upload_at: object, *, stale_after_minutes: int) -> tuple[st
 
 
 @router.get("/status")
-def fuel_sensor_status(token: Optional[str] = None, recent_limit: int = 100):
+def fuel_sensor_status(recent_limit: int = 100, _admin: str = Depends(require_admin)):
     """Return SMF-FMS device health and newest uploads for the admin console.
 
     Health is based on ``received_at`` (the server receipt time), rather than
@@ -55,7 +48,6 @@ def fuel_sensor_status(token: Optional[str] = None, recent_limit: int = 100):
     the device timestamp and remains the safer upload-health signal in field
     deployments too.
     """
-    _require_admin(token)
     recent_limit = max(1, min(recent_limit, 500))
     stale_after_minutes = max(5, int(os.getenv("SMF_FUEL_SENSOR_STALE_MINUTES", "20")))
     try:

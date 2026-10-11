@@ -7,19 +7,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from core.security import ADMIN_PASSWORD_HASH, create_confirm_token, verify_password, verify_token
+from core.security import ADMIN_PASSWORD_HASH, create_confirm_token, require_admin, verify_password
 
 router = APIRouter(prefix="/api/admin", tags=["admin-confirm"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 class ConfirmPasswordRequest(BaseModel):
@@ -28,8 +21,7 @@ class ConfirmPasswordRequest(BaseModel):
 
 
 @router.post("/verify-password")
-async def verify_admin_password(payload: ConfirmPasswordRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+async def verify_admin_password(payload: ConfirmPasswordRequest, email: str = Depends(require_admin)):
     if not ADMIN_PASSWORD_HASH or not verify_password(payload.password, ADMIN_PASSWORD_HASH):
         raise HTTPException(status_code=401, detail="Incorrect password")
     return {"confirm_token": create_confirm_token(email, payload.action)}

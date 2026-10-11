@@ -25,7 +25,8 @@ class DiscordOAuthTests(unittest.TestCase):
         database.init_database()
         self._env = patch.dict(os.environ, ENV)
         self._env.start()
-        self.token = security.create_access_token({"sub": "staff@showmefire.org"})
+        self.admin_email = "staff@showmefire.org"
+        self.token = security.create_access_token({"sub": self.admin_email})
 
     def tearDown(self):
         self._env.stop()
@@ -33,7 +34,11 @@ class DiscordOAuthTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _start(self, **kwargs):
-        response = run(discord_admin.discord_oauth_start(token=self.token, **kwargs))
+        # discord_oauth_start now authenticates via Depends(require_admin), which
+        # is only resolved by FastAPI's request machinery - calling the endpoint
+        # function directly (as these unit tests do) means passing the already-
+        # authenticated email it would have resolved to, not the raw JWT.
+        response = run(discord_admin.discord_oauth_start(email=self.admin_email, **kwargs))
         return response, parse_qs(urlparse(response.headers["location"]).query)
 
     def _callback(self, state, **kwargs):
@@ -67,7 +72,7 @@ class DiscordOAuthTests(unittest.TestCase):
 
     def test_not_configured_sends_admin_back_with_error(self):
         with patch.dict(os.environ, {"DISCORD_CLIENT_SECRET": ""}):
-            response = run(discord_admin.discord_oauth_start(token=self.token))
+            response = run(discord_admin.discord_oauth_start(email=self.admin_email))
         self.assertIn("discord_error=not_configured", response.headers["location"])
 
     def test_callback_links_account_and_lists_manageable_servers(self):
@@ -75,7 +80,7 @@ class DiscordOAuthTests(unittest.TestCase):
         response = self._callback(params["state"][0])
         self.assertIn("/admin/discord?discord=connected", response.headers["location"])
         with patch.object(discord_admin, "_fetch_discord_servers", return_value={"servers": [{"id": "g1"}], "stale": False}):
-            account = run(discord_admin.get_discord_account(token=self.token))
+            account = run(discord_admin.get_discord_account(email=self.admin_email))
         self.assertTrue(account["linked"])
         self.assertEqual(account["account"]["display_name"], "Cade")
         by_id = {g["id"]: g for g in account["guilds"]}

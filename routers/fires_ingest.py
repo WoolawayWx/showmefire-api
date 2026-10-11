@@ -33,20 +33,13 @@ from core.database import (
     upsert_ingest_report,
 )
 from core.fire_events import MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN
-from core.security import verify_token
+from core.security import require_admin
 from routers.fires import _GeocodeUnavailable, _forward_geocode
 from services.county_lookup import county_for_point
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["fires-ingest"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _ingest_source(authorization: Optional[str] = Header(default=None)) -> Dict:
@@ -143,7 +136,7 @@ def admin_list_ingest_sources(token: Optional[str] = None):
     """List ingest sources and their most recent key's status (admin only).
     Raw keys are never returned here - only whether one is active, when it
     was last used, and when it was issued."""
-    _require_admin(token)
+    require_admin(token)
     return {"success": True, "sources": list_fire_ingest_sources()}
 
 
@@ -151,7 +144,7 @@ def admin_list_ingest_sources(token: Optional[str] = None):
 def admin_create_ingest_source(payload: IngestSourceCreate, token: Optional[str] = None):
     """Create a new ingest source + its API key (admin only). The raw key is
     returned exactly once - only its SHA-256 hash is ever stored."""
-    _require_admin(token)
+    require_admin(token)
     try:
         source = create_fire_ingest_source(
             name=payload.name, slug=payload.slug,
@@ -167,7 +160,7 @@ def admin_rotate_ingest_source_key(source_id: int, token: Optional[str] = None):
     """Issue a new key for an existing ingest source (admin only). Any
     previously issued key keeps working until separately revoked - rotation
     doesn't lock out an in-flight integration."""
-    _require_admin(token)
+    require_admin(token)
     raw_key = create_ingest_api_key_for_source(source_id)
     return {"success": True, "api_key": raw_key}
 
@@ -175,7 +168,7 @@ def admin_rotate_ingest_source_key(source_id: int, token: Optional[str] = None):
 @router.post("/api/admin/fires/ingest-sources/{source_id}/revoke")
 def admin_revoke_ingest_source(source_id: int, token: Optional[str] = None):
     """Revoke an ingest source's current API key (admin only)."""
-    _require_admin(token)
+    require_admin(token)
     revoked = revoke_ingest_api_key(source_id)
     if not revoked:
         raise HTTPException(status_code=404, detail="No active key found for this source")

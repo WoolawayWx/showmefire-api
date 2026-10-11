@@ -9,10 +9,10 @@ from core.fire_danger import calculate_fire_danger
 from services import beta_products
 from services import forecast_jobs
 try:
-    from routers import forecast_admin
+    from core import security as forecast_admin_security
 except ModuleNotFoundError:
     # The minimal local test environment may not include API auth extras.
-    forecast_admin = None
+    forecast_admin_security = None
 
 
 class BetaFireDangerTests(unittest.TestCase):
@@ -155,17 +155,20 @@ class BetaFireDangerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "already running"):
                 forecast_jobs.trigger_beta_forecast("admin@example.org")
 
-    @unittest.skipIf(forecast_admin is None, "API authentication dependencies are not installed")
+    @unittest.skipIf(forecast_admin_security is None, "API authentication dependencies are not installed")
     def test_forecast_trigger_requires_admin(self):
-        with patch.object(forecast_admin, "verify_token", return_value=None):
+        # forecast_admin's /run and /status routes now authenticate via the
+        # shared Depends(require_admin) (core.security) instead of their own
+        # local _require_admin - test that shared gate directly.
+        with patch.object(forecast_admin_security, "verify_token", return_value=None):
             with self.assertRaises(Exception) as context:
-                forecast_admin._require_admin()
+                forecast_admin_security.require_admin()
         self.assertEqual(getattr(context.exception, "status_code", None), 401)
 
-    @unittest.skipIf(forecast_admin is None, "API authentication dependencies are not installed")
+    @unittest.skipIf(forecast_admin_security is None, "API authentication dependencies are not installed")
     def test_forecast_trigger_accepts_admin(self):
-        with patch.object(forecast_admin, "verify_token", return_value="admin@example.org"):
-            self.assertEqual(forecast_admin._require_admin(), "admin@example.org")
+        with patch.object(forecast_admin_security, "verify_token", return_value="admin@example.org"):
+            self.assertEqual(forecast_admin_security.require_admin(), "admin@example.org")
 
 
 if __name__ == "__main__":

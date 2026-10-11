@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -70,7 +70,7 @@ from core.database import (
     update_fire_event,
 )
 from core.fire_events import FUEL_TYPES, MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN, VERIFICATION_TIERS
-from core.security import SECRET_KEY, verify_token
+from core.security import SECRET_KEY, require_admin
 from services.county_lookup import county_for_point
 from services.discord_notifier import notify_staff_alert
 from services.turnstile import verify_turnstile
@@ -111,13 +111,6 @@ MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_MEDIA_COUNT = 5
 MAX_DOCUMENT_COUNT = 1
 MEDIA_DIR = Path(os.getenv("FIRE_MEDIA_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "fire-media")))
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _client_ip(request: Request) -> str:
@@ -788,9 +781,8 @@ async def upload_fire_report_document(
 
 
 @router.get("/api/admin/fires/reports/{event_id}/media/{media_id}")
-def admin_get_fire_report_media(event_id: int, media_id: int, token: Optional[str] = None):
+def admin_get_fire_report_media(event_id: int, media_id: int, _admin: str = Depends(require_admin)):
     """Serve report media only to authenticated administrators."""
-    _require_admin(token)
     event = get_fire_event(event_id, admin=True)
     item = next((row for row in (event or {}).get("media", []) if row["id"] == media_id), None)
     if not item:
@@ -990,23 +982,22 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
 # map/popup shows anything as confirmed.
 
 @router.get("/api/admin/fires/incident-feedback")
-def admin_list_pending_incident_feedback(token: Optional[str] = None, limit: int = 100):
+def admin_list_pending_incident_feedback(_admin: str = Depends(require_admin), limit: int = 100):
     """Feedback awaiting review, most recent first, each with a heuristic
     confidence score to help triage (see services/feedback_confidence.py) -
     admin only. The score is advisory, not a decision."""
-    _require_admin(token)
-    from services.feedback_confidence import score_feedback
+    from services.feedback_confidence import score_feedback_batch
     feedback = list_pending_fire_incident_feedback(limit=limit)
+    scores = score_feedback_batch([item["id"] for item in feedback])
     for item in feedback:
-        item["confidence"] = score_feedback(item["id"])
+        item["confidence"] = scores.get(item["id"])
     return {"success": True, "feedback": feedback, "count": len(feedback)}
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/approve")
-def admin_approve_incident_feedback(feedback_id: int, token: Optional[str] = None):
+def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(require_admin)):
     """Approve a feedback submission - if it's 'confirmed_fire', the incident
     becomes 'confirmed' on the public map immediately (admin only)."""
-    actor = _require_admin(token)
     feedback = set_fire_incident_feedback_status(feedback_id, "approved", reviewed_by=actor)
     if not feedback:
         raise HTTPException(status_code=404, detail="Feedback not found")
@@ -1021,10 +1012,9 @@ def admin_approve_incident_feedback(feedback_id: int, token: Optional[str] = Non
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/reject")
-def admin_reject_incident_feedback(feedback_id: int, token: Optional[str] = None):
+def admin_reject_incident_feedback(feedback_id: int, actor: str = Depends(require_admin)):
     """Reject a feedback submission - excluded from 'confirmed' status and
     from the review queue, but kept for the audit trail (admin only)."""
-    actor = _require_admin(token)
     feedback = set_fire_incident_feedback_status(feedback_id, "rejected", reviewed_by=actor)
     if not feedback:
         raise HTTPException(status_code=404, detail="Feedback not found")
@@ -1038,7 +1028,7 @@ def admin_reject_incident_feedback(feedback_id: int, token: Optional[str] = None
 
 @router.get("/api/admin/fires/reports")
 def admin_list_fire_reports(
-    token: Optional[str] = None,
+    _admin: str = Depends(require_admin),
     status: Optional[str] = "pending",
     source: Optional[str] = None,
     limit: int = 50,
@@ -1049,15 +1039,13 @@ def admin_list_fire_reports(
     excludes reports already linked to an incident - pair with GET
     /api/admin/fires/incidents/pending-queue for the grouped queue view, so
     nothing shows up twice between the two lists."""
-    _require_admin(token)
     events = list_fire_events(status=status, source=source, limit=limit, offset=offset, admin=True, ungrouped_only=ungrouped_only)
     return {"success": True, "reports": events, "count": len(events)}
 
 
 @router.get("/api/admin/fires/reports/{event_id}")
-def admin_get_fire_report(event_id: int, token: Optional[str] = None):
+def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
     """Fire report detail, including moderation history and contact info (admin only)"""
-    _require_admin(token)
     event = get_fire_event(event_id, admin=True)
     if not event:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -1069,9 +1057,8 @@ def admin_get_fire_report(event_id: int, token: Optional[str] = None):
 
 
 @router.post("/api/admin/fires/reports/{event_id}/approve")
-def admin_approve_fire_report(event_id: int, payload: FireReportModeration, token: Optional[str] = None):
+def admin_approve_fire_report(event_id: int, payload: FireReportModeration, actor: str = Depends(require_admin)):
     """Approve a pending fire report and assign its verification tier (admin only)"""
-    actor = _require_admin(token)
     result = set_fire_event_status(
         event_id, to_status="approved", actor=actor,
         to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref,
@@ -1086,9 +1073,8 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, toke
 
 
 @router.post("/api/admin/fires/reports/{event_id}/reject")
-def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token: Optional[str] = None):
+def admin_reject_fire_report(event_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
     """Reject a pending fire report (admin only)"""
-    actor = _require_admin(token)
     result = set_fire_event_status(event_id, to_status="rejected", actor=actor, reason=payload.reason)
     if result is None:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -1098,9 +1084,8 @@ def admin_reject_fire_report(event_id: int, payload: FireReportRejection, token:
 
 
 @router.put("/api/admin/fires/events/{event_id}")
-def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: Optional[str] = None):
+def admin_update_fire_event(event_id: int, payload: FireEventUpdate, actor: str = Depends(require_admin)):
     """Edit a fire event; every edit requires a reason (admin only)"""
-    actor = _require_admin(token)
     fields = payload.model_dump(exclude={"edit_reason"}, exclude_none=True)
     event = update_fire_event(event_id, actor=actor, edit_reason=payload.edit_reason, **fields)
     if not event:
@@ -1109,9 +1094,8 @@ def admin_update_fire_event(event_id: int, payload: FireEventUpdate, token: Opti
 
 
 @router.delete("/api/admin/fires/events/{event_id}")
-def admin_delete_fire_event(event_id: int, token: Optional[str] = None, reason: str = ""):
+def admin_delete_fire_event(event_id: int, actor: str = Depends(require_admin), reason: str = ""):
     """Soft-delete a fire event; moderation history is retained (admin only)"""
-    actor = _require_admin(token)
     deleted = delete_fire_event(event_id, actor=actor, reason=reason)
     if not deleted:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -1119,9 +1103,8 @@ def admin_delete_fire_event(event_id: int, token: Optional[str] = None, reason: 
 
 
 @router.get("/api/admin/fires/labels")
-def admin_export_fire_labels(token: Optional[str] = None, min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
+def admin_export_fire_labels(_admin: str = Depends(require_admin), min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
     """Fire events eligible as model training labels (admin only)"""
-    _require_admin(token)
     if min_tier not in VERIFICATION_TIERS:
         raise HTTPException(status_code=400, detail=f"min_tier must be one of {VERIFICATION_TIERS}")
     rows = export_fire_labels(min_tier=min_tier, since=since, until=until)
@@ -1134,9 +1117,8 @@ def admin_export_fire_labels(token: Optional[str] = None, min_tier: str = "admin
 
 
 @router.post("/api/admin/fires/blocklist")
-def admin_add_to_blocklist(payload: BlocklistCreate, token: Optional[str] = None):
+def admin_add_to_blocklist(payload: BlocklistCreate, actor: str = Depends(require_admin)):
     """Block an IP hash from submitting further reports (admin only)"""
-    actor = _require_admin(token)
     add_ip_to_blocklist(payload.ip_hash, payload.reason, actor)
     return {"success": True}
 
@@ -1178,7 +1160,7 @@ def list_public_fire_incident_shapes_geojson(response: Response, since: Optional
 
 @router.get("/api/admin/fires/detections.geojson")
 def admin_list_fire_detections_geojson(
-    token: Optional[str] = None,
+    _admin: str = Depends(require_admin),
     source: str = "modis,viirs,ngfs",
     since: Optional[str] = None,
     limit: int = 500,
@@ -1188,7 +1170,6 @@ def admin_list_fire_detections_geojson(
     zone - includes ones already suppressed by a recurring source or
     exclusion zone, so staff can see the full false-positive pattern, not
     just what's currently published (admin only)."""
-    _require_admin(token)
     events = list_fire_events(source=source, since=since, limit=limit, admin=True)
     features = [
         {
@@ -1218,7 +1199,7 @@ def admin_list_fire_detections_geojson(
 
 @router.get("/api/admin/fires/incidents")
 def admin_list_fire_incidents(
-    token: Optional[str] = None,
+    _admin: str = Depends(require_admin),
     since: Optional[str] = None,
     until: Optional[str] = None,
     source: Optional[str] = None,
@@ -1231,7 +1212,6 @@ def admin_list_fire_incidents(
     """List satellite-detection incidents, most recently active first (admin only).
     has_feedback=true: only incidents with at least one public feedback submission.
     confirmed_only=true: only incidents with at least one 'confirmed_fire' submission."""
-    _require_admin(token)
     incidents = list_fire_incidents(
         since=since, until=until, source=source, bbox=_parse_bbox(bbox),
         has_feedback=has_feedback, confirmed_only=confirmed_only, limit=limit, offset=offset,
@@ -1243,10 +1223,9 @@ def admin_list_fire_incidents(
 def admin_refresh_fire_incident_graphics(
     incident_id: Optional[int] = None,
     force: bool = True,
-    token: Optional[str] = None,
+    _admin: str = Depends(require_admin),
 ):
     """Regenerate incident PNG cards on demand (admin only)."""
-    _require_admin(token)
     from services.fire_incident_graphics import refresh_incident_graphics
     result = refresh_incident_graphics(incident_id=incident_id, force=force)
     if incident_id is not None and result["rendered"] == 0:
@@ -1255,9 +1234,8 @@ def admin_refresh_fire_incident_graphics(
 
 
 @router.post("/api/admin/fires/incidents/reanalyze")
-def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, token: Optional[str] = None):
+def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: str = Depends(require_admin)):
     """Re-run confidence scoring and regenerate graphics after data changes."""
-    _require_admin(token)
     from services.fire_confidence import refresh_confidence_shapes
     from services.fire_incident_graphics import refresh_incident_graphics
     graphic_result = refresh_incident_graphics(incident_id=incident_id, force=True)
@@ -1266,7 +1244,7 @@ def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, token: Opt
 
 
 @router.get("/api/admin/fires/incidents/pending-queue")
-def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 100, has_additional_info: Optional[bool] = None):
+def admin_list_pending_incident_queue(_admin: str = Depends(require_admin), limit: int = 100, has_additional_info: Optional[bool] = None):
     """Grouped moderation queue: every incident with at least one pending
     member, with a live per-status member breakdown and an incident_confidence
     reading (when FIRE_INCIDENT_CONFIDENCE_VERSION=v2) - lets a moderator
@@ -1282,7 +1260,6 @@ def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 
     or a written description (see core.database._incident_has_additional_info)
     - so a moderator can triage the ones worth a closer look first without
     paging through every raw MODIS/VIIRS/NGFS detection."""
-    _require_admin(token)
     from services.incident_confidence import score_incident, use_v2
 
     incidents = list_incidents_with_pending_members(limit=limit)
@@ -1298,9 +1275,8 @@ def admin_list_pending_incident_queue(token: Optional[str] = None, limit: int = 
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/approve-all")
-def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, token: Optional[str] = None):
+def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, actor: str = Depends(require_admin)):
     """Approve every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
-    actor = _require_admin(token)
     result = set_incident_review_decision(
         incident_id, "approved", actor, reason="admin_bulk_action",
         to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref, note=payload.moderator_note,
@@ -1309,19 +1285,17 @@ def admin_approve_all_incident_reports(incident_id: int, payload: FireReportMode
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/reject-all")
-def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, token: Optional[str] = None):
+def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
     """Reject every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
-    actor = _require_admin(token)
     result = set_incident_review_decision(incident_id, "rejected", actor, reason="admin_bulk_action", note=payload.reason)
     return {"success": True, **result}
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/delete")
-def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, token: Optional[str] = None):
+def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
     """Delete this whole incident and every one of its member detections in
     one action (soft delete - audit trail retained on each event and on the
     incident) - the easy 'this cluster is bogus' button (admin only)."""
-    actor = _require_admin(token)
     result = delete_fire_incident_and_members(incident_id, actor=actor, reason=payload.reason)
     if not result["incident_deleted"]:
         raise HTTPException(status_code=404, detail="Fire incident not found")
@@ -1329,9 +1303,8 @@ def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, t
 
 
 @router.get("/api/admin/fires/incidents/{incident_id}")
-def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
+def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admin)):
     """Incident detail, including every member detection for map plotting (admin only)"""
-    _require_admin(token)
     incident = get_fire_incident(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
@@ -1358,19 +1331,17 @@ def admin_get_fire_incident(incident_id: int, token: Optional[str] = None):
 # upsert_detection_event) - never automatic.
 
 @router.get("/api/admin/fires/recurring-sources")
-def admin_list_recurring_sources(status: Optional[str] = None, token: Optional[str] = None):
+def admin_list_recurring_sources(status: Optional[str] = None, _admin: str = Depends(require_admin)):
     """List recurring non-fire source candidates/confirmed/dismissed rows (admin only)"""
-    _require_admin(token)
     sources = list_recurring_sources(status=status)
     return {"success": True, "sources": sources, "count": len(sources)}
 
 
 @router.post("/api/admin/fires/recurring-sources/{source_id}/confirm")
-def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfirmation, token: Optional[str] = None):
+def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfirmation, actor: str = Depends(require_admin)):
     """Confirm a candidate as a real non-fire source - from this point new
     detections within its radius are suppressed from incident clustering,
     ML confidence scoring, and graphics regeneration (admin only)."""
-    actor = _require_admin(token)
     source = set_recurring_source_status(source_id, "confirmed", reviewed_by=actor, label=payload.label, source_type=payload.source_type)
     if not source:
         raise HTTPException(status_code=404, detail="Recurring source not found")
@@ -1378,11 +1349,10 @@ def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfi
 
 
 @router.post("/api/admin/fires/recurring-sources/{source_id}/dismiss")
-def admin_dismiss_recurring_source(source_id: int, token: Optional[str] = None):
+def admin_dismiss_recurring_source(source_id: int, actor: str = Depends(require_admin)):
     """Dismiss a candidate - staff reviewed it and it's not actually a
     persistent non-fire source (e.g. a real recurring wildfire-prone area).
     The detector will keep refreshing its stats but won't change its status (admin only)."""
-    actor = _require_admin(token)
     source = set_recurring_source_status(source_id, "dismissed", reviewed_by=actor)
     if not source:
         raise HTTPException(status_code=404, detail="Recurring source not found")
@@ -1397,18 +1367,16 @@ def admin_dismiss_recurring_source(source_id: int, token: Optional[str] = None):
 # (core.database.upsert_detection_event) the moment it's created.
 
 @router.get("/api/admin/fires/exclusion-zones")
-def admin_list_exclusion_zones(status: Optional[str] = "active", token: Optional[str] = None):
+def admin_list_exclusion_zones(status: Optional[str] = "active", _admin: str = Depends(require_admin)):
     """List exclusion zones (admin only). Defaults to active zones; pass status=None (empty) for all."""
-    _require_admin(token)
     zones = list_fire_exclusion_zones(status=status or None)
     return {"success": True, "zones": zones, "count": len(zones)}
 
 
 @router.post("/api/admin/fires/exclusion-zones")
-def admin_create_exclusion_zone(payload: ExclusionZoneCreate, token: Optional[str] = None):
+def admin_create_exclusion_zone(payload: ExclusionZoneCreate, actor: str = Depends(require_admin)):
     """Create a new exclusion zone and immediately hide any existing active
     incidents whose centroid falls inside it (admin only)."""
-    actor = _require_admin(token)
     geometry_geojson = json.dumps(payload.geometry)
     zone = create_fire_exclusion_zone(payload.name, geometry_geojson, created_by=actor, notes=payload.notes)
     hidden_incidents = list_fire_incidents_in_geometry(geometry_geojson)
@@ -1418,10 +1386,9 @@ def admin_create_exclusion_zone(payload: ExclusionZoneCreate, token: Optional[st
 
 
 @router.delete("/api/admin/fires/exclusion-zones/{zone_id}")
-def admin_delete_exclusion_zone(zone_id: int, token: Optional[str] = None):
+def admin_delete_exclusion_zone(zone_id: int, _admin: str = Depends(require_admin)):
     """Soft-delete a zone - stops it suppressing new detections. Does not
     restore any incidents it previously hid (admin only)."""
-    _require_admin(token)
     zone = set_fire_exclusion_zone_status(zone_id, "deleted")
     if not zone:
         raise HTTPException(status_code=404, detail="Exclusion zone not found")

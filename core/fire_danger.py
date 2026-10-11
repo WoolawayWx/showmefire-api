@@ -32,6 +32,22 @@ class FireDangerCategory(IntEnum):
 
 CATEGORY_LABELS = tuple(RULE_SPEC["categories"])
 CATEGORY_IDS = tuple(int(category) for category in FireDangerCategory)
+
+# The single definition of "what color is each fire-danger class" - previously
+# redefined independently (and drifting between hex vs RGBA encodings) across
+# maps/realtimefiredanger.py, maps/observed_peak_history.py,
+# maps/forecastfiredangerbias.py, forecast/DailyForecast.py, and others.
+# Index-aligned with CATEGORY_IDS/CATEGORY_LABELS (0=Low .. 4=Extreme).
+CATEGORY_HEX_COLORS = ("#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000")
+CATEGORY_RGBA_COLORS = {
+    0: (144, 238, 144, 255),  # Low
+    1: (255, 237, 78, 255),   # Moderate
+    2: (255, 165, 0, 255),    # Elevated
+    3: (255, 0, 0, 255),      # Critical
+    4: (139, 0, 0, 255),      # Extreme
+}
+# matplotlib BoundaryNorm edges for the 5 discrete classes above.
+CATEGORY_BINS = (-0.5, 0.5, 1.5, 2.5, 3.5, 4.5)
 HIGH_IMPACT_CATEGORY_IDS = (
     int(FireDangerCategory.ELEVATED),
     int(FireDangerCategory.CRITICAL),

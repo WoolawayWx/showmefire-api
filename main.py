@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Header
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Request, Header
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from contextlib import asynccontextmanager
 from services.synoptic import (
@@ -55,6 +55,7 @@ from core.security import (
     create_access_token,
     create_refresh_token,
     verify_token,
+    require_admin,
     set_request_token,
     reset_request_token,
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -501,34 +502,25 @@ async def get_banner_public():
     return load_banner_config()
 
 @app.get("/api/admin/banner")
-async def get_banner_admin(token: Optional[str] = None):
+async def get_banner_admin(email: str = Depends(require_admin)):
     """Get banner data (admin only)"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return load_banner_config()
 
 @app.post("/api/admin/banner")
-async def update_banner(banner: BannerData, token: Optional[str] = None):
+async def update_banner(banner: BannerData, email: str = Depends(require_admin)):
     """Update banner (admin only)"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     save_banner_config(banner)
     logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
     return {"success": True, "message": "Banner updated successfully"}
 
 
 @app.get("/api/admin/ignored_stations")
-def admin_list_ignored(token: Optional[str] = None):
+def admin_list_ignored(email: str = Depends(require_admin)):
     """List ignored stations (admin only)"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
     db_path = get_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=15)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute('SELECT stid, reason, added_at FROM ignored_stations ORDER BY added_at DESC')
@@ -541,11 +533,8 @@ def admin_list_ignored(token: Optional[str] = None):
 
 
 @app.post("/api/admin/ignored_stations")
-def admin_add_ignored(payload: dict, token: Optional[str] = None):
+def admin_add_ignored(payload: dict, email: str = Depends(require_admin)):
     """Add an ignored station. Payload: { stid: 'MBGM7', reason: '...' }"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
     stid = (payload.get('stid') or '').strip().upper()
     reason = payload.get('reason') or None
@@ -554,7 +543,7 @@ def admin_add_ignored(payload: dict, token: Optional[str] = None):
 
     db_path = get_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=15)
         cursor = conn.cursor()
         cursor.execute('INSERT OR IGNORE INTO ignored_stations (stid, reason) VALUES (?, ?)', (stid, reason))
         conn.commit()
@@ -572,16 +561,13 @@ def admin_add_ignored(payload: dict, token: Optional[str] = None):
 
 
 @app.delete("/api/admin/ignored_stations/{stid}")
-def admin_remove_ignored(stid: str, token: Optional[str] = None):
+def admin_remove_ignored(stid: str, email: str = Depends(require_admin)):
     """Remove an ignored station by STID"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
     stid = stid.strip().upper()
     db_path = get_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=15)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM ignored_stations WHERE stid = ?', (stid,))
         conn.commit()
@@ -610,11 +596,8 @@ def api_get_website_version():
 
 
 @app.post('/api/admin/website/version')
-def admin_set_website_version(payload: dict, token: Optional[str] = None):
+def admin_set_website_version(payload: dict, email: str = Depends(require_admin)):
     """Admin-only: set website version. Payload: { version: '1.2.3' }"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
 
     version = (payload.get('version') or '').strip()
     if not version:
@@ -644,18 +627,12 @@ def get_public_projects():
 
 
 @app.get('/api/admin/projects')
-def admin_list_projects(token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_list_projects(email: str = Depends(require_admin)):
     return {"success": True, "projects": list_dev_projects()}
 
 
 @app.post('/api/admin/projects')
-def admin_create_project(payload: DevProjectCreate, token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_create_project(payload: DevProjectCreate, email: str = Depends(require_admin)):
 
     name = (payload.name or '').strip()
     if not name:
@@ -672,10 +649,7 @@ def admin_create_project(payload: DevProjectCreate, token: Optional[str] = None)
 
 
 @app.put('/api/admin/projects/{project_id}')
-def admin_update_project(project_id: int, payload: DevProjectUpdate, token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_update_project(project_id: int, payload: DevProjectUpdate, email: str = Depends(require_admin)):
 
     ok = update_dev_project(
         project_id=project_id,
@@ -694,10 +668,7 @@ def admin_update_project(project_id: int, payload: DevProjectUpdate, token: Opti
 
 
 @app.delete('/api/admin/projects/{project_id}')
-def admin_delete_project(project_id: int, token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_delete_project(project_id: int, email: str = Depends(require_admin)):
 
     if not delete_dev_project(project_id):
         raise HTTPException(status_code=404, detail="Project not found")
@@ -705,10 +676,7 @@ def admin_delete_project(project_id: int, token: Optional[str] = None):
 
 
 @app.get("/api/admin/opsbrief/files")
-def admin_list_opsbrief_files(token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_list_opsbrief_files(email: str = Depends(require_admin)):
 
     files = []
     for f in sorted(OPSBRIEF_DIR.glob("*")):
@@ -723,10 +691,7 @@ def admin_list_opsbrief_files(token: Optional[str] = None):
 
 
 @app.post("/api/admin/opsbrief/upload")
-async def admin_upload_opsbrief(token: Optional[str] = None, upload: UploadFile = File(...)):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+async def admin_upload_opsbrief(email: str = Depends(require_admin), upload: UploadFile = File(...)):
 
     filename = Path(upload.filename or "").name
     if not filename:
@@ -748,10 +713,7 @@ async def admin_upload_opsbrief(token: Optional[str] = None, upload: UploadFile 
 
 
 @app.delete("/api/admin/opsbrief/files/{filename}")
-def admin_delete_opsbrief_file(filename: str, token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_delete_opsbrief_file(filename: str, email: str = Depends(require_admin)):
 
     safe_name = Path(filename).name
     if safe_name.lower() == OPSBRIEF_FALLBACK_FILE:
@@ -766,20 +728,14 @@ def admin_delete_opsbrief_file(filename: str, token: Optional[str] = None):
 
 
 @app.get("/api/admin/opsbrief/config")
-def admin_get_opsbrief_config(token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_get_opsbrief_config(email: str = Depends(require_admin)):
 
     config = get_briefing_config()
     return {"success": True, "config": config}
 
 
 @app.post("/api/admin/opsbrief/config")
-def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, token: Optional[str] = None):
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def admin_set_opsbrief_config(payload: OpsBriefConfigUpdate, email: str = Depends(require_admin)):
 
     if payload.file_path is not None:
         safe_name = Path(payload.file_path).name
@@ -1103,26 +1059,22 @@ async def save_historical_to_archive(days_back: int = 1):
 
 
 @app.get("/api/historical/archive/list")
-async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
+async def list_archived_files(_admin: str = Depends(require_admin)):
     '''
-    List all archived data files.
-    
-    Query params:
-    - archive_dir: Directory to list (default: archive/raw_data)
-    
+    List all archived data files in the fixed raw-data archive directory.
+
     Returns: List of available archive files with metadata
     '''
-    archive_path = Path(archive_dir)
-    
+    archive_path = ARCHIVE_RAW_DATA_DIR
+
     files = []
-    if archive_dir == str(ARCHIVE_RAW_DATA_DIR):
-        from services.archive_store import ArchiveStore
-        store = ArchiveStore()
-        for m in await asyncio.to_thread(store.list_observations):
-            files.append({"filename": m['name'], "size_mb": round(m['size'] / 1024 / 1024, 2),
-                          "created": m['captured_at'],
-                          "modified": datetime.fromtimestamp(m['mtime_ns'] / 1e9).isoformat(),
-                          "storage": "r2"})
+    from services.archive_store import ArchiveStore
+    store = ArchiveStore()
+    for m in await asyncio.to_thread(store.list_observations):
+        files.append({"filename": m['name'], "size_mb": round(m['size'] / 1024 / 1024, 2),
+                      "created": m['captured_at'],
+                      "modified": datetime.fromtimestamp(m['mtime_ns'] / 1e9).isoformat(),
+                      "storage": "r2"})
     for filepath in archive_path.glob("raw_data_*.json"):
         stat = filepath.stat()
         files.append({
@@ -1131,10 +1083,10 @@ async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
             "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
         })
-    
+
     files = list({item['filename']: item for item in files}.values())
     files.sort(key=lambda x: x['modified'], reverse=True)
-    
+
     return {
         "success": True,
         "files": files,
@@ -1143,32 +1095,32 @@ async def list_archived_files(archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
 
 
 @app.get("/api/historical/archive/load/{filename}")
-async def load_archived_file(filename: str, archive_dir: str = str(ARCHIVE_RAW_DATA_DIR)):
+async def load_archived_file(filename: str, _admin: str = Depends(require_admin)):
     '''
-    Load a specific archived data file.
-    
+    Load a specific archived data file from the fixed raw-data archive directory.
+
     Path params:
     - filename: Name of the file to load
-    
-    Query params:
-    - archive_dir: Directory to load from (default: archive/raw_data)
-    
+
     Returns: Archived data with statistics
     '''
-    archive_path = Path(archive_dir) / filename
-    
+    base_dir = ARCHIVE_RAW_DATA_DIR.resolve()
+    archive_path = (base_dir / filename).resolve()
+    try:
+        archive_path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Forbidden: Path traversal not allowed")
+
     try:
         if archive_path.exists():
             with open(archive_path, 'r') as f:
                 data = json.load(f)
-        elif archive_dir == str(ARCHIVE_RAW_DATA_DIR):
+        else:
             from services.archive_store import ArchiveStore
             data = await asyncio.to_thread(ArchiveStore().read_observation, filename)
             if data is None:
                 return {"success": False, "error": "File not found"}
-        else:
-            return {"success": False, "error": "File not found"}
-        
+
         return {
             "success": True,
             "data": data,
@@ -1232,59 +1184,38 @@ def api_latest_forecast(cycle: int = 12):
     return forecast
 
 @app.get("/api/admin/reports/list")
-async def list_reports(token: Optional[str] = None):
+async def list_reports(email: str = Depends(require_admin)):
     """List all reports (files and folders) in the reports directory (Admin/Logged-in only)"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return list_files(str(REPORTS_DIR))
 
 @app.get("/api/admin/reports/list/{path:path}")
-async def list_reports_in_path(path: str, token: Optional[str] = None):
+async def list_reports_in_path(path: str, email: str = Depends(require_admin)):
     """List contents of a specific folder within reports directory"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return list_files(str(REPORTS_DIR), path)
 
 @app.get("/api/admin/reports/view/{filepath:path}")
-async def view_report(filepath: str, token: Optional[str] = None):
+async def view_report(filepath: str, email: str = Depends(require_admin)):
     """Serve a specific report file securely from reports directory"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return view_file(str(REPORTS_DIR), filepath, email)
 
 @app.get("/api/admin/logs/list")
-async def list_logs(token: Optional[str] = None):
+async def list_logs(email: str = Depends(require_admin)):
     """List all logs (files and folders) in the logs directory (Admin/Logged-in only)"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return list_files(str(LOGS_DIR))
 
 @app.get("/api/admin/logs/list/{path:path}")
-async def list_logs_in_path(path: str, token: Optional[str] = None):
+async def list_logs_in_path(path: str, email: str = Depends(require_admin)):
     """List contents of a specific folder within logs directory"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return list_files(str(LOGS_DIR), path)
 
 @app.get("/api/admin/logs/view/{filepath:path}")
-async def view_log(filepath: str, token: Optional[str] = None):
+async def view_log(filepath: str, email: str = Depends(require_admin)):
     """Serve a specific log file securely from logs directory"""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     return view_file(str(LOGS_DIR), filepath, email)
 
 @app.post("/api/admin/logs/cleanup")
-async def cleanup_logs(token: Optional[str] = None):
+async def cleanup_logs(email: str = Depends(require_admin)):
     """Run the log purge (delete stale dated logs, truncate oversized ever-growing ones) immediately."""
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
     result = await asyncio.to_thread(purge_old_logs)
     return {"success": True, **result}
 
@@ -1346,63 +1277,6 @@ async def get_morning_fuel_moisture(
 
 
 
-@app.get("/api/fuel-moisture/morning/debug")
-async def get_morning_fuel_moisture_debug(
-    date: Optional[str] = None,
-    states: Optional[str] = "MO",
-    networks: Optional[str] = "2"
-):
-    """
-    Debug endpoint - returns raw Synoptic API response for fuel moisture.
-    Helps diagnose data extraction issues.
-    """
-    from services.synoptic import SYNOPTIC_API_TOKEN
-    from pytz import timezone as pytz_timezone
-    import aiohttp
-    
-    try:
-        # Parse date if provided
-        if date:
-            from datetime import datetime as dt
-            central = pytz_timezone('America/Chicago')
-            parsed_date = dt.strptime(date, "%Y-%m-%d")
-            target_central = central.localize(parsed_date.replace(hour=7, minute=0, second=0))
-            target_time = target_central.astimezone(pytz_timezone('UTC'))
-        else:
-            from pytz import timezone as pytz_timezone
-            central = pytz_timezone('America/Chicago')
-            now_central = datetime.now(central)
-            target_central = now_central.replace(hour=7, minute=0, second=0, microsecond=0)
-            target_time = target_central.astimezone(pytz_timezone('UTC'))
-        
-        attime = target_time.strftime("%Y%m%d%H%M")
-        
-        url = "https://api.synopticdata.com/v2/stations/nearesttime"
-        params = {
-            "token": SYNOPTIC_API_TOKEN,
-            "state": states,
-            "attime": attime,
-            "within": "60",
-            "network": networks,
-            "vars": "fuel_moisture",
-            "obtimezone": "local"
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            response = await session.get(url, params=params, timeout=60)
-            response.raise_for_status()
-            raw_data = await response.json()
-        
-        return {
-            "success": True,
-            "query_params": params,
-            "raw_response": raw_data
-        }
-    except Exception as e:
-        logger.error(f"Error in debug endpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/fuel-sensor/readings")
 async def ingest_fuel_sensor_readings(payload: dict, x_device_key: Optional[str] = Header(None)):
     """Ingest fuel-moisture readings from our own dowel sensor hardware
@@ -1441,10 +1315,28 @@ async def ingest_fuel_sensor_readings(payload: dict, x_device_key: Optional[str]
     firmware_version = diagnostics.get("firmware_version")
     enclosure_state = diagnostics.get("enclosure_state")
 
+    try:
+        stored = await asyncio.to_thread(
+            _ingest_fuel_sensor_readings_sync,
+            site_id, device_id, readings,
+            battery_v, rssi_dbm, uptime_s, firmware_version, enclosure_state,
+        )
+        return {"success": True, "stored": stored, "received": len(readings)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error ingesting fuel sensor readings from {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _ingest_fuel_sensor_readings_sync(
+    site_id: str, device_id: str, readings: list,
+    battery_v, rssi_dbm, uptime_s, firmware_version, enclosure_state,
+) -> int:
     db_path = get_db_path()
     stored = 0
+    conn = sqlite3.connect(db_path, timeout=15)
     try:
-        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         for reading in readings:
             recorded_at = reading.get("recorded_at")
@@ -1462,13 +1354,9 @@ async def ingest_fuel_sensor_readings(payload: dict, x_device_key: Optional[str]
             ))
             stored += cursor.rowcount
         conn.commit()
+        return stored
+    finally:
         conn.close()
-        return {"success": True, "stored": stored, "received": len(readings)}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error ingesting fuel sensor readings from {device_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/fuel-sensor/readings")
@@ -1477,7 +1365,7 @@ def list_fuel_sensor_readings(site_id: Optional[str] = None, device_id: Optional
     limit = max(1, min(limit, 1000))
     db_path = get_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=15)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         query = "SELECT * FROM fuel_moisture_sensor_readings WHERE 1=1"

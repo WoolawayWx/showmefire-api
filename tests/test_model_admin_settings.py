@@ -23,7 +23,7 @@ class ModelAdminSettingsTests(unittest.TestCase):
         self._db_patcher = patch.object(database, "get_db_path", return_value=self._db_path)
         self._db_patcher.start()
         database.init_database()
-        self._admin_patcher = patch.object(model_admin, "_require_admin", return_value="tester@example.com")
+        self._admin_patcher = patch.object(model_admin, "require_admin", return_value="tester@example.com")
         self._admin_patcher.start()
 
     def tearDown(self):

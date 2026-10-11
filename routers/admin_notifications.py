@@ -12,11 +12,11 @@ import sqlite3
 import uuid
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from core.database import get_db_path
-from core.security import verify_token
+from core.security import require_admin
 from services.mobile_content import county_catalog
 from services.mobile_push import _eligible_subscriptions, send_mobile_event
 
@@ -34,13 +34,6 @@ APP_DESTINATIONS = {
     "/report-fire": "Report a fire",
 }
 CHANNELS = ("forecast", "sitrep", "fire_weather", "fire_detection")
-
-
-def _require_admin(token: Optional[str]) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 class ManualNotification(BaseModel):
@@ -85,8 +78,7 @@ def _recipients(payload: ManualNotification) -> list[dict]:
 
 
 @router.get("/options")
-def notification_options(token: Optional[str] = None):
-    _require_admin(token)
+def notification_options(_admin: str = Depends(require_admin)):
     return {
         "success": True,
         "channels": [
@@ -101,15 +93,13 @@ def notification_options(token: Optional[str] = None):
 
 
 @router.post("/preview")
-def preview_notification(payload: ManualNotification, token: Optional[str] = None):
+def preview_notification(payload: ManualNotification, _admin: str = Depends(require_admin)):
     """How many devices would receive this, so staff see the audience before sending."""
-    _require_admin(token)
     return {"success": True, "recipients": len(_recipients(payload))}
 
 
 @router.post("/send")
-def send_notification(payload: ManualNotification, token: Optional[str] = None):
-    email = _require_admin(token)
+def send_notification(payload: ManualNotification, email: str = Depends(require_admin)):
     recipients = len(_recipients(payload))
     if recipients == 0:
         raise HTTPException(status_code=409, detail="No subscribed devices match this audience; nothing was sent.")
@@ -138,8 +128,7 @@ def send_notification(payload: ManualNotification, token: Optional[str] = None):
 
 
 @router.get("/history")
-def notification_history(token: Optional[str] = None, limit: int = 50):
-    _require_admin(token)
+def notification_history(limit: int = 50, _admin: str = Depends(require_admin)):
     with sqlite3.connect(get_db_path()) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(

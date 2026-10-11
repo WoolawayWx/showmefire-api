@@ -1018,7 +1018,7 @@ async def list_logos(authorization: Optional[str] = Header(default=None)):
     return {"logos": logos}
 
 
-async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Optional[int]):
+def _run_job_sync(job_id: str, bundle: dict, department_id: int, api_key_id: Optional[int]):
     started = time.monotonic()
     with _db() as db:
         db.execute("UPDATE graphic_jobs SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
@@ -1048,7 +1048,7 @@ async def _run_job(job_id: str, bundle: dict, department_id: int, api_key_id: Op
                 raise ValueError("configured department logo asset no longer exists")
             bundle["department_logo_path"] = logo_asset["path"]
             bundle["department_logo_url"] = logo_asset["cdn_url"]
-        result = await asyncio.get_running_loop().run_in_executor(_get_executor(), render_graphic, bundle)
+        result = _get_executor().submit(render_graphic, bundle).result()
         data = result["bytes"]
         if len(data) < 1000:
             raise ValueError("rendered image failed content validation")
@@ -1090,22 +1090,29 @@ def _purge_cdn(key: str):
     response.raise_for_status()
 
 
-@router.post("/jobs", status_code=202)
-async def create_job(bundle_id: str, authorization: Optional[str] = Header(default=None)):
-    key = _department_key(authorization)
+def _create_job_sync(bundle_id: str, department_id: int, daily_limit: int, monthly_limit: int) -> tuple[str, dict]:
     with _db() as db:
-        bundle_row = db.execute("SELECT * FROM graphic_bundles WHERE id=? AND department_id=? AND active=1", (bundle_id, key["department_id"])).fetchone()
+        bundle_row = db.execute("SELECT * FROM graphic_bundles WHERE id=? AND department_id=? AND active=1", (bundle_id, department_id)).fetchone()
         if not bundle_row:
             raise HTTPException(status_code=404, detail="Bundle not found")
         bundle = json.loads(bundle_row["config_json"])
         bundle["id"] = bundle_id
-        today = db.execute("SELECT COUNT(*) FROM graphic_usage_events WHERE department_id=? AND created_at >= date('now')", (key["department_id"],)).fetchone()[0]
-        month = db.execute("SELECT COUNT(*) FROM graphic_usage_events WHERE department_id=? AND created_at >= date('now','start of month')", (key["department_id"],)).fetchone()[0]
-        if today >= key["daily_limit"] or month >= key["monthly_limit"]:
+        today = db.execute("SELECT COUNT(*) FROM graphic_usage_events WHERE department_id=? AND created_at >= date('now')", (department_id,)).fetchone()[0]
+        month = db.execute("SELECT COUNT(*) FROM graphic_usage_events WHERE department_id=? AND created_at >= date('now','start of month')", (department_id,)).fetchone()[0]
+        if today >= daily_limit or month >= monthly_limit:
             raise HTTPException(status_code=429, detail="Graphics usage quota exceeded")
         job_id = str(uuid.uuid4())
-        db.execute("INSERT INTO graphic_jobs(id,bundle_id,department_id,status,config_json) VALUES (?,?,?,?,?)", (job_id, bundle_id, key["department_id"], "queued", json.dumps(bundle)))
-    asyncio.create_task(_run_job(job_id, bundle, key["department_id"], key["id"]))
+        db.execute("INSERT INTO graphic_jobs(id,bundle_id,department_id,status,config_json) VALUES (?,?,?,?,?)", (job_id, bundle_id, department_id, "queued", json.dumps(bundle)))
+    return job_id, bundle
+
+
+@router.post("/jobs", status_code=202)
+async def create_job(bundle_id: str, authorization: Optional[str] = Header(default=None)):
+    key = _department_key(authorization)
+    job_id, bundle = await asyncio.to_thread(
+        _create_job_sync, bundle_id, key["department_id"], key["daily_limit"], key["monthly_limit"],
+    )
+    asyncio.create_task(asyncio.to_thread(_run_job_sync, job_id, bundle, key["department_id"], key["id"]))
     return {"job_id": job_id, "status": "queued", "image_url": _image_url(bundle_id)}
 
 

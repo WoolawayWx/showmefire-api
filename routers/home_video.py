@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from core.database import get_db_path
-from core.security import verify_token
+from core.security import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["home-video"])
@@ -22,13 +22,6 @@ HOME_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {".mp4", ".webm"}
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-
-
-def _require_admin(token: Optional[str]) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def parse_youtube_id(value: str) -> Optional[str]:
@@ -101,8 +94,7 @@ def public_home_video(response: Response):
 
 
 @router.get("/api/admin/home-video")
-def admin_get_home_video(token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_home_video(_admin: str = Depends(require_admin)):
     return {"success": True, **_present(_row()), "enabled_setting": bool(_row().get("enabled"))}
 
 
@@ -132,8 +124,7 @@ def _save(email: str, **fields) -> None:
 
 
 @router.post("/api/admin/home-video")
-def admin_update_home_video(payload: HomeVideoUpdate, token: Optional[str] = None):
-    email = _require_admin(token)
+def admin_update_home_video(payload: HomeVideoUpdate, email: str = Depends(require_admin)):
     current = _row()
     youtube_id = current.get("youtube_id") or ""
     if payload.youtube_url.strip():
@@ -159,8 +150,7 @@ def _remove_file(filename: str) -> None:
 
 
 @router.post("/api/admin/home-video/upload")
-async def admin_upload_home_video(token: Optional[str] = None, upload: UploadFile = File(...)):
-    email = _require_admin(token)
+async def admin_upload_home_video(upload: UploadFile = File(...), email: str = Depends(require_admin)):
     extension = Path(upload.filename or "").suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only .mp4 or .webm files are allowed.")
@@ -185,8 +175,7 @@ async def admin_upload_home_video(token: Optional[str] = None, upload: UploadFil
 
 
 @router.delete("/api/admin/home-video/upload")
-def admin_delete_home_video_upload(token: Optional[str] = None):
-    email = _require_admin(token)
+def admin_delete_home_video_upload(email: str = Depends(require_admin)):
     current = _row()
     has_youtube = bool(current.get("youtube_id"))
     # Without a YouTube fallback there is nothing left to show, so switch it off.

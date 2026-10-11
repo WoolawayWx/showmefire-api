@@ -494,15 +494,22 @@ def apply_ops(member: Dict[str, Any], map_id: str, ops: List[Dict[str, Any]]) ->
         live = conn.execute(
             "SELECT COUNT(*) FROM field_features WHERE map_id=? AND deleted=0", (map_id,)
         ).fetchone()[0]
+        uids = list({uid for _, uid, _ in prepared})
+        placeholders = ",".join("?" * len(uids))
+        existing_by_uid = {
+            row["uid"]: bool(row["deleted"])
+            for row in conn.execute(
+                f"SELECT uid, deleted FROM field_features WHERE map_id=? AND uid IN ({placeholders})",
+                (map_id, *uids),
+            ).fetchall()
+        }
         for kind, uid, text in prepared:
-            existing = conn.execute(
-                "SELECT deleted FROM field_features WHERE map_id=? AND uid=?", (map_id, uid)
-            ).fetchone()
+            existing_deleted = existing_by_uid.get(uid)
             rev += 1
             if kind == "upsert":
-                if (existing is None or existing["deleted"]) and live >= feature_cap:
+                if (existing_deleted is None or existing_deleted) and live >= feature_cap:
                     raise FieldError("This map has too many features for its plan.", 413)
-                if existing is None or existing["deleted"]:
+                if existing_deleted is None or existing_deleted:
                     live += 1
                 conn.execute(
                     "INSERT INTO field_features (map_id, uid, feature_json, deleted, rev) VALUES (?,?,?,0,?)"
@@ -510,14 +517,16 @@ def apply_ops(member: Dict[str, Any], map_id: str, ops: List[Dict[str, Any]]) ->
                     " deleted=0, rev=excluded.rev",
                     (map_id, uid, text, rev),
                 )
+                existing_by_uid[uid] = False
             else:
-                if existing is not None and not existing["deleted"]:
+                if existing_deleted is not None and not existing_deleted:
                     live -= 1
                 conn.execute(
                     "INSERT INTO field_features (map_id, uid, feature_json, deleted, rev) VALUES (?,?,NULL,1,?)"
                     " ON CONFLICT(map_id, uid) DO UPDATE SET feature_json=NULL, deleted=1, rev=excluded.rev",
                     (map_id, uid, rev),
                 )
+                existing_by_uid[uid] = True
             conn.execute(
                 "INSERT INTO field_ops (map_id, rev, uid, op, feature_json, member_id, ts) VALUES (?,?,?,?,?,?,?)",
                 (map_id, rev, uid, kind, text, member["id"], now),

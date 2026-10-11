@@ -11,23 +11,16 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from core.security import verify_token
+from core.security import require_admin
 from forecast.endOfDayReport import run_report, STABLE_FORECAST_GLOB
 from core.config import REPORTS_DIR
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin/verification", tags=["verification-admin"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 class RerunRequest(BaseModel):
@@ -37,8 +30,7 @@ class RerunRequest(BaseModel):
 
 
 @router.post("/rerun")
-async def rerun_verification(payload: RerunRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+async def rerun_verification(payload: RerunRequest, email: str = Depends(require_admin)):
     try:
         from maps.observed_peak_history import snapshot_observed_peak_for_date
         from services.rtma_peak import generate_rtma_peak_for_verification
@@ -60,15 +52,13 @@ async def rerun_verification(payload: RerunRequest, token: Optional[str] = None)
 
 
 @router.get("/summary/{date}")
-def get_verification_ai_summary(date: str, token: Optional[str] = None):
-    _require_admin(token)
+def get_verification_ai_summary(date: str, _admin: str = Depends(require_admin)):
     from services.verification_feedback import feedback_status
     return feedback_status(date)
 
 
 @router.post("/summary/{date}/generate")
-def generate_verification_ai_feedback(date: str, token: Optional[str] = None):
-    _require_admin(token)
+def generate_verification_ai_feedback(date: str, _admin: str = Depends(require_admin)):
     from services.verification_feedback import generate_feedback
     from ai.cloudflare import CloudflareAIClient
     if not CloudflareAIClient().configured:

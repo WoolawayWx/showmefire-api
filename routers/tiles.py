@@ -7,6 +7,7 @@ Provides COG (Cloud Optimized GeoTIFF) endpoints for MapLibre GL.
 
 import asyncio
 import logging
+from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -175,7 +176,8 @@ def _apply_missouri_mask(png: bytes, img: ImageData) -> bytes:
 FIRE_DANGER_LABELS = {0: "Low", 1: "Moderate", 2: "Elevated", 3: "Critical", 4: "Extreme"}
 # ~400 m: well under the raster's own cell size, so it only thins vertices.
 _POLYGON_SIMPLIFY_DEGREES = 0.004
-_polygon_cache: dict[tuple[str, int], dict] = {}
+_polygon_cache: "OrderedDict[tuple[str, int], dict]" = OrderedDict()
+_POLYGON_CACHE_MAX = 8
 
 
 def _fire_danger_polygons_sync(filename: str) -> dict:
@@ -186,6 +188,7 @@ def _fire_danger_polygons_sync(filename: str) -> dict:
     cache_key = (str(tif_path), tif_path.stat().st_mtime_ns)
     cached = _polygon_cache.get(cache_key)
     if cached is not None:
+        _polygon_cache.move_to_end(cache_key)
         return cached
 
     with rasterio.open(tif_path) as src:
@@ -220,8 +223,9 @@ def _fire_danger_polygons_sync(filename: str) -> dict:
         })
 
     result = {"type": "FeatureCollection", "features": features}
-    _polygon_cache.clear()
     _polygon_cache[cache_key] = result
+    if len(_polygon_cache) > _POLYGON_CACHE_MAX:
+        _polygon_cache.popitem(last=False)
     return result
 
 

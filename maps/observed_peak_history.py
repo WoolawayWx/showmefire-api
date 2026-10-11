@@ -28,6 +28,7 @@ except ModuleNotFoundError:
     GIS_DIR = PROJECT_DIR / "gis"
     sys.path.append(str(PROJECT_DIR))
 
+from core.fire_danger import CATEGORY_RGBA_COLORS
 from maps.realtime_geotiff import export_discrete_rgba_geotiff
 
 try:
@@ -45,13 +46,10 @@ STATE_FILE = OBSERVED_PEAK_DIR / "state.json"
 CURRENT_DAY_FILE = OBSERVED_PEAK_DIR / "current_day.npy"
 TODAY_TIF = Path(GIS_DIR) / "observed_peak_today.tif"
 
-DANGER_CLASS_COLORS = {
-    0: (144, 238, 144, 255),  # Low
-    1: (255, 237, 78, 255),   # Moderate
-    2: (255, 165, 0, 255),    # Elevated
-    3: (255, 0, 0, 255),      # Critical
-    4: (139, 0, 0, 255),      # Extreme
-}
+# Kept as a module-level name (not inlined) since routers/verification.py
+# imports it directly as `DANGER_CLASS_COLORS`; the values themselves now
+# live in core.fire_danger as the single shared definition.
+DANGER_CLASS_COLORS = CATEGORY_RGBA_COLORS
 BOUNDS_TOLERANCE = 1e-6
 
 

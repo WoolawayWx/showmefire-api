@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.executors import run_in_process_pool_async
-from core.security import verify_confirm_token, verify_token
+from core.security import require_admin, verify_confirm_token
 from services.spread_rate import (
     PNG_PATH,
     STATUS_PATH,
@@ -34,16 +34,8 @@ class RunConfirmation(BaseModel):
     confirm_token: Optional[str] = None
 
 
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
-
-
 @router.get("/status")
-async def spread_rate_admin_status(token: Optional[str] = None):
-    _require_admin(token)
+async def spread_rate_admin_status(_admin: str = Depends(require_admin)):
     status = spread_rate_status()
     return {
         **status,
@@ -56,8 +48,7 @@ async def spread_rate_admin_status(token: Optional[str] = None):
 
 
 @router.post("/generate")
-async def spread_rate_admin_generate(payload: RunConfirmation = RunConfirmation(), token: Optional[str] = None):
-    email = _require_admin(token)
+async def spread_rate_admin_generate(payload: RunConfirmation = RunConfirmation(), email: str = Depends(require_admin)):
     if not verify_confirm_token(payload.confirm_token, RUN_ACTION):
         raise HTTPException(status_code=401, detail="Password confirmation required or expired")
     try:
@@ -71,8 +62,7 @@ async def spread_rate_admin_generate(payload: RunConfirmation = RunConfirmation(
 
 
 @router.post("/warmup")
-async def spread_rate_admin_warmup(payload: WarmupRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+async def spread_rate_admin_warmup(payload: WarmupRequest, email: str = Depends(require_admin)):
     try:
         result = await run_in_process_pool_async(warmup_spread_rate_inputs, payload.days)
     except Exception as exc:

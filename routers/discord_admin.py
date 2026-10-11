@@ -5,11 +5,11 @@ from typing import Optional
 from urllib import error, request
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from core.database import get_discord_admin_settings, update_discord_admin_settings
-from core.security import verify_token
+from core.security import require_admin, verify_token
 from services.discord_notifier import (
     DISCORD_EVENT_SECRET,
     DISCORD_EVENT_TIMEOUT_SEC,
@@ -121,13 +121,6 @@ def _staff_config(settings: dict) -> dict:
         "staff_alert_types": enabled,
         "staff_alert_type_options": [{"key": key, "label": label} for key, label in STAFF_ALERT_TYPES.items()],
     }
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _normalize_role_csv(value: str | None) -> str:
@@ -374,8 +367,7 @@ def _bot_invite_url(application_id: str, guild_id: Optional[str] = None) -> str:
 
 
 @router.get("/api/admin/discord/config")
-async def get_discord_config(token: Optional[str] = None):
-    _require_admin(token)
+async def get_discord_config(_admin: str = Depends(require_admin)):
     settings = get_discord_admin_settings()
 
     return {
@@ -408,9 +400,7 @@ async def get_discord_config(token: Optional[str] = None):
 
 
 @router.post("/api/admin/discord/config")
-async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Optional[str] = None):
-    email = _require_admin(token)
-
+async def update_discord_config(payload: DiscordConfigUpdateRequest, email: str = Depends(require_admin)):
     if payload.channel_id is not None and payload.channel_name is not None:
         if not payload.channel_id and not payload.channel_name:
             raise HTTPException(status_code=422, detail="Provide channel_id or channel_name")
@@ -509,8 +499,7 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, token: Opti
 
 
 @router.get("/api/admin/discord/status")
-async def get_discord_status(token: Optional[str] = None):
-    _require_admin(token)
+async def get_discord_status(_admin: str = Depends(require_admin)):
     settings = get_discord_admin_settings()
     health = _fetch_discord_health()
 
@@ -557,8 +546,7 @@ async def get_discord_status(token: Optional[str] = None):
 
 
 @router.get("/api/admin/discord/servers")
-async def get_discord_servers(token: Optional[str] = None):
-    _require_admin(token)
+async def get_discord_servers(_admin: str = Depends(require_admin)):
     payload = _fetch_discord_servers()
     application_id = _bot_application_id(payload)
     return {
@@ -575,8 +563,7 @@ async def get_discord_servers(token: Optional[str] = None):
 
 
 @router.post("/api/admin/discord/test-event")
-async def send_discord_test_event(payload: DiscordTestEventRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+async def send_discord_test_event(payload: DiscordTestEventRequest, email: str = Depends(require_admin)):
     now_dt = datetime.now(timezone.utc)
     last_sent = _TEST_EVENT_LAST_SENT_AT.get(email)
     if last_sent and (now_dt - last_sent).total_seconds() < 15:
@@ -703,14 +690,13 @@ def _server_invite_url(application_id: str) -> Optional[str]:
 
 
 @router.get("/api/admin/discord/oauth/start")
-async def discord_oauth_start(purpose: str = "connect", guild_id: Optional[str] = None, token: Optional[str] = None):
+async def discord_oauth_start(purpose: str = "connect", guild_id: Optional[str] = None, email: str = Depends(require_admin)):
     """Browser navigation target for "Connect with Discord" / "Add bot"."""
     import secrets
     from urllib.parse import urlencode
 
     from core.database import create_discord_oauth_state
 
-    email = _require_admin(token)
     client_id, client_secret = _oauth_client()
     if not client_id or not client_secret:
         return _admin_page_redirect(discord_error="not_configured")
@@ -803,12 +789,11 @@ async def discord_oauth_callback(
 
 
 @router.get("/api/admin/discord/account")
-async def get_discord_account(token: Optional[str] = None):
+async def get_discord_account(email: str = Depends(require_admin)):
     from urllib.parse import urlencode
 
     from core.database import get_discord_admin_link
 
-    email = _require_admin(token)
     client_id, client_secret = _oauth_client()
     link = get_discord_admin_link(email)
     base = {
@@ -854,9 +839,8 @@ async def get_discord_account(token: Optional[str] = None):
 
 
 @router.delete("/api/admin/discord/account")
-async def disconnect_discord_account(token: Optional[str] = None):
+async def disconnect_discord_account(email: str = Depends(require_admin)):
     from core.database import delete_discord_admin_link
 
-    email = _require_admin(token)
     delete_discord_admin_link(email)
     return {"success": True}

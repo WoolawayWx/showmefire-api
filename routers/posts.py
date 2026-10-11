@@ -16,18 +16,13 @@ from core.database import (
     list_posts,
     update_post,
 )
-from core.security import verify_token
+from core.security import require_admin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["posts"])
 
 
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _normalize_tags(tags: Optional[List[str]]) -> List[str]:
@@ -147,7 +142,7 @@ def public_get_post(post_ref: str):
 @router.get("/api/admin/posts")
 def admin_list_posts(token: Optional[str] = None, tag: Optional[str] = None, category: Optional[str] = None,
                      limit: int = 50, offset: int = 0):
-    _require_admin(token)
+    require_admin(token)
     try:
         posts = list_posts(tag=tag, category=category, status=None, limit=limit, offset=offset)
         available_tags = list_post_tags()
@@ -161,7 +156,7 @@ def admin_list_posts(token: Optional[str] = None, tag: Optional[str] = None, cat
 
 @router.post("/api/admin/posts")
 def admin_create_post(payload: PostCreate, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         post = create_post(
             title=payload.title,
@@ -185,7 +180,7 @@ def admin_create_post(payload: PostCreate, token: Optional[str] = None):
 
 @router.get("/api/admin/posts/{post_id}")
 def admin_get_post(post_id: int, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         post = get_post(post_id)
     except Exception as e:
@@ -200,7 +195,7 @@ def admin_get_post(post_id: int, token: Optional[str] = None):
 
 @router.put("/api/admin/posts/{post_id}")
 def admin_update_post(post_id: int, payload: PostUpdate, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         post = update_post(
             post_id,
@@ -229,7 +224,7 @@ def admin_update_post(post_id: int, payload: PostUpdate, token: Optional[str] = 
 
 @router.post("/api/admin/post-categories")
 def admin_create_post_category(payload: dict, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         return {"success": True, "category": create_post_category(payload.get("name", ""))}
     except ValueError as exc:
@@ -243,7 +238,7 @@ def public_post_categories():
 
 @router.delete("/api/admin/posts/{post_id}")
 def admin_delete_post(post_id: int, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         deleted = delete_post(post_id)
     except Exception as e:
@@ -258,7 +253,7 @@ def admin_delete_post(post_id: int, token: Optional[str] = None):
 
 @router.post("/api/admin/posts/{post_id}/comments")
 def admin_create_comment(post_id: int, payload: CommentCreate, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         comment = create_comment(post_id, author_name=payload.author_name, body=payload.body)
     except Exception as e:
@@ -273,7 +268,7 @@ def admin_create_comment(post_id: int, payload: CommentCreate, token: Optional[s
 
 @router.delete("/api/admin/posts/{post_id}/comments/{comment_id}")
 def admin_delete_comment(post_id: int, comment_id: int, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         deleted = delete_comment(post_id, comment_id)
     except Exception as e:

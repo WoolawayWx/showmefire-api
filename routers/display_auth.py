@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from core import security
@@ -27,18 +27,11 @@ from core.database import (
     set_display_code_settings,
     touch_display_access_code_usage,
 )
-from core.security import hash_password, verify_password, verify_token
+from core.security import hash_password, require_admin, verify_password
 
 router = APIRouter(tags=["display-auth"])
 
 DISPLAY_MAX_VALID_DAYS = 400
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _set_display_cookie(response: Response, value: str, max_age: int) -> None:
@@ -173,8 +166,7 @@ class DisplayCodeCreateRequest(BaseModel):
 
 
 @router.get("/api/admin/display-codes")
-def admin_list_display_codes(token: Optional[str] = None):
-    _require_admin(token)
+def admin_list_display_codes(_admin: str = Depends(require_admin)):
     codes = list_display_access_codes()
     for item in codes:
         item.pop("code_hash", None)
@@ -183,8 +175,7 @@ def admin_list_display_codes(token: Optional[str] = None):
 
 
 @router.post("/api/admin/display-codes", status_code=201)
-def admin_create_display_code(payload: DisplayCodeCreateRequest, token: Optional[str] = None):
-    admin_email = _require_admin(token)
+def admin_create_display_code(payload: DisplayCodeCreateRequest, admin_email: str = Depends(require_admin)):
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(days=payload.valid_days)
     row = create_display_access_code(
@@ -204,34 +195,30 @@ def admin_create_display_code(payload: DisplayCodeCreateRequest, token: Optional
 
 
 @router.delete("/api/admin/display-codes/{code_id}")
-def admin_revoke_display_code(code_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_revoke_display_code(code_id: int, _admin: str = Depends(require_admin)):
     if not revoke_display_access_code(code_id):
         raise HTTPException(status_code=404, detail="Code not found or already revoked")
     return {"success": True}
 
 
 @router.get("/api/admin/display-codes/{code_id}/usage")
-def admin_get_display_code_usage(code_id: int, token: Optional[str] = None):
+def admin_get_display_code_usage(code_id: int, _admin: str = Depends(require_admin)):
     """Recent logins for this code, so an admin can see who's actually using
     a shared code (by IP/user-agent, since there's no per-user identity)."""
-    _require_admin(token)
     return {"success": True, "usage": list_display_access_code_usages(code_id)}
 
 
 @router.get("/api/admin/display-codes/{code_id}/settings")
-def admin_get_display_code_settings(code_id: int, token: Optional[str] = None):
-    _require_admin(token)
+def admin_get_display_code_settings(code_id: int, _admin: str = Depends(require_admin)):
     return {"success": True, "settings": get_display_code_settings(code_id)}
 
 
 @router.put("/api/admin/display-codes/{code_id}/settings")
-def admin_set_display_code_settings(code_id: int, settings: Dict[str, Any], token: Optional[str] = None):
+def admin_set_display_code_settings(code_id: int, settings: Dict[str, Any], _admin: str = Depends(require_admin)):
     """Body is the complete settings object (the admin UI always submits the
     full, already-merged-with-defaults form) - stored as-is; new default keys
     added later still apply to old codes via merge_display_settings at read
     time, so this never needs a migration when the schema grows."""
-    _require_admin(token)
     if not set_display_code_settings(code_id, settings):
         raise HTTPException(status_code=404, detail="Code not found")
     return {"success": True, "settings": get_display_code_settings(code_id)}

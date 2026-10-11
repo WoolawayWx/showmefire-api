@@ -1,25 +1,18 @@
 """Authenticated archive inventory and resumable sync controls."""
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from core.security import verify_token
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from core.security import require_admin
 from services.archive_store import ArchiveStore
 
 router = APIRouter(prefix='/api/admin/archive', tags=['archive-admin'])
 
 
-def require_admin(token):
-    if not verify_token(token):
-        raise HTTPException(status_code=401, detail='Unauthorized')
-
-
 @router.get('/status')
-def status(days: int = Query(30, ge=1, le=366), token: str | None = None):
-    require_admin(token)
+def status(days: int = Query(30, ge=1, le=366), _admin: str = Depends(require_admin)):
     return ArchiveStore().status(days)
 
 
 @router.post('/sync', status_code=202)
-def sync(background_tasks: BackgroundTasks, token: str | None = None):
-    require_admin(token)
+def sync(background_tasks: BackgroundTasks, _admin: str = Depends(require_admin)):
     store = ArchiveStore()
     if not store.configured:
         raise HTTPException(status_code=503, detail='R2 archive credentials are not configured')
@@ -33,8 +26,7 @@ def sync(background_tasks: BackgroundTasks, token: str | None = None):
 
 
 @router.get('/processing')
-def processing(token: str | None = None):
-    require_admin(token)
+def processing(_admin: str = Depends(require_admin)):
     import json
     from services.forecast_jobs import get_beta_forecast_status
     from services.forecast_09z_jobs import get_09z_forecast_status

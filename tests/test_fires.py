@@ -458,8 +458,13 @@ class FiresRouterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
     def test_admin_routes_reject_bad_token(self):
+        # Admin routes authenticate via Depends(require_admin) - FastAPI
+        # resolves that dependency from the request, not from a positional
+        # arg, so a direct call can no longer thread a bad token through the
+        # route function itself. Exercise the dependency that every admin
+        # route shares instead.
         with self.assertRaises(HTTPException) as ctx:
-            fires_router.admin_list_fire_reports("not-a-real-token")
+            fires_router.require_admin("not-a-real-token")
         self.assertEqual(ctx.exception.status_code, 401)
 
     def test_missing_event_returns_404_on_admin_routes(self):

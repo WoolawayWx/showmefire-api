@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from core.config import FORECAST_V1_DIR
-from core.security import verify_confirm_token, verify_token
+from core.security import require_admin, verify_confirm_token
 from forecast_v1.acquisition import latest_publishable_12z
 from forecast_v1.contracts import run_id_for_cycle, utc_rfc3339
 from forecast_v1.repository import ensure_schema, transaction
@@ -30,13 +30,6 @@ RUN_ACTION = "run_forecast_v1"
 
 class RunConfirmation(BaseModel):
     confirm_token: Optional[str] = None
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _decode_json(value, fallback):
@@ -80,15 +73,13 @@ def _schedule_status() -> dict:
 
 
 @router.get("/job")
-def forecast_v1_admin_job(token: Optional[str] = None):
+def forecast_v1_admin_job(_admin: str = Depends(require_admin)):
     """Lightweight endpoint for frequent progress polling during a run."""
-    _require_admin(token)
     return get_forecast_v1_job_status()
 
 
 @router.get("/status")
-def forecast_v1_admin_status(token: Optional[str] = None):
-    _require_admin(token)
+def forecast_v1_admin_status(_admin: str = Depends(require_admin)):
     ensure_schema()
     with transaction() as connection:
         run_rows = connection.execute(
@@ -171,8 +162,7 @@ def forecast_v1_admin_status(token: Optional[str] = None):
 
 
 @router.post("/run", status_code=status.HTTP_202_ACCEPTED)
-def run_forecast_v1_admin(payload: RunConfirmation = RunConfirmation(), token: Optional[str] = None):
-    email = _require_admin(token)
+def run_forecast_v1_admin(payload: RunConfirmation = RunConfirmation(), email: str = Depends(require_admin)):
     if not verify_confirm_token(payload.confirm_token, RUN_ACTION):
         raise HTTPException(status_code=401, detail="Password confirmation required or expired")
     try:
@@ -182,6 +172,5 @@ def run_forecast_v1_admin(payload: RunConfirmation = RunConfirmation(), token: O
 
 
 @router.post("/retention")
-def run_forecast_v1_retention(token: Optional[str] = None):
-    _require_admin(token)
+def run_forecast_v1_retention(_admin: str = Depends(require_admin)):
     return {"status": "completed", "result": prune_forecast_v1_hot_storage()}

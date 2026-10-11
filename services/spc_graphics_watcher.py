@@ -125,11 +125,11 @@ async def refresh_spc_graphics() -> dict:
 
     # Imported lazily to avoid coupling API router initialization to the
     # scheduler module at application startup.
-    from routers.graphics import _run_job
+    from routers.graphics import _run_job_sync
 
     for job in jobs:
-        await _run_job(
-            job["job_id"], job["bundle"], job["department_id"], None,
+        await asyncio.to_thread(
+            _run_job_sync, job["job_id"], job["bundle"], job["department_id"], None,
         )
 
     job_ids = [job["job_id"] for job in jobs]

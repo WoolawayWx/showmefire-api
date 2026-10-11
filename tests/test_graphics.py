@@ -222,7 +222,7 @@ class GraphicsTests(unittest.TestCase):
             for product_id in graphic_renderer.PRODUCT_URLS
         }
 
-        async def complete_job(job_id, bundle, department_id, api_key_id):
+        def complete_job(job_id, bundle, department_id, api_key_id):
             with graphics._db() as db:
                 db.execute(
                     "UPDATE graphic_jobs SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -241,7 +241,7 @@ class GraphicsTests(unittest.TestCase):
             spc_graphics_watcher,
             "fetch_spc_product",
             side_effect=lambda product_id: payload_by_product[product_id],
-        ), patch.object(graphics, "_run_job", side_effect=complete_job):
+        ), patch.object(graphics, "_run_job_sync", side_effect=complete_job):
             result = asyncio.run(spc_graphics_watcher.refresh_spc_graphics())
 
         self.assertEqual(result["changed_products"], ["spc_cat"])

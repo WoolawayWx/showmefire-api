@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from core.database import get_shadow_model_setting, list_shadow_model_settings, set_shadow_model_setting
-from core.security import verify_confirm_token, verify_token
+from core.security import require_admin, verify_confirm_token
 from models import shadow_bundles
 from models.versioning import get_model_entry, promote, rollback, validate_promotion_candidate
 from pipelines import import_model
@@ -50,13 +50,6 @@ MAX_HISTORY_ENTRIES = 5
 MAX_BUNDLE_UPLOAD_BYTES = 200 * 1024 * 1024  # generous for a multi-file model bundle archive, still bounded
 
 
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
-
-
 def _require_confirmation(confirm_token: Optional[str], action: str) -> None:
     if not verify_confirm_token(confirm_token, action):
         raise HTTPException(status_code=401, detail="Password confirmation required or expired")
@@ -90,7 +83,7 @@ class BetaVerificationRequest(BaseModel):
 
 @router.get("/status")
 async def get_model_status(token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     shadows = {
         "fuel_moisture": fuel_moisture_shadow_diagnostics(),
         "v4": v4_shadow_diagnostics(),
@@ -150,7 +143,7 @@ async def list_model_families(token: Optional[str] = None):
     pipelines/import_model.py, so the website's Import panel should show for
     them too - see import_model.IMPORTABLE_MODEL_TYPES, the single source
     of truth this mirrors rather than re-deriving from `registry` alone."""
-    _require_admin(token)
+    require_admin(token)
     return {
         "registry": REGISTRY_MODEL_TYPES,
         "guarded_shadow": GUARDED_SHADOW_TYPES,
@@ -168,7 +161,7 @@ async def get_family_settings(family: str, token: Optional[str] = None):
     see core.database.shadow_model_settings. Registry families
     (fuel_moisture, fuel_moisture_spatial, etc.) and risk_fusion (Phase A,
     no trained artifact) have no such setting - they're always on."""
-    _require_admin(token)
+    require_admin(token)
     if family not in shadow_bundles.SHADOW_FAMILIES:
         raise HTTPException(status_code=404, detail=f"{family} has no live enable/disable setting")
     setting = get_shadow_model_setting(family)
@@ -179,7 +172,7 @@ async def get_family_settings(family: str, token: Optional[str] = None):
 
 @router.post("/{family}/settings")
 async def set_family_settings(family: str, payload: ShadowSettingsRequest, token: Optional[str] = None):
-    email = _require_admin(token)
+    email = require_admin(token)
     if family not in shadow_bundles.SHADOW_FAMILIES:
         raise HTTPException(status_code=404, detail=f"{family} has no live enable/disable setting")
     return {"success": True, "setting": set_shadow_model_setting(family, payload.enabled, updated_by=email)}
@@ -190,7 +183,7 @@ async def get_model_schedule(request: Request, token: Optional[str] = None):
     """Read-only introspection of the live APScheduler instance, filtered to
     the curated core.scheduler.MODEL_RELEVANT_JOBS allowlist - no editing
     capability is exposed here by design (see the plan this shipped under)."""
-    _require_admin(token)
+    require_admin(token)
     from core.scheduler import MODEL_RELEVANT_JOBS
 
     scheduler = getattr(request.app.state, "scheduler", None)
@@ -257,7 +250,7 @@ def _guarded_shadow_versions(family: str) -> dict:
 
 @router.get("/{family}/versions")
 async def list_family_versions(family: str, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     if family in REGISTRY_MODEL_TYPES:
         return _registry_summary(family)
     if family in GUARDED_SHADOW_TYPES:
@@ -267,7 +260,7 @@ async def list_family_versions(family: str, token: Optional[str] = None):
 
 @router.post("/{family}/upload", status_code=201)
 async def upload_shadow_bundle(family: str, token: Optional[str] = None, file: UploadFile = File(...)):
-    email = _require_admin(token)
+    email = require_admin(token)
     if family not in GUARDED_SHADOW_TYPES:
         raise HTTPException(status_code=400, detail=f"{family} is not an uploadable guarded-shadow family")
     content = await file.read(MAX_BUNDLE_UPLOAD_BYTES + 1)
@@ -316,7 +309,7 @@ async def import_model_release(family: str, payload: ImportRequest, token: Optio
     GitHub release, verifies its assets, and registers it as a beta
     candidate - the one step in the model lifecycle that was previously
     100% CLI/SSH-only despite promote/rollback/upload already having a UI."""
-    _require_admin(token)
+    require_admin(token)
     if family not in import_model.IMPORTABLE_MODEL_TYPES:
         raise HTTPException(status_code=400, detail=f"{family} is not importable into the registry")
     if not payload.tag.strip():
@@ -410,7 +403,7 @@ async def activate_family_version(family: str, payload: ActivateRequest, token: 
     restart required. Registry families: this IS promotion (stable takes on
     the named beta candidate) - wraps the existing, previously CLI-only
     models.versioning.promote()."""
-    _require_admin(token)
+    require_admin(token)
     _require_confirmation(payload.confirm_token, f"activate_model:{family}")
     if family in shadow_bundles._REGISTRY_MIGRATED_FAMILIES:
         # Migrated shadow family: activating a version is a real, gated
@@ -476,7 +469,7 @@ async def rollback_family(family: str, payload: RollbackRequest, token: Optional
     activating an older already-installed version through /activate
     instead - there is no separate stable/beta distinction to roll back
     from for those families."""
-    _require_admin(token)
+    require_admin(token)
     _require_confirmation(payload.confirm_token, f"rollback_model:{family}")
     if family not in REGISTRY_MODEL_TYPES:
         raise HTTPException(status_code=400,
@@ -493,7 +486,7 @@ async def rollback_family(family: str, payload: RollbackRequest, token: Optional
 
 @router.post("/verify-beta")
 async def verify_beta_forecast(payload: BetaVerificationRequest, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         return await asyncio.to_thread(run_beta_verification, payload.date)
     except RuntimeError as error:

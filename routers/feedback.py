@@ -24,7 +24,7 @@ from core.database import (
     list_feedback,
     update_feedback_status,
 )
-from core.security import SECRET_KEY, verify_token
+from core.security import SECRET_KEY, require_admin
 from services.discord_notifier import notify_staff_alert
 
 logger = logging.getLogger(__name__)
@@ -52,12 +52,6 @@ STATUSES = {"new", "read", "archived"}
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 def _client_ip(request: Request) -> str:
@@ -199,7 +193,7 @@ def submit_feedback(payload: FeedbackCreate, request: Request):
 @router.get("/api/admin/feedback")
 def admin_list_feedback(token: Optional[str] = None, status: Optional[str] = None,
                         limit: int = 50, offset: int = 0):
-    _require_admin(token)
+    require_admin(token)
     if status and status not in STATUSES:
         raise HTTPException(status_code=400, detail=f"unknown status: {status!r}")
     try:
@@ -212,7 +206,7 @@ def admin_list_feedback(token: Optional[str] = None, status: Optional[str] = Non
 
 @router.patch("/api/admin/feedback/{feedback_id}")
 def admin_update_feedback_status(feedback_id: int, payload: FeedbackStatusUpdate, token: Optional[str] = None):
-    _require_admin(token)
+    require_admin(token)
     try:
         updated = update_feedback_status(feedback_id, payload.status)
     except Exception as e:

@@ -20,14 +20,14 @@ _CACHED = False
 def _load_from_db() -> Set[str]:
 	db_path = database.get_db_path()
 	try:
-		conn = sqlite3.connect(db_path)
+		conn = sqlite3.connect(db_path, timeout=15)
 		cursor = conn.cursor()
 		cursor.execute('SELECT stid FROM ignored_stations')
 		rows = cursor.fetchall()
 		conn.close()
 		return {r[0] for r in rows if r and r[0]}
 	except Exception as e:
-		logger.debug(f"Could not load ignored_stations from DB: {e}")
+		logger.warning(f"Could not load ignored_stations from DB: {e}")
 		return set()
 
 def get_ignored_stations(force_reload: bool = False) -> Set[str]:

@@ -112,71 +112,85 @@ def _directional(classification: str, value_for_confirmed: float, value_for_not_
 def score_feedback(feedback_id: int) -> Optional[dict]:
     """Returns {"score": 0-100, "factors": {...}} for one feedback row, or
     None if it no longer exists."""
+    return score_feedback_batch([feedback_id]).get(feedback_id)
+
+
+def score_feedback_batch(feedback_ids: list[int]) -> dict[int, Optional[dict]]:
+    """Same as score_feedback, but scores many feedback rows over a single
+    shared connection/cursor instead of opening a new sqlite3 connection per
+    row - the admin review queue calls this for up to 100 rows per load."""
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        feedback = cursor.execute(
-            "SELECT id, incident_id, classification, note, contact, submitter_ip_hash FROM fire_incident_feedback WHERE id = ?",
-            (feedback_id,),
-        ).fetchone()
-        if not feedback:
-            return None
-
-        classification = feedback["classification"]
-        evidence = _incident_evidence(cursor, feedback["incident_id"])
-        corroboration = _corroboration_count(cursor, feedback["incident_id"], classification, feedback_id)
-        repeat_submissions = _recent_submission_count(cursor, feedback["submitter_ip_hash"], feedback_id)
-
-        ml_alignment = (
-            _directional(classification, evidence["avg_ml_confidence"], 1.0 - evidence["avg_ml_confidence"])
-            if evidence["avg_ml_confidence"] is not None else 0.5
-        )
-        frp_signal = min(1.0, math.log1p(evidence["max_frp"]) / 6.0) if evidence["max_frp"] else 0.0
-        frp_component = _directional(classification, frp_signal, 1.0 - frp_signal)
-        # High water fraction is a classic false-positive pattern (sun glint) -
-        # a strong signal against confirmed_fire specifically, independent of
-        # whatever the averaged ML score says. Cropland doesn't get the same
-        # penalty (agricultural areas have plenty of real fires); it only
-        # mildly supports controlled_burn.
-        water_component = _directional(classification, 1.0 - evidence["avg_water_frac"], evidence["avg_water_frac"])
-        cropland_component = 0.5 + (0.3 * evidence["avg_cropland_frac"] if classification == "controlled_burn" else 0.0)
-        official_component = _directional(classification, 0.85 if evidence["has_official_or_reviewed"] else 0.5,
-                                           0.15 if evidence["has_official_or_reviewed"] else 0.5)
-        sustained_component = _directional(classification, 0.75 if evidence["sustained"] else 0.5,
-                                            0.3 if evidence["sustained"] else 0.5)
-
-        corroboration_boost = min(0.15, corroboration * 0.08)
-        contact_boost = 0.03 if (feedback["contact"] or "").strip() else 0.0
-        detail_boost = 0.03 if len((feedback["note"] or "").strip()) >= 20 else 0.0
-        spam_penalty = min(0.4, repeat_submissions * 0.15)
-
-        score = (
-            0.30 * ml_alignment
-            + 0.15 * frp_component
-            + 0.10 * water_component
-            + 0.05 * cropland_component
-            + 0.20 * official_component
-            + 0.10 * sustained_component
-            + corroboration_boost + contact_boost + detail_boost - spam_penalty
-        )
-        score = max(0.0, min(1.0, score))
-
         return {
-            "score": round(score * 100),
-            "factors": {
-                "satellite_ml_confidence_pct": round(evidence["avg_ml_confidence"] * 100) if evidence["avg_ml_confidence"] is not None else None,
-                "peak_frp_signal_pct": round(frp_signal * 100),
-                "water_fraction_pct": round(evidence["avg_water_frac"] * 100),
-                "cropland_fraction_pct": round(evidence["avg_cropland_frac"] * 100),
-                "officially_confirmed_detection": evidence["has_official_or_reviewed"],
-                "sustained_multi_pass_incident": evidence["sustained"],
-                "corroborating_reports": corroboration,
-                "contact_provided": bool((feedback["contact"] or "").strip()),
-                "detailed_note": len((feedback["note"] or "").strip()) >= 20,
-                "recent_submissions_from_source": repeat_submissions,
-            },
+            feedback_id: _score_feedback_with_cursor(cursor, feedback_id)
+            for feedback_id in feedback_ids
         }
     finally:
         conn.close()
+
+
+def _score_feedback_with_cursor(cursor: sqlite3.Cursor, feedback_id: int) -> Optional[dict]:
+    feedback = cursor.execute(
+        "SELECT id, incident_id, classification, note, contact, submitter_ip_hash FROM fire_incident_feedback WHERE id = ?",
+        (feedback_id,),
+    ).fetchone()
+    if not feedback:
+        return None
+
+    classification = feedback["classification"]
+    evidence = _incident_evidence(cursor, feedback["incident_id"])
+    corroboration = _corroboration_count(cursor, feedback["incident_id"], classification, feedback_id)
+    repeat_submissions = _recent_submission_count(cursor, feedback["submitter_ip_hash"], feedback_id)
+
+    ml_alignment = (
+        _directional(classification, evidence["avg_ml_confidence"], 1.0 - evidence["avg_ml_confidence"])
+        if evidence["avg_ml_confidence"] is not None else 0.5
+    )
+    frp_signal = min(1.0, math.log1p(evidence["max_frp"]) / 6.0) if evidence["max_frp"] else 0.0
+    frp_component = _directional(classification, frp_signal, 1.0 - frp_signal)
+    # High water fraction is a classic false-positive pattern (sun glint) -
+    # a strong signal against confirmed_fire specifically, independent of
+    # whatever the averaged ML score says. Cropland doesn't get the same
+    # penalty (agricultural areas have plenty of real fires); it only
+    # mildly supports controlled_burn.
+    water_component = _directional(classification, 1.0 - evidence["avg_water_frac"], evidence["avg_water_frac"])
+    cropland_component = 0.5 + (0.3 * evidence["avg_cropland_frac"] if classification == "controlled_burn" else 0.0)
+    official_component = _directional(classification, 0.85 if evidence["has_official_or_reviewed"] else 0.5,
+                                       0.15 if evidence["has_official_or_reviewed"] else 0.5)
+    sustained_component = _directional(classification, 0.75 if evidence["sustained"] else 0.5,
+                                        0.3 if evidence["sustained"] else 0.5)
+
+    corroboration_boost = min(0.15, corroboration * 0.08)
+    contact_boost = 0.03 if (feedback["contact"] or "").strip() else 0.0
+    detail_boost = 0.03 if len((feedback["note"] or "").strip()) >= 20 else 0.0
+    spam_penalty = min(0.4, repeat_submissions * 0.15)
+
+    score = (
+        0.30 * ml_alignment
+        + 0.15 * frp_component
+        + 0.10 * water_component
+        + 0.05 * cropland_component
+        + 0.20 * official_component
+        + 0.10 * sustained_component
+        + corroboration_boost + contact_boost + detail_boost - spam_penalty
+    )
+    score = max(0.0, min(1.0, score))
+
+    return {
+        "score": round(score * 100),
+        "factors": {
+            "satellite_ml_confidence_pct": round(evidence["avg_ml_confidence"] * 100) if evidence["avg_ml_confidence"] is not None else None,
+            "peak_frp_signal_pct": round(frp_signal * 100),
+            "water_fraction_pct": round(evidence["avg_water_frac"] * 100),
+            "cropland_fraction_pct": round(evidence["avg_cropland_frac"] * 100),
+            "officially_confirmed_detection": evidence["has_official_or_reviewed"],
+            "sustained_multi_pass_incident": evidence["sustained"],
+            "corroborating_reports": corroboration,
+            "contact_provided": bool((feedback["contact"] or "").strip()),
+            "detailed_note": len((feedback["note"] or "").strip()) >= 20,
+            "recent_submissions_from_source": repeat_submissions,
+        },
+    }

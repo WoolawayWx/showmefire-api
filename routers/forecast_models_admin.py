@@ -9,21 +9,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.security import verify_token
+from core.security import require_admin
 from forecast_v1 import registry
 from forecast_v1.adapters import ADAPTERS
 
 router = APIRouter(prefix="/api/admin/forecast-models", tags=["forecast-models-admin"])
-
-
-def _require_admin(token: Optional[str] = None) -> str:
-    email = verify_token(token)
-    if not email:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return email
 
 
 class AddModelRequest(BaseModel):
@@ -43,14 +36,12 @@ class ScheduleRequest(BaseModel):
 
 
 @router.get("")
-def list_forecast_models(token: Optional[str] = None):
-    _require_admin(token)
+def list_forecast_models(_admin: str = Depends(require_admin)):
     return {"models": registry.list_models(), "available_adapters": sorted(ADAPTERS)}
 
 
 @router.post("")
-def add_forecast_model(body: AddModelRequest, token: Optional[str] = None):
-    _require_admin(token)
+def add_forecast_model(body: AddModelRequest, _admin: str = Depends(require_admin)):
     if body.adapter_key not in ADAPTERS:
         raise HTTPException(status_code=400, detail=f"unknown adapter_key: {body.adapter_key}")
     try:
@@ -60,8 +51,7 @@ def add_forecast_model(body: AddModelRequest, token: Optional[str] = None):
 
 
 @router.get("/{key}")
-def get_forecast_model(key: str, token: Optional[str] = None):
-    _require_admin(token)
+def get_forecast_model(key: str, _admin: str = Depends(require_admin)):
     model = registry.get_model(key)
     if not model:
         raise HTTPException(status_code=404, detail="not found")
@@ -69,9 +59,8 @@ def get_forecast_model(key: str, token: Optional[str] = None):
 
 
 @router.post("/{key}/status")
-def set_forecast_model_status(key: str, body: StatusRequest, token: Optional[str] = None):
+def set_forecast_model_status(key: str, body: StatusRequest, _admin: str = Depends(require_admin)):
     """Move a model between disabled/shadow/active. 'active' requires `weight`."""
-    _require_admin(token)
     try:
         return registry.set_status(key, body.status, body.weight)
     except ValueError as error:
@@ -79,16 +68,14 @@ def set_forecast_model_status(key: str, body: StatusRequest, token: Optional[str
 
 
 @router.post("/{key}/schedule")
-def set_forecast_model_schedule(key: str, body: ScheduleRequest, token: Optional[str] = None):
-    _require_admin(token)
+def set_forecast_model_schedule(key: str, body: ScheduleRequest, _admin: str = Depends(require_admin)):
     if not registry.get_model(key):
         raise HTTPException(status_code=404, detail="not found")
     return registry.set_schedule(key, body.schedule_minutes)
 
 
 @router.get("/{key}/performance")
-def get_forecast_model_performance(key: str, limit_cycles: int = 20, token: Optional[str] = None):
-    _require_admin(token)
+def get_forecast_model_performance(key: str, limit_cycles: int = 20, _admin: str = Depends(require_admin)):
     if not registry.get_model(key):
         raise HTTPException(status_code=404, detail="not found")
     return registry.performance_summary(key, limit_cycles)
