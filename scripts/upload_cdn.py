@@ -96,7 +96,15 @@ def generate_image_timeline(hours=12, cdn_base_url='https://cdn.showmefire.org',
         'rh': 'mo-rh.png',
         'windfilmap': 'mo-windfilmap.png',
         'observedpeakfiredanger': 'mo-observedpeakfiredanger.png',
-        'forecastfiredangerbias': 'mo-forecastfiredangerbias.png'
+        'forecastfiredangerbias': 'mo-forecastfiredangerbias.png',
+        # Flagship current-conditions products only (see
+        # maps/station_plot.py's catalog) - the rest (change variants,
+        # today's max/min, WBGT, theta-e, moisture convergence, advisories)
+        # are still servable via /list-images and latest/*.png without
+        # timeline/history playback.
+        'airtempmap': 'mo-airtempmap.png',
+        'feelslikemap': 'mo-feelslikemap.png',
+        'dewpointmap': 'mo-dewpointmap.png',
     }
     
     timeline = {

@@ -58,8 +58,13 @@ async def fetch_and_store_raws_stations():
         raws_station_data["last_updated"] = datetime.now().isoformat()
         raws_station_data["error"] = None
     except Exception as e:
+        # A transient fetch failure must not wipe out the last known-good
+        # RAWS list - this global feeds the testbed beta products and the
+        # production weather-station GIS layer, both of which join on
+        # fuel-moisture by station id, so clearing it to [] here turned any
+        # single flaky poll into a 0-station blackout everywhere until the
+        # next successful 5-minute cycle.
         raws_station_data["error"] = str(e)
-        raws_station_data["stations"] = []
         raws_station_data["last_updated"] = datetime.now().isoformat()
 
 
@@ -81,6 +86,55 @@ async def publish_gis_observations_job():
         await asyncio.to_thread(publish_weather_stations, get_station_data(), raws_station_data)
     except Exception as error:
         logger.error("GIS station publication failed: %s", error, exc_info=True)
+
+
+async def record_station_history_job():
+    """Log the latest station fetch (raw + derived fields) into
+    maps/station_history.py's rolling table, so the current-conditions map
+    catalog's "Today's Max/Min" and "N-hour Change" products have something
+    to read. Reuses the already-cached get_station_data() feed - no extra
+    Synoptic API call here."""
+    try:
+        from maps.station_history import prune_old, record_observations
+        from services import derived_met
+
+        def _record():
+            stations = get_station_data()
+
+            def _obs(name):
+                return lambda s: s.get("observations", {}).get(name, {}).get("value")
+
+            air_temp = _obs("air_temp")
+            rh = _obs("relative_humidity")
+            dewpoint = _obs("dew_point_temperature")
+            wind_speed = _obs("wind_speed")
+
+            def _feels_like(station):
+                t, r, w = air_temp(station), rh(station), wind_speed(station)
+                if t is None or r is None or w is None:
+                    return None
+                return derived_met.feels_like_f(t, r, w)
+
+            def _wbgt(station):
+                t, r, w = air_temp(station), rh(station), wind_speed(station)
+                if t is None or r is None or w is None:
+                    return None
+                return derived_met.estimate_wbgt_f(t, r, w)
+
+            fields = {
+                "air_temp_f": air_temp,
+                "relative_humidity_pct": rh,
+                "dew_point_temperature_f": dewpoint,
+                "wind_speed_mph": wind_speed,
+                "feels_like_f": _feels_like,
+                "wbgt_f": _wbgt,
+            }
+            record_observations(stations, fields)
+            prune_old()
+
+        await asyncio.to_thread(_record)
+    except Exception as error:
+        logger.error("Station history recording failed: %s", error, exc_info=True)
 
 
 async def refresh_testbed_rtma_job():
@@ -478,6 +532,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         minutes=5,
         seconds=45,
         id='publish_gis_observations',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        record_station_history_job,
+        'interval',
+        minutes=5,
+        seconds=20,
+        id='record_station_history',
         max_instances=1,
         coalesce=True,
     )

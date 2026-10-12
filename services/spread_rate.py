@@ -343,6 +343,11 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
     ax.set_frame_on(False)
     ax.set_xticks([])
     ax.set_yticks([])
+    # The Missouri bbox is narrower than this axes box, so cartopy letterboxes
+    # it - anchor west so the state hugs the left edge like the other house
+    # graphics (e.g. forecast/firedangermodel.py) instead of centering in the
+    # gap between the legend and the text column.
+    ax.set_anchor("W")
     lon = static["lon"]
     lat = static["lat"]
     mesh = ax.pcolormesh(
@@ -382,10 +387,34 @@ def _render_png(grids: dict[str, np.ndarray], static: dict, out_path: Path, meta
         Path(__file__).resolve().parent,
     )
 
-    cax = fig.add_axes([0.02, 0.12, 0.018, 0.58])
-    cbar = fig.colorbar(mesh, cax=cax, ticks=np.arange(len(all_labels)))
-    cbar.ax.set_yticklabels(all_labels)
+    # Agricultural/non-burnable are land-cover categories, not points on the
+    # spread-rate ramp - drawing them as the top two ticks of one continuous
+    # colorbar reads as "more extreme than Extreme." Split them into their own
+    # swatches below a visible gap so the ramp stays a clean, ordered scale
+    # and the land-cover classes read as a separate "why no number here" key.
+    ramp_cax = fig.add_axes([0.02, 0.32, 0.018, 0.44])
+    ramp_mappable = plt.cm.ScalarMappable(
+        cmap=ListedColormap(ROS_CLASS_COLORS),
+        norm=BoundaryNorm(np.arange(-0.5, len(ROS_CLASS_LABELS) + 0.5, 1.0), len(ROS_CLASS_LABELS)),
+    )
+    cbar = fig.colorbar(ramp_mappable, cax=ramp_cax, ticks=np.arange(len(ROS_CLASS_LABELS)))
+    cbar.ax.set_yticklabels(ROS_CLASS_LABELS)
     cbar.set_label("Potential Head-Fire Spread Rate")
+
+    land_cover = ((NON_BURNABLE_LABEL, NON_BURNABLE_COLOR), (AGRICULTURAL_LABEL, AGRICULTURAL_COLOR))
+    swatch_height = 0.08
+    swatch_gap = 0.025
+    swatch_bottom = 0.10
+    for i, (label, color) in enumerate(land_cover):
+        y0 = swatch_bottom + i * (swatch_height + swatch_gap)
+        swatch_ax = fig.add_axes([0.02, y0, 0.018, swatch_height])
+        swatch_ax.set_facecolor(color)
+        swatch_ax.set_xticks([])
+        swatch_ax.set_yticks([])
+        for spine in swatch_ax.spines.values():
+            spine.set_color("#333333")
+            spine.set_linewidth(0.6)
+        fig.text(0.045, y0 + swatch_height / 2, label, va="center", ha="left", fontsize=10)
 
     fd, temporary = tempfile.mkstemp(prefix=".spread_rate.", suffix=".png", dir=out_path.parent)
     os.close(fd)
