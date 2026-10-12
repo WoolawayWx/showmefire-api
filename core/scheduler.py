@@ -99,7 +99,7 @@ async def record_station_history_job():
         from services import derived_met
 
         def _record():
-            stations = get_station_data()
+            stations = get_station_data().get("stations") or []
 
             def _obs(name):
                 return lambda s: s.get("observations", {}).get(name, {}).get("value")
