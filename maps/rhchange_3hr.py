@@ -34,7 +34,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.rh_change_3hr.value",
-    cmap="BrBG", diverging=True, label="3-Hr RH Change (%)", vmax=30,
+    cmap="BrBG", diverging=True, label="3-Hr RH Change (%)", vmax=25,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

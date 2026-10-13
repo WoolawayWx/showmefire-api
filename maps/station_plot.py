@@ -438,12 +438,12 @@ def plot_filled_field(
         grid_lon_mesh, grid_lat_mesh, field_grid, transform=data_crs,
         levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7, extend="both",
     )
-    # The state is anchored flush against the left edge (see generate_basemap),
-    # so there's no left-side gutter left to put a colorbar in - put it in the
-    # whitespace on the right instead, below the title/subtitle/description
-    # text block (which ends well above this band) and above the bottom-right
-    # logo.
-    cax = fig.add_axes([0.90, 0.12, 0.016, 0.28])
+    # Missouri's own western border angles inward below the NW panhandle (see
+    # generate_basemap's west anchor), leaving a wedge of background open
+    # from about x=40px down to a steady ~230px between roughly y=400-950px
+    # (in the 2048x1152 canvas) - the same wedge the forecast graphics' own
+    # legend sits in. Put the colorbar there instead of over the map.
+    cax = fig.add_axes([0.025, 0.15, 0.018, 0.5])
     fig.colorbar(mesh, cax=cax, label=label)
     return len(points_lon)
 

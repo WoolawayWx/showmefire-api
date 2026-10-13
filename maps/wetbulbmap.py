@@ -30,7 +30,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.wet_bulb.value",
-    cmap="RdYlBu_r", label="Wet-Bulb Temperature (F)", vmin=-10, vmax=90,
+    cmap="RdYlBu_r", label="Wet-Bulb Temperature (F)", vmin=0, vmax=80,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,
