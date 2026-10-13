@@ -34,7 +34,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.air_temp_change_24hr.value",
-    cmap="RdBu_r", diverging=True, label="24-Hr Temp Change (F)",
+    cmap="RdBu_r", diverging=True, label="24-Hr Temp Change (F)", vmax=30,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

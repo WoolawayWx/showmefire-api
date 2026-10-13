@@ -35,7 +35,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.wbgt_max_today.value",
-    cmap="YlOrRd", label="Max Estimated WBGT (F)",
+    cmap="YlOrRd", label="Max Estimated WBGT (F)", vmin=40, vmax=100,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

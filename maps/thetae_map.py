@@ -46,7 +46,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.theta_e.value",
-    cmap="RdYlBu_r", label="Theta-E (C)",
+    cmap="RdYlBu_r", label="Theta-E (C)", vmin=0, vmax=90,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

@@ -62,16 +62,95 @@ STATION_CACHE_PATH = PROJECT_DIR / "data" / "current_conditions" / "station_cach
 STATION_CACHE_MAX_AGE_SECONDS = 120
 
 
+#  (field_path, neighbor_count, min_abs_deviation, mad_multiplier) - thresholds
+# are in each field's native units and sized to its normal local variability
+# (RH/wind swing more between neighbors than temperature does), so a single
+# shared multiplier wouldn't fit all of them.
+QC_RAW_FIELDS = [
+    ("observations.air_temp.value", 5, 15.0, 6.0),
+    ("observations.dew_point_temperature.value", 5, 15.0, 6.0),
+    ("observations.relative_humidity.value", 5, 25.0, 6.0),
+    ("observations.wind_speed.value", 5, 20.0, 6.0),
+]
+
+
 def fetch_stations(*, valid_networks: Optional[set] = None, max_age_seconds: float = STATION_CACHE_MAX_AGE_SECONDS) -> list[dict]:
     """Return the current station list, reusing a recent on-disk cache
     instead of re-fetching /stations when another script already did so
     within `max_age_seconds`. Falls back to a live fetch on any cache miss
-    or read failure - never raises due to a stale/corrupt cache file."""
+    or read failure - never raises due to a stale/corrupt cache file.
+
+    Raw observation fields are QC'd against each station's local neighbors
+    (see qc_filter_field) before being returned, so every map built on this
+    - and every value derived from these fields, like feels-like/WBGT/theta-E
+    - is protected from a single stuck/miscalibrated sensor (e.g. a lone 36F
+    reading in a field of 70s) without each script needing its own check."""
     cached = _read_station_cache(max_age_seconds)
     if cached is None:
         cached = _fetch_and_cache_stations()
     networks = valid_networks if valid_networks is not None else VALID_NETWORKS
-    return [s for s in cached if s.get("network") in networks]
+    stations = [s for s in cached if s.get("network") in networks]
+    for field_path, neighbor_count, min_abs_deviation, mad_multiplier in QC_RAW_FIELDS:
+        qc_filter_field(
+            stations, field_path,
+            neighbor_count=neighbor_count, min_abs_deviation=min_abs_deviation, mad_multiplier=mad_multiplier,
+        )
+    return stations
+
+
+def qc_filter_field(
+    stations: list[dict], field_path: str, *,
+    neighbor_count: int = 5, min_abs_deviation: float = 15.0, mad_multiplier: float = 6.0,
+) -> int:
+    """Null out a field's value at stations whose reading is a statistical
+    outlier versus its nearest neighbors - catches a stuck/miscalibrated
+    sensor (e.g. a lone 36F reading surrounded by stations in the 70s) before
+    it reaches a dot plot or an interpolated fill, rather than needing a human
+    to notice it on a published map.
+
+    For each station, compares its value to the median of its
+    `neighbor_count` nearest (by lat/lon) stations that also report the
+    field, then flags it as an outlier if that residual exceeds BOTH
+    `min_abs_deviation` (an absolute floor, so the check doesn't fire on tiny
+    deviations when stations happen to be unusually uniform) and
+    `mad_multiplier` times the statewide median absolute deviation of all
+    stations' local residuals (so the threshold adapts to how noisy this
+    field normally is day to day). Mutates `stations` in place, setting
+    flagged values to None (identical to the field never having been
+    reported). Returns the number of stations flagged."""
+    entries = []
+    for station in stations:
+        value = _get_path(station, field_path)
+        lon, lat = station.get("longitude"), station.get("latitude")
+        if value is None or lon is None or lat is None:
+            continue
+        entries.append((station, value, lon, lat))
+    if len(entries) < neighbor_count + 1:
+        return 0
+
+    positions = np.array([(lon, lat) for _, _, lon, lat in entries], dtype=float)
+    values = np.array([value for _, value, _, _ in entries], dtype=float)
+
+    residuals = np.empty(len(entries))
+    for i in range(len(entries)):
+        dists = np.linalg.norm(positions - positions[i], axis=1)
+        nearest_idx = np.argsort(dists)[1:neighbor_count + 1]  # [0] is always itself (dist 0)
+        residuals[i] = values[i] - np.median(values[nearest_idx])
+
+    robust_scale = 1.4826 * (np.median(np.abs(residuals - np.median(residuals))) or 0.0)
+    threshold = max(min_abs_deviation, mad_multiplier * robust_scale)
+
+    flagged = 0
+    parts = field_path.split(".")
+    for i, (station, _, _, _) in enumerate(entries):
+        if abs(residuals[i]) <= threshold:
+            continue
+        node = station
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = None
+        flagged += 1
+    return flagged
 
 
 def _read_station_cache(max_age_seconds: float) -> Optional[list[dict]]:
@@ -116,6 +195,15 @@ def generate_basemap():
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_extent(MO_EXTENT, crs=data_crs)
+    # MO_EXTENT's aspect ratio (~1.09) doesn't match this 16:9 canvas (~1.78),
+    # so the equal-aspect GeoAxes needs to pad one dimension to fit. The
+    # default anchor='C' centers the state in the frame, splitting that pad
+    # into equal left/right gutters - which eats into the right-side
+    # title/description text. Anchoring west keeps the state flush against
+    # the left edge (matching the existing branding layout, which already
+    # reserves the right side for text) and pushes all the padding to the
+    # right instead.
+    ax.set_anchor("W")
     # Station dots/labels plotted after this (some sit right at the state
     # border) would otherwise trigger Matplotlib autoscale and silently
     # re-fit the view, shifting the whole map sideways under the equal-aspect
@@ -280,6 +368,7 @@ FILL_GRID_SIZE = 200
 def plot_filled_field(
     fig, ax, data_crs, stations: list[dict], *, field_path: str,
     cmap: str = "RdYlBu_r", diverging: bool = False, label: str = "",
+    vmin: Optional[float] = None, vmax: Optional[float] = None,
     grid_size: int = FILL_GRID_SIZE,
 ) -> int:
     """RBF-interpolated filled contour of a numeric field across Missouri,
@@ -290,7 +379,17 @@ def plot_filled_field(
     plot_station_values'/plot_wind_barbs' dot/label/barb zorders (10/11), so
     callers can call this before or after those - the stacking order is
     zorder-driven, not call-order-driven. Returns the number of stations used
-    for the interpolation (0 if there weren't enough to fit one)."""
+    for the interpolation (0 if there weren't enough to fit one).
+
+    `vmin`/`vmax` set a FIXED color scale (for `diverging=True`, pass only
+    `vmax` - the fixed scale runs -vmax to +vmax) so the same value always
+    maps to the same color across runs, instead of each render rescaling to
+    that cycle's min/max (which makes maps impossible to compare over time
+    and lets one bad reading stretch the whole scale). Callers should always
+    pass fixed bounds sized to the field's realistic range; values outside
+    the range still render, clipped to the end-cap color via
+    `extend='both'`, so an out-of-range reading is visible as "pegged" rather
+    than silently absent."""
     points_lon, points_lat, points_val = [], [], []
     for station in stations:
         value = _get_path(station, field_path)
@@ -325,21 +424,26 @@ def plot_filled_field(
     if not finite.size:
         return 0
     if diverging:
-        vmax = float(np.max(np.abs(finite))) or 1.0
+        if vmax is None:
+            raise ValueError("plot_filled_field(diverging=True) requires a fixed vmax")
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
         levels = np.linspace(-vmax, vmax, 41)
     else:
-        vmin, vmax = float(np.min(finite)), float(np.max(finite))
-        if vmin == vmax:
-            vmax = vmin + 1.0
+        if vmin is None or vmax is None:
+            raise ValueError("plot_filled_field requires fixed vmin/vmax (pass the field's realistic range)")
         norm = None
         levels = np.linspace(vmin, vmax, 41)
 
     mesh = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, field_grid, transform=data_crs,
-        levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7,
+        levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7, extend="both",
     )
-    cax = fig.add_axes([0.03, 0.1, 0.018, 0.55])
+    # The state is anchored flush against the left edge (see generate_basemap),
+    # so there's no left-side gutter left to put a colorbar in - put it in the
+    # whitespace on the right instead, below the title/subtitle/description
+    # text block (which ends well above this band) and above the bottom-right
+    # logo.
+    cax = fig.add_axes([0.90, 0.12, 0.016, 0.28])
     fig.colorbar(mesh, cax=cax, label=label)
     return len(points_lon)
 

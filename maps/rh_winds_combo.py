@@ -21,7 +21,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.relative_humidity.value",
-    cmap="BrBG", label="Relative Humidity (%)",
+    cmap="BrBG", label="Relative Humidity (%)", vmin=0, vmax=100,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

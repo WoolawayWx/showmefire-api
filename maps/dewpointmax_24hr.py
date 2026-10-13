@@ -33,7 +33,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.dewpoint_max_24hr.value",
-    cmap="BrBG", label="Max Dewpoint Temperature (F)",
+    cmap="BrBG", label="Max Dewpoint Temperature (F)", vmin=-10, vmax=80,
 )
 plotted = sp.plot_station_values(
     ax, data_crs, stations,

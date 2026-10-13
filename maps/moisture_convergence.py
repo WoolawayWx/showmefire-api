@@ -106,13 +106,16 @@ if __name__ == "__main__":
                 within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
                 convergence_scaled[~within_mask] = np.nan
 
-        finite = convergence_scaled[np.isfinite(convergence_scaled)]
-        vmax = float(np.max(np.abs(finite))) if finite.size else 1.0
-        vmax = vmax or 1.0
+        # Fixed scale (not auto-ranged to this cycle's min/max) so the same
+        # value always maps to the same color across runs - +/-5 (in the
+        # 1e-8/s scaled units above) comfortably covers a moderate
+        # convergence/divergence signal for Missouri; stronger signals still
+        # render, pegged to the end-cap color via extend="both".
+        vmax = 5.0
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
         mesh = ax.contourf(
             grid_lon_mesh, grid_lat_mesh, convergence_scaled, transform=data_crs,
-            levels=np.linspace(-vmax, vmax, 41), cmap="BrBG", norm=norm, alpha=0.8, zorder=7,
+            levels=np.linspace(-vmax, vmax, 41), cmap="BrBG", norm=norm, alpha=0.8, zorder=7, extend="both",
         )
         cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
         fig.colorbar(mesh, cax=cax, label="Moisture Convergence (relative units)")
