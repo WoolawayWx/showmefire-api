@@ -28,6 +28,11 @@ for station in stations:
     }
 
 fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+sp.plot_filled_field(
+    fig, ax, data_crs, stations,
+    field_path="observations.feels_like_max_today.value",
+    cmap="RdYlBu_r", label="Max Feels Like (F)",
+)
 plotted = sp.plot_station_values(
     ax, data_crs, stations,
     field_path="observations.feels_like_max_today.value",

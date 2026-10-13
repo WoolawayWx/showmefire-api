@@ -31,6 +31,11 @@ for station in stations:
     station.setdefault("observations", {})["dewpoint_change_1hr"] = {"value": changes.get(station.get("stid"))}
 
 fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+sp.plot_filled_field(
+    fig, ax, data_crs, stations,
+    field_path="observations.dewpoint_change_1hr.value",
+    cmap="BrBG", diverging=True, label="1-Hr Dewpoint Change (F)",
+)
 plotted = sp.plot_station_values(
     ax, data_crs, stations,
     field_path="observations.dewpoint_change_1hr.value",

@@ -18,6 +18,11 @@ start_time = time.time()
 stations = sp.fetch_stations()
 
 fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+sp.plot_filled_field(
+    fig, ax, data_crs, stations,
+    field_path="observations.dew_point_temperature.value",
+    cmap="BrBG", label="Dewpoint Temperature (F)",
+)
 plotted = sp.plot_station_values(
     ax, data_crs, stations,
     field_path="observations.dew_point_temperature.value",

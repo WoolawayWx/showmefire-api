@@ -32,7 +32,11 @@ import matplotlib.image as mpimg
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import TwoSlopeNorm
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from scipy.interpolate import Rbf
+from scipy.ndimage import gaussian_filter
+from shapely.geometry import Point
 
 MAPS_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = MAPS_DIR.parent
@@ -112,6 +116,11 @@ def generate_basemap():
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_extent(MO_EXTENT, crs=data_crs)
+    # Station dots/labels plotted after this (some sit right at the state
+    # border) would otherwise trigger Matplotlib autoscale and silently
+    # re-fit the view, shifting the whole map sideways under the equal-aspect
+    # GeoAxes constraint.
+    ax.set_autoscale_on(False)
 
     redraw_boundaries(ax, data_crs)
     return fig, ax, data_crs, map_crs, MAP_DPI
@@ -263,6 +272,76 @@ def plot_station_dual_values(
         )
         plotted += 1
     return plotted
+
+
+FILL_GRID_SIZE = 200
+
+
+def plot_filled_field(
+    fig, ax, data_crs, stations: list[dict], *, field_path: str,
+    cmap: str = "RdYlBu_r", diverging: bool = False, label: str = "",
+    grid_size: int = FILL_GRID_SIZE,
+) -> int:
+    """RBF-interpolated filled contour of a numeric field across Missouri,
+    masked to the state outline, with a colorbar - the same
+    interpolate/mask/contourf approach rhmap-fil.py and moisture_convergence.py
+    already use, generalized to any station field. Drawn at zorder=7, below
+    redraw_boundaries' default county/state zorders (8/9) and
+    plot_station_values'/plot_wind_barbs' dot/label/barb zorders (10/11), so
+    callers can call this before or after those - the stacking order is
+    zorder-driven, not call-order-driven. Returns the number of stations used
+    for the interpolation (0 if there weren't enough to fit one)."""
+    points_lon, points_lat, points_val = [], [], []
+    for station in stations:
+        value = _get_path(station, field_path)
+        lon, lat = station.get("longitude"), station.get("latitude")
+        if value is None or lon is None or lat is None:
+            continue
+        points_lon.append(lon)
+        points_lat.append(lat)
+        points_val.append(value)
+    if len(points_lon) < 4:  # Rbf needs enough points for a stable fit
+        return 0
+
+    grid_lon = np.linspace(MO_EXTENT[0], MO_EXTENT[1], grid_size)
+    grid_lat = np.linspace(MO_EXTENT[2], MO_EXTENT[3], grid_size)
+    grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
+    field_grid = gaussian_filter(
+        Rbf(points_lon, points_lat, points_val, function="multiquadric", smooth=0.5)(grid_lon_mesh, grid_lat_mesh),
+        sigma=2,
+    )
+
+    if STATE_SHAPEFILE.is_file():
+        state = gpd.read_file(STATE_SHAPEFILE)
+        if state.crs != data_crs.proj4_init:
+            state = state.to_crs(data_crs.proj4_init)
+        if not state.empty:
+            missouri_geom = state.geometry.iloc[0]
+            grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
+            within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
+            field_grid[~within_mask] = np.nan
+
+    finite = field_grid[np.isfinite(field_grid)]
+    if not finite.size:
+        return 0
+    if diverging:
+        vmax = float(np.max(np.abs(finite))) or 1.0
+        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+        levels = np.linspace(-vmax, vmax, 41)
+    else:
+        vmin, vmax = float(np.min(finite)), float(np.max(finite))
+        if vmin == vmax:
+            vmax = vmin + 1.0
+        norm = None
+        levels = np.linspace(vmin, vmax, 41)
+
+    mesh = ax.contourf(
+        grid_lon_mesh, grid_lat_mesh, field_grid, transform=data_crs,
+        levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7,
+    )
+    cax = fig.add_axes([0.03, 0.1, 0.018, 0.55])
+    fig.colorbar(mesh, cax=cax, label=label)
+    return len(points_lon)
 
 
 def plot_wind_barbs(
