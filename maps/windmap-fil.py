@@ -30,6 +30,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 from realtime_geotiff import export_continuous_rgba_geotiff
+from station_rbf import buffer_points
 
 def degrees_to_cardinal(degrees):
     if degrees is None:
@@ -120,6 +121,9 @@ for s in filtered_stations:
         ws = s['observations']['wind_speed']
         if ws.get('value') is not None:
             points.append((s['longitude'], s['latitude'], ws['value']))
+
+# Neighbor-state stations anchor the interpolation at the border (barbs stay Missouri-only).
+points += buffer_points('wind_speed')
 
 fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
 

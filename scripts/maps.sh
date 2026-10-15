@@ -73,7 +73,7 @@ for base_script in "${SLOW_FIRST[@]}"; do
 done
 for script in ./maps/*.py; do
     base_script="$(basename "$script")"
-    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "precipitation_graphics.py" || "$base_script" == "__init__.py" || "$base_script" == "station_plot.py" || "$base_script" == "station_history.py" || "$base_script" == "status_lock.py" || "$base_script" == "station_products.py" ]]; then
+    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "precipitation_graphics.py" || "$base_script" == "__init__.py" || "$base_script" == "station_plot.py" || "$base_script" == "station_history.py" || "$base_script" == "status_lock.py" || "$base_script" == "station_products.py" || "$base_script" == "station_rbf.py" || "$base_script" == "station_png.py" ]]; then
         continue
     fi
     [[ " ${SLOW_FIRST[*]} " == *" $base_script "* ]] && continue

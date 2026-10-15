@@ -7,8 +7,10 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
-from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data
+from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data, fetch_buffer_stations
 from services.timeseries import fetchtimeseriesdata
+from services.station_precip import fetch_station_precip
+from services.station_et import fetch_station_et
 from tools.ngfs_ogc_firedetect import main as firedetect
 from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
@@ -534,6 +536,9 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
+    scheduler.add_job(fetch_buffer_stations, 'interval', minutes=5, seconds=30, id='fetch_buffer_stations')
+    scheduler.add_job(fetch_station_precip, 'interval', minutes=10, seconds=90, id='fetch_station_precip')
+    scheduler.add_job(fetch_station_et, 'interval', minutes=15, seconds=45, id='fetch_station_et')
     scheduler.add_job(
         refresh_testbed_observations_job,
         'interval',

@@ -275,6 +275,69 @@ def get_station_data():
     """Return the combined station data"""
     return station_data
 
+
+# Out-of-state stations used only to anchor interpolation near the Missouri border. Kept apart
+# from `station_data` on purpose: `/stations` feeds the website, mobile app, bot and models,
+# none of which should start seeing neighbor-state stations.
+BUFFER_STATES = ["IL", "IA", "NE", "KS", "OK", "AR", "TN", "KY"]
+BUFFER_NETWORKS = "1,2,156"  # ASOS/AWOS, RAWS, Missouri Mesonet (CWOP deliberately excluded)
+
+buffer_station_data = {
+    "stations": None,
+    "last_updated": None,
+    "error": None
+}
+
+
+async def fetch_buffer_stations():
+    """Fetch current observations for the Missouri neighbor-state buffer into `buffer_station_data`."""
+    try:
+        weather_params = {
+            "token": SYNOPTIC_API_TOKEN,
+            "state": ",".join(BUFFER_STATES),
+            "units": "english",
+            "within": "70",
+            "status": "active",
+            "network": BUFFER_NETWORKS,
+        }
+        metadata_params = {
+            "token": SYNOPTIC_API_TOKEN,
+            "state": ",".join(BUFFER_STATES),
+            "status": "active",
+            "complete": "1",
+            "sensorvars": "1",
+            "network": BUFFER_NETWORKS,
+        }
+        async with aiohttp.ClientSession() as session:
+            weather_response = await session.get("https://api.synopticdata.com/v2/stations/latest", params=weather_params, timeout=30)
+            weather_response.raise_for_status()
+            weather_json = await weather_response.json()
+            metadata_response = await session.get("https://api.synopticdata.com/v2/stations/metadata", params=metadata_params, timeout=30)
+            metadata_response.raise_for_status()
+            metadata_json = await metadata_response.json()
+
+        metadata_lookup = {s["STID"]: s for s in metadata_json.get("STATION") or [] if s.get("STID")}
+        ignored = get_ignored_stations()
+        stations = []
+        for station in weather_json.get("STATION") or []:
+            if (station.get("STID") or station.get("ID")) in ignored:
+                continue
+            flattened = flatten_station_data(station, metadata_lookup.get(station.get("STID"), {}))
+            if flattened is not None:
+                stations.append(flattened)
+
+        buffer_station_data.update(stations=stations, count=len(stations), error=None,
+                                   last_updated=datetime.now(timezone.utc).isoformat())
+        logger.info(f"Buffer station data updated ({len(stations)} stations)")
+    except Exception as e:
+        buffer_station_data["error"] = str(e)  # keep serving the last good data
+        logger.error(f"Error fetching buffer station data: {e}")
+
+
+def get_buffer_station_data():
+    """Return the neighbor-state buffer stations"""
+    return buffer_station_data
+
 async def fetch_raws_stations_multi_state(states=None):
     """
     Fetch all RAWS stations in the specified states.

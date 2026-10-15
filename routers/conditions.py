@@ -55,6 +55,7 @@ class FillProduct:
     vmin: float
     vmax: float
     classes: Optional[tuple[tuple[str, str], ...]] = None  # (label, hex) for discrete products
+    decimals: int = 1  # legend value precision (ET rates need more than one decimal)
 
 
 FILL_PRODUCTS: tuple[FillProduct, ...] = (
@@ -64,6 +65,14 @@ FILL_PRODUCTS: tuple[FillProduct, ...] = (
     FillProduct("station_rh", "Relative humidity", "%", "realtime/relative_humidity.tif", "RdYlGn", 0, 100),
     FillProduct("station_fuel_moisture", "Fuel moisture", "%", "realtime/fuel_moisture.tif", "RdYlGn", 0, 30),
     FillProduct("station_wind", "Wind speed", "mph", "realtime/wind_speed.tif", "RdYlGn_r", 0, 51),
+    # Station precipitation (ASOS/AWOS + RAWS, dry stations are real zeros) and hourly Penman-Monteith
+    # reference ET (RAWS only); written by maps/stationprecipmap.py and maps/etmap.py.
+    FillProduct("station_precip_1h", "Precipitation, last hour", "in", "realtime/station_precip_1h.tif", "Blues", 0, 1.0, decimals=2),
+    FillProduct("station_precip_24h", "Precipitation, last 24 h", "in", "realtime/station_precip_24h.tif", "Blues", 0, 3.0, decimals=1),
+    FillProduct("station_et_current", "Reference ET, current rate", "in/hr", "realtime/station_et_current.tif", "YlOrBr", 0, 0.04, decimals=3),
+    FillProduct("station_et_24h", "Reference ET, last 24 h", "in", "realtime/station_et_24h.tif", "YlOrBr", 0, 0.30, decimals=2),
+    FillProduct("station_et_max", "Reference ET, peak hourly rate (24 h)", "in/hr", "realtime/station_et_max.tif", "YlOrBr", 0, 0.04, decimals=3),
+    FillProduct("station_et_min", "Reference ET, lowest hourly rate (24 h)", "in/hr", "realtime/station_et_min.tif", "YlOrBr", 0, 0.01, decimals=3),
 )
 
 
@@ -85,7 +94,7 @@ def _fill_layer(product: FillProduct) -> dict:
     cmap = matplotlib.colormaps[product.mpl_cmap] if not product.classes else None
     for step in range(0 if product.classes else 6):
         fraction = step / 5
-        legend.append({"value": round(product.vmin + (product.vmax - product.vmin) * fraction, 1),
+        legend.append({"value": round(product.vmin + (product.vmax - product.vmin) * fraction, product.decimals),
                        "color": _hex([v * 255 for v in cmap(fraction)])})
     return {
         "id": product.key, "label": product.label, "units": product.units, "filename": product.filename,

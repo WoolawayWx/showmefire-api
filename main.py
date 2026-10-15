@@ -7,10 +7,14 @@ from contextlib import asynccontextmanager
 from services.synoptic import (
     get_station_data, 
     fetch_historical_station_data, 
-    save_raw_data_to_archive, 
-    fetch_synoptic_data
+    save_raw_data_to_archive,
+    fetch_synoptic_data,
+    get_buffer_station_data,
+    fetch_buffer_stations
 )
 from services.timeseries import get_timeseries_data, fetchtimeseriesdata
+from services.station_precip import get_precip_data, fetch_station_precip
+from services.station_et import get_et_data, fetch_station_et
 from services.banner import BannerData, load_banner_config, save_banner_config
 from services.file_manager import list_files, view_file
 from services.log_maintenance import purge_old_logs
@@ -378,6 +382,27 @@ async def refresh_stations():
     await fetch_synoptic_data()
     data = get_station_data()
     return {"message": "Station data refreshed", "last_updated": data["last_updated"]}
+
+@app.get('/stations/buffer')
+async def station_buffer(refresh: bool = False):
+    """Neighbor-state stations (same shape as /stations) used only to anchor border interpolation."""
+    if refresh or get_buffer_station_data()["stations"] is None:
+        await fetch_buffer_stations()
+    return get_buffer_station_data()
+
+@app.get('/stations/precip')
+async def station_precip(refresh: bool = False):
+    """1h/24h precipitation (inches) for Missouri and neighbor-state stations; 0.0 = sensor reported no rain."""
+    if refresh or get_precip_data()["stations"] is None:
+        await fetch_station_precip()
+    return get_precip_data()
+
+@app.get('/stations/et')
+async def station_et(refresh: bool = False):
+    """Reference ET (inches) at RAWS stations: current hourly rate, rolling 24 h total, peak and low hourly rate."""
+    if refresh or get_et_data()["stations"] is None:
+        await fetch_station_et()
+    return get_et_data()
 
 @app.get('/stations/timeseries')
 async def timeseries():

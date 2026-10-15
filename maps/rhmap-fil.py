@@ -32,6 +32,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 from realtime_geotiff import export_continuous_rgba_geotiff
+from station_rbf import buffer_points
 
 start_time = time.time()
 
@@ -125,6 +126,9 @@ for s in filtered_stations:
         if rh.get('value') is not None:
             capped_rh = min(rh['value'], 100)  # Cap at 100%
             points.append((s['longitude'], s['latitude'], capped_rh))
+
+# Neighbor-state stations anchor the interpolation at the border (markers/labels stay Missouri-only).
+points += buffer_points('relative_humidity', cap=100)
 
 fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
 

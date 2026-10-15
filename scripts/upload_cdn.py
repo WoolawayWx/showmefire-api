@@ -363,6 +363,14 @@ if __name__ == "__main__":
             PROJECT_ROOT / "images" / "mo-fuelmoisture.png",
             PROJECT_ROOT / "images" / "mo-observedpeakfiredanger.png",
             PROJECT_ROOT / "images" / "mo-forecastfiredangerbias.png",
+            # Station precipitation and reference ET (maps/stationprecipmap.py, maps/etmap.py).
+            # In production maps.sh uploads these automatically via MAPS_SH_NEW_IMAGES.
+            PROJECT_ROOT / "images" / "mo-stationprecip-1hr.png",
+            PROJECT_ROOT / "images" / "mo-stationprecip-24hr.png",
+            PROJECT_ROOT / "images" / "mo-et-current.png",
+            PROJECT_ROOT / "images" / "mo-et-24hr.png",
+            PROJECT_ROOT / "images" / "mo-et-peak-24hr.png",
+            PROJECT_ROOT / "images" / "mo-et-low-24hr.png",
         ]
     upload_quarter_hour_files(files_to_upload=quarter_hour_files, path_prefix=test_prefix)
     
