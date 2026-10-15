@@ -1,4 +1,6 @@
 import os
+import sys
+import tempfile
 import boto3
 from pathlib import Path
 from datetime import datetime
@@ -19,6 +21,11 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 FOLDERS_TO_UPLOAD = [
     PROJECT_ROOT / "images"
 ]
+
+# maps.sh exports PYTHONPATH, but a manual `python scripts/upload_cdn.py` does not.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from services.cdn_thumbnails import make_thumbnail, thumbnails_enabled
 
 def upload_to_cdn(files, dest_keys, content_types=None, cache_controls=None):
     """
@@ -197,6 +204,29 @@ def get_r2_client():
         region_name='auto'
     )
 
+def _upload_thumbnail(s3, file_path, path_prefix=None):
+    """Upload the small WebP copy of a PNG next to its latest/ file (see services/cdn_thumbnails.py).
+
+    Does nothing unless CDN_THUMBNAILS is on. Only the latest/ copy is uploaded (not the dated
+    archive), and it never raises: a thumbnail is optional and must not break the real upload.
+    """
+    if not thumbnails_enabled():
+        return
+    try:
+        with tempfile.TemporaryDirectory() as work_dir:
+            thumbnail = make_thumbnail(file_path, Path(work_dir))
+            if thumbnail is None:
+                return
+            key = f"{path_prefix.rstrip('/')}/latest/{thumbnail.name}" if path_prefix else f"latest/{thumbnail.name}"
+            s3.upload_file(
+                str(thumbnail), BUCKET_NAME, key,
+                ExtraArgs={'ContentType': 'image/webp', 'CacheControl': 'max-age=300'}
+            )
+            print(f" [OK] {thumbnail.name} -> {key}")
+    except Exception as e:
+        print(f" [INFO] Thumbnail for {Path(file_path).name} skipped: {e}")
+
+
 def upload_quarter_hour_files(files_to_upload=None, path_prefix=None):
     """
     Uploads files that update on the quarter hour with path structure yyyy/mm/dd/hhmm.
@@ -251,6 +281,7 @@ def upload_quarter_hour_files(files_to_upload=None, path_prefix=None):
             )
             
             print(f" [OK] {filename} -> R2")
+            _upload_thumbnail(s3, file_path, path_prefix)
         except Exception as e:
             print(f" [FAILED] {filename}: {e}")
     
@@ -329,6 +360,7 @@ def upload_forecast_files(files_to_upload=None, path_prefix=None):
             )
             
             print(f" [OK] {filename} -> R2")
+            _upload_thumbnail(s3, file_path, path_prefix)
         except Exception as e:
             print(f" [FAILED] {filename}: {e}")
 
