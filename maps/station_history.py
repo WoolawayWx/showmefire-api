@@ -197,6 +197,45 @@ def get_today_extremes_batch(
     }
 
 
+def get_extremes_for_date_batch(
+    field: str, date_local: str, *, db_path: Optional[Path] = None,
+) -> dict[str, dict]:
+    """Daily min/max for every station on one America/Chicago calendar date
+    (YYYY-MM-DD) - e.g. yesterday's maximum wind gust."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT stid, min_value, max_value FROM station_daily_extreme WHERE field = ? AND date_local = ?",
+            (field, date_local),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row["stid"]: {"min": row["min_value"], "max": row["max_value"]} for row in rows}
+
+
+def get_daily_maxima_batch(
+    field: str, days: int, *, now_utc: Optional[datetime] = None, db_path: Optional[Path] = None,
+) -> dict[str, dict[str, float]]:
+    """{stid: {date_local: max_value}} for the last `days` America/Chicago
+    dates including today. For a cumulative-since-midnight field (rainfall)
+    the daily max is the day's total."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    start = (now_utc.astimezone(CHICAGO_TZ) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT stid, date_local, max_value FROM station_daily_extreme "
+            "WHERE field = ? AND date_local >= ? AND max_value IS NOT NULL",
+            (field, start),
+        ).fetchall()
+    finally:
+        conn.close()
+    result: dict[str, dict[str, float]] = {}
+    for row in rows:
+        result.setdefault(row["stid"], {})[row["date_local"]] = row["max_value"]
+    return result
+
+
 def get_rolling_extremes_batch(
     field: str, hours: float, *, now_utc: Optional[datetime] = None, db_path: Optional[Path] = None,
 ) -> dict[str, dict]:

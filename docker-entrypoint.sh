@@ -25,7 +25,11 @@ fi
 
 # Dockerfile.dev doesn't install the cron package; only start it if present so the
 # dev image doesn't crash under `set -e`.
-if [ -x /etc/init.d/cron ]; then
+# The docker-compose `backend` service sets SMF_START_CRON=0 because cron jobs
+# run in the separate `worker` service.
+if [ "${SMF_START_CRON:-1}" != "1" ]; then
+    echo "SMF_START_CRON=${SMF_START_CRON}, skipping cron start (cron runs in the worker service)"
+elif [ -x /etc/init.d/cron ]; then
     service cron start
 else
     echo "cron not installed, skipping cron start"

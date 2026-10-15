@@ -1,4 +1,4 @@
-"""Render and publish only the six NOAA precipitation graphics to R2."""
+"""Render and publish the NOAA precipitation graphics to R2."""
 
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ def _get_r2_client_and_bucket():
     return upload_cdn.get_r2_client(), os.getenv("R2_BUCKET", upload_cdn.BUCKET_NAME)
 
 
-def publish() -> list[str]:
+def publish(stems=None) -> list[str]:
     # Render all products before connecting to R2 so source/render errors never
     # replace a previously published CDN image.
-    outputs = generate_graphics()
+    outputs = generate_graphics(stems=stems) if stems else generate_graphics()
     client, bucket = _get_r2_client_and_bucket()
     published = []
     for path in outputs:

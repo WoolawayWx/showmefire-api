@@ -122,6 +122,10 @@ async def record_station_history_job():
                 return derived_met.estimate_wbgt_f(t, r, w)
 
             fields = {
+                # Backing the pressure, wind-gust and rainfall maps.
+                "sea_level_pressure_mb": _obs("sea_level_pressure"),
+                "wind_gust_mph": _obs("wind_gust"),
+                "precip_since_midnight_in": _obs("precip_accum_since_local_midnight"),
                 "air_temp_f": air_temp,
                 "relative_humidity_pct": rh,
                 "dew_point_temperature_f": dewpoint,
@@ -178,6 +182,19 @@ async def rtma_spread_rate_pipeline_job():
             logger.error("Spread-rate RTMA retention cleanup failed: %s", cleanup_error, exc_info=True)
     except Exception as error:
         logger.error("RTMA/spread-rate pipeline failed: %s", error, exc_info=True)
+
+
+async def publish_hourly_precipitation_graphics_job():
+    """Hourly refresh of the short-range accumulations (1/3/6/12/24-hour),
+    which NOAA updates every hour; the multi-day totals stay on the twice-daily
+    publish_precipitation_graphics_job."""
+    try:
+        from maps.precipitation_graphics import HOURLY_STEMS
+
+        published = await asyncio.to_thread(publish_precipitation_graphics, HOURLY_STEMS)
+        logger.info("Hourly precipitation graphics published: %s", published)
+    except Exception as error:
+        logger.error("Hourly precipitation graphics publish failed: %s", error, exc_info=True)
 
 
 async def publish_precipitation_graphics_job():
@@ -545,7 +562,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
     scheduler.add_job(fetch_and_store_afds, 'interval', minutes=AFD_POLL_MINUTES, id='fetch_afds')
-    scheduler.add_job(run_active_mo_alerts, 'interval', minutes=5, id='fetch_active_mo_alerts')
+    scheduler.add_job(
+        run_active_mo_alerts,
+        'interval',
+        minutes=max(1, int(os.getenv("SMF_ALERT_POLL_MINUTES", "1"))),
+        id='fetch_active_mo_alerts',
+        max_instances=1,
+        coalesce=True,
+    )
     if os.getenv("SMF_GRAPHICS_SPC_AUTO_REFRESH", "true").lower() == "true":
         scheduler.add_job(
             refresh_spc_graphics_job,
@@ -611,6 +635,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
 
+    scheduler.add_job(
+        publish_hourly_precipitation_graphics_job,
+        'cron',
+        minute=12,  # NOAA posts the hourly QPE a few minutes past the hour
+        id='publish_hourly_precipitation_graphics',
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(
         publish_precipitation_graphics_job,
         'cron',

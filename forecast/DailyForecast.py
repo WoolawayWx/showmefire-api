@@ -316,7 +316,28 @@ def estimate_fuel_moisture(relative_humidity, air_temp=None):
 from forecast.map_style import add_boundaries, add_title_and_branding, create_base_map  # noqa: E402
 
 
-def get_current_fuel_moisture_field(port='8000', target_date=None, target_hour_utc=None, include_metadata=False):
+def _fetch_morning_fuel_moisture_direct(target_date=None, target_hour_utc=None, max_attempts=3):
+    """Same payload as GET /api/fuel-moisture/morning, without going through the API.
+
+    Returns {"success": True, "data": ...}, or None if it still fails after
+    retries so the caller can fall back to the HTTP endpoint.
+    """
+    import asyncio
+    from services.synoptic import fetch_fuel_moisture_at_time, resolve_fuel_moisture_target_time
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            target_time = resolve_fuel_moisture_target_time(target_date, target_hour_utc)
+            data = asyncio.run(fetch_fuel_moisture_at_time(target_time=target_time, states=None, networks=None))
+            return {"success": True, "data": data}
+        except Exception as e:
+            logger.warning(f"Direct fuel moisture fetch attempt {attempt}/{max_attempts} failed: {e}")
+            if attempt < max_attempts:
+                time.sleep(10 * attempt)
+    return None
+
+
+def get_current_fuel_moisture_field(port='8000',target_date=None, target_hour_utc=None, include_metadata=False):
     target_label = f"{int(target_hour_utc):02d}z" if target_hour_utc is not None else "7 AM CT"
     logger.info(f"Getting current fuel moisture field from RAWS at {target_label} (port={port})")
     """
@@ -339,11 +360,28 @@ def get_current_fuel_moisture_field(port='8000', target_date=None, target_hour_u
         if target_hour_utc is not None:
             params['hour_utc'] = int(target_hour_utc)
         
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        
+        # Fetch straight from Synoptic (what the API endpoint wraps) so the
+        # forecast doesn't depend on the web server being responsive.
+        data = _fetch_morning_fuel_moisture_direct(params.get('date'), params.get('hour_utc'))
+
+        if data is None:
+            # Fall back to the API. It shares a single worker with the
+            # map/scheduler jobs, so it can be briefly unresponsive; allow a
+            # long read timeout and retry.
+            max_attempts = 4
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = requests.get(url, params=params, timeout=60)
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_attempts:
+                        raise
+                    wait_s = 15 * attempt
+                    logger.warning(f"Fuel moisture API attempt {attempt}/{max_attempts} failed ({e}); retrying in {wait_s}s")
+                    time.sleep(wait_s)
+            data = response.json()
+
         if not data.get('success'):
             logger.warning(f"API returned error: {data}")
             return None

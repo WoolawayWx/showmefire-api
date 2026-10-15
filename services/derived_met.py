@@ -235,3 +235,85 @@ def theta_e_k(temp_c, dewpoint_c, pressure_hpa):
         (3.376 / t_lcl - 0.00254) * mixing_ratio_gkg * (1.0 + 0.81e-3 * mixing_ratio_gkg)
     )
     return theta_e if np.ndim(theta_e) else float(theta_e)
+
+
+# --- Pressure / wind-profile / dispersion helpers ---------------------------
+
+HPA_PER_INHG = 33.8639
+
+
+def hpa_to_inhg(pressure_hpa):
+    return np.asarray(pressure_hpa, dtype=float) / HPA_PER_INHG
+
+
+def wind_at_height(speed, from_height_m, to_height_m=2.0, roughness_length_m=0.1):
+    """Adjust a wind speed to another height with the neutral logarithmic
+    wind profile (default 0.1 m roughness: open grass/cropland). RAWS report
+    at ~6 m (20 ft) and ASOS at 10 m, so this puts them on a common 2 m basis.
+    An estimate - it ignores stability, so it is rough on calm, stable nights.
+    Sensor heights at or below the roughness length are returned unchanged."""
+    from_height = np.asarray(from_height_m, dtype=float)
+    z0 = roughness_length_m
+    valid = from_height > z0 * 2
+    factor = np.where(valid, np.log(to_height_m / z0) / np.log(np.where(valid, from_height, 10.0) / z0), 1.0)
+    result = np.asarray(speed, dtype=float) * factor
+    return result if np.ndim(result) else float(result)
+
+
+def solar_elevation_deg(lat_deg, lon_deg, when_utc):
+    """Approximate solar elevation angle (degrees above the horizon) for a
+    location and a timezone-aware UTC datetime (NOAA low-precision formulas,
+    good to a fraction of a degree - plenty for day/night and insolation
+    classes)."""
+    day_of_year = when_utc.timetuple().tm_yday
+    hours = when_utc.hour + when_utc.minute / 60.0 + when_utc.second / 3600.0
+    gamma = 2.0 * np.pi / 365.0 * (day_of_year - 1 + (hours - 12.0) / 24.0)
+    equation_of_time_min = 229.18 * (
+        0.000075 + 0.001868 * np.cos(gamma) - 0.032077 * np.sin(gamma)
+        - 0.014615 * np.cos(2 * gamma) - 0.040849 * np.sin(2 * gamma)
+    )
+    declination = (
+        0.006918 - 0.399912 * np.cos(gamma) + 0.070257 * np.sin(gamma)
+        - 0.006758 * np.cos(2 * gamma) + 0.000907 * np.sin(2 * gamma)
+        - 0.002697 * np.cos(3 * gamma) + 0.00148 * np.sin(3 * gamma)
+    )
+    true_solar_minutes = hours * 60.0 + equation_of_time_min + 4.0 * np.asarray(lon_deg, dtype=float)
+    hour_angle = np.radians(true_solar_minutes / 4.0 - 180.0)
+    lat = np.radians(np.asarray(lat_deg, dtype=float))
+    sin_elevation = np.sin(lat) * np.sin(declination) + np.cos(lat) * np.cos(declination) * np.cos(hour_angle)
+    return np.degrees(np.arcsin(np.clip(sin_elevation, -1.0, 1.0)))
+
+
+# Pasquill (1961) stability table, as a numeric index: A=1 ... D=4 ... F=6
+# (half steps are the table's "A-B"/"B-C"/"C-D" cells). Rows are 10 m wind
+# speed bands in m/s (<2, 2-3, 3-5, 5-6, >6); columns are strong / moderate /
+# slight daytime insolation, then clear-night.
+_PASQUILL_ROWS = (
+    (1.0, 1.5, 2.0, 6.0),
+    (1.5, 2.0, 3.0, 6.0),
+    (2.0, 2.5, 3.0, 5.0),
+    (3.0, 3.5, 4.0, 4.0),
+    (3.0, 4.0, 4.0, 4.0),
+)
+
+
+def pasquill_stability_index(wind_10m_ms, solar_elevation):
+    """Estimated Pasquill-Gifford stability index (1 = A very unstable ...
+    4 = D neutral ... 6 = F stable) from 10 m wind speed and solar elevation.
+
+    Cloud cover is not available for most stations, so daytime insolation is
+    taken from sun height alone (clear-sky; >60 deg strong, 35-60 moderate,
+    otherwise slight) and nights are assumed clear. That overstates stability
+    under cloud, so treat the result as an estimate, not an observation."""
+    speed = float(wind_10m_ms)
+    row = 0 if speed < 2 else 1 if speed < 3 else 2 if speed < 5 else 3 if speed < 6 else 4
+    elevation = float(solar_elevation)
+    if elevation < 5.0:
+        column = 3
+    elif elevation > 60.0:
+        column = 0
+    elif elevation > 35.0:
+        column = 1
+    else:
+        column = 2
+    return _PASQUILL_ROWS[row][column]

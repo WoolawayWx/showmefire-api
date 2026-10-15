@@ -21,6 +21,18 @@ if ! flock -n 9; then
     exit 0
 fi
 
+# The daily forecast (forecasts.sh) takes priority over map refreshes: skip
+# this cycle while it holds its lock, and run at low CPU priority otherwise so
+# a map run that overlaps the forecast start can't starve it or the API.
+FORECAST_LOCK_FILE="${TMPDIR:-/tmp}/showmefire-forecast.lock"
+exec 8>"$FORECAST_LOCK_FILE"
+if ! flock -n -s 8; then
+    echo "Daily forecast is running (lock: $FORECAST_LOCK_FILE); skipping this cycle."
+    exit 0
+fi
+exec 8>&-
+renice -n 15 -p $$ > /dev/null 2>&1 || true
+
 # Detect correct Python executable (same convention as forecasts.sh / forecast_RRFS.sh).
 # Cron does not inherit the Docker image's VIRTUAL_ENV/PATH, and in production the
 # venv lives at /opt/venv, not $PROJECT_DIR/venv - so `source ./venv/bin/activate`
@@ -47,23 +59,59 @@ failed_scripts=()
 # Marker used to detect which images/*.png files this run's scripts actually
 # touched (see MAPS_SH_NEW_IMAGES below) - set before the loop starts.
 IMAGE_MARKER="$(mktemp)"
-trap 'rm -f "$IMAGE_MARKER"' EXIT
+SCRIPT_LOG_DIR="$(mktemp -d)"
+trap 'rm -rf "$IMAGE_MARKER" "$SCRIPT_LOG_DIR"' EXIT
 
-# Run all Python scripts in the maps folder
+# Collect every runnable script in the maps folder. Helper modules are
+# imported by other scripts and should not be executed directly. The slowest
+# scripts go first so they start immediately and the short ones fill in the
+# gaps (shortest total wall time for a fixed number of parallel slots).
+SLOW_FIRST=(advisory_category_maps.py realtimefiredanger.py windmap-fil.py rhmap-fil.py fuelmoisturemap.py outlookgraphic.py)
+scripts=()
+for base_script in "${SLOW_FIRST[@]}"; do
+    [ -f "./maps/$base_script" ] && scripts+=("./maps/$base_script")
+done
 for script in ./maps/*.py; do
     base_script="$(basename "$script")"
-
-    # Helper modules are imported by other scripts and should not be executed directly.
-    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "precipitation_graphics.py" || "$base_script" == "__init__.py" || "$base_script" == "station_plot.py" || "$base_script" == "station_history.py" ]]; then
+    if [[ "$base_script" == "station_danger_history.py" || "$base_script" == "realtime_geotiff.py" || "$base_script" == "dailyCapture.py" || "$base_script" == "precipitation_graphics.py" || "$base_script" == "__init__.py" || "$base_script" == "station_plot.py" || "$base_script" == "station_history.py" || "$base_script" == "status_lock.py" || "$base_script" == "station_products.py" ]]; then
         continue
     fi
+    [[ " ${SLOW_FIRST[*]} " == *" $base_script "* ]] && continue
+    scripts+=("$script")
+done
 
+# Run the scripts MAPS_PARALLEL at a time (each is an independent process
+# that renders its own PNG). Scripts that update the shared status.json
+# serialize that read-modify-write themselves via maps/status_lock.py. Each
+# script's output goes to its own log and is replayed below in order, so
+# maps.log stays readable instead of interleaving.
+MAPS_PARALLEL="${MAPS_PARALLEL:-3}"
+run_map_script() {
+    local script="$1"
+    local base_script
+    base_script="$(basename "$script")"
+    local started=$SECONDS
+    "$PYTHON" "$script" > "$SCRIPT_LOG_DIR/$base_script.log" 2>&1
+    echo "$? $((SECONDS - started))" > "$SCRIPT_LOG_DIR/$base_script.rc"
+}
+export -f run_map_script
+export PYTHON SCRIPT_LOG_DIR
+
+run_started=$SECONDS
+printf '%s\0' "${scripts[@]}" | xargs -0 -n1 -P "$MAPS_PARALLEL" bash -c 'run_map_script "$0"'
+
+for script in "${scripts[@]}"; do
+    base_script="$(basename "$script")"
+    read -r rc elapsed < "$SCRIPT_LOG_DIR/$base_script.rc" || { rc=1; elapsed=0; }
     echo "Running $script..."
-    if ! "$PYTHON" "$script"; then
+    cat "$SCRIPT_LOG_DIR/$base_script.log"
+    echo "[timing] $base_script: ${elapsed}s"
+    if [ "$rc" != "0" ]; then
         echo "[ERROR] Failed: $script"
         failed_scripts+=("$script")
     fi
 done
+echo "[timing] all map scripts: $((SECONDS - run_started))s (MAPS_PARALLEL=$MAPS_PARALLEL)"
 
 UPLOAD_FORECAST_VALUE="${uploadForecast:-true}"
 UPLOAD_FORECAST_VALUE="$(echo "$UPLOAD_FORECAST_VALUE" | tr '[:upper:]' '[:lower:]')"

@@ -14,6 +14,7 @@ needed), publishing images/mo-forecastfiredangerbias.png which upload_cdn.py
 then pushes to cdn.showmefire.org/latest/ like every other map script here.
 """
 import json
+from station_plot import opaque_blend_cmap
 import sys
 from datetime import datetime, timezone
 from io import BytesIO
@@ -146,7 +147,7 @@ def main():
 
     cs = ax.contourf(
         lon_mesh, lat_mesh, bias, transform=data_crs,
-        levels=BIAS_BINS, cmap=BIAS_CMAP, norm=BIAS_NORM, alpha=0.75, zorder=7, antialiased=True,
+        levels=BIAS_BINS, cmap=opaque_blend_cmap(BIAS_CMAP, 0.75), norm=BIAS_NORM, zorder=7, antialiased=False,
     )
     ax.contour(
         lon_mesh, lat_mesh, bias, transform=data_crs,

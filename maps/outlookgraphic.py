@@ -332,6 +332,8 @@ def render_outlook(fig, ax, data_crs, payload: dict, day: int):
 
 
 def update_status(runtime_sec: float, feature_count: int, day: int, output_file: Path, output_webp: Path | None):
+    import status_lock
+    status_lock.acquire(STATUS_FILE)
     if STATUS_FILE.exists():
         try:
             with STATUS_FILE.open("r", encoding="utf-8") as f:
@@ -353,6 +355,7 @@ def update_status(runtime_sec: float, feature_count: int, day: int, output_file:
 
     with STATUS_FILE.open("w", encoding="utf-8") as f:
         json.dump(status, f, indent=4)
+    status_lock.release()
 
 
 def main():

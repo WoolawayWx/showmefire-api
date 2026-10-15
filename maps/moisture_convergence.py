@@ -82,9 +82,10 @@ if __name__ == "__main__":
     plotted_cells = 0
 
     if have_data:
-        grid_lon = np.linspace(sp.MO_EXTENT[0], sp.MO_EXTENT[1], GRID_SIZE)
-        grid_lat = np.linspace(sp.MO_EXTENT[2], sp.MO_EXTENT[3], GRID_SIZE)
-        grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
+        # Shared, cached grid + state mask + map-projected coordinates (see
+        # station_plot._fill_grid): the old per-point Shapely mask and
+        # lon/lat contouring cost ~40s of this script's runtime.
+        grid_lon_mesh, grid_lat_mesh, within_mask, x_mesh, y_mesh = sp._fill_grid(GRID_SIZE, map_crs, data_crs)
 
         u_grid = gaussian_filter(Rbf(points_lon, points_lat, points_u, function="multiquadric", smooth=0.5)(grid_lon_mesh, grid_lat_mesh), sigma=2)
         v_grid = gaussian_filter(Rbf(points_lon, points_lat, points_v, function="multiquadric", smooth=0.5)(grid_lon_mesh, grid_lat_mesh), sigma=2)
@@ -95,16 +96,8 @@ if __name__ == "__main__":
         # synoptic-scale moisture-convergence order of magnitude).
         convergence_scaled = convergence / 1e-8
 
-        state_path = sp.STATE_SHAPEFILE
-        if state_path.is_file():
-            state = gpd.read_file(state_path)
-            if state.crs != data_crs.proj4_init:
-                state = state.to_crs(data_crs.proj4_init)
-            if not state.empty:
-                missouri_geom = state.geometry.iloc[0]
-                grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-                within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
-                convergence_scaled[~within_mask] = np.nan
+        if within_mask is not None:
+            convergence_scaled[~within_mask] = np.nan
 
         # Fixed scale (not auto-ranged to this cycle's min/max) so the same
         # value always maps to the same color across runs - +/-5 (in the
@@ -114,8 +107,8 @@ if __name__ == "__main__":
         vmax = 5.0
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
         mesh = ax.contourf(
-            grid_lon_mesh, grid_lat_mesh, convergence_scaled, transform=data_crs,
-            levels=np.linspace(-vmax, vmax, 41), cmap="BrBG", norm=norm, alpha=0.8, zorder=7, extend="both",
+            x_mesh, y_mesh, convergence_scaled,
+            levels=np.linspace(-vmax, vmax, 41), cmap=sp.opaque_blend_cmap("BrBG", 0.8), norm=norm, zorder=7, extend="both", antialiased=False,
         )
         cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
         fig.colorbar(mesh, cax=cax, label="Moisture Convergence (relative units)")

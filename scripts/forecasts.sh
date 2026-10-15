@@ -7,6 +7,11 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1
 
+# Hold an exclusive lock for the whole run so maps.sh skips its cycles instead
+# of competing with the forecast (and the API it calls) for CPU/memory.
+exec 8>"${TMPDIR:-/tmp}/showmefire-forecast.lock"
+flock -x 8
+
 # Detect correct Python executable
 if [ -f "/opt/venv/bin/python" ]; then
     PYTHON="/opt/venv/bin/python" # Docker production

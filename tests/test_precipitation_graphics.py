@@ -67,14 +67,14 @@ def test_fetch_layer_png_rejects_error_payload():
         graphics.fetch_layer_png(25, service="https://example.test/MapServer", session=session)
 
 
-def test_generate_graphics_writes_six_maps_at_established_dimensions(tmp_path, monkeypatch):
+def test_generate_graphics_writes_every_product_at_established_dimensions(tmp_path, monkeypatch):
     session = _Session()
     layer_ids = {name: idx for idx, (_, name, _, _) in enumerate(graphics.PRODUCTS, 20)}
     monkeypatch.setattr(graphics, "resolve_layer_ids", lambda *args, **kwargs: layer_ids)
     monkeypatch.setattr(graphics, "fetch_legend_entries", lambda *args, **kwargs: [("0 to 1", (0.2, 0.5, 0.8, 1.0))])
     timestamp = datetime(2026, 9, 23, 6, 0, tzinfo=ZoneInfo("America/Chicago"))
     outputs = graphics.generate_graphics(output_dir=tmp_path, session=session, now=timestamp)
-    assert len(outputs) == 6
+    assert len(outputs) == len(graphics.PRODUCTS)
     assert all(path.exists() for path in outputs)
     assert {path.name for path in outputs} == {f"mo-{stem}.png" for stem, *_ in graphics.PRODUCTS}
     from PIL import Image
@@ -101,7 +101,7 @@ def test_failed_render_keeps_cdn_untouched(monkeypatch):
     assert upload_called is False
 
 
-def test_publish_uploads_only_the_six_stable_graphic_keys(tmp_path, monkeypatch):
+def test_publish_uploads_only_the_stable_graphic_keys(tmp_path, monkeypatch):
     from scripts import publish_precipitation_graphics as publisher
 
     outputs = [tmp_path / f"mo-{stem}.png" for stem, *_ in graphics.PRODUCTS]
@@ -116,6 +116,20 @@ def test_publish_uploads_only_the_six_stable_graphic_keys(tmp_path, monkeypatch)
     monkeypatch.setattr(publisher, "generate_graphics", lambda: outputs)
     monkeypatch.setattr(publisher, "_get_r2_client_and_bucket", lambda: (Client(), "test-bucket"))
     published = publisher.publish()
-    assert len(uploads) == 6
+    assert len(uploads) == len(graphics.PRODUCTS)
     assert published == [f"latest/{output.name}" for output in outputs]
     assert all(content_type == "image/png" for _, _, _, content_type in uploads)
+
+
+def test_generate_graphics_can_render_only_the_hourly_products(tmp_path, monkeypatch):
+    layer_ids = {name: idx for idx, (_, name, _, _) in enumerate(graphics.PRODUCTS, 20)}
+    monkeypatch.setattr(graphics, "resolve_layer_ids", lambda *args, **kwargs: layer_ids)
+    monkeypatch.setattr(graphics, "fetch_legend_entries", lambda *args, **kwargs: [("0 to 1", (0.2, 0.5, 0.8, 1.0))])
+    timestamp = datetime(2026, 9, 23, 6, 0, tzinfo=ZoneInfo("America/Chicago"))
+    outputs = graphics.generate_graphics(output_dir=tmp_path, session=_Session(), now=timestamp, stems=graphics.HOURLY_STEMS)
+    assert {path.name for path in outputs} == {f"mo-{stem}.png" for stem in graphics.HOURLY_STEMS}
+    assert len(outputs) == 5
+
+
+def test_every_hourly_stem_is_a_defined_product():
+    assert graphics.HOURLY_STEMS <= {stem for stem, *_ in graphics.PRODUCTS}

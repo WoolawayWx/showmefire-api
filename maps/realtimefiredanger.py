@@ -13,6 +13,8 @@ from rasterio.plot import show
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import numpy as np
+from station_plot import opaque_blend_cmap
+import station_plot as sp
 from pathlib import Path
 import requests
 from scipy.interpolate import griddata, Rbf
@@ -142,17 +144,11 @@ def generate_basemap():
     map_extent = ax.get_extent(crs=data_crs)  
     bbox = box(*map_extent)
     
-    counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
-    if counties.crs != data_crs.proj4_init:
-        counties = counties.to_crs(data_crs.proj4_init)
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", 
+    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", 
                     facecolor='none', linewidth=1, zorder=5)
 
     
-    missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-    if missouriborder.crs != data_crs.proj4_init:
-        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-    ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", 
+    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", 
                     facecolor='none', linewidth=1, zorder=6)
 
     
@@ -270,13 +266,11 @@ if rh_points and wind_points and fuel_points:
     norm = BoundaryNorm(bins, len(colors))
 
     # Mask to Missouri
-    missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-    if missouriborder.crs != data_crs.proj4_init:
-        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-    if not missouriborder.empty:
-        missouri_geom = missouriborder.geometry.iloc[0]
-        grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-        within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
+    # Shared, cached state mask + map-projected grid (see station_plot._fill_grid): the old
+    # per-Point Shapely mask and lon/lat contouring (cartopy re-projecting every polygon)
+    # were most of this script's runtime.
+    _, _, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(400, map_crs, data_crs)
+    if within_mask is not None:
         grid_values[~within_mask] = np.nan
 
     station_danger_summary = count_station_fire_danger_categories_from_grid(
@@ -328,8 +322,8 @@ if rh_points and wind_points and fuel_points:
         print(f"Warning: Failed to update observed peak fire danger grid: {e}")
 
     cs = ax.contourf(
-        grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
-        levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True
+        grid_x_mesh, grid_y_mesh, grid_values,
+        levels=bins, cmap=opaque_blend_cmap(cmap, 0.7), norm=norm, zorder=7, antialiased=True
     )
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
@@ -339,15 +333,9 @@ if rh_points and wind_points and fuel_points:
 else:
     print("Insufficient data for fire danger calculation.")
 
-counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
-if counties.crs != data_crs.proj4_init:
-    counties = counties.to_crs(data_crs.proj4_init)
-ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
     
-missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-if missouriborder.crs != data_crs.proj4_init:
-    missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
 
 ax.set_anchor('W') 
 
@@ -423,23 +411,17 @@ if peak_running_grid is not None:
         peak_fig, peak_ax, peak_data_crs, peak_map_crs, peak_mapdpi = generate_basemap()
 
         peak_cs = peak_ax.contourf(
-            grid_lon_mesh, grid_lat_mesh, peak_running_grid, transform=peak_data_crs,
-            levels=bins, cmap=cmap, norm=norm, alpha=0.7, zorder=7, antialiased=True
+            grid_x_mesh, grid_y_mesh, peak_running_grid,
+            levels=bins, cmap=opaque_blend_cmap(cmap, 0.7), norm=norm, zorder=7, antialiased=True
         )
         peak_cax = peak_fig.add_axes([0.02, 0.08, 0.02, 0.6])
         peak_cbar = plt.colorbar(peak_cs, cax=peak_cax, label='Fire Danger Level')
         peak_cbar.set_ticks([0, 1, 2, 3, 4])
         peak_cbar.set_ticklabels(labels)
 
-        peak_counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
-        if peak_counties.crs != peak_data_crs.proj4_init:
-            peak_counties = peak_counties.to_crs(peak_data_crs.proj4_init)
-        peak_ax.add_geometries(peak_counties.geometry, crs=peak_data_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
 
-        peak_border = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-        if peak_border.crs != peak_data_crs.proj4_init:
-            peak_border = peak_border.to_crs(peak_data_crs.proj4_init)
-        peak_ax.add_geometries(peak_border.geometry, crs=peak_data_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
 
         peak_ax.set_anchor('W')
         peak_fig.subplots_adjust(left=0.05)
@@ -504,6 +486,8 @@ logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 plt.close(fig)
 
 status_file = Path(__file__).parent.parent / 'status.json'
+import status_lock
+status_lock.acquire(status_file)
 if status_file.exists():
     try:
         with open(status_file, 'r') as f:
@@ -537,6 +521,7 @@ status['RealtimeFireDanger'] = {
 
 with open(status_file, 'w') as f:
     json.dump(status, f, indent=4)
+status_lock.release()
 
 try:
     history = append_fire_danger_snapshot(

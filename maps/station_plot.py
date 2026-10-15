@@ -18,6 +18,7 @@ here.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import os
 import tempfile
 import time
@@ -32,16 +33,18 @@ import matplotlib.image as mpimg
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, ListedColormap, TwoSlopeNorm, to_rgb
+from matplotlib.ticker import MaxNLocator
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from scipy.interpolate import Rbf
 from scipy.ndimage import gaussian_filter
-from shapely.geometry import Point
+import shapely
 
 MAPS_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = MAPS_DIR.parent
 
 PIXEL_WIDTH, PIXEL_HEIGHT, MAP_DPI = 2048, 1152, 144
+MAP_BACKGROUND = "#E8E8E8"
 MO_EXTENT = (-95.8, -89.1, 35.8, 40.8)
 MAP_CENTRAL_LON, MAP_CENTRAL_LAT = -92.45, 38.3
 
@@ -72,6 +75,45 @@ QC_RAW_FIELDS = [
     ("observations.relative_humidity.value", 5, 25.0, 6.0),
     ("observations.wind_speed.value", 5, 20.0, 6.0),
 ]
+
+
+# Derived "extreme" fields (running max/min from maps/station_history.py) are
+# built from stored history, not the live observation, so QC_RAW_FIELDS can't
+# protect them: a stuck sensor's stored 36F "max" sits among neighbors in the
+# 80s. Same neighbor-outlier check, keyed by the field's leaf name
+# (neighbor_count, min_abs_deviation, mad_multiplier). Applied automatically
+# by every plot_* function below.
+QC_DERIVED_FIELDS = {
+    "air_temp_max_today": (5, 15.0, 6.0),
+    "air_temp_min_today": (5, 15.0, 6.0),
+    "feels_like_max_today": (5, 15.0, 6.0),
+    "feels_like_min_today": (5, 15.0, 6.0),
+    "wbgt_max_today": (5, 10.0, 6.0),
+    "dewpoint_max_24hr": (5, 15.0, 6.0),
+    # Wind gusts (raw and the history-derived maxima) swing a lot between
+    # neighbors in a storm, so the absolute floor is wide; this only catches
+    # a stuck sensor reading 90 mph among stations in the teens.
+    "wind_gust": (5, 25.0, 6.0),
+    "gust_max_1hr": (5, 25.0, 6.0),
+    "gust_max_today": (5, 25.0, 6.0),
+    "gust_max_yesterday": (5, 25.0, 6.0),
+}
+
+
+def qc_derived_field(stations: list[dict], field_path: str) -> int:
+    """Run the neighbor-outlier QC on `field_path` if it is a known derived
+    extreme field (see QC_DERIVED_FIELDS); no-op for anything else. Mutates
+    `stations` in place and returns the number of values nulled."""
+    parts = field_path.split(".")
+    leaf = parts[-2] if len(parts) >= 2 and parts[-1] == "value" else parts[-1]
+    params = QC_DERIVED_FIELDS.get(leaf)
+    if params is None:
+        return 0
+    neighbor_count, min_abs_deviation, mad_multiplier = params
+    return qc_filter_field(
+        stations, field_path,
+        neighbor_count=neighbor_count, min_abs_deviation=min_abs_deviation, mad_multiplier=mad_multiplier,
+    )
 
 
 def fetch_stations(*, valid_networks: Optional[set] = None, max_age_seconds: float = STATION_CACHE_MAX_AGE_SECONDS) -> list[dict]:
@@ -188,7 +230,7 @@ def generate_basemap():
     fig = plt.figure(
         figsize=(PIXEL_WIDTH / MAP_DPI, PIXEL_HEIGHT / MAP_DPI),
         dpi=MAP_DPI,
-        facecolor="#E8E8E8",
+        facecolor=MAP_BACKGROUND,
     )
     ax = plt.axes([0, 0, 1, 1], projection=map_crs)
     ax.set_frame_on(False)
@@ -214,24 +256,32 @@ def generate_basemap():
     return fig, ax, data_crs, map_crs, MAP_DPI
 
 
+@lru_cache(maxsize=8)
+def _projected_boundary(path: str, proj4: str):
+    """Boundary geometries reprojected once into the map projection.
+
+    Cartopy re-projects lat/lon geometries on every draw, which dominated
+    render time (~5s per basemap for the dense county/state outlines);
+    pre-projecting here and drawing with the map CRS skips that and renders
+    pixel-identically. Cached so scripts drawing several maps in one process
+    (e.g. the advisory maps) pay for it once.
+    """
+    return gpd.read_file(path).to_crs(proj4).geometry
+
+
 def redraw_boundaries(ax, data_crs, *, county_zorder: int = 8, state_zorder: int = 9) -> None:
     """County + state outlines. Default zorders are high enough to stay
     visible on top of a filled contour/pcolormesh layer underneath."""
+    map_crs = ax.projection
     if COUNTY_SHAPEFILE.is_file():
-        counties = gpd.read_file(COUNTY_SHAPEFILE)
-        if counties.crs != data_crs.proj4_init:
-            counties = counties.to_crs(data_crs.proj4_init)
         ax.add_geometries(
-            counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none",
-            linewidth=1, zorder=county_zorder,
+            _projected_boundary(str(COUNTY_SHAPEFILE), map_crs.proj4_init), crs=map_crs,
+            edgecolor="#B6B6B6", facecolor="none", linewidth=1, zorder=county_zorder,
         )
     if STATE_SHAPEFILE.is_file():
-        state = gpd.read_file(STATE_SHAPEFILE)
-        if state.crs != data_crs.proj4_init:
-            state = state.to_crs(data_crs.proj4_init)
         ax.add_geometries(
-            state.geometry, crs=data_crs, edgecolor="#000000", facecolor="none",
-            linewidth=1.5, zorder=state_zorder,
+            _projected_boundary(str(STATE_SHAPEFILE), map_crs.proj4_init), crs=map_crs,
+            edgecolor="#000000", facecolor="none", linewidth=1.5, zorder=state_zorder,
         )
 
 
@@ -321,6 +371,7 @@ def plot_station_values(
 ) -> int:
     """Dot + text label at each station for one numeric field, decluttered
     the same way rhmap-fil.py does. Returns the number of stations plotted."""
+    qc_derived_field(stations, field_path)
     plotted = 0
     for station, (value,) in _declutter(stations, [field_path], min_label_dist):
         lon, lat = station["longitude"], station["latitude"]
@@ -344,6 +395,8 @@ def plot_station_dual_values(
     """Dot + two stacked text labels per station (e.g. today's max over min,
     or RH over dewpoint) - the "two numbers at one dot" capability none of
     the existing maps/*.py scripts have."""
+    qc_derived_field(stations, top_field_path)
+    qc_derived_field(stations, bottom_field_path)
     plotted = 0
     for station, (top_value, bottom_value) in _declutter(stations, [top_field_path, bottom_field_path], min_label_dist):
         lon, lat = station["longitude"], station["latitude"]
@@ -362,7 +415,66 @@ def plot_station_dual_values(
     return plotted
 
 
-FILL_GRID_SIZE = 200
+# Fine grid + many levels + a matching blur keep the filled contours smooth
+# (a coarse 200-cell grid with 41 levels showed visibly stepped, jagged edges).
+@lru_cache(maxsize=1)
+def _missouri_geometry():
+    """Missouri outline in lon/lat, read once per process (every filled map
+    needs it for its mask)."""
+    if not STATE_SHAPEFILE.is_file():
+        return None
+    state = gpd.read_file(STATE_SHAPEFILE).to_crs("EPSG:4326")
+    return None if state.empty else state.geometry.iloc[0]
+
+
+_FILL_GRID_CACHE: dict = {}
+
+
+def _fill_grid(grid_size: int, map_crs, data_crs):
+    """(lon mesh, lat mesh, in-state mask, projected x, projected y) for the
+    fill grid, built once per process and reused by every map it draws.
+
+    Contouring in the map's own projected coordinates (rather than handing
+    cartopy lon/lat with transform=PlateCarree) skips cartopy re-projecting
+    every contour polygon on each draw - the single biggest cost of a filled
+    map (~7s of ~11s) - and renders the same picture."""
+    key = (grid_size, map_crs.proj4_init)
+    cached = _FILL_GRID_CACHE.get(key)
+    if cached is None:
+        grid_lon = np.linspace(MO_EXTENT[0], MO_EXTENT[1], grid_size)
+        grid_lat = np.linspace(MO_EXTENT[2], MO_EXTENT[3], grid_size)
+        lon_mesh, lat_mesh = np.meshgrid(grid_lon, grid_lat)
+        geometry = _missouri_geometry()
+        mask = shapely.contains_xy(geometry, lon_mesh, lat_mesh) if geometry is not None else None
+        projected = map_crs.transform_points(data_crs, lon_mesh, lat_mesh)
+        cached = (lon_mesh, lat_mesh, mask, projected[..., 0], projected[..., 1])
+        _FILL_GRID_CACHE[key] = cached
+    return cached
+
+
+FILL_GRID_SIZE = 400
+FILL_ALPHA = 0.8
+FILL_BLUR_SIGMA = 4
+FILL_LEVEL_COUNT = 161
+
+
+def opaque_blend_cmap(cmap_name: str, alpha: float = FILL_ALPHA, background: str = MAP_BACKGROUND) -> ListedColormap:
+    """`cmap_name` pre-blended with the (uniform) map background at `alpha`, so
+    the fill can be drawn fully opaque. Semi-transparent contourf bands overlap
+    slightly where they meet, which shows up as a thin darker stroke along every
+    contour edge; opaque bands with identical on-screen color don't."""
+    base = plt.get_cmap(cmap_name)
+    bg = np.array(to_rgb(background))
+
+    def blend(rgba):
+        return tuple(alpha * np.array(rgba[:3]) + (1 - alpha) * bg) + (1.0,)
+
+    # Index by integer so the blended map keeps the original's N: categorical
+    # maps (e.g. 5 fire-danger colors) rely on a BoundaryNorm built from cmap.N.
+    blended = ListedColormap([blend(base(i)) for i in range(base.N)], name=f"{getattr(base, 'name', 'cmap')}_opaque")
+    blended.set_under(blend(base(0)))
+    blended.set_over(blend(base(base.N - 1)))
+    return blended
 
 
 def plot_filled_field(
@@ -370,6 +482,8 @@ def plot_filled_field(
     cmap: str = "RdYlBu_r", diverging: bool = False, label: str = "",
     vmin: Optional[float] = None, vmax: Optional[float] = None,
     grid_size: int = FILL_GRID_SIZE,
+    levels: Optional[list] = None, colors: Optional[list] = None,
+    tick_labels: Optional[list] = None, clip_min: Optional[float] = None,
 ) -> int:
     """RBF-interpolated filled contour of a numeric field across Missouri,
     masked to the state outline, with a colorbar - the same
@@ -390,6 +504,7 @@ def plot_filled_field(
     the range still render, clipped to the end-cap color via
     `extend='both'`, so an out-of-range reading is visible as "pegged" rather
     than silently absent."""
+    qc_derived_field(stations, field_path)
     points_lon, points_lat, points_val = [], [], []
     for station in stations:
         value = _get_path(station, field_path)
@@ -402,41 +517,64 @@ def plot_filled_field(
     if len(points_lon) < 4:  # Rbf needs enough points for a stable fit
         return 0
 
-    grid_lon = np.linspace(MO_EXTENT[0], MO_EXTENT[1], grid_size)
-    grid_lat = np.linspace(MO_EXTENT[2], MO_EXTENT[3], grid_size)
-    grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
-    field_grid = gaussian_filter(
-        Rbf(points_lon, points_lat, points_val, function="multiquadric", smooth=0.5)(grid_lon_mesh, grid_lat_mesh),
-        sigma=2,
+    field_grid = interpolate_to_grid(points_lon, points_lat, points_val, ax, data_crs, grid_size=grid_size)
+    return draw_filled_grid(
+        fig, ax, data_crs, field_grid, cmap=cmap, diverging=diverging, label=label, vmin=vmin, vmax=vmax,
+        grid_size=grid_size, levels=levels, colors=colors, tick_labels=tick_labels, clip_min=clip_min,
+        point_count=len(points_lon),
     )
 
-    if STATE_SHAPEFILE.is_file():
-        state = gpd.read_file(STATE_SHAPEFILE)
-        if state.crs != data_crs.proj4_init:
-            state = state.to_crs(data_crs.proj4_init)
-        if not state.empty:
-            missouri_geom = state.geometry.iloc[0]
-            grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-            within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
-            field_grid[~within_mask] = np.nan
+
+def interpolate_to_grid(points_lon, points_lat, values, ax, data_crs, *, grid_size: int = FILL_GRID_SIZE, sigma: float = FILL_BLUR_SIGMA) -> np.ndarray:
+    """RBF-interpolate scattered station values onto the fill grid (lon/lat
+    mesh from _fill_grid, rows = latitude) and blur, unmasked."""
+    lon_mesh, lat_mesh, _mask, _x, _y = _fill_grid(grid_size, ax.projection, data_crs)
+    return gaussian_filter(
+        Rbf(points_lon, points_lat, values, function="multiquadric", smooth=0.5)(lon_mesh, lat_mesh), sigma=sigma,
+    )
+
+
+def draw_filled_grid(
+    fig, ax, data_crs, field_grid: np.ndarray, *, cmap: str = "RdYlBu_r", diverging: bool = False, label: str = "",
+    vmin: Optional[float] = None, vmax: Optional[float] = None, grid_size: int = FILL_GRID_SIZE,
+    levels: Optional[list] = None, colors: Optional[list] = None, tick_labels: Optional[list] = None,
+    clip_min: Optional[float] = None, point_count: int = 0,
+) -> int:
+    """Mask `field_grid` (from interpolate_to_grid, or computed from one - e.g.
+    a divergence) to Missouri and draw it as a filled contour + colorbar.
+    Returns point_count, or 0 if nothing finite remained to draw."""
+    _lon_mesh, _lat_mesh, mask, x_mesh, y_mesh = _fill_grid(grid_size, ax.projection, data_crs)
+    field_grid = np.array(field_grid, dtype=float)
+    if clip_min is not None:
+        field_grid = np.maximum(field_grid, clip_min)
+    if mask is not None:
+        field_grid[~mask] = np.nan
 
     finite = field_grid[np.isfinite(field_grid)]
     if not finite.size:
         return 0
-    if diverging:
+    if levels is not None:
+        norm = BoundaryNorm(levels, ncolors=len(levels) - 1, clip=True) if colors is not None else None
+        draw_levels = levels
+    elif diverging:
         if vmax is None:
             raise ValueError("plot_filled_field(diverging=True) requires a fixed vmax")
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
-        levels = np.linspace(-vmax, vmax, 41)
+        draw_levels = np.linspace(-vmax, vmax, FILL_LEVEL_COUNT)
     else:
         if vmin is None or vmax is None:
             raise ValueError("plot_filled_field requires fixed vmin/vmax (pass the field's realistic range)")
         norm = None
-        levels = np.linspace(vmin, vmax, 41)
+        draw_levels = np.linspace(vmin, vmax, FILL_LEVEL_COUNT)
 
+    if colors is not None:
+        fill_cmap = ListedColormap(colors)
+    else:
+        fill_cmap = opaque_blend_cmap(cmap)
     mesh = ax.contourf(
-        grid_lon_mesh, grid_lat_mesh, field_grid, transform=data_crs,
-        levels=levels, cmap=cmap, norm=norm, alpha=0.8, zorder=7, extend="both",
+        x_mesh, y_mesh, field_grid,
+        levels=draw_levels, cmap=fill_cmap, norm=norm, zorder=7, extend="both" if levels is None else "neither",
+        antialiased=False,
     )
     # Missouri's own western border angles inward below the NW panhandle (see
     # generate_basemap's west anchor), leaving a wedge of background open
@@ -444,8 +582,15 @@ def plot_filled_field(
     # (in the 2048x1152 canvas) - the same wedge the forecast graphics' own
     # legend sits in. Put the colorbar there instead of over the map.
     cax = fig.add_axes([0.025, 0.15, 0.018, 0.5])
-    fig.colorbar(mesh, cax=cax, label=label)
-    return len(points_lon)
+    # Round tick values regardless of how many contour levels there are.
+    if tick_labels is not None:
+        # Categorical fill: one tick per class, centered in its band.
+        colorbar = fig.colorbar(mesh, cax=cax, label=label, ticks=[(levels[i] + levels[i + 1]) / 2 for i in range(len(levels) - 1)])
+        colorbar.ax.set_yticklabels(tick_labels)
+        colorbar.ax.tick_params(length=0)
+    else:
+        fig.colorbar(mesh, cax=cax, label=label, ticks=MaxNLocator(nbins=8))
+    return point_count
 
 
 def plot_wind_barbs(

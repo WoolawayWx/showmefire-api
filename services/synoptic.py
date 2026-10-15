@@ -28,6 +28,9 @@ from core.ignored_stations import get_ignored_stations
 # Synoptic's "latest" endpoint returns each sensor's last-ever value, however old (a RAWS fuel-moisture
 # probe once reported 22.3% with a 2015 timestamp and was contoured into today's map). Drop readings that
 # are too old or physically implausible before they reach any product.
+# A logger with a bad clock (e.g. MOA11 reporting 2027 timestamps) can stamp
+# readings in the future; allow a little clock skew, reject anything beyond it.
+MAX_OBSERVATION_FUTURE_SKEW = timedelta(minutes=int(os.getenv("SMF_MAX_OBSERVATION_FUTURE_SKEW_MINUTES", "30")))
 MAX_OBSERVATION_AGE = timedelta(minutes=int(os.getenv("SMF_MAX_OBSERVATION_AGE_MINUTES", "360")))
 OBSERVATION_LIMITS = {
     "air_temp": (-60.0, 130.0),
@@ -41,7 +44,7 @@ OBSERVATION_LIMITS = {
 
 
 def observation_is_usable(key, value, observed_at, now=None):
-    """True when a reading is recent enough and inside the plausible range for its variable."""
+    """True when a reading is recent enough (and not future-dated) and inside the plausible range for its variable."""
     if value is None:
         return False
     if observed_at:
@@ -49,7 +52,8 @@ def observation_is_usable(key, value, observed_at, now=None):
             when = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
-            if (now or datetime.now(timezone.utc)) - when > MAX_OBSERVATION_AGE:
+            age = (now or datetime.now(timezone.utc)) - when
+            if age > MAX_OBSERVATION_AGE or -age > MAX_OBSERVATION_FUTURE_SKEW:
                 return False
         except ValueError:
             pass  # unparseable timestamp: let the value through rather than hide a live station
@@ -407,7 +411,13 @@ async def fetch_historical_station_data(states=None, days_back=1, networks=None,
         response = await session.get(url, params=params, timeout=120)
         response.raise_for_status()
         data = await response.json()
-    
+
+    # Drop ignored (broken) stations so every consumer of this data - forecast
+    # initialization, station plots, timeseries endpoints, archives - skips them.
+    if data.get("STATION"):
+        ignored = get_ignored_stations()
+        data["STATION"] = [s for s in data["STATION"] if (s.get("STID") or s.get("ID")) not in ignored]
+
     # Add metadata about the request
     data['_metadata'] = {
         'start_time': start_time.isoformat(),

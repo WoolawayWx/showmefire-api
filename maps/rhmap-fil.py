@@ -12,6 +12,8 @@ from rasterio.plot import show
 import matplotlib.pyplot as plt
 import geopandas as gpd
 import numpy as np
+from station_plot import opaque_blend_cmap
+import station_plot as sp
 from pathlib import Path
 import requests
 from scipy.interpolate import griddata, Rbf  # Add this import at the top if not present
@@ -93,17 +95,11 @@ def generate_basemap():
     map_extent = ax.get_extent(crs=data_crs)  
     bbox = box(*map_extent)
     
-    counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
-    if counties.crs != data_crs.proj4_init:
-        counties = counties.to_crs(data_crs.proj4_init)
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", 
+    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", 
                     facecolor='none', linewidth=1, zorder=5)
 
     
-    missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-    if missouriborder.crs != data_crs.proj4_init:
-        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-    ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", 
+    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", 
                     facecolor='none', linewidth=1, zorder=6)
 
     
@@ -149,14 +145,11 @@ if points:
     grid_values = gaussian_filter(grid_values, sigma=0)
 
     # Masking (same as fuel moisture)
-    missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-    if missouriborder.crs != data_crs.proj4_init:
-        missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-
-    if not missouriborder.empty:
-        missouri_geom = missouriborder.geometry.iloc[0]
-        grid_points = [Point(lon, lat) for lon, lat in zip(grid_lon_mesh.ravel(), grid_lat_mesh.ravel())]
-        within_mask = gpd.GeoSeries(grid_points).within(missouri_geom).values.reshape(grid_lon_mesh.shape)
+    # Shared, cached state mask + map-projected grid (see station_plot._fill_grid): the old
+    # per-Point Shapely mask and lon/lat contouring (cartopy re-projecting every polygon)
+    # were most of this script's runtime.
+    _, _, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(400, map_crs, data_crs)
+    if within_mask is not None:
         grid_values[~within_mask] = np.nan
 
     geotiff_ok = export_continuous_rgba_geotiff(
@@ -176,9 +169,9 @@ if points:
 
     # Plotting (same as fuel moisture)
     cs = ax.contourf(
-        grid_lon_mesh, grid_lat_mesh, grid_values, transform=data_crs,
+        grid_x_mesh, grid_y_mesh, grid_values,
         levels=np.linspace(0, 101, 256),
-        cmap='RdYlGn', alpha=0.75, zorder=7, antialiased=True
+        cmap=opaque_blend_cmap('RdYlGn', 0.75), zorder=7, antialiased=False
     )
 
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
@@ -213,15 +206,9 @@ if filtered_stations:
                 )
                 label_positions.append(pos)
 
-counties = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp')
-if counties.crs != data_crs.proj4_init:
-    counties = counties.to_crs(data_crs.proj4_init)
-ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
     
-missouriborder = gpd.read_file(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp')
-if missouriborder.crs != data_crs.proj4_init:
-    missouriborder = missouriborder.to_crs(data_crs.proj4_init)
-ax.add_geometries(missouriborder.geometry, crs=data_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
 
 ax.set_anchor('W') 
 
@@ -306,6 +293,8 @@ logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
 plt.close(fig)
 
 status_file = Path(__file__).parent.parent / 'status.json'
+import status_lock
+status_lock.acquire(status_file)
 if status_file.exists():
     try:
         with open(status_file, 'r') as f:
@@ -327,3 +316,4 @@ status['HumidityFiltered'] = {
 
 with open(status_file, 'w') as f:
     json.dump(status, f, indent=4)
+status_lock.release()

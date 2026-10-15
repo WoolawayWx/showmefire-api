@@ -5,13 +5,13 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import cartopy.crs as ccrs
-import geopandas as gpd
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
@@ -23,18 +23,42 @@ from rasterio.features import rasterize
 from rasterio.transform import from_bounds
 from scipy.ndimage import gaussian_filter
 
+from maps import station_plot as sp
+
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SERVICE_URL = "https://mapservices.weather.noaa.gov/raster/rest/services/obs/rfc_qpe/MapServer"
 CENTRAL = ZoneInfo("America/Chicago")
 EXTENT = (-95.8, -89.1, 35.8, 40.8)
+def _accumulation(stem: str, period: str, title_period: str):
+    return (stem, f"Last {period} Observed (inches)", f"{title_period} Precipitation", "inches")
+
+
 PRODUCTS = (
+    _accumulation("precip-1hr", "1 Hours", "1-Hour"),
+    _accumulation("precip-3hr", "3 Hours", "3-Hour"),
+    _accumulation("precip-6hr", "6 Hours", "6-Hour"),
+    _accumulation("precip-12hr", "12 Hours", "12-Hour"),
     ("precip-24hr", "Last 24 Hours Observed (inches)", "24-Hour Precipitation", "inches"),
+    _accumulation("precip-2day", "2 Days", "2-Day"),
+    _accumulation("precip-3day", "3 Days", "3-Day"),
+    _accumulation("precip-4day", "4 Days", "4-Day"),
+    _accumulation("precip-5day", "5 Days", "5-Day"),
     ("precip-7day", "Last 7 Days Observed (inches)", "7-Day Precipitation", "inches"),
+    _accumulation("precip-10day", "10 Days", "10-Day"),
+    _accumulation("precip-14day", "14 Days", "14-Day"),
     ("precip-30day", "Last 30 Days Observed (inches)", "30-Day Precipitation", "inches"),
     ("precip-60day", "Last 60 Days Observed (inches)", "60-Day Precipitation", "inches"),
+    _accumulation("precip-90day", "90 Days", "90-Day"),
+    _accumulation("precip-120day", "120 Days", "120-Day"),
+    _accumulation("precip-180day", "180 Days", "180-Day"),
+    _accumulation("precip-365day", "365 Days", "365-Day"),
     ("precip-30day-percent-normal", "Last 30 Days Percent of Normal (%)", "30-Day Precipitation Percent of Normal", "percent"),
     ("precip-60day-percent-normal", "Last 60 Days Percent of Normal (%)", "60-Day Precipitation Percent of Normal", "percent"),
 )
+# NOAA refreshes the short accumulations hourly, so these are republished every
+# hour (core/scheduler.py); the multi-day totals change slowly and only go out
+# with the twice-daily run.
+HOURLY_STEMS = frozenset({"precip-1hr", "precip-3hr", "precip-6hr", "precip-12hr", "precip-24hr"})
 LOG = logging.getLogger("precipitation_graphics")
 
 
@@ -180,21 +204,19 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
     ax.set_yticks([])
     ax.set_frame_on(False)
 
-    counties = gpd.read_file(PROJECT_DIR / "maps/shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp")
-    boundary = gpd.read_file(PROJECT_DIR / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp")
-    for frame in (counties, boundary):
-        if frame.crs is None:
-            raise RuntimeError("Missouri map boundary data has no CRS")
-    counties = counties.to_crs("EPSG:4326")
-    boundary = boundary.to_crs("EPSG:4326")
-    state_geometry = boundary.geometry.union_all()
+    state_geometry = sp._missouri_geometry()
 
     raster = mpimg.imread(BytesIO(image_bytes), format="png")
     raster = _smooth_and_mask_to_state(raster, state_geometry, EXTENT)
     ax.imshow(raster, extent=EXTENT, transform=data_crs, origin="upper", interpolation="bilinear", zorder=1)
 
-    for frame, color, width, zorder in ((counties, "#B6B6B6", 0.65, 5), (boundary, "#202020", 1.6, 8)):
-        ax.add_geometries(frame.geometry, crs=data_crs, edgecolor=color, facecolor="none", linewidth=width, zorder=zorder)
+    # Pre-projected into the map CRS (cached): letting cartopy re-project the
+    # lon/lat outlines on every draw was ~70% of this function's runtime.
+    for path, color, width, zorder in ((sp.COUNTY_SHAPEFILE, "#B6B6B6", 0.65, 5), (sp.STATE_SHAPEFILE, "#202020", 1.6, 8)):
+        ax.add_geometries(
+            sp._projected_boundary(str(path), map_crs.proj4_init), crs=map_crs,
+            edgecolor=color, facecolor="none", linewidth=width, zorder=zorder,
+        )
 
     ax.set_anchor("W")
     plt.subplots_adjust(left=0.05)
@@ -264,15 +286,31 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
     plt.close(fig)
 
 
-def generate_graphics(*, output_dir: Path | None = None, service: str = SERVICE_URL, session=requests, now: datetime | None = None) -> list[Path]:
+def generate_graphics(
+    *, output_dir: Path | None = None, service: str = SERVICE_URL, session=requests, now: datetime | None = None,
+    stems: frozenset | set | None = None,
+) -> list[Path]:
+    """Render the NOAA QPE graphics (all of PRODUCTS, or only those whose stem
+    is in `stems`). Network fetches run in parallel; drawing stays serial
+    because Matplotlib is not thread-safe."""
     output_dir = Path(output_dir or PROJECT_DIR / "images")
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = (now or datetime.now(CENTRAL)).astimezone(CENTRAL)
     layer_ids = resolve_layer_ids(service, session=session)
+    products = [product for product in PRODUCTS if stems is None or product[0] in stems]
+
+    def fetch(product):
+        layer_id = layer_ids[product[1]]
+        return (
+            fetch_layer_png(layer_id, service=service, session=session),
+            fetch_legend_entries(layer_id, service=service, session=session),
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        fetched = list(pool.map(fetch, products))
+
     outputs = []
-    for stem, layer_name, title, units in PRODUCTS:
-        image = fetch_layer_png(layer_ids[layer_name], service=service, session=session)
-        legend = fetch_legend_entries(layer_ids[layer_name], service=service, session=session)
+    for (stem, _layer_name, title, units), (image, legend) in zip(products, fetched):
         path = output_dir / f"mo-{stem}.png"
         temporary = path.with_suffix(".tmp.png")
         _draw_map(image, legend, title, units, timestamp, temporary)
