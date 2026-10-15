@@ -19,9 +19,11 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
-from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
-from matplotlib.patches import Patch
+from matplotlib.patches import Rectangle
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
@@ -36,12 +38,11 @@ US_BBOX, US_SIZE = (-126.0, 23.0, -66.0, 50.0), (2400, 1080)
 US_EXTENT = (-124.2, -67.5, 24.0, 49.6)
 SOURCE = "Data Source: NOAA/NWS RIDGE Radar Mosaic\nBase Reflectivity (1x1 km)"
 
-# The standard NWS reflectivity key the mosaic is drawn with.
-DBZ_COLORS = [
-    ("5", "#04E9E7"), ("10", "#019FF4"), ("15", "#0300F4"), ("20", "#02FD02"), ("25", "#01C501"),
-    ("30", "#008E00"), ("35", "#FDF802"), ("40", "#E5BC00"), ("45", "#FD9500"), ("50", "#FD0000"),
-    ("55", "#D40000"), ("60", "#BC0000"), ("65", "#F800FD"), ("70", "#9854C6"),
-]
+# The mosaic service draws a continuous color ramp and publishes no dBZ table for it, so
+# the legend is built from the colors the service actually returns (sampled from its
+# output, light to intense) rather than a numeric key that would not match the image.
+INTENSITY_COLORS = ["#506ca5", "#5289b8", "#58beb9", "#43d484", "#0da912", "#297509", "#ccc202", "#ffbf00", "#ff7400", "#fd2f00"]
+INTENSITY_LABELS = [(0.08, "Light"), (0.40, "Moderate"), (0.72, "Heavy"), (0.95, "Intense")]
 
 
 def fetch_radar(bbox: tuple, size: tuple) -> np.ndarray:
@@ -56,8 +57,37 @@ def fetch_radar(bbox: tuple, size: tuple) -> np.ndarray:
     return mpimg.imread(BytesIO(response.content), format="png")
 
 
-def _dbz_legend_handles():
-    return [Patch(facecolor=color, edgecolor="#555555", linewidth=0.4, label=f"{label}") for label, color in DBZ_COLORS]
+def _add_intensity_legend(fig, x: float, y: float, width: float, height: float) -> None:
+    """Boxed horizontal color bar (light -> intense) with its lower-left corner at (x, y) in
+    figure fractions; drawn above the map and sized so it never needs to sit on the data."""
+    pad_x, pad_top, pad_bottom = 0.012, 0.045, 0.045
+    box_height = height + pad_top + pad_bottom + 0.012
+    fig.add_artist(Rectangle(
+        (x - pad_x, y - pad_bottom), width + 2 * pad_x, box_height, transform=fig.transFigure,
+        facecolor="white", edgecolor="#999999", linewidth=0.8, zorder=40,
+    ))
+    fig.text(x, y + height + 0.012, "Radar Intensity (base reflectivity)", fontsize=11, fontweight="bold",
+             ha="left", va="bottom", color="#222222", zorder=60)
+    bar = fig.add_axes((x, y, width, height), zorder=50)
+    ramp = LinearSegmentedColormap.from_list("radar_intensity", INTENSITY_COLORS)
+    bar.imshow(np.linspace(0, 1, 256)[None, :], aspect="auto", cmap=ramp, extent=(0, 1, 0, 1))
+    bar.set_xticks([]); bar.set_yticks([])
+    for spine in bar.spines.values():
+        spine.set_edgecolor("#555555"); spine.set_linewidth(0.6)
+    for position, label in INTENSITY_LABELS:
+        fig.text(x + position * width, y - 0.01, label, fontsize=10, ha="center", va="top", color="#222222", zorder=60)
+
+
+def _mask_to_state(image: np.ndarray, bbox: tuple) -> np.ndarray:
+    """Make radar transparent outside Missouri's outline (bbox is lon/lat west, south, east, north)."""
+    state = sp._missouri_geometry()
+    if state is None:
+        return image
+    height, width = image.shape[:2]
+    mask = rasterize([(state, 1)], out_shape=(height, width), transform=from_bounds(*bbox, width, height), fill=0, dtype="uint8").astype(bool)
+    masked = image.copy()
+    masked[~mask, 3] = 0.0
+    return masked
 
 
 @lru_cache(maxsize=1)
@@ -74,15 +104,11 @@ def render_missouri(image: np.ndarray) -> dict:
     started = time.time()
     fig, ax, data_crs, _map_crs, _dpi = sp.generate_basemap()
     bbox = MISSOURI_BBOX
-    ax.imshow(image, origin="upper", extent=(bbox[0], bbox[2], bbox[1], bbox[3]), transform=data_crs, interpolation="nearest", zorder=3)
-    legend = fig.legend(
-        handles=_dbz_legend_handles(), title="Reflectivity (dBZ)", loc="center left", bbox_to_anchor=(0.012, 0.42),
-        frameon=True, framealpha=1.0, facecolor="white", edgecolor="#999999", fontsize=9, title_fontsize=10, handlelength=1.6, handleheight=1.0, labelspacing=0.5,
-    )
-    legend.set_zorder(20)
+    ax.imshow(_mask_to_state(image, bbox), origin="upper", extent=(bbox[0], bbox[2], bbox[1], bbox[3]), transform=data_crs, interpolation="nearest", zorder=3)
+    _add_intensity_legend(fig, x=0.745, y=0.22, width=0.225, height=0.028)
     sp.add_branding(
         fig, ax, title="Missouri Radar", subtitle=f"Valid Time: {spx.valid_time_label()}",
-        description=f"{SOURCE}\n\nLatest composite base reflectivity. Colors\nshow precipitation intensity; green is light\nrain, yellow-orange heavy, red-purple intense\nor hail.",
+        description=f"{SOURCE}\n\nLatest composite base reflectivity, shown\nover Missouri only. Colors show precipitation\nintensity: blue-teal is light, green moderate,\nyellow-orange heavy and red intense.",
     )
     status = {"product": "radar_missouri", "status": "updated", "last_update": spx.valid_time_label(), "runtime_sec": round(time.time() - started, 2)}
     sp.save_and_record_status(fig, spx.IMAGES_DIR / "mo-radar.png", spx.STATUS_DIR / "radar_missouri.json", status)
@@ -118,11 +144,7 @@ def render_national(image: np.ndarray) -> dict:
     sp._ensure_fonts_loaded()
     fig.text(0.015, 0.975, "National Radar", fontsize=26, fontweight="bold", ha="left", va="top", fontname="Plus Jakarta Sans")
     fig.text(0.015, 0.925, f"Valid Time: {spx.valid_time_label()}  |  {SOURCE.splitlines()[0]}", fontsize=13, ha="left", va="top", fontname="Montserrat")
-    legend = fig.legend(
-        handles=_dbz_legend_handles(), title="Reflectivity (dBZ)", loc="lower left", bbox_to_anchor=(0.012, 0.03), ncol=7,
-        frameon=True, facecolor="white", edgecolor="#999999", fontsize=9, title_fontsize=10, handlelength=1.4, handleheight=0.9, columnspacing=1.0,
-    )
-    legend.set_zorder(20)
+    _add_intensity_legend(fig, x=0.03, y=0.085, width=0.24, height=0.03)
     fig.text(0.99, 0.015, "ShowMeFire.org", fontsize=16, fontweight="bold", ha="right", va="bottom", fontname="Montserrat")
     logo = _logo()
     if logo is not None:

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from core.database import get_db_path
-from services.graphic_renderer import PRODUCT_URLS, fetch_spc_product
+from services.graphic_renderer import PRODUCT_URLS, USDM_URL, fetch_spc_product, fetch_usdm_fresh
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,9 @@ def _changed_products(observed: dict[str, str]) -> set[str]:
     return {product_id for product_id, digest in observed.items() if previous.get(product_id) != digest}
 
 
+_SOURCE_URLS = {**PRODUCT_URLS, "usdm": USDM_URL}
+
+
 def _queue_affected_bundles(changed_products: set[str]) -> list[dict]:
     """Create jobs for active bundles affected by this SPC source update."""
     queued: list[dict] = []
@@ -51,7 +54,7 @@ def _queue_affected_bundles(changed_products: set[str]) -> list[dict]:
             bundle = json.loads(row["config_json"])
             product_id = bundle.get("product_id")
             affected = product_id in changed_products or (
-                product_id == "spc_four_panel" and bool(changed_products)
+                product_id == "spc_four_panel" and bool(changed_products & set(PRODUCT_URLS))
             )
             if not affected:
                 continue
@@ -93,24 +96,27 @@ def _record_processed(observed: dict[str, str], changed_products: set[str]) -> N
                      source_fingerprint=excluded.source_fingerprint,
                      observed_at=CURRENT_TIMESTAMP,
                      processed_at=CURRENT_TIMESTAMP""",
-                (product_id, PRODUCT_URLS[product_id], observed[product_id]),
+                (product_id, _SOURCE_URLS[product_id], observed[product_id]),
             )
 
 
-async def refresh_spc_graphics() -> dict:
-    """Poll SPC once and render every active bundle affected by an update.
+async def refresh_spc_graphics(product_ids: tuple[str, ...] | None = None) -> dict:
+    """Poll the given sources (default: all SPC outlooks) once and render every
+    active bundle affected by an update.
 
     Active SPC bundles are the current subscription registry. Source state is
     advanced only after every queued render completes or is skipped, allowing
     a failed department render to be retried on the next scheduler tick.
     """
+    product_ids = tuple(product_ids or PRODUCT_URLS)
     payloads = await asyncio.gather(*(
-        asyncio.to_thread(fetch_spc_product, product_id)
-        for product_id in PRODUCT_URLS
+        asyncio.to_thread(fetch_usdm_fresh if product_id == "usdm" else fetch_spc_product,
+                          *(() if product_id == "usdm" else (product_id,)))
+        for product_id in product_ids
     ))
     observed = {
         product_id: _fingerprint(payload)
-        for product_id, payload in zip(PRODUCT_URLS, payloads)
+        for product_id, payload in zip(product_ids, payloads)
     }
     changed_products = _changed_products(observed)
     if not changed_products:
@@ -155,3 +161,15 @@ async def refresh_spc_graphics_job() -> None:
             logger.info("SPC graphics refresh finished: %s", result)
     except Exception as error:
         logger.error("SPC graphics source poll failed: %s", error, exc_info=True)
+
+
+async def refresh_usdm_graphics_job() -> None:
+    """Weekly U.S. Drought Monitor poll. The Monitor publishes Thursday
+    mornings (Eastern); the scheduler only calls this on Thursdays, and an
+    unchanged map is detected by fingerprint so nothing is re-rendered."""
+    try:
+        result = await refresh_spc_graphics(("usdm",))
+        if result["changed_products"]:
+            logger.info("Drought Monitor graphics refresh finished: %s", result)
+    except Exception as error:
+        logger.error("Drought Monitor graphics poll failed: %s", error, exc_info=True)

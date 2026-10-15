@@ -7,7 +7,7 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
-from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data, fetch_buffer_stations
+from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data, get_buffer_station_data, fetch_buffer_stations
 from services.timeseries import fetchtimeseriesdata
 from services.station_precip import fetch_station_precip
 from services.station_et import fetch_station_et
@@ -40,7 +40,7 @@ from services.beta_verification import run_beta_verification
 from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast_v1_operational, run_forecast_v1_shadow
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
-from services.spc_graphics_watcher import refresh_spc_graphics_job
+from services.spc_graphics_watcher import refresh_spc_graphics_job, refresh_usdm_graphics_job
 from scripts.publish_precipitation_graphics import publish as publish_precipitation_graphics
 
 logger = logging.getLogger(__name__)
@@ -136,6 +136,9 @@ async def record_station_history_job():
                 "wbgt_f": _wbgt,
             }
             record_observations(stations, fields)
+            # Neighbor-state stations: pressure only, to anchor the 3-hour change maps at the border.
+            buffer_stations = get_buffer_station_data().get("stations") or []
+            record_observations(buffer_stations, {"sea_level_pressure_mb": _obs("sea_level_pressure")})
             prune_old()
 
         await asyncio.to_thread(_record)
@@ -584,6 +587,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
             max_instances=1,
             coalesce=True,
         )
+    # The Drought Monitor releases Thursdays ~8:30 AM ET; poll every 30 min from
+    # 9:00 AM to 5:30 PM ET to catch late releases. Unchanged data re-renders nothing.
+    scheduler.add_job(
+        refresh_usdm_graphics_job,
+        'cron',
+        day_of_week='thu', hour='9-17', minute='0,30', timezone='America/New_York',
+        id='refresh_usdm_department_graphics',
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
     scheduler.add_job(
         purge_delivery_records,

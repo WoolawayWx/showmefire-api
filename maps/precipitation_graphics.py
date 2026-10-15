@@ -33,6 +33,11 @@ def _accumulation(stem: str, period: str, title_period: str):
     return (stem, f"Last {period} Observed (inches)", f"{title_period} Precipitation", "inches")
 
 
+def _departure(stem: str, layer_period: str, title_period: str):
+    """Observed minus normal, in inches (NOAA's "Departure from Normal" layers)."""
+    return (stem, f"{layer_period} Departure from Normal (inches)", f"{title_period} Precipitation Departure from Normal", "departure")
+
+
 PRODUCTS = (
     _accumulation("precip-1hr", "1 Hours", "1-Hour"),
     _accumulation("precip-3hr", "3 Hours", "3-Hour"),
@@ -54,6 +59,15 @@ PRODUCTS = (
     _accumulation("precip-365day", "365 Days", "365-Day"),
     ("precip-30day-percent-normal", "Last 30 Days Percent of Normal (%)", "30-Day Precipitation Percent of Normal", "percent"),
     ("precip-60day-percent-normal", "Last 60 Days Percent of Normal (%)", "60-Day Precipitation Percent of Normal", "percent"),
+    _departure("precip-7day-departure", "Last 7 Days", "7-Day"),
+    _departure("precip-14day-departure", "Last 14 Days", "14-Day"),
+    _departure("precip-30day-departure", "Last 30 Days", "30-Day"),
+    _departure("precip-60day-departure", "Last 60 Days", "60-Day"),
+    _departure("precip-90day-departure", "Last 90 Days", "90-Day"),
+    _departure("precip-180day-departure", "Last 180 Days", "180-Day"),
+    _departure("precip-365day-departure", "Last 365 Days", "365-Day"),
+    _departure("precip-mtd-departure", "Month to Date", "Month-to-Date"),
+    _departure("precip-ytd-departure", "Year to Date", "Year-to-Date"),
 )
 # NOAA refreshes the short accumulations hourly, so these are republished every
 # hour (core/scheduler.py); the multi-day totals change slowly and only go out
@@ -152,9 +166,11 @@ def _shorten_legend_label(label: str) -> str:
         return f"< {label.rsplit(' ', 1)[-1]}"
     if lower in ("missing data", "missing_data"):
         return "No Data"
-    match = re.match(r"^([\d.]+)\s+to\s+([\d.]+)$", label, re.IGNORECASE)
+    match = re.match(r"^(-?[\d.]+)\s+to\s+(-?[\d.]+)$", label, re.IGNORECASE)
     if match:
-        return f"{match.group(1)}–{match.group(2)}"
+        low, high = match.groups()
+        # An en dash next to a minus sign is unreadable ("-1–-0.5"); keep "to" for negatives.
+        return f"{low} to {high}" if "-" in low + high else f"{low}–{high}"
     return label
 
 
@@ -231,7 +247,10 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
             font_manager.fontManager.addfont(str(font_path))
     fig.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans", color="#202020")
     fig.text(0.99, 0.90, f"NOAA RFC QPE | Valid Time: {timestamp.strftime('%Y-%m-%d %H:%M CT')}", fontsize=16, ha="right", va="top", fontname="Montserrat", color="#333333")
-    description = f"Accumulated precipitation ({units})" if units == "inches" else "Precipitation relative to normal (%)"
+    description = {
+        "inches": f"Accumulated precipitation ({units})",
+        "departure": "Observed minus normal precipitation (inches);\npositive is wetter than normal, negative is drier",
+    }.get(units, "Precipitation relative to normal (%)")
     fig.text(
         0.99, 0.62,
         f"{description}\n\n"
@@ -253,7 +272,10 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
     swatch_w = 0.018
     swatch_h = min(row_height * 0.7, swatch_w)
     title_x, swatch_x, label_x = 0.022, 0.037, 0.062
-    legend_title = "Accumulated Precipitation (in)" if units == "inches" else "Precipitation vs. Normal (%)"
+    legend_title = {
+        "inches": "Accumulated Precipitation (in)",
+        "departure": "Departure from Normal (in)",
+    }.get(units, "Precipitation vs. Normal (%)")
     fig.text(
         title_x, (legend_top + legend_bottom) / 2, legend_title,
         transform=fig.transFigure, rotation=90, fontsize=11, ha="center", va="center",

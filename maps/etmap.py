@@ -1,6 +1,6 @@
 """Station reference-ET maps (current, rolling 24 h, peak and low hourly rate).
 
-Uses /stations/et: hourly FAO-56 Penman-Monteith at RAWS stations (the only network with solar
+Uses /stations/et: hourly ASCE-EWRI short-crop Penman-Monteith at RAWS stations (the only network with solar
 radiation) across Missouri and the neighbor states. Writes gis/realtime/station_et_*.tif (map
 fills) and images/mo-et-*.png (uploaded to the CDN by scripts/upload_cdn.py).
 """
@@ -12,7 +12,7 @@ from station_rbf import build_fill_products, fetch_records
 BLURB = (
     "Data Source: RAWS Stations from Synoptic Weather\n"
     "(the only official network reporting solar radiation)\n\n"
-    "Grass reference evapotranspiration, FAO-56 Penman-Monteith,\n"
+    "Short-crop reference evapotranspiration, ASCE-EWRI Penman-Monteith,\n"
     "calculated hourly from temperature, humidity, wind and solar radiation.\n"
     "Values interpolated from available stations (RAWS are sparse, so areas far from a\n"
     "station are estimates); local variations may occur."
@@ -44,8 +44,9 @@ SPECS = [
 
 def main():
     records = fetch_records('/stations/et')
-    build_fill_products(records, SPECS)
-    render_png_products(records, SPECS)
+    grids = {}  # each field is gridded once and shared by the GeoTIFF and PNG passes
+    build_fill_products(records, SPECS, grids=grids)
+    render_png_products(records, SPECS, grids=grids)
 
 
 if __name__ == '__main__':

@@ -133,3 +133,11 @@ def test_generate_graphics_can_render_only_the_hourly_products(tmp_path, monkeyp
 
 def test_every_hourly_stem_is_a_defined_product():
     assert graphics.HOURLY_STEMS <= {stem for stem, *_ in graphics.PRODUCTS}
+
+
+def test_departure_legend_labels_keep_negative_ranges_readable():
+    assert graphics._shorten_legend_label("-1 to -0.5") == "-1 to -0.5"
+    assert graphics._shorten_legend_label("-0.5 to 0.5") == "-0.5 to 0.5"
+    assert graphics._shorten_legend_label("2 to 3") == "2–3"
+    assert graphics._shorten_legend_label("Less than -8") == "< -8"
+    assert graphics._shorten_legend_label("Greater than or equal to 8") == "≥ 8"

@@ -33,8 +33,9 @@ SPECS = [
 
 def main():
     records = fetch_records('/stations/precip')
-    build_fill_products(records, SPECS)
-    render_png_products(records, SPECS)
+    grids = {}  # each field is gridded once and shared by the GeoTIFF and PNG passes
+    build_fill_products(records, SPECS, grids=grids)
+    render_png_products(records, SPECS, grids=grids)
 
 
 if __name__ == '__main__':

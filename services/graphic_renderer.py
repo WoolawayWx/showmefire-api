@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,7 +42,22 @@ PRODUCT_URLS = {
     "spc_wind": f"{SPC_BASE}/day1otlk_wind.nolyr.geojson",
     "spc_hail": f"{SPC_BASE}/day1otlk_hail.nolyr.geojson",
 }
-PRODUCT_IDS = set(PRODUCT_URLS) | {"spc_four_panel", "mo_alerts"}
+USDM_URL = "https://droughtmonitor.unl.edu/data/json/usdm_current.json"
+PRODUCT_IDS = set(PRODUCT_URLS) | {"spc_four_panel", "mo_alerts", "usdm"}
+# Official U.S. Drought Monitor category colors.
+USDM_CATEGORIES = {
+    0: ("D0 Abnormally Dry", "#ffff00"),
+    1: ("D1 Moderate Drought", "#fcd37f"),
+    2: ("D2 Severe Drought", "#ffaa00"),
+    3: ("D3 Extreme Drought", "#e60000"),
+    4: ("D4 Exceptional Drought", "#730000"),
+}
+# The national file is ~18 MB; clip to the area graphics can show and simplify
+# so the browser preview proxy and the renderer both stay fast.
+USDM_CLIP_BOUNDS = (-135.0, 20.0, -60.0, 55.0)
+USDM_SIMPLIFY_DEGREES = 0.02
+USDM_CACHE_SECONDS = 3600
+_usdm_cache: dict = {"at": 0.0, "payload": None}
 CONUS_EXTENT = (-125.0, -66.5, 24.0, 50.0)
 MISSOURI_EXTENT = (-95.9, -89.0, 35.8, 40.8)
 FALLBACK_COLORS = {2: "#78c878", 5: "#8b4726", 10: "#ffc77d", 15: "#ffff00", 30: "#ff0000", 45: "#ff00ff", 60: "#912cee"}
@@ -62,8 +78,40 @@ def _fetch(url: str) -> bytes:
     return response.content
 
 
+def _fetch_usdm(force: bool = False) -> bytes:
+    """Fetch the current U.S. Drought Monitor, trimmed and styled for rendering.
+
+    Output features carry dn (0-4), label and fill so the shared outlook
+    drawing and legend code handles them like any other product. The result is
+    cached because the Monitor only changes weekly.
+    """
+    now = time.monotonic()
+    if not force and _usdm_cache["payload"] is not None and now - _usdm_cache["at"] < USDM_CACHE_SECONDS:
+        return _usdm_cache["payload"]
+    frame = _as_frame(_fetch(USDM_URL))
+    if not frame.empty:
+        frame = frame.clip(USDM_CLIP_BOUNDS)
+        frame = frame[~frame.geometry.is_empty].copy()
+        frame["geometry"] = frame.geometry.simplify(USDM_SIMPLIFY_DEGREES, preserve_topology=True)
+        frame["dn"] = frame["DM"].astype(int)
+        frame["label"] = frame["dn"].map(lambda dm: USDM_CATEGORIES.get(dm, (f"D{dm}", "#d1d5db"))[0])
+        frame["fill"] = frame["dn"].map(lambda dm: USDM_CATEGORIES.get(dm, (f"D{dm}", "#d1d5db"))[1])
+        frame["stroke"] = "#6b7280"
+        frame = frame[["dn", "label", "fill", "stroke", "geometry"]]
+    payload = frame.to_json().encode()
+    _usdm_cache.update(at=now, payload=payload)
+    return payload
+
+
+def fetch_usdm_fresh() -> bytes:
+    """Bypass the preview cache; used by the weekly change-detection poll."""
+    return _fetch_usdm(force=True)
+
+
 def fetch_spc_product(product_id: str) -> bytes:
-    """Fetch one supported SPC outlook as GIS data."""
+    """Fetch one supported SPC outlook (or the U.S. Drought Monitor) as GIS data."""
+    if product_id == "usdm":
+        return _fetch_usdm()
     try:
         url = PRODUCT_URLS[product_id]
     except KeyError as exc:
@@ -421,7 +469,7 @@ def _render_sources(config: dict):
         if product_id == "mo_alerts":
             payload, source = _load_alert_bytes()
         else:
-            source = PRODUCT_URLS[product_id]
+            source = USDM_URL if product_id == "usdm" else PRODUCT_URLS[product_id]
             payload = fetch_spc_product(product_id)
         payloads.append(payload); urls.append(source); frames.append(_as_frame(payload))
     return product_ids, payloads, urls, frames
@@ -504,7 +552,7 @@ def render_graphic(config: dict) -> dict:
     tile_count = base_tile_count + reference_tile_count
     reference_boundaries = _reference_boundaries()
     fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI), dpi=DPI, facecolor=background_color)
-    labels = {"spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_wind": "Day 1 Wind", "spc_hail": "Day 1 Hail", "mo_alerts": "Missouri Weather Alerts"}
+    labels = {"spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_wind": "Day 1 Wind", "spc_hail": "Day 1 Hail", "mo_alerts": "Missouri Weather Alerts", "usdm": "U.S. Drought Monitor"}
     for product_id, frame, position in zip(product_ids, frames, positions):
         panel_title = labels[product_id] if config["product_id"] == "spc_four_panel" else ""
         _draw_frame(fig.add_axes(position), frame, panel_title, extent, basemap, reference_overlay,

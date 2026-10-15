@@ -311,13 +311,14 @@ def products():
         {"id": "spc_hail", "label": "Day 1 Hail"},
         {"id": "spc_four_panel", "label": "Day 1 Four Panel"},
         {"id": "mo_alerts", "label": "Missouri Weather Alerts"},
+        {"id": "usdm", "label": "U.S. Drought Monitor"},
     ]}
 
 
 @router.get("/preview-data/{product_id}")
 async def preview_data(product_id: str):
     """Short-lived GIS proxy used by the browser's live preview and screenshot render."""
-    if product_id not in {"spc_cat", "spc_tor", "spc_wind", "spc_hail", "mo_alerts"}:
+    if product_id not in {"spc_cat", "spc_tor", "spc_wind", "spc_hail", "mo_alerts", "usdm"}:
         raise HTTPException(status_code=404, detail="Preview data is not available for this product")
     try:
         if product_id == "mo_alerts":

@@ -30,12 +30,14 @@ def _raws(skip=(), stale_hours=0, drop=(), elevation_ft=1100.0, hours=26):
 
 class HourlyEtoTests(unittest.TestCase):
     def test_matches_fao56_hourly_example(self):
+        # ASCE-EWRI short crop (Cd 0.24 by day) runs ~4 % above the FAO-56 published value
+        # (0.63 mm/h, Cd 0.34) for the same inputs, so the expectation is ~0.65.
         # FAO-56 Example 19: 1 Oct, 14:00-15:00 local standard time (Lz = 15 E = UTC+1) at
-        # 16 13'N 16 15'E, 8 m; T 38 C, RH 52 %, u2 3.3 m/s, Rs 2.450 MJ/m2/h; published ETo ~0.63 mm/h.
+        # 16 13'N 16 15'E, 8 m; T 38 C, RH 52 %, u2 3.3 m/s, Rs 2.450 MJ/m2/h; inputs from the published example.
         when = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
         lat, lon = 16 + 13 / 60, 16 + 15 / 60
         eto, ratio = hourly_eto_mm(38, 52, 3.3, 2.450 / 0.0036, lat, lon, 8, when, wind_height_m=2.0)
-        self.assertAlmostEqual(eto, 0.63, delta=0.03)
+        self.assertAlmostEqual(eto, 0.65, delta=0.02)
         self.assertIsNotNone(ratio)  # a daytime hour reports its measured Rs/Rso
         ra, _ = solar_geometry(lat, lon, when)
         self.assertAlmostEqual(ra, 3.54, delta=0.2)  # published 3.543; ours is ~4 % low

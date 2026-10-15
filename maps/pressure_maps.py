@@ -9,6 +9,7 @@ sys.path.append(str(PROJECT_DIR))
 from maps import station_plot as sp
 from maps import station_products as spx
 from maps.station_history import get_changes_batch
+from maps.station_rbf import buffer_stations
 from services import derived_met
 
 LOOKBACK_HOURS = 3
@@ -40,9 +41,23 @@ def prepare(stations: list[dict]) -> tuple[dict, bool]:
     return changes, bool(changes)
 
 
+def anchor_points(buffer: list[dict], field: str) -> list[tuple[float, float, float]]:
+    """(lon, lat, value) for neighbor-state stations that have `field`, so the
+    fill is anchored at the border rather than extrapolated past it."""
+    points = []
+    for station in buffer:
+        value = spx.obs_value(station, field)
+        if value is not None and station.get("longitude") is not None and station.get("latitude") is not None:
+            points.append((station["longitude"], station["latitude"], value))
+    return points
+
+
 def main() -> None:
     stations = sp.fetch_stations()
-    changes, have_history = prepare(stations)
+    # Neighbor-state stations anchor the interpolation at the border; markers and
+    # labels stay Missouri-only. Their 3-hour history is recorded by the scheduler.
+    buffer = buffer_stations()
+    changes, have_history = prepare(stations + buffer)
     note = "" if have_history else "\n\nAccumulating history - full coverage 3 hours after the first recording."
     reduction = "Pressure reduced to sea level, so stations at different elevations are comparable."
 
@@ -50,7 +65,8 @@ def main() -> None:
         title = f"Sea-Level Pressure ({unit})"
         return lambda: spx.render_map(
             stations, product=f"pressure_{png}", png_name=f"mo-pressure-{png}.png", title=title,
-            field=field, fill=dict(cmap="viridis", label=label, vmin=vmin, vmax=vmax), formatter=fmt,
+            field=field, fill=dict(cmap="viridis", label=label, vmin=vmin, vmax=vmax, extra_points=anchor_points(buffer, field)),
+            formatter=fmt,
             description=f"Sea-level pressure ({unit}) at each reporting station.\n{reduction}",
         )
 
@@ -58,7 +74,8 @@ def main() -> None:
         title = f"3-Hour Sea-Level Pressure Change ({unit})"
         return lambda: spx.render_map(
             stations, product=f"pressurechange_3hr_{png}", png_name=f"mo-pressurechange-3hr-{png}.png", title=title,
-            field=field, fill=dict(cmap="PRGn", diverging=True, label=label, vmax=vmax), formatter=fmt,
+            field=field, fill=dict(cmap="PRGn", diverging=True, label=label, vmax=vmax, extra_points=anchor_points(buffer, field)),
+            formatter=fmt,
             ok=have_history, status_note=note,
             description=(
                 f"Change in sea-level pressure ({unit}) over the last 3 hours.\n"

@@ -10,7 +10,6 @@ import matplotlib
 
 matplotlib.use('Agg')
 import cartopy.crs as ccrs
-import geopandas as gpd
 import matplotlib.font_manager as font_manager
 import matplotlib.image as mpimg
 import matplotlib.patheffects as path_effects
@@ -20,8 +19,10 @@ import pandas as pd
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 
 try:
+    import station_plot as sp
     from station_rbf import EXTENT, MAPS_DIR, grid_for_spec, make_grid
 except ImportError:  # imported as maps.station_png (tests)
+    from maps import station_plot as sp
     from maps.station_rbf import EXTENT, MAPS_DIR, grid_for_spec, make_grid
 
 PROJECT_DIR = MAPS_DIR.parent
@@ -47,10 +48,9 @@ def _basemap():
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_extent(EXTENT, crs=data_crs)
-    counties = gpd.read_file(MAPS_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp').to_crs(4326)
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor='#B6B6B6', facecolor='none', linewidth=1, zorder=5)
-    border = gpd.read_file(MAPS_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp').to_crs(4326)
-    ax.add_geometries(border.geometry, crs=data_crs, edgecolor='#000000', facecolor='none', linewidth=1.5, zorder=6)
+    ax.set_autoscale_on(False)
+    # Cached, pre-projected outlines drawn above the fill (zorder 8/9), as in the other maps.
+    sp.redraw_boundaries(ax, data_crs)
     return fig, ax, data_crs
 
 
@@ -60,13 +60,15 @@ def render_station_png(grid, spec, labels, out_path):
     ``labels`` is (lon, lat, value) for the Missouri stations to mark.
     """
     _load_fonts()
-    lon_mesh, lat_mesh = make_grid()
     fig, ax, data_crs = _basemap()
+    # Contour in map-projected coordinates (cached per process) instead of having cartopy re-project
+    # every polygon; this is the same 400x400 lon/lat grid, so the picture is unchanged.
+    _, _, _, x_mesh, y_mesh = sp._fill_grid(400, ax.projection, data_crs)
     vmin, vmax = spec['vmin'], spec['vmax']
     # Keep true zeros (dry) in the lowest colour band instead of dropping them as "below range".
     shown = np.where(np.isfinite(grid), np.maximum(grid, vmin + 1e-6 * (vmax - vmin)), np.nan)
-    contours = ax.contourf(lon_mesh, lat_mesh, shown, transform=data_crs, levels=np.linspace(vmin, vmax, 256),
-                           cmap=spec['cmap'], alpha=0.75, zorder=7, antialiased=True, extend='max')
+    contours = ax.contourf(x_mesh, y_mesh, shown, levels=np.linspace(vmin, vmax, 161),
+                           cmap=sp.opaque_blend_cmap(spec['cmap'], 0.75), zorder=7, antialiased=False, extend='max')
     plt.colorbar(contours, cax=fig.add_axes([0.02, 0.08, 0.02, 0.6]), label=spec['units_label'],
                  ticks=spec.get('ticks', np.linspace(vmin, vmax, 7)))
 
@@ -101,7 +103,7 @@ def render_station_png(grid, spec, labels, out_path):
     plt.close(fig)
 
 
-def render_png_products(records, specs, images_dir=None):
+def render_png_products(records, specs, images_dir=None, grids=None):
     """Render a PNG for every spec with a ``png`` key. Returns the paths written."""
     images_dir = Path(images_dir) if images_dir else IMAGES_DIR
     lon_mesh, lat_mesh = make_grid()
@@ -109,7 +111,7 @@ def render_png_products(records, specs, images_dir=None):
     for spec in specs:
         if 'png' not in spec:
             continue
-        grid, _ = grid_for_spec(records, spec, lon_mesh, lat_mesh)
+        grid, _ = grid_for_spec(records, spec, lon_mesh, lat_mesh, grids=grids)
         if grid is None:
             print(f"No stations with {spec['field']}; leaving {spec['png']} unchanged")
             continue

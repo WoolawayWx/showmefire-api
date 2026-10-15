@@ -11,6 +11,7 @@ many true zeros in rainfall, while IDW stays within the observed range.
 """
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,21 @@ VALID_NETWORKS = {'RAWS', 'ASOS/AWOS', 'MOCOMAGNET', 'Missouri Mesonet'}
 
 def _port():
     return os.getenv('PORT', '8000')
+
+
+def buffer_stations():
+    """Neighbor-state station dicts from ``/stations/buffer`` limited to the map networks.
+
+    Returns [] if the endpoint is unavailable, so a map still renders from Missouri stations alone.
+    """
+    try:
+        response = requests.get(f'http://localhost:{_port()}/stations/buffer', timeout=60)
+        response.raise_for_status()
+        stations = response.json().get('stations') or []
+    except Exception as error:
+        print(f"Warning: buffer stations unavailable, interpolating from Missouri stations only ({error})")
+        return []
+    return [station for station in stations if station.get('network') in VALID_NETWORKS]
 
 
 def buffer_points(variable, cap=None):
@@ -123,21 +139,38 @@ def smooth_nan(grid, sigma):
     return out
 
 
+@lru_cache(maxsize=1)
+def _missouri_boundary():
+    """Missouri outline in lon/lat, read once per process."""
+    import geopandas as gpd
+
+    return gpd.read_file(STATE_BOUNDARY).to_crs(4326).geometry.union_all()
+
+
 def mask_to_missouri(grid, lon_mesh, lat_mesh):
     """NaN everywhere outside the Missouri state boundary."""
-    import geopandas as gpd
     import shapely
 
-    boundary = gpd.read_file(STATE_BOUNDARY).to_crs(4326).geometry.union_all()
+    boundary = _missouri_boundary()
     inside = shapely.contains_xy(boundary, lon_mesh, lat_mesh)
     return np.where(inside, grid, np.nan)
 
 
-def grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma=3.0):
+def grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma=3.0, grids=None):
     """Missouri-masked grid for one spec, or None when no station has its field.
 
-    Stations whose field is None are left out (unknown is not zero).
+    Stations whose field is None are left out (unknown is not zero). ``grids`` is an optional
+    dict that memoizes the result by spec name, so the GeoTIFF and PNG passes grid each field once.
     """
+    if grids is not None and spec['name'] in grids:
+        return grids[spec['name']]
+    result = _grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma)
+    if grids is not None:
+        grids[spec['name']] = result
+    return result
+
+
+def _grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma):
     points = [(r['longitude'], r['latitude'], r[spec['field']])
               for r in records if r.get(spec['field']) is not None]
     if not points:
@@ -146,7 +179,7 @@ def grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma=3.0):
     return mask_to_missouri(smooth_nan(grid, sigma), lon_mesh, lat_mesh), len(points)
 
 
-def build_fill_products(records, specs, out_dir=None, sigma=3.0):
+def build_fill_products(records, specs, out_dir=None, sigma=3.0, grids=None):
     """Grid each spec's field from the station ``records`` and write its GeoTIFF fill.
 
     A spec is a dict: ``name`` (file stem), ``field``, ``cmap``, ``vmin``, ``vmax``,
@@ -157,7 +190,7 @@ def build_fill_products(records, specs, out_dir=None, sigma=3.0):
     lon_mesh, lat_mesh = make_grid()
     written = []
     for spec in specs:
-        grid, count = grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma)
+        grid, count = grid_for_spec(records, spec, lon_mesh, lat_mesh, sigma, grids)
         if grid is None:
             print(f"No stations with {spec['field']}; leaving {spec['name']}.tif unchanged")
             continue

@@ -23,6 +23,7 @@ fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
 sp.plot_filled_field(
     fig, ax, data_crs, stations,
     field_path="observations.air_temp.value",
+    extra_points=sp.buffer_anchor_points("observations.air_temp.value", stations),
     cmap="RdYlBu_r", label="Air Temperature (F)", vmin=0, vmax=100,
 )
 plotted = sp.plot_station_values(

@@ -195,6 +195,31 @@ def qc_filter_field(
     return flagged
 
 
+def buffer_anchor_points(field_path: str, stations: Optional[list[dict]] = None) -> list[tuple[float, float, float]]:
+    """(lon, lat, value) for neighbor-state stations (/stations/buffer) reporting
+    `field_path`, to pass as plot_filled_field(extra_points=...) so the fill is
+    anchored at the Missouri border instead of extrapolated past it. A raw
+    field with a QC rule (QC_RAW_FIELDS) gets the same neighbor-outlier check
+    here, run together with `stations` so border stations are compared across
+    the line. Returns [] if the buffer feed is unavailable."""
+    from maps.station_rbf import buffer_stations
+
+    buffer = buffer_stations()
+    for qc_path, neighbor_count, min_abs_deviation, mad_multiplier in QC_RAW_FIELDS:
+        if qc_path == field_path:
+            qc_filter_field(
+                list(stations or []) + buffer, field_path,
+                neighbor_count=neighbor_count, min_abs_deviation=min_abs_deviation, mad_multiplier=mad_multiplier,
+            )
+    points = []
+    for station in buffer:
+        value = _get_path(station, field_path)
+        lon, lat = station.get("longitude"), station.get("latitude")
+        if value is not None and lon is not None and lat is not None:
+            points.append((lon, lat, value))
+    return points
+
+
 def _read_station_cache(max_age_seconds: float) -> Optional[list[dict]]:
     try:
         if time.time() - STATION_CACHE_PATH.stat().st_mtime > max_age_seconds:
@@ -484,6 +509,7 @@ def plot_filled_field(
     grid_size: int = FILL_GRID_SIZE,
     levels: Optional[list] = None, colors: Optional[list] = None,
     tick_labels: Optional[list] = None, clip_min: Optional[float] = None,
+    extra_points: Optional[list[tuple[float, float, float]]] = None,
 ) -> int:
     """RBF-interpolated filled contour of a numeric field across Missouri,
     masked to the state outline, with a colorbar - the same
@@ -503,9 +529,18 @@ def plot_filled_field(
     pass fixed bounds sized to the field's realistic range; values outside
     the range still render, clipped to the end-cap color via
     `extend='both'`, so an out-of-range reading is visible as "pegged" rather
-    than silently absent."""
+    than silently absent.
+
+    `extra_points` are (lon, lat, value) anchors outside the plotted station
+    list (e.g. neighbor-state stations from /stations/buffer): they steer the
+    interpolation near the border but get no markers or labels, and the fill is
+    still masked to Missouri."""
     qc_derived_field(stations, field_path)
     points_lon, points_lat, points_val = [], [], []
+    for lon, lat, value in extra_points or []:
+        points_lon.append(lon)
+        points_lat.append(lat)
+        points_val.append(value)
     for station in stations:
         value = _get_path(station, field_path)
         lon, lat = station.get("longitude"), station.get("latitude")

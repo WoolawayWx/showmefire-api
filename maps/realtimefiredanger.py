@@ -144,13 +144,7 @@ def generate_basemap():
     map_extent = ax.get_extent(crs=data_crs)  
     bbox = box(*map_extent)
     
-    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", 
-                    facecolor='none', linewidth=1, zorder=5)
-
     
-    ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", 
-                    facecolor='none', linewidth=1, zorder=6)
-
     
     return fig, ax, data_crs, map_crs, mapdpi
 
@@ -333,9 +327,9 @@ if rh_points and wind_points and fuel_points:
 else:
     print("Insufficient data for fire danger calculation.")
 
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
     
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
 
 ax.set_anchor('W') 
 
@@ -419,9 +413,9 @@ if peak_running_grid is not None:
         peak_cbar.set_ticks([0, 1, 2, 3, 4])
         peak_cbar.set_ticklabels(labels)
 
-        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=5)
+        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
 
-        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=6)
+        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
 
         peak_ax.set_anchor('W')
         peak_fig.subplots_adjust(left=0.05)

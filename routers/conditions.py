@@ -65,7 +65,7 @@ FILL_PRODUCTS: tuple[FillProduct, ...] = (
     FillProduct("station_rh", "Relative humidity", "%", "realtime/relative_humidity.tif", "RdYlGn", 0, 100),
     FillProduct("station_fuel_moisture", "Fuel moisture", "%", "realtime/fuel_moisture.tif", "RdYlGn", 0, 30),
     FillProduct("station_wind", "Wind speed", "mph", "realtime/wind_speed.tif", "RdYlGn_r", 0, 51),
-    # Station precipitation (ASOS/AWOS + RAWS, dry stations are real zeros) and hourly Penman-Monteith
+    # Station precipitation (ASOS/AWOS + RAWS, dry stations are real zeros) and hourly short-crop Penman-Monteith
     # reference ET (RAWS only); written by maps/stationprecipmap.py and maps/etmap.py.
     FillProduct("station_precip_1h", "Precipitation, last hour", "in", "realtime/station_precip_1h.tif", "Blues", 0, 1.0, decimals=2),
     FillProduct("station_precip_24h", "Precipitation, last 24 h", "in", "realtime/station_precip_24h.tif", "Blues", 0, 3.0, decimals=1),

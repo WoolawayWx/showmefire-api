@@ -1,8 +1,9 @@
-"""Station reference evapotranspiration (ETo) from RAWS observations.
+"""Station reference evapotranspiration (short crop, ETos) from RAWS observations.
 
-Only RAWS (network 2) reports solar radiation, so ET is computed there: FAO-56 Penman-Monteith
-on the hourly time step (FAO Irrigation and Drainage Paper 56, eq. 53), for the grass
-reference surface. Per station, over the rolling last 24 h (inches):
+Only RAWS (network 2) reports solar radiation, so ET is computed there: the ASCE-EWRI
+standardized Penman-Monteith equation (ASCE-EWRI 2005, eq. 1) on the hourly time step for the
+short-crop reference surface (0.12 m clipped grass: Cn = 37, Cd = 0.24 by day when Rn > 0 and
+0.96 at night). Per station, over the rolling last 24 h (inches):
 
 - ``et_current_in_hr``  the latest hour's rate
 - ``et_24h_in``         sum of the 24 hourly values (up to ``24 - MIN_HOURS_24H`` missing hours
@@ -12,8 +13,8 @@ reference surface. Per station, over the rolling last 24 h (inches):
 
 Assumptions worth knowing: the observation time is treated as the middle of its hour; wind is
 measured at the standard RAWS height of 6.1 m (20 ft) and converted to 2 m; soil heat flux is
-0.1 Rn by day and 0.5 Rn at night (FAO-56); at night the cloud ratio Rs/Rso is carried over
-from the last daytime hour, since Rs/Rso is unstable near zero sun (FAO-56 sec. 3, hourly Rnl).
+0.1 Rn by day and 0.5 Rn at night; at night the cloud ratio Rs/Rso is carried over
+from the last daytime hour, since Rs/Rso is unstable near zero sun (ASCE-EWRI 2005, App. D).
 A station missing any input or a plausible value for an hour simply has no value for that hour.
 """
 from __future__ import annotations
@@ -42,6 +43,10 @@ GSC = 0.0820  # solar constant, MJ m-2 min-1
 SIGMA_HOURLY = 2.043e-10  # Stefan-Boltzmann, MJ K-4 m-2 h-1
 DAY_SIN_ELEVATION = 0.2  # sun at least ~11.5 deg up: Rs/Rso is meaningful
 DEFAULT_CLOUD_RATIO = 0.75  # night before any daytime hour in the window
+# ASCE-EWRI standardized short-crop (ETos) hourly constants.
+SHORT_CROP_CN = 37.0
+SHORT_CROP_CD_DAY = 0.24
+SHORT_CROP_CD_NIGHT = 0.96
 MAX_HOURLY_ETO_MM = 1.5
 MIN_HOURS_24H = 22
 MM_PER_IN = 25.4
@@ -86,7 +91,7 @@ def solar_geometry(lat_deg: float, lon_deg: float, when_utc: datetime, hours: fl
 
 def hourly_eto_mm(temp_c, rh_pct, wind_ms, rs_wm2, lat, lon, elevation_m, when_utc,
                   cloud_ratio=None, wind_height_m=WIND_HEIGHT_M):
-    """FAO-56 hourly grass-reference ET (mm/h) for the hour centred on ``when_utc``.
+    """ASCE-EWRI hourly short-crop reference ET, ETos (mm/h), for the hour centred on ``when_utc``.
 
     ``cloud_ratio`` is the Rs/Rso to use when the sun is too low to measure it (night).
     Returns ``(eto_mm, daytime_cloud_ratio_or_None)``.
@@ -112,8 +117,9 @@ def hourly_eto_mm(temp_c, rh_pct, wind_ms, rs_wm2, lat, lon, elevation_m, when_u
     rnl = SIGMA_HOURLY * (temp_c + 273.16) ** 4 * (0.34 - 0.14 * math.sqrt(ea)) * (1.35 * ratio - 0.35)
     rn = rns - rnl
     soil_flux = 0.1 * rn if rn > 0 else 0.5 * rn
-    numerator = 0.408 * slope * (rn - soil_flux) + gamma * (37 / (temp_c + 273)) * u2 * (es - ea)
-    return max(0.0, numerator / (slope + gamma * (1 + 0.34 * u2))), daytime_ratio
+    cd = SHORT_CROP_CD_DAY if rn > 0 else SHORT_CROP_CD_NIGHT
+    numerator = 0.408 * slope * (rn - soil_flux) + gamma * (SHORT_CROP_CN / (temp_c + 273)) * u2 * (es - ea)
+    return max(0.0, numerator / (slope + gamma * (1 + cd * u2))), daytime_ratio
 
 
 def _usable(name, value):
