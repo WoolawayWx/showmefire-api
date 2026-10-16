@@ -1,81 +1,46 @@
-import cartopy.crs as ccrs
-import pandas as pd
-from matplotlib.colors import ListedColormap, BoundaryNorm
-from scipy.ndimage import gaussian_filter
-from scipy.interpolate import Rbf  # Added for Option 1
-from shapely.ops import unary_union
-from shapely.affinity import translate
-from shapely.geometry import box, Point, LineString, mapping
+"""Missouri statewide 10-hour fuel moisture map (images/mo-fuelmoisture.png).
+
+RAWS fuel moisture (/stations/raws, including neighbor-state RAWS so the fill
+reaches the border), RBF-interpolated across the state, with the 9% critical
+threshold drawn as a dotted contour. Also exports
+gis/realtime/fuel_moisture.tif and reports into the root status.json under
+'RealTimeFuelMoisture'.
+
+Basemap, boundaries and branding come from maps/station_plot.py. The station
+feed (/stations/raws, not /stations), interpolation, and station dots/labels
+(every MO RAWS dot, one-decimal labels, no decluttering) are this map's own
+and unchanged.
+"""
 import json
-import matplotlib.patheffects as path_effects
-import rasterio
-from rasterio.plot import show
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import numpy as np
-from station_plot import opaque_blend_cmap
-import station_plot as sp
-from pathlib import Path
-import requests
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import cairosvg
-from io import BytesIO
-from dotenv import load_dotenv
-import os
-import matplotlib.font_manager as font_manager
-import matplotlib.image as mpimg
-import geojson
-import time
 import logging
+import os
+import time
 from logging.handlers import RotatingFileHandler
-from shapely.geometry import Polygon, MultiPolygon
+from pathlib import Path
 
+import matplotlib.patheffects as path_effects
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from scipy.interpolate import Rbf
+
+import station_plot as sp
+import status_lock
 from realtime_geotiff import export_continuous_rgba_geotiff
-
-
-def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
-    lon_min = center_lon - zoom_width / 2
-    lon_max = center_lon + zoom_width / 2
-    lat_min = center_lat - zoom_height / 2
-    lat_max = center_lat + zoom_height / 2
-    return (lon_min, lon_max, lat_min, lat_max)
-
-def add_hillshade(ax, hillshade_path, extent, data_crs, alpha=0.3, cmap='gray'):
-    with rasterio.open(hillshade_path) as src:
-        hillshade = src.read(1)
-        
-        # Get the bounds from the raster
-        bounds = src.bounds
-        hillshade_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
-        
-        # Display the hillshade
-        ax.imshow(hillshade, 
-                  extent=hillshade_extent,
-                  transform=data_crs,
-                  cmap=cmap,
-                  alpha=alpha,
-                  zorder=1,  # Behind everything else
-                  interpolation='lanczos')
-
-def generate_basemap():
-    SCRIPT_DIR = Path(__file__).resolve().parent
-    PROJECT_DIR = SCRIPT_DIR.parent
-    pixelw, pixelh, mapdpi = 2048, 1152, 144
-    center_lon, center_lat = -92.5, 38.5
-    extent = (-95.8, -89.1, 35.8, 40.8)
-    data_crs = ccrs.PlateCarree()
-    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
-    fig = plt.figure(figsize=(pixelw / mapdpi, pixelh / mapdpi), dpi=mapdpi, facecolor='#E8E8E8')
-    ax = plt.axes([0,0,1,1], projection=map_crs)
-    ax.set_frame_on(False)
-    ax.set_xticks([]); ax.set_yticks([])
-    ax.set_extent(extent, crs=data_crs)
-    return fig, ax, data_crs, map_crs, mapdpi
 
 start_time = time.time()
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+GRID_SIZE = 400
+
+
+def now_ct():
+    return pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')
+
+
 load_dotenv()
 port = os.getenv('PORT', '8000')
 response = requests.get(f'http://localhost:{port}/stations/raws')
@@ -87,34 +52,25 @@ for s in stations:
     if fm is not None:
         points.append((s['longitude'], s['latitude'], fm))
 
-fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
-
-lon_min, lon_max, lat_min, lat_max = -95.8, -89.1, 35.8, 40.8
-grid_lon = np.linspace(lon_min, lon_max, 400) 
-grid_lat = np.linspace(lat_min, lat_max, 400)
-grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
+fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+grid_lon_mesh, grid_lat_mesh, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(GRID_SIZE, map_crs, data_crs)
 
 if points:
-    points_lon = [p[0] for p in points]
-    points_lat = [p[1] for p in points]
-    values = [p[2] for p in points]
-    
+    points_lon, points_lat, values = zip(*points)
     rbf = Rbf(points_lon, points_lat, values, function='multiquadric', smooth=0.005)
-    grid_values = rbf(grid_lon_mesh, grid_lat_mesh)
-    grid_values = gaussian_filter(grid_values, sigma=0)
-
-    # Shared, cached state mask + map-projected grid (see station_plot._fill_grid): the old
-    # per-Point Shapely mask and lon/lat contouring (cartopy re-projecting every polygon)
-    # were most of this script's runtime.
-    _, _, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(400, map_crs, data_crs)
+    # Cells outside Missouri are masked to NaN anyway, so only evaluate the
+    # RBF inside the state (identical values, ~45% fewer cells).
     if within_mask is not None:
-        grid_values[~within_mask] = np.nan
+        grid_values = np.full(grid_lon_mesh.shape, np.nan)
+        grid_values[within_mask] = rbf(grid_lon_mesh[within_mask], grid_lat_mesh[within_mask])
+    else:
+        grid_values = rbf(grid_lon_mesh, grid_lat_mesh)
 
     geotiff_ok = export_continuous_rgba_geotiff(
         grid_values=grid_values,
         lon_mesh=grid_lon_mesh,
         lat_mesh=grid_lat_mesh,
-        out_path=SCRIPT_DIR.parent / 'gis/realtime/fuel_moisture.tif',
+        out_path=PROJECT_DIR / 'gis/realtime/fuel_moisture.tif',
         cmap_name='RdYlGn',
         vmin=0,
         vmax=30,
@@ -124,63 +80,45 @@ if points:
     )
     if not geotiff_ok:
         print("Warning: Failed to export fuel moisture GeoTIFF")
-    
+
     cs = ax.contourf(
         grid_x_mesh, grid_y_mesh, grid_values,
         levels=np.linspace(0, 30, 256),
-        cmap=opaque_blend_cmap('RdYlGn', 0.75), zorder=7, antialiased=False
+        cmap=sp.opaque_blend_cmap('RdYlGn', 0.75), zorder=7, antialiased=False
     )
-    
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Fuel Moisture (%)', ticks=np.arange(0, 32, 2))
-    contour_9 = ax.contour(
+    cbar = fig.colorbar(cs, cax=cax, label='Fuel Moisture (%)', ticks=np.arange(0, 32, 2))
+    # 9% critical threshold. zorder 7.5 (above the fill, below the county
+    # lines): sp.generate_basemap() adds the county lines (zorder 8) first, so
+    # a zorder-8 contour would now draw on top of them instead of under them.
+    ax.contour(
         grid_x_mesh, grid_y_mesh, grid_values, levels=[9], colors='black',
-        linestyles='dotted', linewidths=2, zorder=8
+        linestyles='dotted', linewidths=2, zorder=7.5
     )
     cbar.ax.axhline(y=9, color='black', linewidth=2.5, linestyle='--', zorder=10)
 
 mo_stations = [s for s in stations if s.get('state') == 'MO']
-lats = [s['latitude'] for s in mo_stations]
-lons = [s['longitude'] for s in mo_stations]
-ax.scatter(lons, lats, transform=data_crs, color='black', s=20, zorder=10, edgecolor='white', linewidth=1)
+ax.scatter(
+    [s['longitude'] for s in mo_stations], [s['latitude'] for s in mo_stations],
+    transform=data_crs, color='black', s=20, zorder=10, edgecolor='white', linewidth=1
+)
+for s in mo_stations:
+    fm = s.get('observations', {}).get('fuel_moisture', {}).get('value')
+    if fm is not None:
+        ax.text(
+            s['longitude'], s['latitude']+0.05, f"{fm:.1f}%",
+            transform=data_crs, fontsize=9, color='black', zorder=11,
+            ha='center', va='bottom',
+            path_effects=[path_effects.withStroke(linewidth=2, foreground='white')]
+        )
 
-for s in stations:
-    if s.get('state') == 'MO':
-        fm = s.get('observations', {}).get('fuel_moisture', {}).get('value')
-        if fm is not None:
-            ax.text(
-                s['longitude'], s['latitude']+0.05, f"{fm:.1f}%", 
-                transform=data_crs, fontsize=9, color='black', zorder=11,
-                ha='center', va='bottom',
-                path_effects=[path_effects.withStroke(linewidth=2, foreground='white')]
-            )
-
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
-
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
-
-ax.set_anchor('W') 
-
-plt.subplots_adjust(left=0.05) 
-
-font_paths = [
-    str(SCRIPT_DIR.parent / 'assets/Montserrat/static/Montserrat-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf')
-]
-for font_path in font_paths:
-    if Path(font_path).exists():
-        font_manager.fontManager.addfont(font_path)
-plt.rcParams['font.family'] = 'Montserrat'
-
-fig.text(
-    0.99, 0.97,
-    "Missouri Statewide Fuel Moisture Map",
-    fontsize=26,
-    fontweight='bold',
-    ha='right',
-    va='top',
-    fontname='Plus Jakarta Sans'
+# Title/subtitle/wordmark/logo from the shared layout; this map's description
+# keeps its own (default) line spacing, so it is drawn here instead.
+sp.add_branding(
+    fig, ax,
+    title="Missouri Statewide Fuel Moisture Map",
+    subtitle=f"Valid Time: {now_ct()}",
+    description="",
 )
 fig.text(
     0.99, 0.6,
@@ -191,46 +129,19 @@ fig.text(
     "Due to the low number of stations reporting fuel moisture,\n"
     "data may not be accurate, and local variations may occur.\n"
     "RAWS stations outside of Missouri are used in order\n to create a proper plot.",
-    fontsize=12,
-    ha='right',
-    va='top',
-    fontname='Montserrat'
+    fontsize=12, ha='right', va='top', fontname='Montserrat'
 )
-fig.text(
-    0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
-    fontsize=16,
-    ha='right',
-    va='top',
-    fontname='Montserrat'
-)
-fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
-
-svg_path = str(SCRIPT_DIR.parent / 'assets/LightBackGroundLogo.svg')
-
-try:
-    png_bytes = cairosvg.svg2png(url=svg_path)
-    image = mpimg.imread(BytesIO(png_bytes), format='png')
-except ImportError:
-    image = None
-
-if image is not None:
-    imagebox = OffsetImage(image, zoom=0.03)
-    ab = AnnotationBbox(
-        imagebox, (0.99, 0.01), frameon=False,
-        xycoords='figure fraction', box_alignment=(1,0)
-    )
-    ax.add_artist(ab)
 
 fig.savefig('images/mo-fuelmoisture.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
 runtime_sec = time.time() - start_time
-
-print(f"Fuel Moisture updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-print(f"Script runtime: {runtime_sec:.2f} seconds")
+updated_msg = f"Fuel Moisture updated at {now_ct()}"
+runtime_msg = f"Script runtime: {runtime_sec:.2f} seconds"
+print(updated_msg)
+print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = Path(__file__).parent.parent / 'logs/fuelmoisturemap.log'
+log_file = PROJECT_DIR / 'logs/fuelmoisturemap.log'
 log_file.parent.mkdir(exist_ok=True)
 logger = logging.getLogger('fuelmoisturemap')
 logger.setLevel(logging.INFO)
@@ -238,31 +149,24 @@ if not logger.handlers:
     handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
-logger.info(f"Fuel Moisture updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
+logger.info(updated_msg)
+logger.info(runtime_msg)
 
 plt.close(fig)
 
-status_file = Path(__file__).parent.parent / 'status.json'
-import status_lock
+status_file = PROJECT_DIR / 'status.json'
 status_lock.acquire(status_file)
-if status_file.exists():
-    try:
-        with open(status_file, 'r') as f:
-            status = json.load(f)
-    except json.JSONDecodeError:
-        status = {}
-else:
+try:
+    with open(status_file, 'r') as f:
+        status = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
     status = {}
 
 status['RealTimeFuelMoisture'] = {
-    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': now_ct(),
     'status': 'updated',
     'runtime_sec': round(runtime_sec, 2),
-    'log': [
-        f"Fuel Moisture updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}",
-        f"Script runtime: {runtime_sec:.2f} seconds"
-    ]
+    'log': [updated_msg, runtime_msg],
 }
 
 with open(status_file, 'w') as f:

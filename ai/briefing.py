@@ -55,7 +55,7 @@ def _round(value: float | None, digits: int = 1) -> float | None:
     return round(value, digits) if value is not None else None
 
 
-def _region(latitude: float, longitude: float) -> str:
+def region_for(latitude: float, longitude: float) -> str:
     # A central Missouri box prevents Columbia/Jefferson City/central Ozarks
     # stations from being forced into a broad east/west quadrant.
     if 37.2 <= latitude <= 39.6 and -93.8 <= longitude <= -91.4:
@@ -122,7 +122,7 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
         rows.append({
             "station_id": str(station_id),
-            "region": _region(latitude, longitude),
+            "region": region_for(latitude, longitude),
             "latitude": latitude,
             "longitude": longitude,
             # Cumulative precipitation is reduced to the maximum forecast
@@ -262,10 +262,51 @@ def _county_summary(county_path: Path | None) -> dict[str, Any] | None:
     }
 
 
+FIRE_WEATHER_MAX_AGE_HOURS = 3
+
+
+def _current_dispersion(path: Path, now: datetime | None = None) -> dict[str, Any] | None:
+    """Latest hourly HRRR dispersion estimate for the current hour
+    (maps/fire_weather_maps.py), or None when it is missing or older than
+    FIRE_WEATHER_MAX_AGE_HOURS. It describes conditions now, not the afternoon
+    forecast; the prompt says so."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        valid = datetime.strptime(payload["valid_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+    except (OSError, ValueError, KeyError):
+        return None
+    now = now or datetime.now(ZoneInfo("UTC"))
+    if (now - valid).total_seconds() > FIRE_WEATHER_MAX_AGE_HOURS * 3600:
+        return None
+
+    def area(summary: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "mixing_height_ft": summary["mixing_height_ft"],
+            "transport_wind_mph": summary["transport_speed_mph"],
+            "transport_wind_from": summary.get("transport_direction"),
+            "smoke_dispersal": summary.get("ventilation_dominant"),
+        }
+
+    state = payload["statewide"]
+    return {
+        "valid_time": valid.astimezone(ZoneInfo("America/Chicago")).strftime("%-I %p CT %b %-d"),
+        "source": payload.get("source"),
+        "statewide": {
+            **area(state),
+            "smoke_dispersal_percent": state.get("ventilation_category_percent"),
+            "surface_inversion_percent": state.get("surface_inversion_percent"),
+            "haines_max": state["haines"].get("max"),
+            "hot_dry_windy_max": state["hdw"].get("max"),
+        },
+        "regions": {name: area(region) for name, region in payload.get("regions", {}).items() if region.get("cell_count")},
+    }
+
+
 def build_briefing(
     archive_dir: str | Path,
     forecast_path: str | Path | None = None,
     county_path: str | Path | None = None,
+    fire_weather_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-serializable briefing from the latest station forecast."""
     archive_path = Path(archive_dir)
@@ -296,6 +337,13 @@ def build_briefing(
         "regions": regions,
         "statewide": _summary(rows),
     }
+    dispersion = _current_dispersion(
+        Path(fire_weather_path)
+        if fire_weather_path
+        else archive_path.parent.parent / "data" / "current_conditions" / "fire_weather_latest.json"
+    )
+    if dispersion:
+        briefing["current_dispersion"] = dispersion
     county_summary = _county_summary(resolved_county_path)
     if county_summary:
         briefing["county_danger"] = county_summary

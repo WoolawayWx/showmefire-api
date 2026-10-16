@@ -94,6 +94,7 @@ from core.config import (
     MISSOURI_FIRES_JSON,
     MISSOURI_FIRES_GEOJSON
 )
+from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
 from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
@@ -293,6 +294,9 @@ app.include_router(graphics.router)
 app.include_router(bulletins.router)
 app.include_router(display_auth.router)
 app.include_router(field.router)
+app.include_router(fire_weather_data.router)
+app.include_router(soundings_router.router)
+app.include_router(map_archive_router.router)
 
 origins = [
     "http://localhost:3000",        # For local development of a React/Vue frontend

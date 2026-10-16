@@ -51,3 +51,6 @@ maps/shapefiles/MO_MoDOT_Roads_Arcs/*
 # Local backups
 *.bak
 *.bak/
+
+# Cross-container job locks (scripts/maps.sh, scripts/forecast_lock.sh)
+.locks/

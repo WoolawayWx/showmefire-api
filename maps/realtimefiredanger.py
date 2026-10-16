@@ -1,41 +1,43 @@
-import shutil
-import cartopy.crs as ccrs
-import pandas as pd
-from matplotlib.colors import ListedColormap, BoundaryNorm
-from scipy.ndimage import gaussian_filter
-from shapely.ops import unary_union
-from shapely.affinity import translate
-from shapely.geometry import box, Point
+"""Missouri realtime fire danger (images/mo-realtimefiredanger.png) and
+today's observed peak (images/mo-observedpeakfiredanger.png).
+
+RH and wind from every /stations station, fuel moisture from RAWS
+(/stations/raws), each RBF-interpolated, then classified cell by cell with the
+canonical core.fire_danger rule. Also exports
+gis/realtime/realtime_fire_danger.tif, folds the grid into the observed-peak
+running max (maps/observed_peak_history.py), reports into the root
+status.json under 'RealtimeFireDanger', and appends the station-count history
+(maps/station_danger_history.py).
+
+Basemap, boundaries and branding come from maps/station_plot.py. The
+interpolation and classification math are unchanged; they are only evaluated
+where the result is used (inside Missouri).
+"""
 import json
-import matplotlib.patheffects as path_effects
-import rasterio
-from rasterio.plot import show
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import numpy as np
-from station_plot import opaque_blend_cmap
-import station_plot as sp
-from pathlib import Path
-import requests
-from scipy.interpolate import griddata, Rbf
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import cairosvg
-from io import BytesIO
-import matplotlib.font_manager as font_manager
-import matplotlib.image as mpimg
-from dotenv import load_dotenv
+import logging
 import os
+import shutil
 import sys
 import time
-import logging
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from scipy.interpolate import Rbf
+from scipy.ndimage import binary_dilation, gaussian_filter
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from core.fire_danger import calculate_fire_danger as canonical_fire_danger
+from core.fire_danger import calculate_fire_danger
 from core.fire_danger import CATEGORY_BINS, CATEGORY_HEX_COLORS, CATEGORY_LABELS, CATEGORY_RGBA_COLORS
 
+import station_plot as sp
+import status_lock
 from realtime_geotiff import export_discrete_rgba_geotiff
 from station_danger_history import (
     count_station_fire_danger_categories_from_grid,
@@ -45,112 +47,62 @@ from station_danger_history import (
 )
 from observed_peak_history import update_observed_peak_grid, load_today_running_grid
 
-def generate_extent(center_lon, center_lat, zoom_width, zoom_height):
-    lon_min = center_lon - zoom_width / 2
-    lon_max = center_lon + zoom_width / 2
-    lat_min = center_lat - zoom_height / 2
-    lat_max = center_lat + zoom_height / 2
-    return (lon_min, lon_max, lat_min, lat_max)
-
-def add_hillshade(ax, hillshade_path, extent, data_crs, alpha=0.3, cmap='gray'):
-    with rasterio.open(hillshade_path) as src:
-        hillshade = src.read(1)
-        
-        # Get the bounds from the raster
-        bounds = src.bounds
-        hillshade_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
-        
-        # Display the hillshade
-        ax.imshow(hillshade, 
-                  extent=hillshade_extent,
-                  transform=data_crs,
-                  cmap=cmap,
-                  alpha=alpha,
-                  zorder=1,  # Behind everything else
-                  interpolation='lanczos')
-
-def estimate_fuel_moisture(relative_humidity, air_temp=None):
-    """
-    Estimate 10-hour fuel moisture from relative humidity.
-    Based on empirical relationships used in fire weather.
-    
-    Simple estimation: FM ≈ 0.03 + 0.25 * RH (as decimal)
-    This gives roughly: RH 20% → FM 8%, RH 40% → FM 13%
-    
-    Returns: estimated fuel moisture percentage
-    """
-    if relative_humidity is None:
-        return None
-    
-    # Convert RH from percentage to decimal
-    rh_decimal = relative_humidity / 100.0
-    
-    # Simple linear estimation
-    fm_estimate = 3 + 0.25 * relative_humidity
-    
-    # Clamp to reasonable range (3-30%)
-    fm_estimate = max(3, min(30, fm_estimate))
-    
-    return fm_estimate
-
-def calculate_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots):
-    """
-    Fire Danger Criteria based on ShowMeFire.org:
-    Low: FM >= 15%
-    Moderate: FM < 15% WITH (RH < 45% OR Wind >= 10 kts)
-    Elevated: FM < 9% WITH [(RH < 35% and Wind >= 12) or (RH < 25% and Wind >= 5)]
-    Critical: FM < 9% WITH (RH < 25% AND Wind >= 15 kts)
-    Extreme: FM < 7% WITH (RH < 20% AND Wind >= 25 kts)
-    
-    Parameters:
-    - fuel_moisture: 10-hour fuel moisture percentage
-    - relative_humidity: 2-meter relative humidity percentage
-    - wind_speed_knots: 10-meter sustained wind speed in knots
-    
-    Returns: danger level (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
-    """
-    
-    return canonical_fire_danger(fuel_moisture, relative_humidity, wind_speed_knots)
-
-def generate_basemap():
-    SCRIPT_DIR = Path(__file__).resolve().parent
-    PROJECT_DIR = SCRIPT_DIR.parent
-
-    # Map Parameters
-    pixelw = 2048
-    pixelh = 1152
-    mapdpi = 144
-
-    center_lon = -92.5
-    center_lat = 38.5
-    # Missouri bounds with margin: lon -96.27 to -88.6, lat 35.49 to 41.11
-    extent = (-95.8, -89.1, 35.8, 40.8)
-
-    data_crs = ccrs.PlateCarree()
-    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
-
-    figsize_width = pixelw / mapdpi
-    figsize_height = pixelh / mapdpi
-
-    fig = plt.figure(figsize=(figsize_width, figsize_height), dpi=mapdpi, facecolor='#E8E8E8')
-    ax = plt.axes([0,0,1,1], projection=map_crs)
-
-    ax.set_frame_on(False)
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    ax.set_extent(extent, crs=data_crs)
-    
-    map_extent = ax.get_extent(crs=data_crs)  
-    bbox = box(*map_extent)
-    
-    
-    
-    return fig, ax, data_crs, map_crs, mapdpi
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+GRID_SIZE = 400
+BLUR_SIGMA = 0.7
+
+CRITERIA_TEXT = (
+    "Fire Danger Criteria:\n"
+    "\n"
+    "Low: FM ≥ 15% (fuels too wet to spread significantly)\n\n"
+    "Moderate: FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
+    "Elevated: FM < 9% AND\n"
+    "  (RH < 35% & Wind ≥ 12 kts) OR (RH < 25% & Wind ≥ 5 kts)\n\n"
+    "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
+    "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
+    "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
+    "For More Info, Visit ShowMeFire.org"
+)
+
+bins = list(CATEGORY_BINS)
+labels = list(CATEGORY_LABELS)
+cmap = ListedColormap(list(CATEGORY_HEX_COLORS))
+norm = BoundaryNorm(bins, cmap.N)
+
+
+def now_ct():
+    return pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')
+
+
+def draw_danger(fig, ax, grid_x_mesh, grid_y_mesh, grid):
+    """Fire danger classes as a filled contour + categorical colorbar."""
+    cs = ax.contourf(
+        grid_x_mesh, grid_y_mesh, grid,
+        levels=bins, cmap=sp.opaque_blend_cmap(cmap, 0.7), norm=norm, zorder=7, antialiased=True
+    )
+    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+    cbar = fig.colorbar(cs, cax=cax, label='Fire Danger Level')
+    cbar.set_ticks([0, 1, 2, 3, 4])
+    cbar.set_ticklabels(labels)
+
+
+def brand(fig, ax, title, subtitle):
+    # Title/subtitle/wordmark/logo from the shared layout; the criteria block
+    # keeps its own position, size and line spacing, so it is drawn here.
+    sp.add_branding(fig, ax, title=title, subtitle=subtitle, description="")
+    fig.text(0.99, 0.62, CRITERIA_TEXT, fontsize=10, ha='right', va='top', linespacing=1.6, fontname='Montserrat')
+
+
+def rbf_in(points, smooth, lon_mesh, lat_mesh, where):
+    """The station RBF (multiquadric) evaluated only at the `where` cells;
+    every other cell is 0 (never read: see the callers)."""
+    rbf = Rbf([p[0] for p in points], [p[1] for p in points], [p[2] for p in points],
+              function='multiquadric', smooth=smooth)
+    grid = np.zeros(lon_mesh.shape)
+    grid[where] = rbf(lon_mesh[where], lat_mesh[where])
+    return grid
+
 
 load_dotenv()
 port = os.getenv('PORT', '8000')
@@ -161,22 +113,21 @@ raws_stations = response.json()['stations']
 station_danger_summary = empty_station_fire_danger_summary(raws_stations)
 peak_running_grid = None
 
-# Use all stations for RH and wind, but only RAWS for fuel moisture
-response_all = requests.get(f'http://localhost:{port}/stations')
-all_stations = response_all.json()['stations']
+# All /stations stations (every network) for RH and wind - the raw payload via
+# station_plot's short-lived shared cache. Deliberately not
+# sp.fetch_stations(): that filters networks and applies the neighbor-outlier
+# QC, which would change this map's inputs.
+all_stations = sp._read_station_cache(sp.STATION_CACHE_MAX_AGE_SECONDS)
+if all_stations is None:
+    all_stations = sp._fetch_and_cache_stations()
 
-# Define grid
-lon_min, lon_max, lat_min, lat_max = -95.8, -89.1, 35.8, 40.8
-grid_lon = np.linspace(lon_min, lon_max, 400)
-grid_lat = np.linspace(lat_min, lat_max, 400)
-grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
-
-fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
+fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+grid_lon_mesh, grid_lat_mesh, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(GRID_SIZE, map_crs, data_crs)
 
 # Collect data for interpolation
 rh_points = []
 wind_points = []
-fuel_points_measured = []  # RAWS stations with actual fuel moisture
+fuel_points = []  # RAWS stations with actual fuel moisture
 
 for s in all_stations:
     obs = s.get('observations', {})
@@ -191,81 +142,43 @@ for s in all_stations:
 for s in raws_stations:
     fm = s.get('observations', {}).get('fuel_moisture', {}).get('value')
     if fm is not None and fm > 0:
-        fuel_points_measured.append((s['longitude'], s['latitude'], fm))
-
-fuel_points = fuel_points_measured
+        fuel_points.append((s['longitude'], s['latitude'], fm))
 
 print(f"Data summary: {len(rh_points)} RH, {len(wind_points)} wind, "
-      f"{len(fuel_points_measured)} measured FM (RAWS only)")
+      f"{len(fuel_points)} measured FM (RAWS only)")
 
 start_time = time.time()
 
 if rh_points and wind_points and fuel_points:
-    # Interpolate RH
-    rh_lon = [p[0] for p in rh_points]
-    rh_lat = [p[1] for p in rh_points]
-    rh_values = [p[2] for p in rh_points]
-    rh_rbf = Rbf(rh_lon, rh_lat, rh_values, function='multiquadric', smooth=0.01)
-    rh_grid = rh_rbf(grid_lon_mesh, grid_lat_mesh)
-    rh_grid = gaussian_filter(rh_grid, sigma=0.7)
+    # Only cells inside Missouri are classified (the rest are masked to NaN).
+    # The blurred fields need their exact values within the blur radius
+    # (gaussian_filter's default truncate=4 -> 3 cells at sigma 0.7) of those
+    # cells, so the RBFs are evaluated on the state mask grown by that radius;
+    # in-state results are identical to evaluating and blurring the full grid.
+    inside = within_mask if within_mask is not None else np.ones(grid_lon_mesh.shape, dtype=bool)
+    radius = int(4.0 * BLUR_SIGMA + 0.5)
+    near = binary_dilation(inside, structure=np.ones((2 * radius + 1, 2 * radius + 1), dtype=bool))
 
-    # Interpolate wind
-    wind_lon = [p[0] for p in wind_points]
-    wind_lat = [p[1] for p in wind_points]
-    wind_values = [p[2] for p in wind_points]
-    wind_rbf = Rbf(wind_lon, wind_lat, wind_values, function='multiquadric', smooth=0.01)
-    wind_grid = wind_rbf(grid_lon_mesh, grid_lat_mesh)
-    wind_grid = gaussian_filter(wind_grid, sigma=0.7)
+    rh_grid = gaussian_filter(rbf_in(rh_points, 0.01, grid_lon_mesh, grid_lat_mesh, near), sigma=BLUR_SIGMA)[inside]
+    wind_grid = gaussian_filter(rbf_in(wind_points, 0.01, grid_lon_mesh, grid_lat_mesh, near), sigma=BLUR_SIGMA)[inside]
+    fuel_grid = gaussian_filter(rbf_in(fuel_points, 0.01, grid_lon_mesh, grid_lat_mesh, near), sigma=BLUR_SIGMA)[inside]
 
-    # Interpolate fuel moisture with priority given to measured values
-    fuel_lon = [p[0] for p in fuel_points]
-    fuel_lat = [p[1] for p in fuel_points]
-    fuel_values = [p[2] for p in fuel_points]
-    fuel_rbf = Rbf(fuel_lon, fuel_lat, fuel_values, function='multiquadric', smooth=0.01)
-    fuel_grid = fuel_rbf(grid_lon_mesh, grid_lat_mesh)
-    fuel_grid = gaussian_filter(fuel_grid, sigma=0.7)
+    # Blend toward the (sharper, unblurred) measured fuel moisture near each RAWS station.
+    measured_grid = rbf_in(fuel_points, 0.005, grid_lon_mesh, grid_lat_mesh, inside)[inside]
+    lon_in, lat_in = grid_lon_mesh[inside], grid_lat_mesh[inside]
+    influence_grid = np.zeros_like(lon_in)
+    for mlon, mlat, _ in fuel_points:
+        dist = np.sqrt((lon_in - mlon)**2 + (lat_in - mlat)**2)
+        influence_grid = np.maximum(influence_grid, np.exp(-dist / 0.5))
+    fuel_grid = influence_grid * measured_grid + (1 - influence_grid) * fuel_grid
 
-    # If we have measured fuel moisture, blend with estimated as before
-    if fuel_points_measured:
-        measured_lon = [p[0] for p in fuel_points_measured]
-        measured_lat = [p[1] for p in fuel_points_measured]
-        measured_values = [p[2] for p in fuel_points_measured]
-        measured_rbf = Rbf(measured_lon, measured_lat, measured_values, function='multiquadric', smooth=0.005)
-        measured_grid = measured_rbf(grid_lon_mesh, grid_lat_mesh)
-        measured_grid = gaussian_filter(measured_grid, sigma=0)
-
-        # Distance-based influence
-        influence_grid = np.zeros_like(grid_lon_mesh)
-        for mlon, mlat in zip(measured_lon, measured_lat):
-            dist = np.sqrt((grid_lon_mesh - mlon)**2 + (grid_lat_mesh - mlat)**2)
-            influence = np.exp(-dist / 0.5)
-            influence_grid = np.maximum(influence_grid, influence)
-        fuel_grid = (influence_grid * measured_grid + (1 - influence_grid) * fuel_grid)
-
-    # Calculate fire danger using NWCG standards
-    grid_values = np.full_like(rh_grid, np.nan, dtype=float)
-    for i in range(grid_values.shape[0]):
-        for j in range(grid_values.shape[1]):
-            grid_values[i, j] = calculate_fire_danger(
-                fuel_grid[i, j],
-                rh_grid[i, j],
-                wind_grid[i, j]
-            )
-
-    # Fire danger categories (0=Low, 1=Moderate, 2=Elevated, 3=Critical, 4=Extreme)
-    bins = list(CATEGORY_BINS)
-    labels = list(CATEGORY_LABELS)
-    colors = list(CATEGORY_HEX_COLORS)
-    cmap = ListedColormap(colors)
-    norm = BoundaryNorm(bins, len(colors))
-
-    # Mask to Missouri
-    # Shared, cached state mask + map-projected grid (see station_plot._fill_grid): the old
-    # per-Point Shapely mask and lon/lat contouring (cartopy re-projecting every polygon)
-    # were most of this script's runtime.
-    _, _, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(400, map_crs, data_crs)
-    if within_mask is not None:
-        grid_values[~within_mask] = np.nan
+    # Classify with the canonical rule (0=Low .. 4=Extreme); .tolist() hands it
+    # plain floats, which is faster than numpy scalars and gives the same result.
+    grid_values = np.full(grid_lon_mesh.shape, np.nan)
+    grid_values[inside] = np.array([
+        calculate_fire_danger(fm, rh, wind)
+        for fm, rh, wind in zip(fuel_grid.tolist(), rh_grid.tolist(), wind_grid.tolist())
+    ], dtype=float)
 
     station_danger_summary = count_station_fire_danger_categories_from_grid(
         stations=raws_stations,
@@ -275,13 +188,12 @@ if rh_points and wind_points and fuel_points:
         state_filter='MO',
     )
 
-    danger_class_colors = CATEGORY_RGBA_COLORS
     geotiff_ok = export_discrete_rgba_geotiff(
         grid_values=grid_values,
         lon_mesh=grid_lon_mesh,
         lat_mesh=grid_lat_mesh,
-        out_path=SCRIPT_DIR.parent / 'gis/realtime/realtime_fire_danger.tif',
-        class_colors=danger_class_colors,
+        out_path=PROJECT_DIR / 'gis/realtime/realtime_fire_danger.tif',
+        class_colors=CATEGORY_RGBA_COLORS,
         description='Missouri realtime fire danger classes (RGBA)',
         source='Synoptic observations + ShowMeFire fire danger model',
         legend='Low=green, Moderate=yellow, Elevated=orange, Critical=red, Extreme=dark red',
@@ -315,145 +227,22 @@ if rh_points and wind_points and fuel_points:
     except Exception as e:
         print(f"Warning: Failed to update observed peak fire danger grid: {e}")
 
-    cs = ax.contourf(
-        grid_x_mesh, grid_y_mesh, grid_values,
-        levels=bins, cmap=opaque_blend_cmap(cmap, 0.7), norm=norm, zorder=7, antialiased=True
-    )
-
-    cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Fire Danger Level')
-    cbar.set_ticks([0, 1, 2, 3, 4])
-    cbar.set_ticklabels(labels)
+    draw_danger(fig, ax, grid_x_mesh, grid_y_mesh, grid_values)
 else:
     print("Insufficient data for fire danger calculation.")
 
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
-    
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
-
-ax.set_anchor('W') 
-
-plt.subplots_adjust(left=0.05) 
-
-font_paths = [
-    str(SCRIPT_DIR.parent / 'assets/Montserrat/static/Montserrat-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf')
-]
-for font_path in font_paths:
-    if Path(font_path).exists():
-        font_manager.fontManager.addfont(font_path)
-plt.rcParams['font.family'] = 'Montserrat'
-
-fig.text(
-    0.99, 0.97,
-    "Missouri Fire Danger Assessment",
-    fontsize=26,
-    fontweight='bold',
-    ha='right',
-    va='top',
-    fontname='Plus Jakarta Sans'
-)
-fig.text(
-    0.99, 0.62,
-    "Fire Danger Criteria:\n"
-    "\n"
-    "Low: FM ≥ 15% (fuels too wet to spread significantly)\n\n"
-    "Moderate: FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
-    "Elevated: FM < 9% AND\n"
-    "  (RH < 35% & Wind ≥ 12 kts) OR (RH < 25% & Wind ≥ 5 kts)\n\n"
-    "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
-    "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
-    "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
-    "For More Info, Visit ShowMeFire.org",
-    fontsize=10,
-    ha='right',
-    va='top',
-    linespacing=1.6,
-    fontname='Montserrat'
-)
-fig.text(
-    0.99, 0.90,
-    "Observations Analysis | Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
-    fontsize=16,
-    ha='right',
-    va='top',
-    fontname='Montserrat'
-)
-fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
-
-svg_path = str(SCRIPT_DIR.parent / 'assets/LightBackGroundLogo.svg')
-
-try:
-    png_bytes = cairosvg.svg2png(url=svg_path)
-    image = mpimg.imread(BytesIO(png_bytes), format='png')
-except ImportError:
-    image = None
-
-if image is not None:
-    imagebox = OffsetImage(image, zoom=0.03)
-    ab = AnnotationBbox(
-        imagebox, (0.99, 0.01), frameon=False,
-        xycoords='figure fraction', box_alignment=(1,0)
-    )
-    ax.add_artist(ab)
-
+brand(fig, ax, "Missouri Fire Danger Assessment", f"Observations Analysis | Valid Time: {now_ct()}")
 fig.savefig('images/mo-realtimefiredanger.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
 if peak_running_grid is not None:
     try:
-        peak_fig, peak_ax, peak_data_crs, peak_map_crs, peak_mapdpi = generate_basemap()
-
-        peak_cs = peak_ax.contourf(
-            grid_x_mesh, grid_y_mesh, peak_running_grid,
-            levels=bins, cmap=opaque_blend_cmap(cmap, 0.7), norm=norm, zorder=7, antialiased=True
-        )
-        peak_cax = peak_fig.add_axes([0.02, 0.08, 0.02, 0.6])
-        peak_cbar = plt.colorbar(peak_cs, cax=peak_cax, label='Fire Danger Level')
-        peak_cbar.set_ticks([0, 1, 2, 3, 4])
-        peak_cbar.set_ticklabels(labels)
-
-        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
-
-        peak_ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), peak_map_crs.proj4_init), crs=peak_map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
-
-        peak_ax.set_anchor('W')
-        peak_fig.subplots_adjust(left=0.05)
-
-        peak_fig.text(
-            0.99, 0.97, "Missouri Peak Fire Danger (Today)",
-            fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans'
-        )
-        peak_fig.text(
-            0.99, 0.90,
+        peak_fig, peak_ax, _, _, peak_mapdpi = sp.generate_basemap()
+        draw_danger(peak_fig, peak_ax, grid_x_mesh, grid_y_mesh, peak_running_grid)
+        brand(
+            peak_fig, peak_ax, "Missouri Peak Fire Danger (Today)",
             "Worst fire danger class reached at each location so far today\n"
-            "As of: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
-            fontsize=16, ha='right', va='top', fontname='Montserrat'
+            f"As of: {now_ct()}",
         )
-        peak_fig.text(
-            0.99, 0.62,
-            "Fire Danger Criteria:\n"
-            "\n"
-            "Low: FM ≥ 15% (fuels too wet to spread significantly)\n\n"
-            "Moderate: FM < 15% AND (RH < 45% OR Wind ≥ 10 kts)\n\n"
-            "Elevated: FM < 9% AND\n"
-            "  (RH < 35% & Wind ≥ 12 kts) OR (RH < 25% & Wind ≥ 5 kts)\n\n"
-            "Critical: FM < 9% AND (RH < 25% & Wind ≥ 15 kts)\n\n"
-            "Extreme: FM < 7% AND (RH < 20% & Wind ≥ 25 kts)\n\n"
-            "Data Source: AWOS, RAWS, Missouri Mesonet, CWOP Stations\n"
-            "For More Info, Visit ShowMeFire.org",
-            fontsize=10, ha='right', va='top', linespacing=1.6, fontname='Montserrat'
-        )
-        peak_fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
-
-        if image is not None:
-            peak_imagebox = OffsetImage(image, zoom=0.03)
-            peak_ab = AnnotationBbox(
-                peak_imagebox, (0.99, 0.01), frameon=False,
-                xycoords='figure fraction', box_alignment=(1, 0)
-            )
-            peak_ax.add_artist(peak_ab)
-
         peak_fig.savefig('images/mo-observedpeakfiredanger.png', dpi=peak_mapdpi, bbox_inches=None, pad_inches=0)
         plt.close(peak_fig)
         print("Peak fire danger (today) map updated")
@@ -461,12 +250,13 @@ if peak_running_grid is not None:
         print(f"Warning: Failed to render peak fire danger PNG: {e}")
 
 runtime_sec = time.time() - start_time
-
-print(f"Fire Danger Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-print(f"Script runtime: {runtime_sec:.2f} seconds")
+updated_msg = f"Fire Danger Map updated at {now_ct()}"
+runtime_msg = f"Script runtime: {runtime_sec:.2f} seconds"
+print(updated_msg)
+print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = Path(__file__).parent.parent / 'logs/realtimefiredanger.log'
+log_file = PROJECT_DIR / 'logs/realtimefiredanger.log'
 log_file.parent.mkdir(exist_ok=True)
 logger = logging.getLogger('realtimefiredanger')
 logger.setLevel(logging.INFO)
@@ -474,41 +264,38 @@ if not logger.handlers:
     handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
-logger.info(f"Fire Danger Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
+logger.info(updated_msg)
+logger.info(runtime_msg)
 
 plt.close(fig)
 
-status_file = Path(__file__).parent.parent / 'status.json'
-import status_lock
+status_file = PROJECT_DIR / 'status.json'
 status_lock.acquire(status_file)
-if status_file.exists():
-    try:
-        with open(status_file, 'r') as f:
-            status = json.load(f)
-    except json.JSONDecodeError:
-        status = {}
-else:
+try:
+    with open(status_file, 'r') as f:
+        status = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
     status = {}
 
+counts = station_danger_summary['counts']
 status['RealtimeFireDanger'] = {
-    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': now_ct(),
     'status': 'updated',
     'runtime_sec': round(runtime_sec, 2),
-    'station_fire_danger_counts': station_danger_summary['counts'],
+    'station_fire_danger_counts': counts,
     'total_mo_stations': station_danger_summary['total_mo_stations'],
     'classified_mo_stations': station_danger_summary['classified_mo_stations'],
     'unclassified_mo_stations': station_danger_summary['unclassified_mo_stations'],
     'log': [
-        f"Fire Danger Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}",
-        f"Script runtime: {runtime_sec:.2f} seconds",
+        updated_msg,
+        runtime_msg,
         (
             "Station fire danger counts: "
-            f"Low={station_danger_summary['counts']['Low']}, "
-            f"Moderate={station_danger_summary['counts']['Moderate']}, "
-            f"Elevated={station_danger_summary['counts']['Elevated']}, "
-            f"Critical={station_danger_summary['counts']['Critical']}, "
-            f"Extreme={station_danger_summary['counts']['Extreme']}"
+            f"Low={counts['Low']}, "
+            f"Moderate={counts['Moderate']}, "
+            f"Elevated={counts['Elevated']}, "
+            f"Critical={counts['Critical']}, "
+            f"Extreme={counts['Extreme']}"
         )
     ]
 }

@@ -3,7 +3,6 @@
 Imported by stationprecipmap.py / etmap.py, never run directly (see scripts/maps.sh). Each spec
 that has a ``png`` key is drawn from the same Missouri-masked IDW grid as its GeoTIFF fill.
 """
-from io import BytesIO
 from pathlib import Path
 
 import matplotlib
@@ -11,7 +10,6 @@ import matplotlib
 matplotlib.use('Agg')
 import cartopy.crs as ccrs
 import matplotlib.font_manager as font_manager
-import matplotlib.image as mpimg
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
@@ -89,13 +87,10 @@ def render_station_png(grid, spec, labels, out_path):
              fontsize=16, ha='right', va='top', fontname='Montserrat')
     fig.text(0.99, 0.6, spec['blurb'], fontsize=12, ha='right', va='top', fontname='Montserrat')
     fig.text(0.02, 0.01, 'ShowMeFire.org', fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
-    try:
-        import cairosvg
-        logo = mpimg.imread(BytesIO(cairosvg.svg2png(url=str(PROJECT_DIR / 'assets/LightBackGroundLogo.svg'))), format='png')
+    logo = sp.logo_image()
+    if logo is not None:
         ax.add_artist(AnnotationBbox(OffsetImage(logo, zoom=0.03), (0.99, 0.01), frameon=False,
                                      xycoords='figure fraction', box_alignment=(1, 0)))
-    except Exception:  # the logo is decoration: never lose the map over it
-        pass
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

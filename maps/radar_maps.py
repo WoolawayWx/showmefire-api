@@ -90,14 +90,8 @@ def _mask_to_state(image: np.ndarray, bbox: tuple) -> np.ndarray:
     return masked
 
 
-@lru_cache(maxsize=1)
 def _logo():
-    try:
-        import cairosvg
-
-        return mpimg.imread(BytesIO(cairosvg.svg2png(url=str(PROJECT_DIR / "assets/LightBackGroundLogo.svg"))), format="png")
-    except Exception:  # noqa: BLE001 - the logo is decorative
-        return None
+    return sp.logo_image()
 
 
 def render_missouri(image: np.ndarray) -> dict:

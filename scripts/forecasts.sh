@@ -8,9 +8,11 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR" || exit 1
 
 # Hold an exclusive lock for the whole run so maps.sh skips its cycles instead
-# of competing with the forecast (and the API it calls) for CPU/memory.
-exec 8>"${TMPDIR:-/tmp}/showmefire-forecast.lock"
-flock -x 8
+# of competing with the forecast (and the API it calls) for CPU/memory. It
+# lives in the project folder so every copy of maps.sh (container or host
+# cron) sees it; see scripts/forecast_lock.sh.
+source "$SCRIPT_DIR/forecast_lock.sh"
+take_forecast_lock
 
 # Detect correct Python executable
 if [ -f "/opt/venv/bin/python" ]; then

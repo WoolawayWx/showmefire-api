@@ -37,7 +37,7 @@ from matplotlib.colors import BoundaryNorm, ListedColormap, TwoSlopeNorm, to_rgb
 from matplotlib.ticker import MaxNLocator
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from scipy.interpolate import Rbf
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, zoom
 import shapely
 
 MAPS_DIR = Path(__file__).resolve().parent
@@ -329,6 +329,35 @@ def _ensure_fonts_loaded() -> None:
     _FONTS_LOADED = True
 
 
+LOGO_SVG = PROJECT_DIR / "assets" / "LightBackGroundLogo.svg"
+LOGO_PNG_CACHE = PROJECT_DIR / "cache" / "LightBackGroundLogo.png"
+
+
+@lru_cache(maxsize=1)
+def logo_image() -> Optional[np.ndarray]:
+    """The ShowMeFire logo as an RGBA array. Rasterizing the SVG costs ~0.2s
+    and every map draws it, so the PNG is cached on disk (rebuilt whenever the
+    SVG is newer) and in memory for scripts that draw several maps."""
+    try:
+        if LOGO_PNG_CACHE.is_file() and LOGO_PNG_CACHE.stat().st_mtime >= LOGO_SVG.stat().st_mtime:
+            return mpimg.imread(LOGO_PNG_CACHE, format="png")
+        import cairosvg
+
+        png_bytes = cairosvg.svg2png(url=str(LOGO_SVG))
+    except (ImportError, FileNotFoundError, OSError):
+        return None
+    try:
+        LOGO_PNG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".logo.", suffix=".png", dir=LOGO_PNG_CACHE.parent)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(png_bytes)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, LOGO_PNG_CACHE)
+    except OSError:
+        pass  # caching is an optimization only
+    return mpimg.imread(BytesIO(png_bytes), format="png")
+
+
 def add_branding(fig, ax, *, title: str, subtitle: str, description: str) -> None:
     """Title/subtitle/description block + "ShowMeFire.org" wordmark + logo,
     matching the look of rhmap-fil.py/windmap-fil.py/fuelmoisturemap.py."""
@@ -338,14 +367,7 @@ def add_branding(fig, ax, *, title: str, subtitle: str, description: str) -> Non
     fig.text(0.99, 0.6, description, fontsize=12, ha="right", va="top", fontname="Montserrat", linespacing=1.4)
     fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat")
 
-    svg_path = PROJECT_DIR / "assets/LightBackGroundLogo.svg"
-    try:
-        import cairosvg
-
-        png_bytes = cairosvg.svg2png(url=str(svg_path))
-        image = mpimg.imread(BytesIO(png_bytes), format="png")
-    except (ImportError, FileNotFoundError, OSError):
-        image = None
+    image = logo_image()
     if image is not None:
         imagebox = OffsetImage(image, zoom=0.03)
         annotation = AnnotationBbox(
@@ -563,10 +585,17 @@ def plot_filled_field(
 def interpolate_to_grid(points_lon, points_lat, values, ax, data_crs, *, grid_size: int = FILL_GRID_SIZE, sigma: float = FILL_BLUR_SIGMA) -> np.ndarray:
     """RBF-interpolate scattered station values onto the fill grid (lon/lat
     mesh from _fill_grid, rows = latitude) and blur, unmasked."""
-    lon_mesh, lat_mesh, _mask, _x, _y = _fill_grid(grid_size, ax.projection, data_crs)
-    return gaussian_filter(
-        Rbf(points_lon, points_lat, values, function="multiquadric", smooth=0.5)(lon_mesh, lat_mesh), sigma=sigma,
-    )
+    # Evaluating the RBF at every one of the 160k fill cells was the costliest
+    # step of most station maps. The result is blurred by `sigma` cells anyway,
+    # so evaluate on a half-resolution grid and upsample (cubic) first: within
+    # ~0.01 units of the full evaluation, about 3x faster.
+    lon_mesh, _lat_mesh, _mask, _x, _y = _fill_grid(grid_size, ax.projection, data_crs)
+    coarse_size = max(grid_size // 2, 50)
+    coarse_lon, coarse_lat = np.meshgrid(np.linspace(MO_EXTENT[0], MO_EXTENT[1], coarse_size),
+                                         np.linspace(MO_EXTENT[2], MO_EXTENT[3], coarse_size))
+    coarse = Rbf(points_lon, points_lat, values, function="multiquadric", smooth=0.5)(coarse_lon, coarse_lat)
+    full = zoom(coarse, grid_size / coarse_size, order=3)[: lon_mesh.shape[0], : lon_mesh.shape[1]]
+    return gaussian_filter(full, sigma=sigma)
 
 
 def draw_filled_grid(
@@ -658,6 +687,9 @@ def _atomic_json_write(path: Path, payload: Any) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
             handle.write("\n")
+        # mkstemp() creates files 0600 whatever the umask; make them readable
+        # like any other output (the API, CDN upload and host tools read them).
+        os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -676,6 +708,7 @@ def save_and_record_status(fig, out_png_path: Path, status_path: Path, status_pa
     temp_path = Path(temporary)
     try:
         fig.savefig(temp_path, dpi=dpi, facecolor=fig.get_facecolor(), bbox_inches=None, pad_inches=0)
+        os.chmod(temp_path, 0o644)  # mkstemp() files are 0600; see _atomic_json_write
         os.replace(temp_path, out_png_path)
     finally:
         if temp_path.exists():

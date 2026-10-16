@@ -16,6 +16,7 @@ from tools.firedetections import main as fetch_advanced_fire_detections
 from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive, run_ngfs_raw_archive
+from services import map_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
@@ -718,6 +719,18 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=3,
         minute=15,
         id='archive_stale_ngfs_detections',
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Zip each finished day's 15-minute CDN map copies, prune them after 14
+    # days and tell staff on Discord when zips are ready (services/map_archive.py).
+    scheduler.add_job(
+        map_archive.run_scheduled,
+        'cron',
+        hour=2,
+        minute=45,
+        id='daily_map_archive',
         max_instances=1,
         coalesce=True
     )

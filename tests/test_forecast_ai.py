@@ -70,5 +70,46 @@ class ForecastAITests(unittest.TestCase):
         self.assertIn("0.08 inches", discussion)
 
 
+class CurrentDispersionTests(unittest.TestCase):
+    def _fire_weather_file(self, directory, valid_time):
+        area = {
+            "mixing_height_ft": {"min": 2000, "median": 4200, "max": 6000},
+            "transport_speed_mph": {"min": 20, "median": 30, "max": 40},
+            "transport_direction": "northwest", "ventilation_dominant": "Very Good",
+            "ventilation_category_percent": {"Very Good": 70.0, "Good": 30.0},
+            "surface_inversion_percent": 0.0, "haines": {"max": 5}, "hdw": {"max": 140}, "cell_count": 10,
+        }
+        path = Path(directory) / "fire_weather_latest.json"
+        path.write_text(json.dumps({"valid_time": valid_time, "source": "HRRR",
+                                    "statewide": area, "regions": {"Central": area}}))
+        return path
+
+    def _briefing(self, directory, valid_time):
+        forecast = ForecastAITests()._forecast_file(directory)
+        return build_briefing(directory, forecast_path=forecast,
+                              fire_weather_path=self._fire_weather_file(directory, valid_time))
+
+    def test_fresh_analysis_is_added_and_used_by_fallback(self):
+        from datetime import datetime, timezone
+        from forecast.forecast_ai import fallback_text
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            briefing = self._briefing(directory, now)
+        self.assertEqual(briefing["current_dispersion"]["statewide"]["smoke_dispersal"], "Very Good")
+        _headline, discussion = fallback_text(briefing)
+        self.assertIn("mixing heights are near 4,200 ft", discussion)
+        self.assertIn("very good smoke dispersal", discussion)
+
+    def test_stale_or_missing_analysis_is_left_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            briefing = self._briefing(directory, "2020-01-01T00:00:00Z")
+            self.assertNotIn("current_dispersion", briefing)
+            forecast = ForecastAITests()._forecast_file(directory)
+            briefing = build_briefing(directory, forecast_path=forecast,
+                                      fire_weather_path=Path(directory) / "missing.json")
+        self.assertNotIn("current_dispersion", briefing)
+
+
 if __name__ == "__main__":
     unittest.main()

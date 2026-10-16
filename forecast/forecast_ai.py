@@ -165,8 +165,27 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         f"with the strongest values near {round(state['wind_mph']['max'])} mph in "
         f"{strongest_name} Missouri.{wind_direction_text}"
         + rain_text
+        + _dispersion_sentence(briefing.get("current_dispersion"))
     )
     return headline, discussion
+
+
+def _dispersion_sentence(dispersion: dict | None) -> str:
+    """One factual sentence on the current hourly dispersion estimate, labeled with its time."""
+    if not dispersion:
+        return ""
+    state = dispersion["statewide"]
+    mixing = state["mixing_height_ft"].get("median")
+    transport = state["transport_wind_mph"].get("median")
+    category = state.get("smoke_dispersal")
+    if mixing is None or transport is None or not category:
+        return ""
+    direction = f" from the {state['transport_wind_from']}" if state.get("transport_wind_from") else ""
+    return (
+        f" As of {dispersion['valid_time']}, mixing heights are near {round(mixing):,} ft with "
+        f"transport winds near {round(transport)} mph{direction}, giving mostly "
+        f"{category.lower()} smoke dispersal."
+    )
 
 
 def generate_text(
@@ -242,7 +261,12 @@ def generate_forecast_text(
         "moisture to whole numbers. Omit precipitation when it is trace or "
         "unavailable. Do not invent fronts, timing, cloud cover, confidence, "
         "causes, or impacts that are not in the JSON. Do not give recommendations, "
-        "use headings, report averages, or use markdown.\n\n" + data
+        "use headings, report averages, or use markdown. "
+        "If current_dispersion is present it describes conditions at its "
+        "valid_time (current conditions), not the afternoon forecast: you may add at most one short sentence on current "
+        "smoke dispersal (mixing height, transport wind, smoke dispersal category) and "
+        "must say it is as of that time; never present it as afternoon or forecast "
+        "conditions.\n\n" + data
     )
     generated_headline = generate_text(client, headline_prompt, briefing)
     generated_discussion = generate_text(

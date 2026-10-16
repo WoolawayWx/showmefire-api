@@ -65,6 +65,12 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+# Only now that the inputs are in (the wait above is mostly idle) take the
+# forecast lock, so maps.sh yields CPU to the actual forecast work.
+source "$SCRIPT_DIR/forecast_lock.sh"
+take_forecast_lock
+echo "=== Holding forecast lock; map refreshes paused ===" >> "$LOG_FILE" 2>&1
+
 run_step "Running 9z Daily Forecast" "$PROJECT_DIR/forecast/DailyForecast.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then

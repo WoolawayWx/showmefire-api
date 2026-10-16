@@ -202,3 +202,13 @@ def health_liveness(request: Request, verbose: bool = False):
 def health_readiness(request: Request):
     """Readiness probe - runs every registered check (DB, scheduler, disk, data freshness)."""
     return _run_readiness(request)
+
+
+@router.get("/health/products")
+def health_products():
+    """Freshness of every automated product (maps, model and external data feeds):
+    each product's last update, its expected refresh interval and any problems.
+    Reads local files only, so it is cheap enough to poll."""
+    from services.product_health import check_all
+
+    return check_all()

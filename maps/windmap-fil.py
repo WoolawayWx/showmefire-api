@@ -1,157 +1,79 @@
-import cartopy.crs as ccrs
-import pandas as pd
-from matplotlib.colors import ListedColormap, BoundaryNorm
-from scipy.ndimage import gaussian_filter
-from shapely.ops import unary_union
-from shapely.affinity import translate
-from shapely.geometry import box, Point
-import json
-import matplotlib.patheffects as path_effects
-import rasterio
-from rasterio.plot import show
-import matplotlib.pyplot as plt
-import geopandas as gpd
-import numpy as np
-from station_plot import opaque_blend_cmap
-import station_plot as sp
-from pathlib import Path
-import requests
-from scipy.interpolate import griddata, Rbf
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import cairosvg
-from io import BytesIO
-import matplotlib.font_manager as font_manager
-import matplotlib.image as mpimg
-from dotenv import load_dotenv
-import os
-import time
-import logging
-from logging.handlers import RotatingFileHandler
+"""Missouri statewide sustained wind speed map (images/mo-windfilmap.png).
 
+Station wind speed from the four map networks, anchored at the border by
+neighbor-state stations, RBF-interpolated across the state, with a wind barb
+at every station. Also exports gis/realtime/wind_speed.tif and reports into
+the root status.json under 'WindFiltered'.
+
+Basemap, boundaries, branding and the station feed come from
+maps/station_plot.py. The interpolation is this map's own (smooth=0.005, no
+blur) and is unchanged.
+"""
+import json
+import logging
+import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.interpolate import Rbf
+
+import station_plot as sp
+import status_lock
 from realtime_geotiff import export_continuous_rgba_geotiff
 from station_rbf import buffer_points
 
-def degrees_to_cardinal(degrees):
-    if degrees is None:
-        return ""
-    directions = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-    index = round(degrees / 22.5) % 16
-    return directions[index]
-
-def add_hillshade(ax, hillshade_path, extent, data_crs, alpha=0.3, cmap='gray'):
-    with rasterio.open(hillshade_path) as src:
-        hillshade = src.read(1)
-        
-        # Get the bounds from the raster
-        bounds = src.bounds
-        hillshade_extent = [bounds.left, bounds.right, bounds.bottom, bounds.top]
-        
-        # Display the hillshade
-        ax.imshow(hillshade, 
-                  extent=hillshade_extent,
-                  transform=data_crs,
-                  cmap=cmap,
-                  alpha=alpha,
-                  zorder=1,  # Behind everything else
-                  interpolation='lanczos')
-
-def generate_basemap():
-    SCRIPT_DIR = Path(__file__).resolve().parent
-    PROJECT_DIR = SCRIPT_DIR.parent
-
-    # Map Parameters
-    pixelw = 2048
-    pixelh = 1152
-    mapdpi = 144
-
-    center_lon = -92.5
-    center_lat = 38.5
-    # Missouri bounds with margin: lon -96.27 to -88.6, lat 35.49 to 41.11
-    extent = (-95.8, -89.1, 35.8, 40.8)
-
-    data_crs = ccrs.PlateCarree()
-    map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
-
-    figsize_width = pixelw / mapdpi
-    figsize_height = pixelh / mapdpi
-
-    fig = plt.figure(figsize=(figsize_width, figsize_height), dpi=mapdpi, facecolor='#E8E8E8')
-    ax = plt.axes([0,0,1,1], projection=map_crs)
-
-    ax.set_frame_on(False)
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-    ax.set_extent(extent, crs=data_crs)
-
-    # hillshade_path = PROJECT_DIR / 'assets/hillshade.tif'
-    # if hillshade_path.exists():
-    #    add_hillshade(ax, hillshade_path, extent, data_crs, alpha=0.3, cmap='gray')
-    
-    map_extent = ax.get_extent(crs=data_crs)  
-    bbox = box(*map_extent)
-    
-    
-    
-    return fig, ax, data_crs, map_crs, mapdpi
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+GRID_SIZE = 400
 
-load_dotenv()
-port = os.getenv('PORT', '8000')
-response = requests.get(f'http://localhost:{port}/stations')
-data = response.json()
-stations = data['stations']
 
-valid_networks = {'RAWS', 'ASOS/AWOS', 'MOCOMAGNET', 'Missouri Mesonet'}
-filtered_stations = [s for s in stations if s.get('network') in valid_networks] 
+def now_ct():
+    return pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')
+
+
+# The raw /stations payload (via station_plot's short-lived shared cache, so
+# this map doesn't re-fetch what another script in the same maps.sh cycle
+# just fetched). Deliberately not sp.fetch_stations(): that also applies the
+# neighbor-outlier QC, which would change this map's inputs.
+all_stations = sp._read_station_cache(sp.STATION_CACHE_MAX_AGE_SECONDS)
+if all_stations is None:
+    all_stations = sp._fetch_and_cache_stations()
+filtered_stations = [s for s in all_stations if s.get('network') in sp.VALID_NETWORKS]
 
 points = []
 for s in filtered_stations:
-    if 'observations' in s and 'wind_speed' in s['observations']:
-        ws = s['observations']['wind_speed']
-        if ws.get('value') is not None:
-            points.append((s['longitude'], s['latitude'], ws['value']))
+    ws = s.get('observations', {}).get('wind_speed', {}).get('value')
+    if ws is not None:
+        points.append((s['longitude'], s['latitude'], ws))
 
 # Neighbor-state stations anchor the interpolation at the border (barbs stay Missouri-only).
 points += buffer_points('wind_speed')
 
-fig, ax, data_crs, map_crs, mapdpi = generate_basemap()
-
-lon_min, lon_max, lat_min, lat_max = -95.8, -89.1, 35.8, 40.8
-grid_lon = np.linspace(lon_min, lon_max, 400)
-grid_lat = np.linspace(lat_min, lat_max, 400)
-grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
+fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
+grid_lon_mesh, grid_lat_mesh, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(GRID_SIZE, map_crs, data_crs)
 
 start_time = time.time()
 
 if points:
-    points_lon = [p[0] for p in points]
-    points_lat = [p[1] for p in points]
-    values = [p[2] for p in points]
-
-    # Interpolation and smoothing (same as rhmap)
+    points_lon, points_lat, values = zip(*points)
     rbf = Rbf(points_lon, points_lat, values, function='multiquadric', smooth=0.005)
-    grid_values = rbf(grid_lon_mesh, grid_lat_mesh)
-    grid_values = np.clip(grid_values, 0, 100)  # Cap wind speed at 100 mph if desired
-    grid_values = gaussian_filter(grid_values, sigma=0)
-
-    # Masking (same as rhmap)
-    # Shared, cached state mask + map-projected grid (see station_plot._fill_grid): the old
-    # per-Point Shapely mask and lon/lat contouring (cartopy re-projecting every polygon)
-    # were most of this script's runtime.
-    _, _, within_mask, grid_x_mesh, grid_y_mesh = sp._fill_grid(400, map_crs, data_crs)
+    # Cells outside Missouri are masked to NaN anyway, so only evaluate the
+    # RBF inside the state (identical values, ~45% fewer cells).
     if within_mask is not None:
-        grid_values[~within_mask] = np.nan
+        grid_values = np.full(grid_lon_mesh.shape, np.nan)
+        grid_values[within_mask] = rbf(grid_lon_mesh[within_mask], grid_lat_mesh[within_mask])
+    else:
+        grid_values = rbf(grid_lon_mesh, grid_lat_mesh)
+    grid_values = np.clip(grid_values, 0, 100)  # Cap wind speed at 100 mph
 
     geotiff_ok = export_continuous_rgba_geotiff(
         grid_values=grid_values,
         lon_mesh=grid_lon_mesh,
         lat_mesh=grid_lat_mesh,
-        out_path=SCRIPT_DIR.parent / 'gis/realtime/wind_speed.tif',
+        out_path=PROJECT_DIR / 'gis/realtime/wind_speed.tif',
         cmap_name='RdYlGn_r',
         vmin=0,
         vmax=51,
@@ -162,62 +84,37 @@ if points:
     if not geotiff_ok:
         print("Warning: Failed to export wind speed GeoTIFF")
 
-    # Plotting (same as rhmap)
     cs = ax.contourf(
         grid_x_mesh, grid_y_mesh, grid_values,
         levels=np.linspace(0, 51, 256),
-        cmap=opaque_blend_cmap('RdYlGn_r', 0.75), zorder=7, antialiased=False
+        cmap=sp.opaque_blend_cmap('RdYlGn_r', 0.75), zorder=7, antialiased=False
     )
-
     cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
-    cbar = plt.colorbar(cs, cax=cax, label='Wind Speed (mph)', ticks=np.arange(0, 52, 5))
+    fig.colorbar(cs, cax=cax, label='Wind Speed (mph)', ticks=np.arange(0, 52, 5))
 
-if filtered_stations:
-    lons = []
-    lats = []
-    us = []
-    vs = []
-    for s in filtered_stations:
-        ws = s.get('observations', {}).get('wind_speed', {}).get('value')
-        wd = s.get('observations', {}).get('wind_direction', {}).get('value')
-        if ws is not None and wd is not None:
-            lons.append(s['longitude'])
-            lats.append(s['latitude'])
-            # Convert to u, v: wind blows from wd, so vector points to wd + 180
-            u = -ws * np.sin(np.radians(wd))
-            v = -ws * np.cos(np.radians(wd))
-            us.append(u)
-            vs.append(v)
-    
-    if lons:
-        ax.barbs(np.array(lons), np.array(lats), np.array(us), np.array(vs), transform=data_crs, length=6, zorder=10, color='black')
+# A barb at every station reporting speed and direction. Not
+# sp.plot_wind_barbs: that drops a station sitting at exactly the same
+# coordinates as one already plotted, which this map never did.
+lons, lats, us, vs = [], [], [], []
+for s in filtered_stations:
+    ws = s.get('observations', {}).get('wind_speed', {}).get('value')
+    wd = s.get('observations', {}).get('wind_direction', {}).get('value')
+    if ws is not None and wd is not None:
+        lons.append(s['longitude'])
+        lats.append(s['latitude'])
+        # Wind blows from wd, so the vector points to wd + 180
+        us.append(-ws * np.sin(np.radians(wd)))
+        vs.append(-ws * np.cos(np.radians(wd)))
+if lons:
+    ax.barbs(np.array(lons), np.array(lats), np.array(us), np.array(vs), transform=data_crs, length=6, zorder=10, color='black')
 
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_County_Boundaries/MO_County_Boundaries.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#B6B6B6", facecolor='none', linewidth=1, zorder=8)
-    
-ax.add_geometries(sp._projected_boundary(str(SCRIPT_DIR / 'shapefiles/MO_State_Boundary/MO_State_Boundary.shp'), map_crs.proj4_init), crs=map_crs, edgecolor="#000000", facecolor='none', linewidth=1.5, zorder=9)
-
-ax.set_anchor('W') 
-
-plt.subplots_adjust(left=0.05) 
-
-font_paths = [
-    str(SCRIPT_DIR.parent / 'assets/Montserrat/static/Montserrat-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Regular.ttf'),
-    str(SCRIPT_DIR.parent / 'assets/Plus_Jakarta_Sans/static/PlusJakartaSans-Bold.ttf')
-]
-for font_path in font_paths:
-    if Path(font_path).exists():
-        font_manager.fontManager.addfont(font_path)
-plt.rcParams['font.family'] = 'Montserrat'
-
-fig.text(
-    0.99, 0.97,
-    "Missouri Statewide Sustained Wind Speed Map",
-    fontsize=26,
-    fontweight='bold',
-    ha='right',
-    va='top',
-    fontname='Plus Jakarta Sans'
+# Title/subtitle/wordmark/logo from the shared layout; this map's description
+# keeps its own (default) line spacing, so it is drawn here instead.
+sp.add_branding(
+    fig, ax,
+    title="Missouri Statewide Sustained Wind Speed Map",
+    subtitle=f"Valid Time: {now_ct()}",
+    description="",
 )
 fig.text(
     0.99, 0.6,
@@ -225,46 +122,19 @@ fig.text(
     "AWOS, RAWS, Missouri Mesonet\n\n"
     "Wind speed is a critical factor in fire behavior and spread.\n"
     "Values interpolated from available stations; local variations may occur.",
-    fontsize=12,
-    ha='right',
-    va='top',
-    fontname='Montserrat'
+    fontsize=12, ha='right', va='top', fontname='Montserrat'
 )
-fig.text(
-    0.99, 0.90,
-    "Valid Time: {date}".format(date=pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')),
-    fontsize=16,
-    ha='right',
-    va='top',
-    fontname='Montserrat'
-)
-fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
-
-svg_path = str(SCRIPT_DIR.parent / 'assets/LightBackGroundLogo.svg')
-
-try:
-    png_bytes = cairosvg.svg2png(url=svg_path)
-    image = mpimg.imread(BytesIO(png_bytes), format='png')
-except ImportError:
-    image = None
-
-if image is not None:
-    imagebox = OffsetImage(image, zoom=0.03)
-    ab = AnnotationBbox(
-        imagebox, (0.99, 0.01), frameon=False,
-        xycoords='figure fraction', box_alignment=(1,0)
-    )
-    ax.add_artist(ab)
 
 fig.savefig('images/mo-windfilmap.png', dpi=mapdpi, bbox_inches=None, pad_inches=0)
 
 runtime_sec = time.time() - start_time
-
-print(f"Wind Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-print(f"Script runtime: {runtime_sec:.2f} seconds")
+updated_msg = f"Wind Map updated at {now_ct()}"
+runtime_msg = f"Script runtime: {runtime_sec:.2f} seconds"
+print(updated_msg)
+print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = Path(__file__).parent.parent / 'logs/windmap-fil.log'
+log_file = PROJECT_DIR / 'logs/windmap-fil.log'
 log_file.parent.mkdir(exist_ok=True)
 logger = logging.getLogger('windmap-fil')
 logger.setLevel(logging.INFO)
@@ -272,31 +142,24 @@ if not logger.handlers:
     handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
-logger.info(f"Wind Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-logger.info(f"Script runtime: {runtime_sec:.2f} seconds")
+logger.info(updated_msg)
+logger.info(runtime_msg)
 
 plt.close(fig)
 
-status_file = Path(__file__).parent.parent / 'status.json'
-import status_lock
+status_file = PROJECT_DIR / 'status.json'
 status_lock.acquire(status_file)
-if status_file.exists():
-    try:
-        with open(status_file, 'r') as f:
-            status = json.load(f)
-    except json.JSONDecodeError:
-        status = {}
-else:
+try:
+    with open(status_file, 'r') as f:
+        status = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
     status = {}
 
 status['WindFiltered'] = {
-    'last_update': pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
+    'last_update': now_ct(),
     'status': 'updated',
     'runtime_sec': round(runtime_sec, 2),
-    'log': [
-        f"Wind Map updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}",
-        f"Script runtime: {runtime_sec:.2f} seconds"
-    ]
+    'log': [updated_msg, runtime_msg],
 }
 
 with open(status_file, 'w') as f:
