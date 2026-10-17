@@ -119,16 +119,20 @@ def _projection_params(dataset) -> tuple[float, float]:
         return HRRR_CENTRAL_LON, HRRR_STANDARD_PARALLEL
 
 
-def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_factory=None) -> Profiles:
-    """Download and crop the pressure-level and surface fields valid at `valid`."""
+def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_factory=None,
+                   run: Optional[datetime] = None, fxx: int = FORECAST_HOUR) -> Profiles:
+    """Download and crop the pressure-level and surface fields valid at `valid`.
+
+    By default that is the previous hour's run at f01. Pass `run` and `fxx` to read a
+    specific forecast hour of a specific run instead (hour-by-hour forecast product)."""
     if herbie_factory is None:
         from herbie import Herbie as herbie_factory
     owned = workdir is None
     workdir = Path(workdir or tempfile.mkdtemp(prefix="smf-hrrr-fw-"))
-    naive = run_for(valid).replace(tzinfo=None)
+    naive = (run or run_for(valid)).replace(tzinfo=None)
     try:
         def subset(product: str, search: str):
-            herbie = herbie_factory(naive, model="hrrr", product=product, fxx=FORECAST_HOUR, save_dir=str(workdir),
+            herbie = herbie_factory(naive, model="hrrr", product=product, fxx=fxx, save_dir=str(workdir),
                                     verbose=False, priority=["aws"])
             return [crop(item) for item in _as_list(herbie.xarray(search, remove_grib=True))]
 

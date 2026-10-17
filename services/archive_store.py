@@ -25,7 +25,8 @@ SOURCES = {'hrrr': 'cache/hrrr', 'rrfs': 'cache/RRFS',
            'forecasts_beta': 'data/testbed/forecast/archive/forecasts',
            'hrrr_beta': 'data/testbed/forecast/cache/hrrr',
            'observations_full': 'archive/raw_data_full',
-           'ensemble': 'cache/ensemble/runs'}
+           'ensemble': 'cache/ensemble/runs',
+           'hrrr_hourly': 'data/hrrr_hourly/nc'}
 DATE = re.compile(r'(20\d{6})')
 
 

@@ -242,7 +242,7 @@ def collect_derived(day: str, now_ts: float) -> list[tuple[Path, str]]:
 
 FILE_COMPONENTS: dict[str, Callable[[str, float], list[tuple[Path, str]]]] = {}
 SOURCE_COMPONENTS = ("forecasts", "observations", "observations_full", "hrrr", "rrfs", "ensemble",
-                     "forecasts_beta", "hrrr_beta")
+                     "forecasts_beta", "hrrr_beta", "hrrr_hourly")
 for _name in SOURCE_COMPONENTS:
     FILE_COMPONENTS[_name] = (lambda day, ts, _n=_name: collect_source(_n, day, ts))
 FILE_COMPONENTS["rtma"] = collect_rtma

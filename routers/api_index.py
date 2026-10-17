@@ -47,6 +47,22 @@ _ROUTES: List[tuple] = [
      "09z forecast vs RTMA peak history.", "none", "public"),
     ("GET", "/forecast-09z/metrics/rtma/{date}", "09z comparison",
      "09z forecast vs RTMA peak for a date.", "date YYYY-MM-DD", "public"),
+    ("GET", "/hrrr-hourly/status", "HRRR hourly forecast",
+     "Update state (waiting_for_forecast, building, rendering, complete...) with progress and the cycle being served.",
+     "none", "public"),
+    ("GET", "/hrrr-hourly/runs", "HRRR hourly forecast",
+     "Built cycles of the hour-by-hour HRRR forecast (12z run, f00-f18) and which is latest.", "none", "public"),
+    ("GET", "/hrrr-hourly/runs/{cycle}", "HRRR hourly forecast",
+     "Manifest: run/issue time, hours, variables with units, grid, statewide hourly series. cycle = 20261016_12z or latest.",
+     "cycle", "public"),
+    ("GET", "/hrrr-hourly/runs/{cycle}/zarr/{path}", "HRRR hourly forecast",
+     "Files of the Zarr store (open the .../zarr URL with a Zarr reader; 600/min for chunk reads).", "cycle; path", "public"),
+    ("GET", "/hrrr-hourly/runs/{cycle}/netcdf", "HRRR hourly forecast",
+     "Download the NetCDF copy of the cycle.", "cycle", "public"),
+    ("GET", "/hrrr-hourly/runs/{cycle}/point", "HRRR hourly forecast",
+     "Hourly series of every element at the nearest grid cell (30/min).", "cycle; lat; lon", "public"),
+    ("GET", "/hrrr-hourly/runs/{cycle}/image/{element}/{hour}", "HRRR hourly forecast",
+     "Map image (PNG) of one element for one forecast hour.", "cycle; element; hour 0-18", "public"),
 ]
 
 

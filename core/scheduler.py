@@ -18,6 +18,7 @@ from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive, run_ngfs_raw_archive
 from services import map_archive
 from services import day_archive, full_obs_archive
+from services.hrrr_hourly import scheduler_job as hrrr_hourly_job
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
@@ -745,6 +746,17 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=1,
         minute=0,
         id='full_observation_capture',
+        max_instances=1,
+        coalesce=True
+    )
+    # Hour-by-hour HRRR product from the 12z run. Each tick is a cheap no-op until the run is fully
+    # published and the daily forecast is idle; the build itself runs in a subprocess.
+    scheduler.add_job(
+        hrrr_hourly_job.run_scheduled,
+        'cron',
+        hour='9-14',
+        minute='*/20',
+        id='hrrr_hourly_forecast',
         max_instances=1,
         coalesce=True
     )
