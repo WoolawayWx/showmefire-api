@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -145,15 +146,22 @@ def write_cycle(cycle_time: datetime, hours: dict[int, dict[str, np.ndarray]], l
     root = Path(root or root_dir())
     issued_at = issued_at or datetime.now(timezone.utc)
     cycle = cycle_id(cycle_time)
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
     dataset = build_dataset(cycle_time, hours, lat, lon, issued_at)
+    timings["dataset_sec"] = round(time.perf_counter() - started, 2)
     if not dataset.data_vars:
         raise ValueError("no elements to write")
 
     staging = root / f".{cycle}.tmp"
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
+    started = time.perf_counter()
     zarr_written = write_zarr(dataset, staging / "forecast.zarr")
+    timings["zarr_sec"] = round(time.perf_counter() - started, 2)
+    started = time.perf_counter()
     write_netcdf(dataset, nc_path(cycle, root))
+    timings["netcdf_sec"] = round(time.perf_counter() - started, 2)
     files = {"netcdf": f"nc/{PRODUCT}_{cycle}.nc", "netcdf_bytes": nc_path(cycle, root).stat().st_size}
     if zarr_written:
         files["zarr"] = f"{cycle}/forecast.zarr"
@@ -169,6 +177,7 @@ def write_cycle(cycle_time: datetime, hours: dict[int, dict[str, np.ndarray]], l
     shutil.rmtree(retired, ignore_errors=True)
     _atomic_json(root / "latest.json", {"cycle": cycle, "cycle_time_utc": manifest["cycle_time_utc"],
                                         "issued_at_utc": manifest["issued_at_utc"]})
+    manifest["write_timings"] = timings  # returned for the build's timings report; not part of manifest.json
     return manifest
 
 
@@ -177,6 +186,17 @@ def list_cycles(root: Optional[Path] = None) -> list[str]:
     if not root.is_dir():
         return []
     return sorted((p.name for p in root.iterdir() if p.is_dir() and (p / "manifest.json").is_file()), reverse=True)
+
+
+def timings_path(cycle: str, root: Optional[Path] = None) -> Path:
+    return Path(root or root_dir()) / cycle / "timings.json"
+
+
+def read_timings(cycle: str, root: Optional[Path] = None) -> dict | None:
+    try:
+        return json.loads(timings_path(cycle, root).read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def read_manifest(cycle: str, root: Optional[Path] = None) -> dict | None:

@@ -96,9 +96,10 @@ from core.config import (
     MISSOURI_FIRES_GEOJSON
 )
 from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
+from core.cors_origins import ORIGIN_REGEX
 from core.public_cors import PublicTileCorsMiddleware
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -302,6 +303,7 @@ app.include_router(verification.router)
 app.include_router(api_index.router)
 app.include_router(day_archive_admin.router)
 app.include_router(hrrr_hourly.router)
+app.include_router(hrrr_hourly_admin.router)
 app.include_router(feedback.router)
 app.include_router(forecast_discussions.router)
 app.include_router(burn_bans.router)
@@ -332,6 +334,7 @@ origins = [
     # "http://192.168.1.100:8080",    # Example of a local IP for testing
     "https://showmefire.org",
     "https://preview.showmefire.org",# Your production frontend domain
+    "https://dev.showmefire.org",
     # You can also add specific port numbers if your frontend is served from one
 ]
 # Extra browser origins that may call the API with credentials, comma separated, for example the
@@ -344,7 +347,8 @@ app.add_middleware(
     # Nuxt may select another port when the default dev port is occupied.
     # Keep local development origins limited to loopback hosts while allowing
     # any local port, instead of making developers change the API for each run.
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+    # Also the Cloudflare Pages preview hosts (*.showmefire-website.pages.dev); see core/cors_origins.py.
+    allow_origin_regex=ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

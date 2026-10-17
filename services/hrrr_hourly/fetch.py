@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -53,16 +55,36 @@ def _first_variable(datasets):
     raise KeyError("empty HRRR subset")
 
 
-def fetch_extras(run: datetime, fxx: int, workdir: Path, herbie_factory=None) -> dict[str, np.ndarray]:
-    """Optional surface fields on the cropped grid. Fields that fail or are absent are left out."""
-    if herbie_factory is None:
-        from herbie import Herbie as herbie_factory
-    naive = run.replace(tzinfo=None)
+# Timings of the most recent fetch_hour() call, read (and cleared) by the build through take_timings().
+_LAST_TIMINGS: dict = {}
+
+
+def take_timings() -> dict:
+    """Timings recorded by the last fetch_hour(): profiles_sec, extras_sec and per-field seconds. Empty if none."""
+    timings = dict(_LAST_TIMINGS)
+    _LAST_TIMINGS.clear()
+    return timings
+
+
+def extra_searches(fxx: int) -> dict[str, str]:
     searches = dict(EXTRA_SEARCHES)
     if fxx >= 1:
         searches["precip"] = f":APCP:surface:{fxx - 1}-{fxx} hour acc fcst"
+    return searches
+
+
+def fetch_extras(run: datetime, fxx: int, workdir: Path, herbie_factory=None,
+                 field_seconds: Optional[dict] = None) -> dict[str, np.ndarray]:
+    """Optional surface fields on the cropped grid. Fields that fail or are absent are left out.
+
+    `field_seconds`, if given, receives the seconds spent on each field (including failed ones)."""
+    if herbie_factory is None:
+        from herbie import Herbie as herbie_factory
+    naive = run.replace(tzinfo=None)
+    searches = extra_searches(fxx)
     out = {}
     for key, search in searches.items():
+        started = time.perf_counter()
         try:
             herbie = herbie_factory(naive, model="hrrr", product="sfc", fxx=fxx, save_dir=str(workdir),
                                     verbose=False, priority=["aws"])
@@ -71,16 +93,118 @@ def fetch_extras(run: datetime, fxx: int, workdir: Path, herbie_factory=None) ->
             out[key] = _first_variable(datasets)
         except Exception as exc:
             logger.info("HRRR %s f%02d: %s unavailable (%s)", run.strftime("%Y%m%d%Hz"), fxx, key, exc)
+        if field_seconds is not None:
+            field_seconds[key] = round(time.perf_counter() - started, 2)
     return out
 
 
-def fetch_hour(run: datetime, fxx: int, herbie_factory=None):
-    """(Profiles, extras) for forecast hour `fxx` of `run`. Temp files are always removed."""
+def fetch_hour(run: datetime, fxx: int, herbie_factory=None, workdir: Optional[Path] = None):
+    """(Profiles, extras) for forecast hour `fxx` of `run`.
+
+    With `workdir` (a Prefetcher's directory for this hour) the GRIB subsets already downloaded there are reused
+    and the caller removes the directory; otherwise a temp directory is used and always removed."""
     valid = run + timedelta(hours=fxx)
-    workdir = Path(tempfile.mkdtemp(prefix="smf-hrrr-hourly-"))
+    owned = workdir is None
+    workdir = Path(workdir or tempfile.mkdtemp(prefix="smf-hrrr-hourly-"))
     try:
+        started = time.perf_counter()
         profiles = hp.fetch_profiles(valid, workdir=workdir, herbie_factory=herbie_factory, run=run, fxx=fxx)
-        extras = fetch_extras(run, fxx, workdir, herbie_factory=herbie_factory)
+        profiles_sec = time.perf_counter() - started
+        field_seconds: dict = {}
+        started = time.perf_counter()
+        extras = fetch_extras(run, fxx, workdir, herbie_factory=herbie_factory, field_seconds=field_seconds)
+        _LAST_TIMINGS.update({"profiles_sec": round(profiles_sec, 2),
+                              "extras_sec": round(time.perf_counter() - started, 2),
+                              "extras_fields": field_seconds, "extras_missing": sorted(set(field_seconds) - set(extras))})
         return profiles, extras
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        if owned:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+def download_hour(run: datetime, fxx: int, workdir: Path, herbie_factory=None, stop: Optional[threading.Event] = None) -> dict:
+    """Download every GRIB subset one forecast hour needs into `workdir`, without decoding anything.
+
+    Herbie names a subset file after its search, so fetch_hour() later finds these files and skips the
+    download. A subset that fails here is not an error: fetch_hour() tries it again and reports it."""
+    if herbie_factory is None:
+        from herbie import Herbie as herbie_factory
+    naive = run.replace(tzinfo=None)
+    wanted = [("prs", hp.PRS_SEARCH)] + [("sfc", search) for search in (*hp.SFC_SEARCHES.values(),
+                                                                      *extra_searches(fxx).values())]
+    seconds, failed = {}, []
+    for product, search in wanted:
+        if stop is not None and stop.is_set():
+            break
+        started = time.perf_counter()
+        try:
+            herbie = herbie_factory(naive, model="hrrr", product=product, fxx=fxx, save_dir=str(workdir),
+                                    verbose=False, priority=["aws"])
+            herbie.download(search, verbose=False)
+        except Exception as exc:
+            failed.append(search)
+            logger.info("HRRR %s f%02d prefetch of %s failed (%s)", run.strftime("%Y%m%d%Hz"), fxx, search, exc)
+        seconds[product] = seconds.get(product, 0.0) + time.perf_counter() - started
+    return {"download_sec": round(sum(seconds.values()), 2), "prs_sec": round(seconds.get("prs", 0.0), 2),
+            "failed": failed}
+
+
+class Prefetcher:
+    """Downloads each hour's GRIB files on a background thread while the build decodes the previous hour.
+
+    The link is the bottleneck (about 5 MB/s, ~60 MB per hour), and decoding is CPU work, so doing them one after
+    the other leaves the link idle half the time. At most `lookahead` hours are downloaded ahead of the hour
+    being processed, which bounds disk use (~60 MB each) and keeps the download from running on while the
+    build is paused for a higher-priority job.
+
+        prefetcher = Prefetcher(run, leads, work_dir)
+        for lead in leads:
+            workdir = prefetcher.wait_for(lead)      # blocks until that hour is on disk
+            fetch_hour(run, lead, workdir=workdir)
+            prefetcher.release(lead)                 # delete it and let the next hour start downloading
+        prefetcher.close()
+    """
+
+    def __init__(self, run: datetime, leads, root: Path, lookahead: int = 1, herbie_factory=None):
+        self.run, self.leads, self.root = run, list(leads), Path(root)
+        self.herbie_factory = herbie_factory
+        self.results: dict[int, dict] = {}
+        self._ready = {lead: threading.Event() for lead in self.leads}
+        self._slots = threading.Semaphore(lookahead + 1)  # hours on disk: the one in use plus the lookahead
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="hrrr-hourly-prefetch", daemon=True)
+        self._thread.start()
+
+    def _dir(self, lead: int) -> Path:
+        return self.root / f"f{lead:02d}"
+
+    def _run(self) -> None:
+        for lead in self.leads:
+            while not self._slots.acquire(timeout=1):
+                if self._stop.is_set():
+                    return
+            if self._stop.is_set():
+                return
+            workdir = self._dir(lead)
+            workdir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.results[lead] = download_hour(self.run, lead, workdir, self.herbie_factory, self._stop)
+            except Exception:
+                logger.exception("hrrr_hourly prefetch of f%02d failed", lead)
+                self.results[lead] = {"download_sec": 0.0, "prs_sec": 0.0, "failed": ["all"]}
+            finally:
+                self._ready[lead].set()
+
+    def wait_for(self, lead: int) -> Path:
+        """Block until `lead` has been downloaded (or failed), then return its directory."""
+        self._ready[lead].wait()
+        return self._dir(lead)
+
+    def release(self, lead: int) -> None:
+        shutil.rmtree(self._dir(lead), ignore_errors=True)
+        self._slots.release()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=30)
+        shutil.rmtree(self.root, ignore_errors=True)

@@ -30,7 +30,19 @@ FORECAST_HOUR = 1
 # 1000-650 mb every 25 mb: Missouri's ground sits at roughly 1000-950 mb and
 # afternoon mixing rarely reaches above ~650 mb (~3.5 km).
 PRESSURE_LEVELS = tuple(range(1000, 649, -25))
-PRS_SEARCH = ":(?:TMP|DPT|UGRD|VGRD|HGT):(?:" + "|".join(str(p) for p in PRESSURE_LEVELS) + ") mb:"
+# Dewpoint is only used in the lowest 50 hPa above ground (the HDW layer; Missouri's surface pressure is never
+# below ~930 hPa) and at 850 mb (Haines), so the levels above 850 mb are not downloaded. Each level is ~0.75 MB of
+# full-CONUS GRIB, so this drops 8 of 75 messages. The dewpoint array is NaN above DEWPOINT_MIN_LEVEL_HPA.
+DEWPOINT_MIN_LEVEL_HPA = 850
+DEWPOINT_LEVELS = tuple(level for level in PRESSURE_LEVELS if level >= DEWPOINT_MIN_LEVEL_HPA)
+
+
+def _levels_pattern(levels) -> str:
+    return "(?:" + "|".join(str(level) for level in levels) + ") mb:"
+
+
+PRS_SEARCH = (f":(?:TMP|UGRD|VGRD|HGT):{_levels_pattern(PRESSURE_LEVELS)}"
+              f"|:DPT:{_levels_pattern(DEWPOINT_LEVELS)}")
 SFC_SEARCHES = {
     "surface": ":(?:HPBL|PRES|HGT):surface:",
     "2m": ":(?:TMP|DPT):2 m above ground:",
@@ -142,13 +154,14 @@ def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_facto
         if owned:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    levels_ds = prs[0]
-    pressures = np.asarray(levels_ds["isobaricInhPa"].values, dtype=float)
-    order = np.argsort(-pressures)  # 1000 mb (lowest) first
-    pressures = pressures[order]
+    # cfgrib returns one dataset per set of levels, so dewpoint (fewer levels) is usually its own dataset.
+    levels_ds = next(dataset for dataset in prs if "t" in dataset.data_vars)
+    pressures = np.sort(np.asarray(levels_ds["isobaricInhPa"].values, dtype=float))[::-1]  # 1000 mb (lowest) first
 
     def level_field(*names):
-        return np.asarray(_variable(prs, *names).values, dtype=float)[order]
+        # Reindex onto the full level axis: levels a field was not downloaded for become NaN.
+        variable = _variable(prs, *names)
+        return np.asarray(variable.reindex(isobaricInhPa=pressures).values, dtype=float)
 
     temp = level_field("t") - 273.15
     dewpoint = level_field("dpt") - 273.15

@@ -152,5 +152,44 @@ class FetchTests(unittest.TestCase):
         self.assertTrue(np.isfinite(fields["hdw"]).all())
 
 
+class SplitLevelHerbie(FakeHerbie):
+    """Like cfgrib after the dewpoint trim: dewpoint comes back as its own dataset with fewer levels."""
+
+    def xarray(self, search, remove_grib=True):
+        result = super().xarray(search, remove_grib)
+        if self.product != "prs":
+            return result
+        keep = np.array(hp.DEWPOINT_LEVELS, dtype=float)
+        levels = result["isobaricInhPa"].values
+        dpt = result[["dpt"]].isel(isobaricInhPa=[int(np.where(levels == level)[0][0]) for level in keep])
+        return [result[["t", "u", "v", "gh"]], dpt]
+
+
+class DewpointTrimTests(unittest.TestCase):
+    def test_search_skips_upper_level_dewpoint_but_keeps_everything_else(self):
+        import re
+        pattern = re.compile(hp.PRS_SEARCH)
+        wanted = lambda name, level: bool(pattern.search(f":{name}:{level} mb:anl:"))  # noqa: E731
+        self.assertTrue(all(wanted("DPT", level) for level in (1000, 950, 850)))
+        self.assertFalse(any(wanted("DPT", level) for level in (825, 700, 650)))
+        for name in ("TMP", "UGRD", "VGRD", "HGT"):
+            self.assertTrue(all(wanted(name, level) for level in hp.PRESSURE_LEVELS), name)
+        self.assertFalse(wanted("RH", 850))
+        messages = sum(1 for name in ("TMP", "UGRD", "VGRD", "HGT", "DPT") for level in hp.PRESSURE_LEVELS
+                       if wanted(name, level))
+        self.assertEqual(messages, 4 * len(hp.PRESSURE_LEVELS) + len(hp.DEWPOINT_LEVELS))
+
+    def test_derived_fields_do_not_change(self):
+        with mock.patch.object(hp, "crop", lambda dataset: dataset):
+            full = hp.fetch_profiles(hour(18), herbie_factory=FakeHerbie)
+            trimmed = hp.fetch_profiles(hour(18), herbie_factory=SplitLevelHerbie)
+        keep = [i for i, level in enumerate(full.pressure_hpa) if level >= hp.DEWPOINT_MIN_LEVEL_HPA]
+        self.assertTrue(np.isnan(trimmed.raw_dewpoint_c[[i for i in range(len(full.pressure_hpa)) if i not in keep]]).all())
+        np.testing.assert_array_equal(trimmed.raw_dewpoint_c[keep], full.raw_dewpoint_c[keep])
+        np.testing.assert_array_equal(trimmed.pressure_hpa, full.pressure_hpa)
+        for name, values in hp.derive_fields(full).items():
+            np.testing.assert_allclose(hp.derive_fields(trimmed)[name], values, equal_nan=True, err_msg=name)
+
+
 if __name__ == "__main__":
     unittest.main()

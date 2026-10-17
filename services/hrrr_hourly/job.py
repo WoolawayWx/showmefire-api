@@ -1,4 +1,7 @@
-"""Build one 12z cycle of the hourly HRRR product: fetch each hour, derive, store, render.
+"""Build one 12z cycle of the hourly HRRR product: fetch each hour, derive, store (Zarr + NetCDF).
+
+Map images are not rendered by the build; an admin asks for one on demand (see render.render_from_store).
+Every build records where its time went (timings.json next to the manifest, a summary in status.json).
 
 Runs as a subprocess (scripts/hrrr_hourly_forecast.py) so its memory is returned to the
 OS afterwards. Per-hour results are cached in a work dir, so an interrupted run resumes.
@@ -168,10 +171,64 @@ def _grid_meta(profiles, lat) -> dict:
             "resolution_km": 3.0}
 
 
-def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = True, fetch_hour: Callable = fetch.fetch_hour,
+def _timed_step(totals: dict, key: str):
+    """Context manager adding the elapsed seconds of its block to totals[key]."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def timer():
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            totals[key] = totals.get(key, 0.0) + time.perf_counter() - started
+    return timer()
+
+
+def _timings_report(totals: dict, per_hour: list, started: float, grid: Optional[dict], hours_requested: int) -> dict:
+    """Round the totals and add the derived numbers that point at the slowest phase."""
+    report = {key: round(value, 2) for key, value in totals.items()}
+    report["total_sec"] = round(time.time() - started, 1)
+    report["active_sec"] = round(report["total_sec"] - report.get("paused_sec", 0.0), 1)
+    report["hours_requested"] = hours_requested
+    report["prefetch"] = "prefetch_download_sec" in report
+    report["hours_built"] = sum(1 for row in per_hour if not row.get("cached") and not row.get("failed"))
+    report["hours_cached"] = sum(1 for row in per_hour if row.get("cached"))
+    report["hours_failed"] = [row["lead"] for row in per_hour if row.get("failed")]
+    built = [row for row in per_hour if not row.get("cached") and not row.get("failed")]
+    if built:
+        report["avg_hour_sec"] = round(sum(row["wall_sec"] for row in built) / len(built), 2)
+        slowest = max(built, key=lambda row: row["wall_sec"])
+        report["slowest_hour"] = {"lead": slowest["lead"], "sec": slowest["wall_sec"]}
+        fields: dict[str, float] = {}
+        for row in built:
+            for name, seconds in (row.get("extras_fields") or {}).items():
+                fields[name] = fields.get(name, 0.0) + seconds
+        if fields:
+            report["extras_fields_sec"] = {k: round(v, 2) for k, v in sorted(fields.items(), key=lambda kv: -kv[1])}
+    # prefetch_download_sec runs alongside the other phases, so it is not a phase of its own here: the build only
+    # loses time to it as prefetch_wait_sec (decoding finished before the next hour's download did).
+    phases = {k: report[k] for k in ("prefetch_wait_sec", "fetch_profiles_sec", "fetch_extras_sec", "fetch_other_sec",
+                                     "derive_sec",
+                                     "cache_io_sec", "series_sec", "dataset_sec", "zarr_sec", "netcdf_sec",
+                                     "render_sec") if k in report}
+    if phases:
+        report["slowest_phase"] = max(phases, key=phases.get)
+    report["grid"] = {k: grid[k] for k in ("ny", "nx") if grid and k in grid}
+    report["per_hour"] = per_hour
+    return report
+
+
+def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = False, fetch_hour: Callable = fetch.fetch_hour,
                 derive_hour: Optional[Callable] = None, root: Optional[Path] = None,
                 images: Optional[Path] = None, on_progress: Optional[Callable] = None,
-                wait: Optional[Callable] = None) -> dict:
+                wait: Optional[Callable] = None, prefetch: bool = True) -> dict:
+    """Build the Zarr + NetCDF store for a cycle. `render=True` also draws every map image (slow; off by default,
+    images are rendered on demand instead). The returned manifest carries a "timings" report, also saved as
+    <cycle>/timings.json.
+
+    `prefetch` downloads the next hour's GRIB files on a background thread while this hour is decoded (only with
+    the real fetch_hour; a custom one is called as fetch_hour(cycle_time, lead))."""
     from services.fire_weather import summary as fs
     from services.hrrr_hourly import derive, render as renderer
 
@@ -185,46 +242,113 @@ def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = True,
     lat = lon = meta = None
     failed = []
     hours = tuple(hours)
+    totals: dict[str, float] = {}
+    per_hour: list[dict] = []
 
     def progress(phase: str, done: int):
+        # Time spent blocked on higher-priority jobs is reported apart, so it never looks like slow code.
         if wait:
-            wait(root)
+            with _timed_step(totals, "paused_sec"):
+                wait(root)
         if on_progress:
             on_progress(phase, done, len(hours))
 
-    for done, lead in enumerate(hours):
-        progress("fetching", done)
-        cached = _work_file(work, lead)
-        try:
-            if cached.is_file():
-                with np.load(cached) as data:
-                    results[lead] = {k: data[k] for k in data.files if k not in ("lat", "lon")}
-                    lat, lon = data["lat"], data["lon"]
-                continue
-            profiles, extras = fetch_hour(cycle_time, lead)
-            fields = derive_hour(profiles, extras)
-            lat, lon = profiles.lat, profiles.lon
-            meta = meta or _grid_meta(profiles, lat)
-            np.savez(_work_file(work, lead).with_suffix(".tmp.npz"), lat=lat, lon=lon, **fields)
-            os.replace(_work_file(work, lead).with_suffix(".tmp.npz"), cached)
-            results[lead] = fields
-        except Exception:
-            logger.exception("hrrr_hourly %s f%02d failed", cycle, lead)
-            failed.append(lead)
+    uncached = [lead for lead in hours if not _work_file(work, lead).is_file()]
+    prefetcher = None
+    if prefetch and fetch_hour is fetch.fetch_hour and uncached:
+        prefetcher = fetch.Prefetcher(cycle_time, uncached, work / "grib")
+    try:
+        for done, lead in enumerate(hours):
+            progress("fetching", done)
+            cached = _work_file(work, lead)
+            row: dict = {"lead": lead}
+            hour_started = time.perf_counter()
+            hour_dir = None
+            try:
+                if cached.is_file():
+                    with _timed_step(totals, "cache_io_sec"):
+                        with np.load(cached) as data:
+                            results[lead] = {k: data[k] for k in data.files if k not in ("lat", "lon")}
+                            lat, lon = data["lat"], data["lon"]
+                    row.update(cached=True, fetch_total_sec=0.0)
+                    continue
+                if prefetcher:
+                    with _timed_step(totals, "prefetch_wait_sec"):
+                        waited = time.perf_counter()
+                        hour_dir = prefetcher.wait_for(lead)
+                        row["prefetch_wait_sec"] = round(time.perf_counter() - waited, 2)
+                    row.update({f"prefetch_{k}": v for k, v in prefetcher.results.get(lead, {}).items()
+                                if k != "failed"})
+                    if prefetcher.results.get(lead, {}).get("failed"):
+                        row["prefetch_failed"] = prefetcher.results[lead]["failed"]
+                    totals["prefetch_download_sec"] = totals.get("prefetch_download_sec", 0.0) + row.get(
+                        "prefetch_download_sec", 0.0)
+                fetch.take_timings()  # drop anything left from an earlier call
+                fetch_started = time.perf_counter()
+                profiles, extras = (fetch_hour(cycle_time, lead, workdir=hour_dir) if prefetcher
+                                    else fetch_hour(cycle_time, lead))
+                fetch_total = time.perf_counter() - fetch_started
+                detail = fetch.take_timings()
+                derive_started = time.perf_counter()
+                fields = derive_hour(profiles, extras)
+                derive_sec = time.perf_counter() - derive_started
+                lat, lon = profiles.lat, profiles.lon
+                meta = meta or _grid_meta(profiles, lat)
+                save_started = time.perf_counter()
+                np.savez(_work_file(work, lead).with_suffix(".tmp.npz"), lat=lat, lon=lon, **fields)
+                os.replace(_work_file(work, lead).with_suffix(".tmp.npz"), cached)
+                totals["cache_io_sec"] = totals.get("cache_io_sec", 0.0) + time.perf_counter() - save_started
+                results[lead] = fields
+                profiles_sec = detail.get("profiles_sec", 0.0)
+                extras_sec = detail.get("extras_sec", 0.0)
+                totals["fetch_profiles_sec"] = totals.get("fetch_profiles_sec", 0.0) + profiles_sec
+                totals["fetch_extras_sec"] = totals.get("fetch_extras_sec", 0.0) + extras_sec
+                totals["fetch_other_sec"] = totals.get("fetch_other_sec", 0.0) + max(
+                    fetch_total - profiles_sec - extras_sec, 0)
+                totals["derive_sec"] = totals.get("derive_sec", 0.0) + derive_sec
+                row.update(fetch_total_sec=round(fetch_total, 2), fetch_profiles_sec=profiles_sec,
+                           fetch_extras_sec=extras_sec, extras_fields=detail.get("extras_fields"),
+                           extras_missing=detail.get("extras_missing"), derive_sec=round(derive_sec, 2),
+                           elements=len(fields))
+            except Exception:
+                logger.exception("hrrr_hourly %s f%02d failed", cycle, lead)
+                failed.append(lead)
+                row.update(failed=True, fetch_total_sec=round(time.perf_counter() - hour_started, 2))
+            finally:
+                if prefetcher and hour_dir is not None:
+                    prefetcher.release(lead)
+                row["wall_sec"] = round(time.perf_counter() - hour_started, 2)
+                per_hour.append(row)
+    finally:
+        if prefetcher:
+            prefetcher.close()
     if not results:
         raise RuntimeError(f"no forecast hours could be built for {cycle}")
     meta = meta or {"ny": int(lat.shape[0]), "nx": int(lat.shape[1])}
-    mask = fs.missouri_mask(lat, lon)
-    manifest = store.write_cycle(cycle_time, results, lat, lon, meta, _series(results, mask), hours, root=root)
+    with _timed_step(totals, "series_sec"):
+        mask = fs.missouri_mask(lat, lon)
+        series = _series(results, mask)
+    manifest = store.write_cycle(cycle_time, results, lat, lon, meta, series, hours, root=root)
+    for key, seconds in manifest.pop("write_timings", {}).items():
+        totals[key] = totals.get(key, 0.0) + seconds
     manifest["failed_hours"] = failed
     if render:
         counts = {}
         for done, lead in enumerate(sorted(results)):
             progress("rendering", done)
-            counts[lead] = len(renderer.render_hour(results[lead], lat, lon, cycle_time, lead, root=images))
+            with _timed_step(totals, "render_sec"):
+                counts[lead] = len(renderer.render_hour(results[lead], lat, lon, cycle_time, lead, root=images))
         manifest["images"] = {"dir": f"{images or images_dir()}/{cycle}", "per_hour": counts}
     shutil.rmtree(work, ignore_errors=True)
     manifest["runtime_sec"] = round(time.time() - started, 1)
+    timings = _timings_report(totals, per_hour, started, meta, len(hours))
+    manifest["timings"] = timings
+    try:
+        store._atomic_json(store.timings_path(cycle, root), timings)
+    except OSError:
+        logger.exception("hrrr_hourly %s: could not write timings.json", cycle)
+    logger.info("hrrr_hourly %s timings: total %.0fs (paused %.0fs), slowest phase %s", cycle, timings["total_sec"],
+                timings.get("paused_sec", 0.0), timings.get("slowest_phase"))
     return manifest
 
 
@@ -297,6 +421,7 @@ def _build_locked(root: Path, cycle: str, cycle_time: datetime, now: datetime, h
     set_state(root, "complete" if not manifest["missing_hours"] else "partial", cycle, label=manifest["label"],
               issued_at_utc=manifest["issued_at_utc"], hours=manifest["forecast_hours"],
               missing_hours=manifest["missing_hours"], runtime_sec=manifest.get("runtime_sec"),
-              variables=len(manifest["variables"]), finished_at=_now_iso())
+              variables=len(manifest["variables"]), finished_at=_now_iso(),
+              timings={k: v for k, v in manifest.get("timings", {}).items() if k != "per_hour"})
     return {"action": "built", "cycle": cycle, "hours": manifest["forecast_hours"],
             "missing_hours": manifest["missing_hours"]}

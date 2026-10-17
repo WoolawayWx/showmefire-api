@@ -185,6 +185,19 @@ forecast: its own directories (`data/hrrr_hourly/`, `images/hrrr_hourly/`), and 
   without it only the NetCDF is written.
 - Routes (no `/api`): `GET /hrrr-hourly/runs`, `/runs/{cycle|latest}`, `/runs/{cycle}/zarr/...`, `/netcdf`,
   `/point?lat=&lon=`, `/image/{element}/{hour}`. Local retention `SMF_HRRR_HOURLY_KEEP_DAYS` (14).
+- Images are not drawn by the build (the data viewer reads the Zarr store). An admin draws one on demand from the
+  stored data: `POST /admin/hrrr-hourly/runs/{cycle}/image/{element}/{hour}[?force=true]` saves it under
+  `images/hrrr_hourly/<cycle>/` and returns it; the public `GET .../image/...` serves it afterwards (404 until then).
+  Also `GET /admin/hrrr-hourly/elements` and `/runs/{cycle}/images` (what is already drawn). One render at a time.
+- Download pipeline: the link (about 5 MB/s) is the bottleneck, so `fetch.Prefetcher` downloads each hour's GRIB
+  subsets on a background thread, one hour ahead, while the previous hour is decoded (disk use is bounded to two
+  hours, ~60 MB each; it never runs on far ahead while the build is paused for a higher-priority job). Dewpoint is
+  requested only for 1000-850 mb (`hrrr_profiles.DEWPOINT_LEVELS`): above that it feeds nothing, and the derived
+  fields are identical.
+- Build timings: every build writes `<cycle>/timings.json` (admin `GET /admin/hrrr-hourly/runs/{cycle}/timings`) and
+  a summary under `timings` in `status.json`: seconds paused for higher-priority jobs, fetch (pressure-level
+  profiles vs. surface extras, per field), derive, cache I/O, series, Zarr, NetCDF, plus `slowest_phase`, the
+  slowest hour and a per-hour breakdown. Use it to decide what to optimise.
 - Python: `xr.open_zarr("https://api.showmefire.org/hrrr-hourly/runs/latest/zarr")`. JS: open the same URL with zarrita.
 
 ## Admin sessions

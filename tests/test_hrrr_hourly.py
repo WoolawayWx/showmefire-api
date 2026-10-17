@@ -9,7 +9,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.rate_limit import RateLimiter
+from core.security import require_admin
 from routers import hrrr_hourly as router_module
+from routers import hrrr_hourly_admin as admin_module
 from services.hrrr_hourly import BY_NAME, ELEMENTS, derive, fetch, job, render, store
 
 CYCLE = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
@@ -376,3 +378,256 @@ def test_scheduler_subprocess_runs_at_lowest_priority(monkeypatch):
     scheduler_job._run()
     assert captured["preexec_fn"] is scheduler_job._lower_priority
     assert captured["env"]["OMP_NUM_THREADS"] == "1"
+
+
+# --- timings + on-demand images -----------------------------------------------------------------
+
+def test_build_does_not_render_and_records_timings(root, monkeypatch):
+    monkeypatch.setattr(render, "render_image", lambda *a, **k: pytest.fail("the build must not draw images"))
+    waits = []
+
+    def fetch_hour(cycle_time, lead):
+        if lead == 2:
+            raise RuntimeError("download failed")
+        fetch._LAST_TIMINGS.update({"profiles_sec": 1.5, "extras_sec": 0.5, "extras_fields": {"cape": 0.3, "gust": 0.2},
+                                    "extras_missing": ["gust"]})
+        return fake_profiles(), {}
+
+    manifest = job.build_cycle(CYCLE, hours=(0, 1, 2), fetch_hour=fetch_hour, derive_hour=lambda p, e: fields(),
+                               root=root, wait=lambda r: waits.append(r))
+    assert "images" not in manifest
+    timings = manifest["timings"]
+    assert timings["hours_built"] == 2 and timings["hours_failed"] == [2] and timings["hours_cached"] == 0
+    assert timings["fetch_profiles_sec"] == 3.0 and timings["fetch_extras_sec"] == 1.0
+    assert timings["extras_fields_sec"] == {"cape": 0.6, "gust": 0.4}
+    assert timings["slowest_phase"] in timings and "zarr_sec" in timings and "netcdf_sec" in timings
+    assert [row["lead"] for row in timings["per_hour"]] == [0, 1, 2]
+    assert timings["per_hour"][2]["failed"] is True and timings["per_hour"][0]["extras_missing"] == ["gust"]
+    assert store.read_timings(CYCLE_ID, root)["total_sec"] == timings["total_sec"]
+    assert "write_timings" not in json.loads((root / CYCLE_ID / "manifest.json").read_text())
+    assert len(waits) == 3
+
+
+def test_build_reports_cached_hours_and_status_carries_summary(root):
+    work = root / ".work" / CYCLE_ID
+    work.mkdir(parents=True)
+    lat, lon = grid()
+    np.savez(work / "f00.npz", lat=lat, lon=lon, **fields())
+    manifest = job.build_cycle(CYCLE, hours=(0, 1), fetch_hour=lambda c, l: (fake_profiles(), {}),
+                               derive_hour=lambda p, e: fields(), root=root)
+    assert manifest["timings"]["hours_cached"] == 1 and manifest["timings"]["hours_built"] == 1
+
+    def build(cycle_time, hours, root, on_progress=None, wait=None):
+        return write(root, hours=hours, expected=hours) | {"timings": manifest["timings"]}
+
+    job.run_auto(now=CYCLE + timedelta(hours=3), root=root, cycle_time=CYCLE, hours=(0, 1), force=True,
+                 ready=lambda c, h: True, lock_free=lambda: True, forecast_done=lambda c: True, build=build)
+    summary = job.read_status(root)["timings"]
+    assert summary["hours_cached"] == 1 and "per_hour" not in summary
+
+
+def _admin_client(admin=True):
+    app = FastAPI()
+    app.include_router(admin_module.router)
+    if admin:
+        app.dependency_overrides[require_admin] = lambda: "admin@example.org"
+    return TestClient(app)
+
+
+def test_render_from_store_reads_the_stored_hour(root, monkeypatch):
+    write(root)
+    seen = {}
+
+    def fake_render(name, values, lat, lon, cycle_time, lead, root=None):
+        seen.update(name=name, values=values, lead=lead, cycle_time=cycle_time)
+        path = render.image_path(CYCLE_ID, name, lead, root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\x89PNG")
+        return path
+
+    monkeypatch.setattr(render, "render_image", fake_render)
+    path, rendered, _seconds = render.render_from_store(CYCLE_ID, "temp_f", 1)
+    index = [e.name for e in ELEMENTS].index("temp_f")
+    assert rendered and path.read_bytes() == b"\x89PNG" and seen["lead"] == 1 and seen["cycle_time"] == CYCLE
+    assert seen["values"].shape == (NY, NX) and seen["values"][0, 0] == pytest.approx((index + 1) * 10.0 + 10.0)
+    assert render.render_from_store(CYCLE_ID, "temp_f", 1)[1] is False
+    assert render.render_from_store(CYCLE_ID, "temp_f", 1, force=True)[1] is True
+    for bad in (("temp_f", 9), ("nope", 1)):
+        with pytest.raises(LookupError):
+            render.render_from_store(CYCLE_ID, *bad)
+    with pytest.raises(LookupError):
+        render.render_from_store("20200101_12z", "temp_f", 1)
+
+
+def test_admin_routes_require_admin_and_make_images_on_demand(root, monkeypatch):
+    write(root)
+    calls = []
+
+    def fake_from_store(cycle, element, hour, force=False, **kwargs):
+        calls.append((cycle, element, hour, force))
+        path = render.image_path(cycle, element, hour)
+        rendered = force or not path.is_file()
+        if rendered:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x89PNG")
+        return path, rendered, 1.25
+
+    monkeypatch.setattr(render, "render_from_store", fake_from_store)
+    base = f"/admin/hrrr-hourly/runs/{CYCLE_ID}"
+    anonymous = _admin_client(admin=False)
+    assert admin_module.router.prefix == "/admin/hrrr-hourly"
+    for method, path in [("post", f"{base}/image/temp_f/1"), ("get", f"{base}/images"), ("get", f"{base}/timings"),
+                         ("get", "/admin/hrrr-hourly/elements")]:
+        assert getattr(anonymous, method)(path).status_code == 401, path
+
+    admin_module.render_limiter.reset()
+    client = _admin_client()
+    first = client.post(f"{base}/image/temp_f/1")
+    assert first.status_code == 200 and first.content == b"\x89PNG" and first.headers["x-rendered"] == "true"
+    assert client.post(f"{base}/image/temp_f/1").headers["x-rendered"] == "false"
+    assert client.post(f"{base}/image/temp_f/1", params={"force": "true"}).headers["x-rendered"] == "true"
+    assert calls[-1] == (CYCLE_ID, "temp_f", 1, True)
+    assert client.get(f"{base}/images").json()["images"] == {"temp_f": [1]}
+    # public route now serves what the admin made
+    assert _client().get(f"/hrrr-hourly/runs/{CYCLE_ID}/image/temp_f/1").content == b"\x89PNG"
+    names = {e["name"] for e in client.get("/admin/hrrr-hourly/elements").json()["elements"]}
+    assert "temp_f" in names and "holzworth_ft" not in names  # image=False elements are not offered
+    for path in (f"{base}/image/holzworth_ft/1", f"{base}/image/temp_f/99", f"{base}/image/nope/1",
+                 "/admin/hrrr-hourly/runs/20200101_12z/image/temp_f/1"):
+        assert client.post(path).status_code == 404, path
+    assert client.post("/admin/hrrr-hourly/runs/bad/image/temp_f/1").status_code == 400
+    assert client.get(f"{base}/timings").status_code == 404
+    admin_module.render_limiter.reset()
+
+
+def test_admin_image_route_reports_render_failures(root, monkeypatch):
+    write(root)
+    admin_module.render_limiter.reset()
+    monkeypatch.setattr(render, "render_from_store", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    client = _admin_client()
+    assert client.post(f"/admin/hrrr-hourly/runs/{CYCLE_ID}/image/temp_f/1").status_code == 500
+    assert admin_module._render_lock.acquire(blocking=False)  # lock was released after the failure
+    admin_module._render_lock.release()
+    admin_module.render_limiter.reset()
+
+
+# --- prefetch -----------------------------------------------------------------------------------
+
+class RecordingHerbie:
+    """Stands in for Herbie: records downloads and writes a file named after the search, like the real one."""
+    log: list = []
+    fail_on: str | None = None
+
+    def __init__(self, run, model, product, fxx, save_dir, **kwargs):
+        self.product, self.fxx, self.save_dir = product, fxx, Path(save_dir)
+
+    def download(self, search, verbose=False):
+        RecordingHerbie.log.append((self.fxx, self.product))
+        if RecordingHerbie.fail_on and RecordingHerbie.fail_on in search:
+            raise RuntimeError("404")
+        (self.save_dir / f"subset_{abs(hash(search))}.grib2").write_bytes(b"x")
+
+
+def _wait_until(condition, seconds=5):
+    import time
+    end = time.time() + seconds
+    while time.time() < end and not condition():
+        time.sleep(0.01)
+    return condition()
+
+
+def test_download_hour_fetches_prs_and_every_surface_search_and_tolerates_failures(tmp_path):
+    RecordingHerbie.log, RecordingHerbie.fail_on = [], "GUST"
+    result = fetch.download_hour(CYCLE, 3, tmp_path, herbie_factory=RecordingHerbie)
+    products = [product for _fxx, product in RecordingHerbie.log]
+    assert products[0] == "prs" and products.count("prs") == 1
+    assert len(products) == 1 + len(fetch.hp.SFC_SEARCHES) + len(fetch.extra_searches(3))
+    assert result["failed"] == [":GUST:surface:"] and "precip" in fetch.extra_searches(3)
+    assert "precip" not in fetch.extra_searches(0)
+    RecordingHerbie.fail_on = None
+
+
+def test_prefetcher_stays_one_hour_ahead_and_cleans_up(tmp_path):
+    RecordingHerbie.log, RecordingHerbie.fail_on = [], None
+    prefetcher = fetch.Prefetcher(CYCLE, [0, 1, 2, 3], tmp_path / "grib", lookahead=1, herbie_factory=RecordingHerbie)
+    first = prefetcher.wait_for(0)
+    assert first == tmp_path / "grib" / "f00" and any(first.iterdir())
+    assert _wait_until(lambda: prefetcher.results.keys() >= {0, 1})
+    import time
+    time.sleep(0.3)
+    assert 2 not in prefetcher.results                      # blocked: hour 0 is still in use
+    prefetcher.release(0)
+    assert not first.exists()
+    assert _wait_until(lambda: 2 in prefetcher.results)     # releasing hour 0 lets hour 2 start
+    for lead in (1, 2, 3):
+        prefetcher.wait_for(lead)
+        prefetcher.release(lead)
+    assert [fxx for fxx, product in RecordingHerbie.log if product == "prs"] == [0, 1, 2, 3]
+    prefetcher.close()
+    assert not (tmp_path / "grib").exists() and not prefetcher._thread.is_alive()
+
+
+def test_prefetcher_close_stops_a_blocked_download_thread(tmp_path):
+    RecordingHerbie.log, RecordingHerbie.fail_on = [], None
+    prefetcher = fetch.Prefetcher(CYCLE, [0, 1, 2], tmp_path / "grib", lookahead=0, herbie_factory=RecordingHerbie)
+    prefetcher.wait_for(0)  # never released, so the thread waits for a slot
+    prefetcher.close()
+    assert not prefetcher._thread.is_alive() and 1 not in prefetcher.results
+
+
+def test_fetch_hour_keeps_a_caller_owned_workdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch.hp, "fetch_profiles", lambda *a, **k: SimpleNamespace(workdir=k["workdir"]))
+    monkeypatch.setattr(fetch, "fetch_extras", lambda *a, **k: {})
+    (tmp_path / "f05").mkdir()
+    profiles, _ = fetch.fetch_hour(CYCLE, 5, workdir=tmp_path / "f05")
+    assert profiles.workdir == tmp_path / "f05" and (tmp_path / "f05").is_dir()
+    profiles, _ = fetch.fetch_hour(CYCLE, 5)
+    assert not profiles.workdir.exists()  # an owned temp directory is removed
+
+
+def test_build_cycle_prefetches_each_hour_and_reports_the_overlap(root, monkeypatch):
+    downloaded, released = [], []
+
+    def download_hour(run, lead, workdir, herbie_factory=None, stop=None):
+        downloaded.append(lead)
+        (workdir / "part.grib2").write_bytes(b"x")
+        return {"download_sec": 2.0, "prs_sec": 1.5, "failed": [":GUST:surface:"] if lead == 1 else []}
+
+    seen = {}
+
+    def fake_fetch_hour(run, lead, herbie_factory=None, workdir=None):
+        assert (workdir / "part.grib2").is_file()          # the prefetched files are there to be reused
+        seen[lead] = workdir
+        if lead == 2:
+            raise RuntimeError("decode failed")
+        return fake_profiles(), {}
+
+    monkeypatch.setattr(fetch, "download_hour", download_hour)
+    monkeypatch.setattr(fetch, "fetch_hour", fake_fetch_hour)
+    manifest = job.build_cycle(CYCLE, hours=(0, 1, 2, 3), fetch_hour=fetch.fetch_hour,
+                               derive_hour=lambda p, e: fields(), root=root)
+    assert downloaded == [0, 1, 2, 3] and manifest["failed_hours"] == [2]
+    timings = manifest["timings"]
+    assert timings["prefetch"] is True and timings["prefetch_download_sec"] == 8.0
+    assert "prefetch_wait_sec" in timings
+    rows = {row["lead"]: row for row in timings["per_hour"]}
+    assert rows[0]["prefetch_download_sec"] == 2.0 and rows[1]["prefetch_failed"] == [":GUST:surface:"]
+    assert all(not path.exists() for path in seen.values())  # released, including the failed hour
+    assert not (root / ".work" / CYCLE_ID).exists()
+
+
+def test_build_cycle_skips_prefetching_cached_hours_and_custom_fetchers(root, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fetch, "download_hour", lambda run, lead, workdir, *a, **k: calls.append(lead) or {})
+    job.build_cycle(CYCLE, hours=(0, 1), fetch_hour=lambda c, l: (fake_profiles(), {}),
+                    derive_hour=lambda p, e: fields(), root=root)
+    assert calls == []                                       # a custom fetch_hour is not prefetched
+    work = root / ".work" / CYCLE_ID
+    work.mkdir(parents=True)
+    lat, lon = grid()
+    np.savez(work / "f00.npz", lat=lat, lon=lon, **fields())
+    monkeypatch.setattr(fetch, "fetch_hour", lambda run, lead, herbie_factory=None, workdir=None:
+                        (fake_profiles(), {}))
+    manifest = job.build_cycle(CYCLE, hours=(0, 1), fetch_hour=fetch.fetch_hour, derive_hour=lambda p, e: fields(),
+                               root=root)
+    assert calls == [1] and manifest["timings"]["hours_cached"] == 1

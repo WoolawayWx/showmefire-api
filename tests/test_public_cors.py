@@ -1,5 +1,6 @@
 """Tile responses carry a stable `Access-Control-Allow-Origin: *`, independent of the caller."""
 import unittest
+from pathlib import Path
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,6 +66,50 @@ class PublicTileCorsTests(unittest.TestCase):
         # An origin that is not allowed still gets no CORS header on the API.
         r = self.client.get("/api/private", headers={"Origin": "https://evil.example"})
         self.assertNotIn("access-control-allow-origin", r.headers)
+
+
+class CredentialedOriginTests(unittest.TestCase):
+    def test_pages_previews_and_loopback_are_allowed(self):
+        from core.cors_origins import origin_allowed
+        for origin in ("https://showmefire-website.pages.dev", "https://3f2a1c9b.showmefire-website.pages.dev",
+                       "https://my-branch.showmefire-website.pages.dev", "https://a.b.showmefire-website.pages.dev",
+                       "http://localhost:3000", "http://127.0.0.1:5173", "http://[::1]:3001"):
+            self.assertTrue(origin_allowed(origin), origin)
+
+    def test_lookalikes_are_rejected(self):
+        from core.cors_origins import origin_allowed
+        for origin in ("https://evil-showmefire-website.pages.dev", "https://showmefire-website.pages.dev.evil.com",
+                       "http://abc.showmefire-website.pages.dev", "https://showmefire-website.pages.dev:8443",
+                       "https://pages.dev", "https://x.other.pages.dev", "https://localhost.evil.com",
+                       "https://abc.showmefire-website.pages.dev/", "https://dev.showmefire.org"):
+            self.assertFalse(origin_allowed(origin), origin)  # dev.showmefire.org is an exact entry in main.py
+
+    def test_main_uses_the_shared_pattern_and_lists_dev(self):
+        source = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn("allow_origin_regex=ORIGIN_REGEX", source)
+        self.assertIn('"https://dev.showmefire.org"', source)
+
+    def test_middleware_answers_a_pages_preview_with_credentials(self):
+        from core.cors_origins import ORIGIN_REGEX
+        app = FastAPI()
+        app.add_middleware(CORSMiddleware, allow_origins=["https://dev.showmefire.org"], allow_origin_regex=ORIGIN_REGEX,
+                           allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+        @app.get("/ping")
+        def ping():
+            return {"ok": True}
+
+        client = TestClient(app)
+        for origin, allowed in (("https://abc123.showmefire-website.pages.dev", True), ("https://dev.showmefire.org", True),
+                                ("https://evil-showmefire-website.pages.dev", False)):
+            response = client.get("/ping", headers={"Origin": origin})
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin if allowed else None, origin)
+            if allowed:
+                self.assertEqual(response.headers.get("access-control-allow-credentials"), "true")
+        preflight = client.options("/ping", headers={"Origin": "https://abc123.showmefire-website.pages.dev",
+                                                     "Access-Control-Request-Method": "POST",
+                                                     "Access-Control-Request-Headers": "content-type"})
+        self.assertEqual(preflight.status_code, 200)
 
 
 if __name__ == "__main__":

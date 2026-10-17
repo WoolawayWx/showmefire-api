@@ -114,6 +114,54 @@ def render_hour(fields: dict[str, np.ndarray], lat, lon, cycle_time: datetime, l
     return done
 
 
+def load_hour(cycle: str, element: str, lead: int, root: Optional[Path] = None):
+    """(values, lat, lon, cycle_time) for one element and hour, read from the cycle's Zarr store (NetCDF if the
+    Zarr store is absent). Raises LookupError when the cycle, element or hour isn't in the store."""
+    import xarray as xr
+    from datetime import timezone
+
+    from services.hrrr_hourly import root_dir, store
+
+    root = Path(root or root_dir())
+    manifest = store.read_manifest(cycle, root)
+    if manifest is None:
+        raise LookupError("unknown cycle")
+    zarr_path = root / cycle / "forecast.zarr"
+    if zarr_path.is_dir():
+        dataset = xr.open_zarr(zarr_path, consolidated=True)
+    elif store.nc_path(cycle, root).is_file():
+        dataset = xr.open_dataset(store.nc_path(cycle, root))
+    else:
+        raise LookupError("no data store for this cycle")
+    with dataset:
+        if element not in dataset.data_vars:
+            raise LookupError(f"{element} is not in this cycle")
+        leads = [int(v) for v in dataset["lead_hour"].values]
+        if lead not in leads:
+            raise LookupError(f"hour {lead} is not in this cycle")
+        values = np.asarray(dataset[element].isel(lead_hour=leads.index(lead)).values, dtype="float32")
+        lat = np.asarray(dataset["latitude"].values)
+        lon = np.asarray(dataset["longitude"].values)
+    cycle_time = datetime.strptime(manifest["cycle_time_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return values, lat, lon, cycle_time
+
+
+def render_from_store(cycle: str, element: str, lead: int, force: bool = False, root: Optional[Path] = None,
+                      data_root: Optional[Path] = None) -> tuple[Path, bool, float]:
+    """Make the map image for one element and hour from the stored data, for an admin who asks for it.
+
+    Returns (path, rendered, seconds). An image already on disk is reused unless `force`."""
+    import time
+
+    path = image_path(cycle, element, lead, root)
+    if path.is_file() and not force:
+        return path, False, 0.0
+    started = time.perf_counter()
+    values, lat, lon, cycle_time = load_hour(cycle, element, lead, data_root)
+    render_image(element, values, lat, lon, cycle_time, lead, root)
+    return path, True, round(time.perf_counter() - started, 2)
+
+
 def prune_images(keep_cycles: Iterable[str], root: Optional[Path] = None) -> list[str]:
     import shutil
 
