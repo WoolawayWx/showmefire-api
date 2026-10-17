@@ -5,13 +5,18 @@ import json
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.config import ARCHIVE_DIR, GIS_DIR, REPORTS_DIR
+from core.rate_limit import RateLimiter
 from routers.verification import _report_covers_closed_window
 
 
-router = APIRouter(prefix="/api/forecast-09z/metrics", tags=["forecast-09z-metrics"])
+router = APIRouter(
+    prefix="/api/forecast-09z/metrics",
+    tags=["forecast-09z-metrics"],
+    dependencies=[Depends(RateLimiter("forecast_09z", 60))],
+)
 METRICS_DIR = Path(ARCHIVE_DIR) / "forecast_09z_metrics"
 STATIONS_DIR = Path(GIS_DIR) / "forecast_09z_vs_12z" / "archive"
 OBSERVED_HISTORY_FILE = Path(REPORTS_DIR) / "validation_history_09z.json"

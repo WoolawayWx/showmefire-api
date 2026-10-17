@@ -54,6 +54,7 @@ from core.database import (
     create_briefing
 )
 import sqlite3
+from core.rate_limit import is_admin, valid_api_key
 from core.security import (
     verify_password,
     create_access_token,
@@ -95,7 +96,7 @@ from core.config import (
     MISSOURI_FIRES_GEOJSON
 )
 from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
 from core.public_cors import PublicTileCorsMiddleware
@@ -228,6 +229,28 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 
+class ReportsStaticFiles(NoCacheStaticFiles):
+    """Serve report plots/images publicly, but keep raw data files behind the rate-limited API.
+
+    The report JSON/CSV files hold station-level rows; the /verification routes
+    expose the same data with rate limits, so direct downloads would bypass them.
+    Admins and clients with an API read key can still fetch them. Set
+    REPORTS_DATA_PUBLIC=true to restore open downloads.
+    """
+
+    DATA_SUFFIXES = (".json", ".csv", ".ndjson", ".tmp")
+
+    async def get_response(self, path, scope):
+        if (
+            path.lower().endswith(self.DATA_SUFFIXES)
+            and os.getenv("REPORTS_DATA_PUBLIC", "false").lower() != "true"
+        ):
+            request = Request(scope)
+            if not (is_admin(request) or valid_api_key(request)):
+                return Response("Not found", status_code=404)
+        return await super().get_response(path, scope)
+
+
 class ForecastStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
         response: Response = await super().get_response(path, scope)
@@ -248,7 +271,7 @@ app.mount("/images", NoCacheStaticFiles(directory=str(IMAGES_DIR)), name="images
 app.mount("/gis", NoCacheStaticFiles(directory=str(GIS_DIR)), name="gis")
 app.mount("/forecast-v1-assets", ForecastStaticFiles(directory=str(FORECAST_V1_DIR)), name="forecast-v1-assets")
 app.mount("/home-video", StaticFiles(directory=str(home_video.HOME_VIDEO_DIR)), name="home-video")
-app.mount("/reports", NoCacheStaticFiles(directory=str(REPORTS_DIR)), name="reports")
+app.mount("/reports", ReportsStaticFiles(directory=str(REPORTS_DIR)), name="reports")
 app.mount("/testbed-assets", NoCacheStaticFiles(directory=str(BETA_ROOT)), name="testbed-assets")
 OPSBRIEF_DIR = Path(__file__).resolve().parent / "files" / "opsbrief"
 OPSBRIEF_DIR.mkdir(parents=True, exist_ok=True)
@@ -276,6 +299,8 @@ app.include_router(fires.router)
 app.include_router(fires_v2.router)
 app.include_router(fires_ingest.router)
 app.include_router(verification.router)
+app.include_router(api_index.router)
+app.include_router(day_archive_admin.router)
 app.include_router(feedback.router)
 app.include_router(forecast_discussions.router)
 app.include_router(burn_bans.router)
@@ -1622,6 +1647,12 @@ def _rss_file_response():
 async def public_rss_feed():
     return _rss_file_response()
 
+
+# Unprefixed twins of the /api routes (e.g. /fires for /api/fires) so the website
+# can migrate gradually; the /api paths keep working. Must run before the "/" mount.
+if os.getenv("API_UNPREFIXED_ALIASES", "true").lower() != "false":
+    from core.api_aliases import add_unprefixed_aliases
+    API_ALIAS_REPORT = add_unprefixed_aliases(app)
 
 app.mount("/", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
     

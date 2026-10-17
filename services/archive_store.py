@@ -23,7 +23,9 @@ log = logging.getLogger(__name__)
 SOURCES = {'hrrr': 'cache/hrrr', 'rrfs': 'cache/RRFS',
            'forecasts': 'archive/forecasts', 'observations': 'archive/raw_data',
            'forecasts_beta': 'data/testbed/forecast/archive/forecasts',
-           'hrrr_beta': 'data/testbed/forecast/cache/hrrr'}
+           'hrrr_beta': 'data/testbed/forecast/cache/hrrr',
+           'observations_full': 'archive/raw_data_full',
+           'ensemble': 'cache/ensemble/runs'}
 DATE = re.compile(r'(20\d{6})')
 
 

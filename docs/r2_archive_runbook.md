@@ -109,3 +109,51 @@ python scripts/pull_r2_archives.py --start 2026-07-01 --end 2026-07-31 --source 
 The downloader selects the newest revision, verifies every downloaded checksum,
 resumes by skipping matching files, and refuses to overwrite different local data.
 The existing SSH/ZIP pull script is still available for legacy archives.
+
+## Day bundles (everything needed to reconstruct a day)
+
+`services/day_archive.py` builds one bundle per completed Central day under
+`day-archive/YYYY-MM-DD/` in R2 (nightly at 03:30 Central, after the 02:45 map zips and the
+01:00 full-observation capture). R2 is the long-term store; the server only uses a
+transient work directory (`cache/day-archive/`, cleaned after each upload).
+
+Components (zip each, verified by reading the upload back, then `manifest.json` is
+published last): `forecasts`, `observations` (RAWS verification pull), `observations_full`
+(all networks 1/2/156/65, whole Central day, `services/full_obs_archive.py`), `hrrr`, `rrfs`,
+`ensemble`, `forecasts_beta`, `hrrr_beta`, `rtma` (the day's 24 hourly files, captured
+before the 7-day cache rolls over), `derived` (peak rasters, validation report, 09z/RTMA
+metrics) and `maps` (server-side copies of the `map-archive/` zips for the two UTC days a
+Central day spans; size-checked, the CLI re-checks size on download). A component with no
+data on the server is recorded as `missing`; a bundle is `complete` only when forecasts,
+observations, derived and maps are present and nothing failed or is partial. Incomplete days
+are retried for `SMF_DAY_ARCHIVE_RETRY_DAYS` (4). First run backfills the last
+`SMF_DAY_ARCHIVE_BACKFILL_DAYS` (7) days; older days have no local source left.
+
+### Window, reminders, deletion
+The ledger (`day-archive/ledger.json`, cached in `data/day_archive/`) gives each bundle
+`expires = created + SMF_DAY_ARCHIVE_KEEP_DAYS` (30). Discord reminders go out 7, 3 and 1
+days before expiry for bundles not yet downloaded, then a daily "overdue - NOT deleted"
+notice. A bundle is deleted from R2 only if it is past its window AND has a verified
+download receipt AND `SMF_DAY_ARCHIVE_DELETE=true` (default false). Nothing is ever deleted
+undownloaded.
+
+### Server retention (7 days)
+With `SMF_DAY_ARCHIVE_PRUNE_LOCAL=true` the nightly pass deletes server source files older
+than `SMF_ARCHIVE_LOCAL_DAYS` (7), only for components read back from R2 and only when
+each file's sha256 still equals the manifest. `reports/` and the `gis/*/archive` rasters are
+never pruned (the public `/verification` routes serve them). Leave the flag off
+(it then logs what it would delete) until the first bundles have been checked. The older
+`SMF_ARCHIVE_PRUNE` for `data-v2/` is separate and still off; see the cleanup note above.
+
+### Downloading (reads R2, not the server)
+- CLI (SSH or your own machine; needs boto3 and the R2 env vars):
+  `python scripts/pull_day_archives.py --list`, `--dest DIR --all-pending`,
+  `--dest DIR --date 2026-10-16`, `--since DATE`, `--no-mark`. It verifies every sha256
+  against the manifest and only then writes `day-archive/receipts/<date>.json`.
+- Admin endpoints (JSON only, no web page, no `/api` prefix): `GET /admin/day-archive`,
+  `GET /admin/day-archive/{date}`, `GET /admin/day-archive/{date}/links` (presigned R2 URLs,
+  default 1 h), `POST /admin/day-archive/{date}/mark-downloaded`, `POST /admin/day-archive/run`.
+  Links point at R2 directly. Mark a day downloaded only after verifying the files.
+
+The full route list, including admin routes, is in `docs/ROUTES.md`
+(`python scripts/generate_routes_doc.py`).

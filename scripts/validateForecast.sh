@@ -43,6 +43,8 @@ fi
 	|| echo "WARN: Observed peak archive snapshot failed for $TODAY_DASH" >&2
 "$PYTHON" -c "from services.rtma_peak import generate_rtma_peak; generate_rtma_peak('$TODAY_DASH')" \
 	|| echo "WARN: RTMA peak generation failed for $TODAY_DASH" >&2
+"$PYTHON" -c "from services.verification_artifacts import build_combined_verification_artifacts; build_combined_verification_artifacts('$TODAY_DASH')" \
+	|| echo "WARN: Combined verification artifacts failed for $TODAY_DASH" >&2
 
 "$PYTHON" forecast/endOfDayReport.py
 "$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta

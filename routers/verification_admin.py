@@ -36,6 +36,8 @@ async def rerun_verification(payload: RerunRequest, email: str = Depends(require
         from services.rtma_peak import generate_rtma_peak_for_verification
         snapshot_observed_peak_for_date(payload.date)
         generate_rtma_peak_for_verification(payload.date)
+        from services.verification_artifacts import build_combined_verification_artifacts
+        build_combined_verification_artifacts(payload.date)
         report = run_report(
             date=payload.date,
             forecast_glob=payload.forecast_glob or STABLE_FORECAST_GLOB,

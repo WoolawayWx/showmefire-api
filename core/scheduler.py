@@ -17,6 +17,7 @@ from alerts.activemoalerts import run_active_mo_alerts
 from services.afds import ingest_latest_afds
 from services.archive_bundler import run_end_of_day_archive, run_ngfs_raw_archive
 from services import map_archive
+from services import day_archive, full_obs_archive
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, purge_delivery_records
@@ -731,6 +732,28 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=2,
         minute=45,
         id='daily_map_archive',
+        max_instances=1,
+        coalesce=True
+    )
+
+    # All-network full-day observations for the finished Central day (01:00), then the
+    # day bundle (03:30, after the map zips at 02:45): everything needed to reconstruct
+    # a day goes to R2; reminders and expiry run in the same pass (services/day_archive.py).
+    scheduler.add_job(
+        full_obs_archive.run_scheduled,
+        'cron',
+        hour=1,
+        minute=0,
+        id='full_observation_capture',
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.add_job(
+        day_archive.run_scheduled,
+        'cron',
+        hour=3,
+        minute=30,
+        id='daily_day_archive',
         max_instances=1,
         coalesce=True
     )

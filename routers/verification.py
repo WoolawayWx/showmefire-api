@@ -12,16 +12,22 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from services.verification_metrics import directional_metrics
 
 from core.config import ARCHIVE_RAW_DATA_DIR, ARCHIVE_DIR, GIS_DIR, IMAGES_DIR, REPORTS_DIR
-from services.verification_artifacts import build_combined_verification_artifacts
+from core.rate_limit import RateLimiter, require_station_data_access
 from services.verification_rainfall import diagnostics as rainfall_diagnostics
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/verification", tags=["verification"])
+# Public read-only routes; capped per client so the data cannot be bulk-pulled.
+verification_limiter = RateLimiter("verification", 60)
+station_limiter = RateLimiter("verification_station", 20)
+
+router = APIRouter(
+    prefix="/verification", tags=["verification"], dependencies=[Depends(verification_limiter)]
+)
 
 HISTORY_FILE = Path(REPORTS_DIR) / "validation_history.json"
 
@@ -111,6 +117,21 @@ def _load_history() -> List[Dict[str, Any]]:
                 # Daily summaries are authoritative if the index is stale.
                 entries[date] = {**entry, 'date': date}
     return list(entries.values())
+
+
+def _read_combined_manifest(date: str) -> Dict[str, Any]:
+    """Read-only view of the combined-artifact manifest written by the nightly job.
+
+    Public GETs must not generate rasters; the nightly job and the admin rerun
+    build them, this only reports what is already on disk.
+    """
+    try:
+        manifest = json.loads(_combined_tif_path(date).with_suffix(".json").read_text(encoding="utf-8"))
+        if isinstance(manifest, dict):
+            return manifest
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+    return {"combined_tif": None, "fallback_reason": "not_generated"}
 
 
 def _read_summary(date):
@@ -286,6 +307,68 @@ def _fire_danger_accuracy(entry: Dict[str, Any]) -> Optional[float]:
     return value if isinstance(value, (int, float)) else None
 
 
+_RTMA_HISTORY_FIELDS = {
+    "Temperature (C)": "temp",
+    "Relative Humidity (%)": "rh",
+    "Wind Speed (m/s)": "wind",
+}
+
+
+def _rtma_point(entry: Dict[str, Any]) -> Dict[str, Any]:
+    block = entry.get("rtma_metrics")
+    point = block.get("station_point") if isinstance(block, dict) else None
+    return point if isinstance(point, dict) else {}
+
+
+@router.get("/rtma/history")
+async def get_rtma_verification_history(limit: int = Query(90, ge=1, le=366)):
+    """Daily forecast-vs-RTMA and station-vs-RTMA scores next to the station-only MAE."""
+    entries = sorted(
+        (e for e in _load_history() if _report_is_available(e) and isinstance(e.get("rtma_metrics"), dict)),
+        key=lambda e: e["date"], reverse=True,
+    )[:limit]
+    days = []
+    for entry in entries:
+        block = entry["rtma_metrics"]
+        point = _rtma_point(entry)
+        gridded = block.get("gridded") if isinstance(block.get("gridded"), dict) else {}
+        days.append({
+            "date": entry["date"],
+            "window_status": _window_status(entry),
+            "rtma_record_count": point.get("record_count"),
+            "rtma_stations_count": point.get("stations_count"),
+            "forecast_vs_rtma": {
+                label: {k: v.get(k) for k in ("mae", "bias", "count")}
+                for label, v in (point.get("forecast_vs_rtma") or {}).items()
+            },
+            "station_vs_rtma": {
+                label: {k: v.get(k) for k in ("mae", "bias", "count")}
+                for label, v in (point.get("station_vs_rtma") or {}).items()
+            },
+            "gridded_fire_danger": gridded.get("fire_danger"),
+        })
+    return {"days": days}
+
+
+@router.get("/rtma/{date}")
+async def get_rtma_verification_report(date: str):
+    """Full RTMA metrics for one date: station-point, station-vs-RTMA, and gridded peak class."""
+    summary = _read_summary(date)
+    date = summary["date"]
+    if not _report_is_available(summary, date):
+        raise HTTPException(status_code=404, detail=f"No completed validation report available for {date}")
+    block = summary.get("rtma_metrics")
+    if not isinstance(block, dict) or not block.get("available"):
+        raise HTTPException(status_code=404, detail=f"No RTMA metrics available for {date}")
+    return {
+        "date": date,
+        "generated_at": summary.get("generated_at"),
+        "window_status": _window_status(summary),
+        "station_metrics": summary.get("metrics", {}),
+        "rtma_metrics": block,
+    }
+
+
 @router.get("/history")
 async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
     history = _load_history()
@@ -306,6 +389,10 @@ async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
         row["has_confusion_matrix"] = bool(entry.get("confusion_matrix"))
         row["has_observed_peak"] = _observed_peak_tif_path(date).exists()
         row["has_rtma_peak"] = _rtma_peak_tif_path(date).exists()
+        point = _rtma_point(entry)
+        for label, field in _RTMA_HISTORY_FIELDS.items():
+            row[f"rtma_{field}_mae"] = (point.get("forecast_vs_rtma", {}).get(label) or {}).get("mae")
+            row[f"rtma_{field}_bias"] = (point.get("forecast_vs_rtma", {}).get(label) or {}).get("bias")
         dates.append(row)
 
     return {"dates": dates}
@@ -318,19 +405,13 @@ async def get_verification_report(date: str):
     if not _report_is_available(summary, date):
         raise HTTPException(status_code=404, detail=f"No completed validation report available for {date}")
 
-    try:
-        from maps.observed_peak_history import snapshot_observed_peak_for_date
-        snapshot_observed_peak_for_date(date)
-    except Exception:
-        logger.exception("Failed to snapshot observed peak archive for %s", date)
-
     observed_peak_tif_path = _observed_peak_tif_path(date)
     forecast_peak_tif_path = _forecast_peak_tif_path(date)
     observed_peak_png_path = _observed_peak_png_path(date)
     forecast_peak_png_path = _forecast_peak_png_path(date)
     rtma_peak_tif_path = _rtma_peak_tif_path(date)
     rtma_peak_png_path = _rtma_peak_png_path(date)
-    artifact_result = build_combined_verification_artifacts(date)
+    artifact_result = _read_combined_manifest(date)
 
     return {
         "date": summary.get("date", date),
@@ -383,7 +464,10 @@ async def get_verification_report(date: str):
     }
 
 
-@router.get("/report/{date}/comparisons")
+@router.get(
+    "/report/{date}/comparisons",
+    dependencies=[Depends(station_limiter), Depends(require_station_data_access)],
+)
 async def get_verification_comparisons(date: str, station: Optional[str] = None, limit: int = 500):
     """Return canonical hourly forecast/observation pairs for a report date."""
     summary = _read_summary(date)

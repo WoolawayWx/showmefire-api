@@ -201,6 +201,80 @@ def day_cloud_phase(scene: Scene) -> np.ndarray:
                 _stretch(scene.band("CMI_C05"), 0.01, 0.59))
 
 
+# Band 7 (3.9 um) carries reflected sunlight as well as emitted heat by day.
+# The reflected part (Rosenfeld & Lensky 1998, BAMS 79, 2457; the method behind
+# the EUMETSAT/CIRA Day Microphysics RGB) is
+#   r = (L7 - B7(T13)) / (S cos(sza) / pi - B7(T13))
+# using band 13 as the emitted temperature. Planck constants are the GOES-R ABI
+# band 7 values (L1b planck_fk1/fk2/bc1/bc2, radiance in mW/(m2 sr cm-1)).
+# The CO2 correction is omitted, which matters little this far from the limb.
+B7_FK1, B7_FK2, B7_BC1, B7_BC2 = 2.02263e5, 3698.19, 0.43361, 0.99939
+B7_SOLAR = 16.7  # TOA solar irradiance at 3.9 um, mW/(m2 cm-1) (~11 W/m2/um)
+
+
+def _band7_radiance(kelvin: np.ndarray) -> np.ndarray:
+    return B7_FK1 / np.expm1(B7_FK2 / (B7_BC1 + B7_BC2 * kelvin))
+
+
+def band7_reflectance(t7: np.ndarray, t13: np.ndarray, sun_elevation_deg) -> np.ndarray:
+    """Solar-reflected fraction of the 3.9 um signal (0-1); NaN where the sun is too low."""
+    emitted = _band7_radiance(t13)
+    cos_sza = np.sin(np.radians(sun_elevation_deg))
+    solar = np.where(cos_sza > 0.05, B7_SOLAR * cos_sza / np.pi, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.clip((_band7_radiance(t7) - emitted) / (solar - emitted), 0.0, 1.0)
+
+
+@lru_cache(maxsize=1)
+def _map_lonlat() -> tuple:
+    map_crs, _extent, x_mesh, y_mesh = _map_grid()
+    points = ccrs.PlateCarree().transform_points(map_crs, x_mesh, y_mesh)
+    return points[..., 0], points[..., 1]
+
+
+def day_microphysics(scene: Scene) -> np.ndarray:
+    # CIRA/EUMETSAT Day Microphysics RGB (bands 3, 7 reflected part, 14).
+    lon, lat = _map_lonlat()
+    r39 = band7_reflectance(scene.band("CMI_C07"), scene.band("CMI_C13"), solar_elevation_deg(lat, lon, scene.start))
+    return _rgb(_stretch(scene.band("CMI_C03"), 0.0, 1.0),
+                _stretch(r39, 0.0, 0.6, 2.5),
+                _stretch(scene.band("CMI_C14"), 203.0, 323.0))
+
+
+def airmass(scene: Scene) -> np.ndarray:
+    # EUMETSAT/CIRA Air Mass RGB (bands 8-10, 12-13, 8).
+    return _rgb(_stretch(scene.band("CMI_C08") - scene.band("CMI_C10"), -26.2, 0.6),
+                _stretch(scene.band("CMI_C12") - scene.band("CMI_C13"), -43.2, 6.7),
+                _stretch(scene.band("CMI_C08"), 243.9, 208.5))
+
+
+def dust(scene: Scene) -> np.ndarray:
+    # EUMETSAT/CIRA Dust RGB (bands 15-13, 14-11, 13).
+    return _rgb(_stretch(scene.band("CMI_C15") - scene.band("CMI_C13"), -6.7, 2.6),
+                _stretch(scene.band("CMI_C14") - scene.band("CMI_C11"), -0.5, 20.0, 2.5),
+                _stretch(scene.band("CMI_C13"), 261.2, 288.7))
+
+
+def day_convection(scene: Scene) -> np.ndarray:
+    # EUMETSAT/CIRA Day Convection RGB (bands 8-10, 7-13, 5-2).
+    return _rgb(_stretch(scene.band("CMI_C08") - scene.band("CMI_C10"), -35.0, 5.0),
+                _stretch(scene.band("CMI_C07") - scene.band("CMI_C13"), -5.0, 60.0, 0.5),
+                _stretch(scene.band("CMI_C05") - scene.band("CMI_C02"), -0.75, 0.25))
+
+
+SANDWICH_COLD_C = -30.0
+
+
+def sandwich(scene: Scene) -> np.ndarray:
+    # CIRA Sandwich: band 2 visible texture multiplied by band 13 IR colors on cold tops.
+    visible = _stretch(scene.band("CMI_C02"), 0.0, 1.0, 1.8)
+    ir_c = scene.band("CMI_C13") - C
+    colors = IR_CMAP(np.clip((ir_c - IR_RANGE[0]) / (IR_RANGE[1] - IR_RANGE[0]), 0, 1))[..., :3]
+    colors = np.where((ir_c < SANDWICH_COLD_C)[..., None], colors, 1.0)
+    image = colors * visible[..., None]
+    return _rgb(image[..., 0], image[..., 1], np.where(np.isfinite(ir_c), image[..., 2], np.nan))
+
+
 def _cmap_from_stops(name: str, stops: list[tuple[float, str]], low: float, high: float) -> LinearSegmentedColormap:
     return LinearSegmentedColormap.from_list(name, [((value - low) / (high - low), color) for value, color in stops])
 
@@ -220,6 +294,16 @@ SWIR_RANGE = (-50.0, 75.0)
 SWIR_CMAP = _cmap_from_stops("swir_fire", [
     (-50, "#ffffff"), (40, "#000000"), (45, "#ffff00"), (55, "#ff8000"), (65, "#ff0000"), (75, "#7f0000"),
 ], *SWIR_RANGE)
+
+
+SPLIT_RANGE = (-2.0, 8.0)
+SPLIT_CMAP = _cmap_from_stops("split_window", [
+    (-2, "#8c510a"), (0, "#f6e8c3"), (1, "#f5f5f5"), (3, "#80cdc1"), (5, "#01665e"), (8, "#003c30"),
+], *SPLIT_RANGE)
+
+
+def _split_window(_band: str, scene: Scene) -> np.ndarray:
+    return scene.band("CMI_C13") - scene.band("CMI_C15")
 
 
 def _celsius(band: str, scene: Scene) -> np.ndarray:
@@ -254,6 +338,10 @@ CHANNELS = [
     dict(key="ir", png="mo-sat-ir.png", title="Missouri Infrared Satellite", file="multi", when="any",
          band=("CMI_C13", _celsius), cmap=IR_CMAP, norm=IR_RANGE, units="Band 13 brightness temperature (°C)",
          blurb="Band 13 clean longwave IR (10.3 µm), 2 km.\nCloud-top and ground temperature, day and\nnight. Colors mark cold, high cloud tops\n(storms)."),
+    dict(key="splitwindow", png="mo-sat-splitwindow.png", title="Missouri Split Window Difference", file="multi",
+         when="any", band=("split", _split_window), cmap=SPLIT_CMAP, norm=SPLIT_RANGE,
+         units="Band 13 − Band 15 (°C)",
+         blurb="Bands 13 minus 15 (10.3 − 12.3 µm), 2 km.\nIn clear air, larger values (green) mean\nmore low-level moisture; brown marks dry\nair or dust. Watch for sharp dry lines."),
 ]
 
 RGBS = [
@@ -275,6 +363,23 @@ RGBS = [
          recipe=night_microphysics,
          blurb="CIRA Nighttime Microphysics RGB\n(bands 15, 13, 7). Picks out fog and low\nstratus (aqua) from high cloud; low cloud\nand fog limit overnight RH recovery\nforecasts. Night only.",
          key_colors=[("Fog / low stratus", "#60e0c8"), ("Thick high cloud", "#a01818"), ("Thin cirrus", "#202060"), ("Clear land", "#d090a0")]),
+    dict(key="daymicro", png="mo-sat-daymicro.png", title="Missouri Day Microphysics", when="day",
+         recipe=day_microphysics,
+         blurb="CIRA/EUMETSAT Day Microphysics RGB\n(bands 3, 7 reflected, 14). Small-droplet\nfog and new cloud look pale pink/white,\nlarge drops pink, ice red/orange. Daytime\ncounterpart to Night Microphysics.",
+         key_colors=[("Fog / small droplets", "#f4d8ec"), ("Water cloud, large drops", "#e080b8"), ("Ice cloud", "#c02820"), ("Small ice / new storm", "#f09030"), ("Clear land", "#8a6f8f"), ("Green vegetation", "#40a040")]),
+    dict(key="airmass", png="mo-sat-airmass.png", title="Missouri Air Mass RGB", when="any", recipe=airmass,
+         blurb="EUMETSAT/CIRA Air Mass RGB (bands 8, 10,\n12, 13). Red-orange marks dry, sinking\nstratospheric air behind troughs that can\nmix down and crash afternoon RH.",
+         key_colors=[("Dry sinking air (jet / PV)", "#c04020"), ("Warm, moist air mass", "#2f8f2f"), ("Cold air mass", "#5040a0"), ("Thick high cloud", "#f0f0f0"), ("Mid-level cloud", "#c8a878")]),
+    dict(key="dust", png="mo-sat-dust.png", title="Missouri Dust RGB", when="any", recipe=dust,
+         blurb="EUMETSAT/CIRA Dust RGB (bands 11, 13,\n14, 15). Blowing dust turns magenta-pink;\nuseful on dry, windy days with high\nspread potential.",
+         key_colors=[("Blowing dust", "#ff40c0"), ("Thick ice cloud", "#8a1a1a"), ("Thin cirrus", "#151530"), ("Low water cloud", "#8070f0"), ("Clear land, warm day", "#c07040")]),
+    dict(key="dayconvection", png="mo-sat-dayconvection.png", title="Missouri Day Convection RGB", when="day",
+         recipe=day_convection,
+         blurb="EUMETSAT/CIRA Day Convection RGB (bands\n2, 5, 7, 8, 10, 13). Bright yellow marks\nstrong updrafts with small ice: storms\nthat may bring lightning and outflow.",
+         key_colors=[("Strong updraft, small ice", "#ffe040"), ("Mature storm, large ice", "#e03030"), ("Low water cloud", "#3060d0"), ("Thin cirrus", "#c040c0")]),
+    dict(key="sandwich", png="mo-sat-sandwich.png", title="Missouri Sandwich RGB", when="day", recipe=sandwich,
+         blurb="CIRA Sandwich (band 2 visible x band 13 IR).\nVisible cloud texture with IR colors on\ntops colder than -30 °C: overshooting\ntops and storm structure.",
+         key_colors=[("Top -30 to -40 °C", "#1050ff"), ("Top -40 to -50 °C", "#00c800"), ("Top -50 to -60 °C", "#ffff00"), ("Top -60 to -70 °C", "#ff0000"), ("Top colder than -70 °C", "#8b008b")]),
 ]
 
 # Fire Detection and Characterization mask codes (filtered = 30-35).

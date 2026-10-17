@@ -76,6 +76,10 @@ def export_verification_history_csv(history, verification_csv_file):
         rh = metrics.get('Relative Humidity (%)', {})
         wind = metrics.get('Wind Speed (m/s)', {})
         fm = metrics.get('Fuel Moisture (%)', {})
+        rtma_point = ((entry.get('rtma_metrics') or {}).get('station_point') or {}).get('forecast_vs_rtma', {})
+        rtma_temp = rtma_point.get('Temperature (C)', {})
+        rtma_rh = rtma_point.get('Relative Humidity (%)', {})
+        rtma_wind = rtma_point.get('Wind Speed (m/s)', {})
 
         rows.append({
             'date': date_compact,
@@ -91,6 +95,12 @@ def export_verification_history_csv(history, verification_csv_file):
             'fm_mae_pct': _to_float_or_none(fm.get('mae')),
             'fm_bias_pct': _to_float_or_none(fm.get('bias')),
             'fm_count': int(fm.get('count', 0) or 0),
+            'rtma_temp_mae_c': _to_float_or_none(rtma_temp.get('mae')),
+            'rtma_temp_bias_c': _to_float_or_none(rtma_temp.get('bias')),
+            'rtma_rh_mae_pct': _to_float_or_none(rtma_rh.get('mae')),
+            'rtma_rh_bias_pct': _to_float_or_none(rtma_rh.get('bias')),
+            'rtma_wind_mae_ms': _to_float_or_none(rtma_wind.get('mae')),
+            'rtma_wind_bias_ms': _to_float_or_none(rtma_wind.get('bias')),
         })
 
     verification_df = pd.DataFrame(rows)
@@ -882,6 +892,16 @@ def run_report(date=None, forecast_glob=STABLE_FORECAST_GLOB, report_suffix=""):
         'wind_category': calculate_neighborhood_metrics(merged, 'pred_wind_cat', 'obs_wind_cat', neighbors),
     }
 
+    # 5d. RTMA comparison - additive; the station metrics above are unchanged.
+    # Gridded peak-class scoring uses the default forecast raster, so it is
+    # only attached to the default (unsuffixed) report.
+    report_date = target_date or forecast_day.isoformat()
+    from services.rtma_verification import build_rtma_metrics
+    rtma_metrics = build_rtma_metrics(
+        merged, station_coords, report_date, calculate_fire_danger,
+        include_gridded=not suffix,
+    )
+
     # 6. Output Report
     # Key the report to the forecast/observation window, not the server's
     # calendar date. The production verification job runs after midnight UTC
@@ -898,6 +918,7 @@ def run_report(date=None, forecast_glob=STABLE_FORECAST_GLOB, report_suffix=""):
         'confusion_matrix': confusion,
         'wind_confusion_matrix': wind_confusion,
         'neighborhood_verification': neighborhood_verification,
+        'rtma_metrics': rtma_metrics,
         'stations_count': merged['stidnunique'] if 'stidnunique' in dir(merged) else merged['stid'].nunique(),
         'record_count': len(merged),
         'qc_exclusions': qc_exclusions,

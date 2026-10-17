@@ -77,6 +77,18 @@ class SatelliteTests(unittest.TestCase):
         self.assertFalse(sat._wanted("night", 0))
         self.assertTrue(sat._wanted("any", 0))
 
+    def test_band7_reflectance_removes_emitted_heat(self):
+        t13 = np.array([290.0, 290.0, 290.0])
+        r39 = sat.band7_reflectance(np.array([290.0, 300.0, 320.0]), t13, np.array([40.0, 40.0, 40.0]))
+        self.assertAlmostEqual(r39[0], 0.0)  # all emitted, nothing reflected
+        self.assertTrue(0 < r39[1] < r39[2] <= 1)
+        self.assertTrue(np.isnan(sat.band7_reflectance(np.array([300.0]), np.array([290.0]), np.array([-5.0]))[0]))
+
+    def test_product_keys_and_pngs_are_unique(self):
+        specs = sat.CHANNELS + sat.RGBS
+        self.assertEqual(len({spec["key"] for spec in specs}), len(specs))
+        self.assertEqual(len({spec["png"] for spec in specs}), len(specs))
+
     def test_every_fire_mask_code_has_one_confidence(self):
         codes = [code for _name, _color, group in sat.FIRE_CLASSES for code in group]
         self.assertEqual(len(codes), len(set(codes)))
