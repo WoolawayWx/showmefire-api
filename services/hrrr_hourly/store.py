@@ -92,11 +92,19 @@ def write_zarr(dataset, path: Path) -> bool:
     except ImportError:
         logger.warning("zarr is not installed; skipping the Zarr store (NetCDF copy is still written)")
         return False
-    codec = numcodecs.Blosc(cname="zstd", clevel=5, shuffle=numcodecs.Blosc.BITSHUFFLE)
+    # Byte-shuffle + zlib rather than Blosc: browsers decode both natively (zlib via DecompressionStream, shuffle in
+    # plain JS). Blosc needs a WebAssembly decoder that calls Function(), which a strict Content-Security-Policy
+    # (no 'unsafe-eval') blocks, so the website could not read Blosc chunks.
+    codec = numcodecs.Zlib(level=5)
+
+    def settings(name: str, chunks: tuple) -> dict:
+        return {"chunks": chunks, "compressor": codec,
+                "filters": [numcodecs.Shuffle(elementsize=dataset[name].dtype.itemsize)]}
+
     ny, nx = dataset["latitude"].shape
-    encoding = {name: {"chunks": (1, ny, nx), "compressor": codec} for name in dataset.data_vars}
-    encoding["latitude"] = {"chunks": (ny, nx), "compressor": codec}
-    encoding["longitude"] = {"chunks": (ny, nx), "compressor": codec}
+    encoding = {name: settings(name, (1, ny, nx)) for name in dataset.data_vars}
+    encoding["latitude"] = settings("latitude", (ny, nx))
+    encoding["longitude"] = settings("longitude", (ny, nx))
     dataset.to_zarr(path, mode="w", consolidated=True, encoding=encoding)
     return True
 
