@@ -1,4 +1,8 @@
-"""Hour-by-hour HRRR forecast product built from the 12z run (f00-f18).
+"""Hour-by-hour HRRR forecast product built from every HRRR run (f00-f18).
+
+A run is built for every hourly cycle, newest first (see job.run_auto). The 12z run is the one the daily forecast
+also uses (CYCLE_HOUR below): it waits for that forecast to finish, and the early prefetch and the shared cache
+serve it. Every other cycle only waits for its own HRRR files.
 
 Separate from the operational daily forecast: its own directories, status key
 and file names, so a run here can never overwrite today's forecast outputs.
@@ -11,6 +15,7 @@ from pathlib import Path
 
 PRODUCT = "hrrr_hourly"
 STATUS_KEY = "HrrrHourly"
+# The cycle shared with the daily fire danger forecast (it builds only after that forecast, and is prefetched early).
 CYCLE_HOUR = 12
 FORECAST_HOURS = tuple(range(0, 19))
 SCHEMA_VERSION = 1
@@ -24,8 +29,29 @@ def images_dir() -> Path:
     return Path(os.environ.get("SMF_HRRR_HOURLY_IMAGES", "images/hrrr_hourly"))
 
 
+def enabled_cycle_hours() -> tuple[int, ...]:
+    """UTC hours whose HRRR run is built. All 24 by default.
+
+    Set from the admin page (the settings file, see controls.py), which wins; otherwise from the environment, e.g.
+    SMF_HRRR_HOURLY_CYCLE_HOURS="0,6,12,18" builds four a day and "12" builds only the 12z run, as before. Anything that
+    is not an hour 0-23 is ignored, and an empty or unusable list means all 24."""
+    from services.hrrr_hourly import controls
+
+    saved = controls.load_settings()["cycle_hours"]
+    if saved:
+        return tuple(saved)
+    chosen = set()
+    for part in os.environ.get("SMF_HRRR_HOURLY_CYCLE_HOURS", "").split(","):
+        part = part.strip()
+        if part.isdigit() and 0 <= int(part) <= 23:
+            chosen.add(int(part))
+    return tuple(sorted(chosen)) or tuple(range(24))
+
+
 def keep_days() -> int:
-    return int(os.environ.get("SMF_HRRR_HOURLY_KEEP_DAYS", "14"))
+    """Days of runs kept on this server. 7, like the CDN: at 24 runs a day that is about 168 runs (it was 14 when
+    there was one run a day)."""
+    return int(os.environ.get("SMF_HRRR_HOURLY_KEEP_DAYS", "7"))
 
 
 def cycle_id(cycle_time) -> str:

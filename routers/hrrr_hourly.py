@@ -46,7 +46,7 @@ def _manifest(cycle: str) -> dict:
 @router.get("/status", dependencies=[Depends(status_limiter)])
 def get_status():
     """Update state for the front end: waiting_for_hrrr | waiting_for_forecast | building | rendering |
-    complete | partial | failed, with `updating`, `pending`, progress counts and `serving_cycle`."""
+    publishing | complete | partial | failed, with `updating`, `pending`, progress counts and `serving_cycle`."""
     status = job.read_status()
     if not status:
         return {"product": "hrrr_hourly", "state": "idle", "updating": False, "pending": False,

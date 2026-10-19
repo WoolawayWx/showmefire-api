@@ -1,7 +1,7 @@
 """Upper-air (radiosonde) soundings in and around Missouri and their fire-weather metrics.
 
 NWS sites come from the Iowa Environmental Mesonet's RAOB archive, which carries
-the routine 00Z/12Z launches and any special (off-hour) launches:
+the routine 00Z/12Z launches and any off-hour launches:
   list:    https://mesonet.agron.iastate.edu/cgi-bin/request/raob.py?station=KSGF&sts=...&ets=...
   profile: https://mesonet.agron.iastate.edu/json/raob.py?ts=YYYYMMDDHHMM&station=KSGF
 University launches that never reach the NWS data stream come from CW3E's
@@ -44,22 +44,12 @@ CW3E_SITES = {
 }
 # Short names for images/status files; NWS sites drop the leading K (KSGF -> sgf).
 SITE_SLUGS = {"USCOU": "cou"}
-ROUTINE_HOURS = (0, 12)
 MIN_TOP_HPA = 400.0  # a profile that stops below this is incomplete (or still arriving)
 SOUNDING_THETA_EXCESS_K = 0.5
 
 
-def is_special(valid: datetime) -> bool:
-    return valid.hour not in ROUTINE_HOURS or valid.minute != 0
-
-
 def site_slug(station: str) -> str:
     return SITE_SLUGS.get(station, station[1:].lower())
-
-
-def launch_is_special(station: str, valid: datetime) -> bool:
-    """Every university (CW3E) flight is a special launch; NWS ones by their time."""
-    return station in CW3E_SITES or is_special(valid)
 
 
 def _cw3e_files(station: str) -> dict[datetime, str]:
@@ -76,7 +66,7 @@ def _cw3e_files(station: str) -> dict[datetime, str]:
 
 
 def list_launches(station: str, start: datetime, end: datetime) -> list[datetime]:
-    """Launch times (UTC) for `station` between start and end, routine and special."""
+    """Launch times (UTC) for `station` between start and end, at any hour."""
     if station in CW3E_SITES:
         return sorted(valid for valid in _cw3e_files(station) if start <= valid <= end)
     response = requests.get(f"{IEM}/cgi-bin/request/raob.py", headers=HEADERS, timeout=60, params={
@@ -301,19 +291,11 @@ def fetch_hrrr_omega(valid: datetime, stations: list[str], herbie_factory=None) 
 
 # --- Which launches to keep -----------------------------------------------------
 KEEP_LATEST = 2
-KEEP_SPECIAL_DAYS = 7
 
 
-def kept_launches(valid_times: list[datetime], now: datetime, station: str = "") -> list[datetime]:
-    """Newest first: the KEEP_LATEST most recent launches plus any special
-    launch from the last KEEP_SPECIAL_DAYS days."""
-    from datetime import timedelta
-
-    ordered = sorted(set(valid_times), reverse=True)
-    keep = set(ordered[:KEEP_LATEST])
-    keep |= {valid for valid in ordered
-             if launch_is_special(station, valid) and now - valid <= timedelta(days=KEEP_SPECIAL_DAYS)}
-    return [valid for valid in ordered if valid in keep]
+def kept_launches(valid_times: list[datetime]) -> list[datetime]:
+    """Newest first: the KEEP_LATEST most recent launches, whatever time they went up."""
+    return sorted(set(valid_times), reverse=True)[:KEEP_LATEST]
 
 
 def sounding_from_record(record: dict[str, Any]) -> Sounding:

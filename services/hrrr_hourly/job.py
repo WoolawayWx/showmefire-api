@@ -21,7 +21,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from services.hrrr_hourly import CYCLE_HOUR, FORECAST_HOURS, cycle_id, images_dir, root_dir
-from services.hrrr_hourly import fetch, store
+from services.hrrr_hourly import controls, fetch, publish, store
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +70,24 @@ def free_disk_mb(path: Path) -> int:
 
 def wait_for_priority_work(root: Path, on_wait: Optional[Callable] = None, sleep: Callable = time.sleep,
                            clock: Callable = time.monotonic, forecast_lock: Path = FORECAST_LOCK,
-                           maps_lock: Path = MAPS_LOCK, memory_mb: Callable = available_memory_mb) -> None:
+                           maps_lock: Path = MAPS_LOCK, memory_mb: Callable = available_memory_mb,
+                           include_forecast: bool = True) -> None:
     """Block while a higher-priority job runs: the daily forecast first, then the 15-minute maps.
 
     Also waits for free memory. Each wait is capped (see MAX_PAUSE_*), after which the build carries on.
-    Raises RuntimeError if the disk is nearly full, since a half-written cycle helps nobody."""
+    Raises RuntimeError if the disk is nearly full, since a half-written cycle helps nobody.
+
+    `include_forecast=False` skips the daily-forecast wait: the early prefetch is meant to run alongside the
+    forecast (it only downloads and decodes single hours, at the lowest priority), so waiting for the forecast's
+    lock would stall it behind the very job it is there to get ahead of."""
     if free_disk_mb(root) < MIN_FREE_DISK_MB:
         raise RuntimeError(f"less than {MIN_FREE_DISK_MB} MB free disk; not building the hourly product")
     checks = (("daily forecast", lambda: forecast_lock_free(forecast_lock), MAX_PAUSE_FORECAST_SECONDS),
               ("15-minute maps", lambda: forecast_lock_free(maps_lock), MAX_PAUSE_MAPS_SECONDS),
               ("free memory", lambda: (memory_mb() or MIN_AVAILABLE_MEMORY_MB) >= MIN_AVAILABLE_MEMORY_MB,
                MAX_PAUSE_MAPS_SECONDS))
+    if not include_forecast:
+        checks = checks[1:]
     for reason, free, cap in checks:
         started = clock()
         while not free() and clock() - started < cap:
@@ -89,10 +96,12 @@ def wait_for_priority_work(root: Path, on_wait: Optional[Callable] = None, sleep
             sleep(POLL_SECONDS)
 
 
-STATES_UPDATING = ("building", "rendering")
+STATES_UPDATING = ("building", "rendering", "publishing")
 FORECAST_STATUS = Path("status.json")
 FORECAST_STATUS_KEY = "ForecastFireDanger"
-FORECAST_GRACE = timedelta(hours=6)  # proceed anyway if the daily forecast never reports done
+# Build the 12z cycle anyway if the daily forecast has not reported done this long after the cycle. Kept under the time a
+# cycle stays among the candidates (newest + BACKFILL_CYCLES), or a day the forecast fails would skip the 12z run.
+FORECAST_GRACE = timedelta(hours=4)
 
 
 def _now_iso() -> str:
@@ -147,6 +156,61 @@ def _work_file(work: Path, lead: int) -> Path:
     return work / f"f{lead:02d}.npz"
 
 
+# Keys saved in a work file beside the derived elements. They are never part of the product: the loader drops
+# them, so they cannot reach the Zarr store, the series or the manifest.
+#   raw_*   unprocessed HRRR surface fields (K, %, m/s) that another product reading the same hour can reuse
+#   grid_*  projection details, so a build resumed entirely from work files still writes full grid metadata
+RAW_PREFIX = "raw_"
+GRID_PREFIX = "grid_"
+CACHE_ONLY_PREFIXES = (RAW_PREFIX, GRID_PREFIX)
+
+
+def _raw_fields(profiles, extras: dict) -> dict[str, np.ndarray]:
+    """The surface fields the daily forecast also reads (2 m T and RH, 10 m wind, gust), unprocessed.
+
+    Temperature is returned to Kelvin from the profile's degC; the rest are the GRIB values. Fields a run
+    lacks are left out."""
+    raw: dict[str, np.ndarray] = {}
+    t2_c = getattr(profiles, "t2_c", None)
+    if t2_c is not None:
+        raw[f"{RAW_PREFIX}t2m_k"] = (np.asarray(t2_c, dtype="float64") + 273.15).astype("float32")
+    for name in ("u10", "v10"):
+        value = getattr(profiles, name, None)
+        if value is not None:
+            raw[f"{RAW_PREFIX}{name}"] = np.asarray(value, dtype="float32")
+    for name in ("rh2", "gust"):
+        if extras.get(name) is not None:
+            raw[f"{RAW_PREFIX}{name}"] = np.asarray(extras[name], dtype="float32")
+    return raw
+
+
+def _save_work_file(path: Path, lat, lon, fields: dict, profiles=None, extras: Optional[dict] = None) -> None:
+    """Write one hour's derived elements (plus raw and grid details when `profiles` is given), atomically."""
+    extra: dict[str, np.ndarray] = {}
+    if profiles is not None:
+        extra.update(_raw_fields(profiles, extras or {}))
+        for name in ("central_longitude", "standard_parallel"):
+            value = getattr(profiles, name, None)
+            if value is not None:
+                extra[f"{GRID_PREFIX}{name}"] = np.float64(value)
+    temporary = path.with_suffix(".tmp.npz")
+    np.savez(temporary, lat=lat, lon=lon, **fields, **extra)
+    os.replace(temporary, path)
+
+
+def _load_work_file(path: Path) -> tuple[dict, np.ndarray, np.ndarray, Optional[dict]]:
+    """(derived elements, lat, lon, grid metadata or None) from a work file, ignoring raw_/grid_ keys."""
+    with np.load(path) as data:
+        fields = {k: data[k] for k in data.files
+                  if k not in ("lat", "lon") and not k.startswith(CACHE_ONLY_PREFIXES)}
+        lat, lon = data["lat"], data["lon"]
+        meta = None
+        if f"{GRID_PREFIX}central_longitude" in data.files and f"{GRID_PREFIX}standard_parallel" in data.files:
+            meta = _grid_meta_from(float(data[f"{GRID_PREFIX}central_longitude"]),
+                                   float(data[f"{GRID_PREFIX}standard_parallel"]), lat)
+    return fields, lat, lon, meta
+
+
 def _series(hours: dict[int, dict[str, np.ndarray]], mask: np.ndarray) -> dict:
     out = {}
     for name in SERIES_ELEMENTS:
@@ -164,11 +228,15 @@ def _series(hours: dict[int, dict[str, np.ndarray]], mask: np.ndarray) -> dict:
     return out
 
 
-def _grid_meta(profiles, lat) -> dict:
+def _grid_meta_from(central_longitude: float, standard_parallel: float, lat) -> dict:
     return {"ny": int(lat.shape[0]), "nx": int(lat.shape[1]), "projection": "lambert_conformal_conic",
-            "central_longitude": profiles.central_longitude, "standard_parallel": profiles.standard_parallel,
+            "central_longitude": central_longitude, "standard_parallel": standard_parallel,
             "lat_min": round(float(np.nanmin(lat)), 3), "lat_max": round(float(np.nanmax(lat)), 3),
             "resolution_km": 3.0}
+
+
+def _grid_meta(profiles, lat) -> dict:
+    return _grid_meta_from(profiles.central_longitude, profiles.standard_parallel, lat)
 
 
 def _timed_step(totals: dict, key: str):
@@ -267,9 +335,8 @@ def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = False
             try:
                 if cached.is_file():
                     with _timed_step(totals, "cache_io_sec"):
-                        with np.load(cached) as data:
-                            results[lead] = {k: data[k] for k in data.files if k not in ("lat", "lon")}
-                            lat, lon = data["lat"], data["lon"]
+                        results[lead], lat, lon, cached_meta = _load_work_file(cached)
+                        meta = meta or cached_meta
                     row.update(cached=True, fetch_total_sec=0.0)
                     continue
                 if prefetcher:
@@ -295,8 +362,7 @@ def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = False
                 lat, lon = profiles.lat, profiles.lon
                 meta = meta or _grid_meta(profiles, lat)
                 save_started = time.perf_counter()
-                np.savez(_work_file(work, lead).with_suffix(".tmp.npz"), lat=lat, lon=lon, **fields)
-                os.replace(_work_file(work, lead).with_suffix(".tmp.npz"), cached)
+                _save_work_file(cached, lat, lon, fields, profiles, extras)
                 totals["cache_io_sec"] = totals.get("cache_io_sec", 0.0) + time.perf_counter() - save_started
                 results[lead] = fields
                 profiles_sec = detail.get("profiles_sec", 0.0)
@@ -352,30 +418,46 @@ def build_cycle(cycle_time: datetime, hours=FORECAST_HOURS, render: bool = False
     return manifest
 
 
-def run_auto(now: Optional[datetime] = None, force: bool = False, cycle_time: Optional[datetime] = None,
-             hours=FORECAST_HOURS, build: Callable = build_cycle, ready: Callable = fetch.cycle_ready,
-             lock_free: Callable = forecast_lock_free, forecast_done: Callable = forecast_complete,
-             root: Optional[Path] = None) -> dict:
-    """One scheduler tick: build the newest 12z cycle only after the daily forecast has finished.
+PREFETCH_TIMEOUT_SECONDS = int(os.environ.get("SMF_HRRR_HOURLY_PREFETCH_TIMEOUT_SECONDS", str(2 * 3600)))
+PREFETCH_POLL_SECONDS = int(os.environ.get("SMF_HRRR_HOURLY_PREFETCH_POLL_SECONDS", "60"))
 
-    Order is fixed: the original forecast (maps, Discord/mobile notices, beta run) runs first and holds the
-    forecast lock until its script exits; this product starts after that, never alongside it."""
+
+def _wait_for_prefetch_slot(root: Path) -> None:
+    wait_for_priority_work(root, include_forecast=False)
+
+
+def prefetch_cycle(cycle_time: Optional[datetime] = None, hours=FORECAST_HOURS, root: Optional[Path] = None,
+                   fetch_hour: Callable = fetch.fetch_hour, derive_hour: Optional[Callable] = None,
+                   hour_ready: Callable = fetch.cycle_ready, wait: Optional[Callable] = None,
+                   sleep: Callable = time.sleep, clock: Callable = time.monotonic,
+                   poll_seconds: Optional[int] = None, timeout_seconds: Optional[int] = None,
+                   now: Optional[datetime] = None, on_hour_done: Optional[Callable] = None) -> dict:
+    """Process each forecast hour of the 12z run as HRRR publishes it, ahead of the real build.
+
+    Does exactly what `build_cycle` does per hour (fetch, derive, save `.work/<cycle>/f{lead}.npz`) and nothing
+    after it: no Zarr, NetCDF, manifest, publish or status.json change. The later build then finds every hour
+    already done and only writes the store. Spreading the work across the ~14 minutes HRRR takes to post f00-f18
+    also keeps the peak load and memory low, instead of decoding everything in one go after the daily forecast.
+
+    Waits (polling `hour_ready`, the idx files of both products) for an hour that is not published yet, up to
+    `timeout_seconds` overall. An hour that fails is left for the build to retry. Holds `.build.lock`, so it never
+    runs alongside a build. Safe to run again: hours that already have a work file are skipped.
+
+    `on_hour_done(lead, done_hours)`, if given, is called after each hour is saved (or found already saved); an
+    exception in it is logged and ignored. The caller uses it to start work as soon as the hours it needs exist.
+    Hours are processed in the order given, so a caller that needs some of them first can list those first."""
+    from services.hrrr_hourly import derive
+
+    derive_hour = derive_hour or derive.derive_hour
+    wait = wait or _wait_for_prefetch_slot
+    poll = PREFETCH_POLL_SECONDS if poll_seconds is None else poll_seconds
+    timeout = PREFETCH_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     root = Path(root or root_dir())
-    now = now or datetime.now(timezone.utc)
     cycle_time = cycle_time or fetch.latest_cycle(now, CYCLE_HOUR)
     cycle = cycle_id(cycle_time)
     existing = store.read_manifest(cycle, root)
-    if existing and not existing.get("missing_hours") and not force:
+    if existing and not existing.get("missing_hours"):
         return {"action": "skip", "reason": "already built", "cycle": cycle}
-    if not force and not ready(cycle_time, max(hours)):
-        set_state(root, "waiting_for_hrrr", cycle, detail="HRRR 12z run not fully published yet")
-        return {"action": "skip", "reason": "cycle not fully published", "cycle": cycle}
-    if not force and not forecast_done(cycle_time) and now < cycle_time + FORECAST_GRACE:
-        set_state(root, "waiting_for_forecast", cycle, detail="daily forecast has not finished yet")
-        return {"action": "skip", "reason": "daily forecast not finished", "cycle": cycle}
-    if not lock_free():
-        set_state(root, "waiting_for_forecast", cycle, detail="daily forecast is running")
-        return {"action": "skip", "reason": "forecast running", "cycle": cycle}
     root.mkdir(parents=True, exist_ok=True)
     guard = open(root / ".build.lock", "a+")
     try:
@@ -384,9 +466,136 @@ def run_auto(now: Optional[datetime] = None, force: bool = False, cycle_time: Op
         guard.close()
         return {"action": "skip", "reason": "another build is running", "cycle": cycle}
     try:
-        return _build_locked(root, cycle, cycle_time, now, hours, build)
+        return _prefetch_locked(root, cycle, cycle_time, tuple(hours), fetch_hour, derive_hour, hour_ready, wait,
+                                sleep, clock, poll, timeout, on_hour_done)
     finally:
         guard.close()
+
+
+def _prefetch_locked(root: Path, cycle: str, cycle_time: datetime, hours: tuple, fetch_hour: Callable,
+                     derive_hour: Callable, hour_ready: Callable, wait: Callable, sleep: Callable, clock: Callable,
+                     poll: int, timeout: int, on_hour_done: Optional[Callable] = None) -> dict:
+    work = root / ".work" / cycle
+    work.mkdir(parents=True, exist_ok=True)
+    started = clock()
+    done: list[int] = []
+    failed: list[int] = []
+
+    def hour_done(lead: int) -> None:
+        done.append(lead)
+        if on_hour_done:
+            try:
+                on_hour_done(lead, list(done))
+            except Exception:
+                logger.exception("hrrr_hourly prefetch %s: the after-hour callback failed for f%02d", cycle, lead)
+
+    def result(reason: str) -> dict:
+        left = [lead for lead in hours if lead not in done and lead not in failed]
+        return {"action": "prefetched", "cycle": cycle, "reason": reason, "hours_done": done,
+                "hours_failed": failed, "hours_pending": left}
+
+    for lead in hours:
+        target = _work_file(work, lead)
+        if target.is_file():
+            hour_done(lead)
+            continue
+        while not hour_ready(cycle_time, lead):
+            if clock() - started >= timeout:
+                logger.warning("hrrr_hourly prefetch %s: f%02d still not published after %ds; stopping", cycle, lead,
+                               timeout)
+                return result("timed out waiting for HRRR")
+            sleep(poll)
+        try:
+            wait(root)
+        except RuntimeError as exc:  # nearly full disk: stop rather than half-write hours
+            logger.error("hrrr_hourly prefetch %s stopped: %s", cycle, exc)
+            return result(str(exc))
+        try:
+            fetch.take_timings()  # drop anything left from an earlier call
+            profiles, extras = fetch_hour(cycle_time, lead)
+            fields = derive_hour(profiles, extras)
+            _save_work_file(target, profiles.lat, profiles.lon, fields, profiles, extras)
+            logger.info("hrrr_hourly prefetch %s f%02d saved (%d of %d)", cycle, lead, len(done) + 1, len(hours))
+            hour_done(lead)
+        except Exception:
+            logger.exception("hrrr_hourly prefetch %s f%02d failed; the build will retry it", cycle, lead)
+            failed.append(lead)
+    return result("complete" if not failed else "some hours failed")
+
+
+BACKFILL_CYCLES = int(os.environ.get("SMF_HRRR_HOURLY_BACKFILL_CYCLES", "3"))
+
+
+def run_auto(now: Optional[datetime] = None, force: bool = False, cycle_time: Optional[datetime] = None,
+             hours=FORECAST_HOURS, build: Callable = build_cycle, ready: Callable = fetch.cycle_ready,
+             lock_free: Callable = forecast_lock_free, forecast_done: Callable = forecast_complete,
+             root: Optional[Path] = None) -> dict:
+    """One scheduler tick: build the newest hourly cycle that is fully published and not built yet.
+
+    With no `cycle_time` it looks at the newest cycle old enough to be ready and BACKFILL_CYCLES earlier ones, newest
+    first, so a builder that falls behind skips old cycles instead of building them long after they were current. An
+    explicit `cycle_time` builds just that cycle.
+
+    The cycle the daily forecast also uses (CYCLE_HOUR, 12z) goes after that forecast: the original forecast (maps,
+    Discord/mobile notices, beta run) runs first and holds the forecast lock until its script exits. Every cycle, 12z
+    or not, also waits while that lock is held; nothing here runs alongside the forecast."""
+    root = Path(root or root_dir())
+    now = now or datetime.now(timezone.utc)
+    # The admin pause switch (controls.py) stops new builds from starting; one already running finishes. It does not
+    # apply to an explicit cycle or --force, which are manual.
+    if cycle_time is None and not force and controls.is_paused(root):
+        serving = _serving_cycle(root) or ""
+        if read_status(root).get("state") != "paused":
+            set_state(root, "paused", serving, detail="paused by an admin")
+        return {"action": "skip", "reason": "paused", "cycle": serving}
+    if read_status(root).get("state") == "paused":      # resumed: do not leave the status saying paused
+        set_state(root, "complete", _serving_cycle(root) or "", detail="resumed")
+    candidates = [cycle_time] if cycle_time is not None else fetch.cycle_candidates(now, BACKFILL_CYCLES)
+    # Why nothing could be built: a ready cycle held up by the forecast takes precedence over a newer cycle that is
+    # simply not published yet. Each is (reason, state, cycle, detail).
+    blocked: Optional[tuple] = None
+    unpublished: Optional[tuple] = None
+    built: Optional[str] = None
+    for candidate in candidates:
+        cycle = cycle_id(candidate)
+        existing = store.read_manifest(cycle, root)
+        if existing and not existing.get("missing_hours") and not force:
+            built = built or cycle
+            continue
+        reason = None
+        if not force and not ready(candidate, max(hours)):
+            reason = ("cycle not fully published", "waiting_for_hrrr",
+                      f"HRRR {candidate:%H}z run not fully published yet")
+        elif (candidate.hour == CYCLE_HOUR and not force and not forecast_done(candidate)
+              and now < candidate + FORECAST_GRACE):
+            reason = ("daily forecast not finished", "waiting_for_forecast", "daily forecast has not finished yet")
+        elif not lock_free():
+            reason = ("forecast running", "waiting_for_forecast", "daily forecast is running")
+        if reason:
+            entry = (*reason[:2], cycle, reason[2])
+            if reason[0] == "cycle not fully published":
+                unpublished = unpublished or entry
+                continue
+            blocked = blocked or entry
+            if reason[0] == "forecast running":
+                break   # the lock is global: no other cycle can run either
+            continue
+        root.mkdir(parents=True, exist_ok=True)
+        guard = open(root / ".build.lock", "a+")
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            guard.close()
+            return {"action": "skip", "reason": "another build is running", "cycle": cycle}
+        try:
+            return _build_locked(root, cycle, candidate, now, hours, build)
+        finally:
+            guard.close()
+    if blocked or unpublished:
+        reason, state, cycle, detail = blocked or unpublished
+        set_state(root, state, cycle, detail=detail)
+        return {"action": "skip", "reason": reason, "cycle": cycle}
+    return {"action": "skip", "reason": "already built", "cycle": built or cycle_id(candidates[0])}
 
 
 def _build_locked(root: Path, cycle: str, cycle_time: datetime, now: datetime, hours, build: Callable) -> dict:
@@ -413,7 +622,12 @@ def _build_locked(root: Path, cycle: str, cycle_time: datetime, now: datetime, h
         manifest = build(cycle_time, hours=hours, root=root, on_progress=on_progress, wait=wait)
     except Exception as exc:
         set_state(root, "failed", cycle, error=str(exc)[:300], finished_at=_now_iso())
+        controls.record_event({"cycle": cycle, "outcome": "failed", "error": str(exc)[:300]}, root)
         raise
+    # Before "complete", so a browser that follows the new serving_cycle finds the run on the CDN. Best effort:
+    # on failure the API still serves it and the viewer falls back to the API.
+    set_state(root, "publishing", cycle, label=manifest["label"], hours_total=len(hours), hours_done=len(hours))
+    publish.try_publish_cycle(cycle, root)
     removed = store.prune(now, root=root)
     if removed:
         from services.hrrr_hourly import render as renderer
@@ -423,5 +637,8 @@ def _build_locked(root: Path, cycle: str, cycle_time: datetime, now: datetime, h
               missing_hours=manifest["missing_hours"], runtime_sec=manifest.get("runtime_sec"),
               variables=len(manifest["variables"]), finished_at=_now_iso(),
               timings={k: v for k, v in manifest.get("timings", {}).items() if k != "per_hour"})
+    controls.record_event({"cycle": cycle, "outcome": "partial" if manifest["missing_hours"] else "complete",
+                           "runtime_sec": manifest.get("runtime_sec"), "hours": len(manifest["forecast_hours"]),
+                           "missing_hours": manifest["missing_hours"]}, root)
     return {"action": "built", "cycle": cycle, "hours": manifest["forecast_hours"],
             "missing_hours": manifest["missing_hours"]}

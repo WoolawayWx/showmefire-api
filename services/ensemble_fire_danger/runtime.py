@@ -1,8 +1,8 @@
 """
 Live runner for the Day-1 ensemble fire danger product (BETA).
 
-Called by scripts/run_ensemble_fire_danger.py (from scripts/forecasts.sh,
-right after DailyForecast, as a NON-blocking step). One run:
+Called by scripts/run_ensemble_fire_danger.py (from scripts/ensemble_12z.sh,
+cron 15:00Z, after DailyForecast, as a NON-blocking job). One run:
 
   1. resolve which cycle of every configured member / ensprod source to
      use for today's 12z-anchored peak window (members.resolve_plan);
@@ -21,9 +21,9 @@ right after DailyForecast, as a NON-blocking step). One run:
      manifest entry; upload the primary images to R2.
 
 Failure isolation: this module never touches any production array, file
-or status key other than its own. Its runner is wired into forecasts.sh
-with `|| echo WARNING`, so even an uncaught crash cannot block or alter
-the public forecast.
+or status key other than its own. Its runner is its own cron job
+(scripts/ensemble_12z.sh, which always exits 0), so even an uncaught crash
+cannot block or alter the public forecast.
 """
 from __future__ import annotations
 

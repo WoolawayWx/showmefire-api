@@ -46,11 +46,6 @@ class ParseTests(unittest.TestCase):
         rows = [row for row in synthetic_rows() if row["pres"] >= 700]
         self.assertIsNone(snd.parse_profile("KSGF", VALID, rows))
 
-    def test_special_launch_detection(self):
-        self.assertFalse(snd.is_special(datetime(2026, 10, 16, 0, tzinfo=timezone.utc)))
-        self.assertFalse(snd.is_special(VALID))
-        self.assertTrue(snd.is_special(datetime(2026, 10, 16, 18, tzinfo=timezone.utc)))
-
 
 class MetricTests(unittest.TestCase):
     def test_well_mixed_afternoon_profile(self):
@@ -70,7 +65,7 @@ class MetricTests(unittest.TestCase):
 
 
 class ListTests(unittest.TestCase):
-    def test_list_launches_returns_unique_times_including_specials(self):
+    def test_list_launches_returns_unique_times_at_any_hour(self):
         csv_text = ("station,validUTC,levelcode,pressure_mb\n"
                     "KOAX,2026-10-16 00:00:00,4,1000\nKOAX,2026-10-16 00:00:00,4,925\n"
                     "KOAX,2026-10-16 18:00:00,4,1000\n")
@@ -83,13 +78,10 @@ class ListTests(unittest.TestCase):
 
 
 class RetentionTests(unittest.TestCase):
-    def test_keeps_two_latest_plus_recent_specials(self):
+    def test_keeps_only_the_latest_launches_whatever_the_hour(self):
         times = [datetime(2026, 10, day, hour, tzinfo=timezone.utc) for day, hour in
                  [(1, 18), (14, 0), (15, 12), (15, 18), (16, 0), (16, 12)]]
-        now = datetime(2026, 10, 16, 14, tzinfo=timezone.utc)
-        kept = snd.kept_launches(times, now)
-        # Newest two, plus the 15th's 18Z special; the Oct 1 special is older than a week.
-        self.assertEqual(kept, [times[5], times[4], times[3]])
+        self.assertEqual(snd.kept_launches(times), [times[5], times[4]])
 
 
 class ManifestTests(unittest.TestCase):
@@ -102,7 +94,7 @@ class ManifestTests(unittest.TestCase):
                                   synthetic_rows(inversion=True))
 
         def record(sounding):
-            return {"station": "KSGF", "valid_time": sounding.valid.isoformat(), "special": snd.is_special(sounding.valid),
+            return {"station": "KSGF", "valid_time": sounding.valid.isoformat(),
                     "fire_weather": snd.fire_weather_metrics(sounding), "thermodynamics": {"pwat_in": 0.5},
                     "omega": {"source": "HRRR analysis", "pressure_hpa": [1000.0], "omega_pa_s": [0.1]}}
 
@@ -119,13 +111,19 @@ class ManifestTests(unittest.TestCase):
         entry = self.sm.manifest_entry("KSGF", self.record, self.previous)
         self.assertEqual(entry["image"], "sounding-sgf-20261016-1800z.png")
         self.assertEqual(entry["thumbnail"], "sounding-sgf-20261016-1800z-sm.webp")
-        self.assertTrue(entry["special"])
-        self.assertIn("(Special)", entry["label"])
+        self.assertNotIn("special", entry)
+        self.assertNotIn("Special", entry["label"])
         self.assertEqual(entry["omega_source"], "HRRR analysis")
+
+    def test_labels_use_the_local_day_not_the_utc_day(self):
+        # 00Z Tue Oct 20 is 7 PM CDT Mon Oct 19 locally.
+        valid = datetime(2026, 10, 20, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.sm._local_time(valid), "7 PM CT Mon Oct 19 (00Z)")
+        self.assertEqual(self.sm._short_time(valid), "7 PM CT Oct 19")
 
     def test_change_line_skips_zero_changes(self):
         line = self.sm._change_line(self.record, self.previous, self.sm.changes(self.record, self.previous))
-        self.assertIn("Change since 12Z Oct 16", line)
+        self.assertIn("Change since 7 AM CT Oct 16", line)
         self.assertNotIn("PW", line)
 
     def test_sounding_round_trips_through_archive_record(self):
@@ -170,9 +168,7 @@ class Cw3eTests(unittest.TestCase):
         self.assertAlmostEqual(float(np.hypot(sounding.u_ms[0], sounding.v_ms[0])), 6.0, places=3)
         self.assertGreater(sounding.v_ms[0], 0)
 
-    def test_university_flights_are_always_special_and_named_cou(self):
-        self.assertTrue(snd.launch_is_special("USCOU", VALID))     # even at 12Z
-        self.assertFalse(snd.launch_is_special("KSGF", VALID))
+    def test_site_slugs(self):
         self.assertEqual(snd.site_slug("USCOU"), "cou")
         self.assertEqual(snd.site_slug("KSGF"), "sgf")
 

@@ -278,6 +278,6 @@
   "_notes": {
     "latency_hours": "Typical hours after cycle time until the LAST lead the Day-1 window needs (f15 of the 12z) is published, measured from real Last-Modified headers on 2026-09-22 plus ~0.25h margin: HRRR 1.2h, NAM nest (NOMADS) 1.9h, RRFS 2.4h, HiResW ARW 2.4h / FV3 1.8h / ARW2 2.2h, REFS 2.6h, HREF 3.1h. Only used to EMULATE the live member mix during historical capture (members.resolve_plan emulate_live_at); live runs check the real .idx.",
     "archive_url": "NAM nest on AWS (noaa-nam-pds) is uploaded ~12h late (Last-Modified 00:40Z next day, confirmed 2026-09-22), so live runs read NOMADS (url) and historical capture reads AWS (archive_url).",
-    "live_run_offset_hours": "The ensemble step runs right after DailyForecast in scripts/forecasts.sh (cron 14:30Z) - about anchor+3h."
+    "live_run_offset_hours": "The ensemble step runs from scripts/ensemble_12z.sh (cron 15:00Z) - about anchor+3h, the same effective time it had when it ran after DailyForecast in scripts/forecasts.sh (then cron 14:30Z). The daily forecast now starts about 13:15Z, so the ensemble is a separate job."
   }
 }

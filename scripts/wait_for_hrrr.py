@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from services.hrrr_readiness import check_hrrr_ready, cycle_run_time
+from services.hrrr_readiness import check_hrrr_ready, cycle_run_time, not_before_utc
 
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
@@ -28,10 +28,25 @@ def main() -> int:
     timeout_seconds = _env_int("HRRR_READINESS_TIMEOUT_SECONDS", 7200)
     poll_seconds = _env_int("HRRR_READINESS_POLL_SECONDS", 300)
     forecast_hours = range(start_hour, end_hour + 1)
+    # Optional earliest start, as a local (Central) HH:MM. The 12z forecast sets 07:30 so it never starts before its
+    # morning fuel-moisture observations are in.
+    not_before_local = os.getenv("FORECAST_NOT_BEFORE_LOCAL") or None
     started = time.monotonic()
 
     while True:
-        run_time = cycle_run_time(datetime.now(timezone.utc), cycle_hour)
+        now = datetime.now(timezone.utc)
+        floor = not_before_utc(now, not_before_local)
+        if floor is not None and now < floor:
+            if time.monotonic() - started >= timeout_seconds:
+                logger.error("Still before the %s local start floor after %d seconds; forecast was not started.",
+                             not_before_local, timeout_seconds)
+                return 1
+            wait = max(1, int((floor - now).total_seconds()))
+            logger.info("Not starting before %s local (%s UTC); waiting %d s.", not_before_local,
+                        floor.strftime("%H:%M"), wait)
+            time.sleep(min(poll_seconds, wait))
+            continue
+        run_time = cycle_run_time(now, cycle_hour)
         result = check_hrrr_ready(run_time, forecast_hours)
         if result.ready:
             logger.info(

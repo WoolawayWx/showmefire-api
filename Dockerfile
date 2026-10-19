@@ -133,10 +133,26 @@ ENV DATA_DIR=/app/data
 RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
 VOLUME ["/app/data"]
 
+# The 12z forecast. It starts polling at 13:00Z and runs once its HRRR f04-f15 files are on AWS (about 13:10Z; see
+# the wait at the top of scripts/forecasts.sh), no earlier than 07:30 Central. This used to be a fixed 30 14.
 RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
-    && echo "30 14 * * * root /bin/bash /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
+    && echo "00 13 * * * root /bin/bash /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
     && echo "" >> /etc/cron.d/forecasts \
     && chmod 0644 /etc/cron.d/forecasts
+
+# Process each hour of the 12z HRRR run as it is published (f00 is out about 12:51Z, f18 about 13:14Z), at the lowest
+# priority, so the hourly product's later build only has to write the store. See job.prefetch_cycle. The script
+# lowers its own priority and waits per hour, so a late run just starts later.
+RUN echo "TZ=UTC" > /etc/cron.d/hrrrprefetch \
+    && echo "45 12 * * * root cd /app && /opt/venv/bin/python /app/scripts/hrrr_hourly_forecast.py --prefetch >> /app/logs/cron_hrrr_prefetch.log 2>&1" >> /etc/cron.d/hrrrprefetch \
+    && echo "" >> /etc/cron.d/hrrrprefetch \
+    && chmod 0644 /etc/cron.d/hrrrprefetch
+
+# The ensemble fire danger (beta) step, split out of forecasts.sh: it needs REFS (~14:36Z) and HREF (~15:06Z).
+RUN echo "TZ=UTC" > /etc/cron.d/ensemble12z \
+    && echo "00 15 * * * root /bin/bash /app/scripts/ensemble_12z.sh >> /app/logs/cron_ensemble12z.log 2>&1" >> /etc/cron.d/ensemble12z \
+    && echo "" >> /etc/cron.d/ensemble12z \
+    && chmod 0644 /etc/cron.d/ensemble12z
 
 # Begin checking the 09z HRRR f05-f18 window just after 12z. The job itself
 # waits for every required frame and field before forecast generation.

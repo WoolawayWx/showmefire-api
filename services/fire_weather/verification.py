@@ -84,7 +84,7 @@ def verify_new(stations: dict[str, tuple], now: Optional[datetime] = None, days:
             if now - valid > timedelta(hours=6):
                 done.add(path.stem)  # the HRRR hour was never archived (or the site is off the grid)
             continue
-        pair = {"station": record["station"], "valid_time": record["valid_time"], "special": record.get("special")}
+        pair = {"station": record["station"], "valid_time": record["valid_time"]}
         for name, balloon_key, grid_key, _units in METRICS:
             balloon = record["fire_weather"].get(balloon_key)
             model = grid.get(grid_key)

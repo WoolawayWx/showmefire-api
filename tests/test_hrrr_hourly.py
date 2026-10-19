@@ -12,6 +12,7 @@ from core.rate_limit import RateLimiter
 from core.security import require_admin
 from routers import hrrr_hourly as router_module
 from routers import hrrr_hourly_admin as admin_module
+from services import cdn_datasets
 from services.hrrr_hourly import BY_NAME, ELEMENTS, derive, fetch, job, render, store
 
 CYCLE = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
@@ -36,6 +37,10 @@ def fields(offset=0.0):
 def root(tmp_path, monkeypatch):
     monkeypatch.setenv("SMF_HRRR_HOURLY_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SMF_HRRR_HOURLY_IMAGES", str(tmp_path / "images"))
+    # A build publishes to the CDN when R2 credentials are in the environment; a test must never do that.
+    # Tests that exercise publishing pass their own client.
+    monkeypatch.setattr(cdn_datasets, "configured", lambda: False)
+    monkeypatch.setattr(cdn_datasets, "make_client", lambda: pytest.fail("a test tried to reach R2"))
     return tmp_path / "data"
 
 
@@ -175,6 +180,57 @@ def test_run_auto_skips_when_built_unpublished_or_forecast_running(root):
     assert seen[0]["started_at"]
 
 
+def test_run_is_published_to_the_cdn_before_it_is_marked_complete(root, monkeypatch):
+    published = []
+
+    def fake_publish(cycle, root_dir=None, client=None):
+        published.append((cycle, job.read_status(root)["state"]))
+
+    monkeypatch.setattr(job.publish, "try_publish_cycle", fake_publish)
+    kwargs = dict(now=CYCLE + timedelta(hours=3), root=root, cycle_time=CYCLE, hours=(0, 1, 2), ready=lambda c, h: True,
+                  lock_free=lambda: True, forecast_done=lambda c: True,
+                  build=lambda cycle_time, hours, root, on_progress=None, wait=None: write(root, hours=hours, expected=hours))
+    assert job.run_auto(**kwargs)["action"] == "built"
+    assert published == [(CYCLE_ID, "publishing")]       # published while still "updating", before "complete"
+    assert job.read_status(root)["state"] == "complete"
+
+
+def test_hrrr_cycle_publish_sends_only_the_zarr_and_manifest(root):
+    from services.hrrr_hourly import publish as hrrr_publish
+
+    class Recorder:
+        def __init__(self):
+            self.keys = []
+
+        def upload_file(self, filename, bucket, key, ExtraArgs=None):
+            self.keys.append(key)
+
+        def put_object(self, Bucket, Key, Body, **kwargs):
+            self.keys.append(Key)
+
+        def get_object(self, Bucket, Key):
+            error = Exception("missing")
+            error.response = {"Error": {"Code": "NoSuchKey"}}
+            raise error
+
+        def get_paginator(self, name):
+            raise AssertionError("nothing should be pruned")
+
+    write(root, hours=(0, 1))
+    assert store.nc_path(CYCLE_ID, root).is_file()               # the NetCDF copy exists locally, but stays off the CDN
+    zarr_dir = root / CYCLE_ID / "forecast.zarr"                 # a stand-in when the zarr library is not installed
+    (zarr_dir / "mixing_height_ft").mkdir(parents=True, exist_ok=True)
+    (zarr_dir / ".zmetadata").write_text("{}")
+    (zarr_dir / "mixing_height_ft" / "0.0.0").write_bytes(b"chunk")
+    recorder = Recorder()
+    assert hrrr_publish.try_publish_cycle(CYCLE_ID, root, client=recorder) is not None
+    keys = recorder.keys
+    assert f"datasets/hrrr-hourly/runs/{CYCLE_ID}/manifest.json" in keys
+    assert "datasets/hrrr-hourly/latest.json" in keys and "datasets/index.json" in keys
+    assert any(k.startswith(f"datasets/hrrr-hourly/runs/{CYCLE_ID}/forecast.zarr/") for k in keys)
+    assert not any(k.endswith(".nc") or "/nc/" in k for k in keys)
+
+
 def test_hourly_waits_for_the_daily_forecast_then_proceeds(root):
     built = []
 
@@ -184,7 +240,7 @@ def test_hourly_waits_for_the_daily_forecast_then_proceeds(root):
 
     base = dict(root=root, cycle_time=CYCLE, hours=(0, 1, 2), ready=lambda c, h: True, lock_free=lambda: True,
                 build=build)
-    # Forecast not done yet (e.g. a tick just before 14:30 UTC): wait, even though HRRR is published.
+    # Forecast not done yet (e.g. a tick shortly after the forecast started at about 13:15 UTC): wait, even though HRRR is published.
     early = job.run_auto(now=CYCLE + timedelta(hours=2), forecast_done=lambda c: False, **base)
     assert early["reason"] == "daily forecast not finished" and not built
     state = job.read_status(root)
@@ -631,3 +687,297 @@ def test_build_cycle_skips_prefetching_cached_hours_and_custom_fetchers(root, mo
     manifest = job.build_cycle(CYCLE, hours=(0, 1), fetch_hour=fetch.fetch_hour, derive_hour=lambda p, e: fields(),
                                root=root)
     assert calls == [1] and manifest["timings"]["hours_cached"] == 1
+
+
+# --- early per-hour prefetch --------------------------------------------------------------------
+
+def prefetch_profiles(offset=0.0):
+    lat, lon = grid()
+    return SimpleNamespace(lat=lat, lon=lon, central_longitude=-97.5, standard_parallel=38.5,
+                           t2_c=np.full((NY, NX), 20.0 + offset), u10=np.full((NY, NX), 3.0), v10=np.full((NY, NX), -4.0))
+
+
+def prefetch_extras():
+    return {"rh2": np.full((NY, NX), 45.0), "gust": np.full((NY, NX), 9.0)}
+
+
+class FakeClock:
+    """sleep() advances the clock, so a poll loop with a timeout runs in no real time."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self):
+        return self.now
+
+
+def prefetch(root, ready, fetch_hour=None, hours=(0, 1, 2), **kwargs):
+    clock = FakeClock()
+    fetched = []
+
+    def default_fetch(cycle_time, lead):
+        fetched.append(lead)
+        return prefetch_profiles(lead), prefetch_extras()
+
+    result = job.prefetch_cycle(CYCLE, hours=hours, root=root, fetch_hour=fetch_hour or default_fetch,
+                                derive_hour=lambda profiles, extras: fields(), hour_ready=ready,
+                                wait=lambda r: None, sleep=clock.sleep, clock=clock.monotonic,
+                                poll_seconds=60, timeout_seconds=kwargs.pop("timeout_seconds", 3600), **kwargs)
+    return result, clock, fetched
+
+
+def test_prefetch_waits_for_an_unpublished_hour_then_saves_every_work_file(root):
+    polls = {1: 0}
+
+    def ready(cycle_time, lead):
+        if lead == 1:       # f01 appears on the third check
+            polls[1] += 1
+            return polls[1] >= 3
+        return True
+
+    result, clock, fetched = prefetch(root, ready)
+    assert result["hours_done"] == [0, 1, 2] and result["hours_pending"] == [] and result["reason"] == "complete"
+    assert fetched == [0, 1, 2] and clock.sleeps == [60, 60]
+    for lead in (0, 1, 2):
+        assert (root / ".work" / CYCLE_ID / f"f{lead:02d}.npz").is_file()
+
+
+def test_work_file_keeps_raw_fields_but_the_loader_drops_them(root):
+    prefetch(root, lambda c, h: True, hours=(0,))
+    path = root / ".work" / CYCLE_ID / "f00.npz"
+    with np.load(path) as data:
+        assert {"raw_t2m_k", "raw_u10", "raw_v10", "raw_rh2", "raw_gust"} <= set(data.files)
+        assert data["raw_t2m_k"][0, 0] == pytest.approx(293.15, abs=1e-4)      # 20 C back to Kelvin
+        assert "grid_central_longitude" in data.files
+    derived, lat, lon, meta = job._load_work_file(path)
+    assert set(derived) == {element.name for element in ELEMENTS}               # nothing raw_/grid_ leaks through
+    assert meta["central_longitude"] == -97.5 and meta["ny"] == NY and meta["nx"] == NX
+
+
+def test_prefetch_times_out_on_an_hour_that_never_appears(root):
+    result, clock, fetched = prefetch(root, lambda c, lead: lead == 0, timeout_seconds=150)
+    assert result["hours_done"] == [0] and result["hours_pending"] == [1, 2]
+    assert result["reason"] == "timed out waiting for HRRR" and fetched == [0]
+    assert clock.now == 180                                                      # polled until past the 150 s limit
+
+
+def test_prefetch_skips_finished_hours_and_leaves_a_failed_one_for_the_build(root):
+    work = root / ".work" / CYCLE_ID
+    work.mkdir(parents=True)
+    job._save_work_file(work / "f00.npz", *grid(), fields())                     # an earlier run already did f00
+
+    def fetch_hour(cycle_time, lead):
+        if lead == 1:
+            raise RuntimeError("download failed")
+        return prefetch_profiles(), prefetch_extras()
+
+    result, _clock, _fetched = prefetch(root, lambda c, h: True, fetch_hour=fetch_hour)
+    assert result["hours_done"] == [0, 2] and result["hours_failed"] == [1]
+    assert result["reason"] == "some hours failed"
+    assert not (work / "f01.npz").exists()
+
+
+def test_prefetch_does_nothing_for_a_cycle_that_is_already_built(root):
+    write(root, hours=tuple(range(0, 19)))
+    result, _clock, fetched = prefetch(root, lambda c, h: True)
+    assert result == {"action": "skip", "reason": "already built", "cycle": CYCLE_ID} and fetched == []
+
+
+def test_build_reuses_prefetched_hours_and_still_writes_full_grid_metadata(root):
+    prefetch(root, lambda c, h: True, hours=(0, 1, 2))
+
+    def never(cycle_time, lead, **kwargs):
+        raise AssertionError("every hour was prefetched; nothing should be fetched again")
+
+    manifest = job.build_cycle(CYCLE, hours=(0, 1, 2), render=False, fetch_hour=never,
+                               derive_hour=lambda p, e: fields(), root=root)
+    assert manifest["forecast_hours"] == [0, 1, 2] and manifest["failed_hours"] == []
+    assert manifest["timings"]["hours_cached"] == 3
+    assert manifest["grid"]["central_longitude"] == -97.5 and manifest["grid"]["projection"] == "lambert_conformal_conic"
+    assert not any(name.startswith(("raw_", "grid_")) for name in manifest["variables"])
+    assert not (root / ".work" / CYCLE_ID).exists()
+
+
+def test_prefetch_does_not_wait_for_the_daily_forecast_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "forecast_lock_free", lambda path: "forecast" not in str(path))   # forecast "running"
+    forecast, maps = tmp_path / "forecast.lock", tmp_path / "maps.lock"
+
+    def no_sleep(_seconds):
+        raise AssertionError("must not wait for the forecast")
+
+    job.wait_for_priority_work(tmp_path, sleep=no_sleep, forecast_lock=forecast, maps_lock=maps,
+                               memory_mb=lambda: 9000, include_forecast=False)
+    waits = []
+    ticks = iter(range(0, 100000, 1000))                                        # the default does wait, then gives up
+    job.wait_for_priority_work(tmp_path, on_wait=waits.append, sleep=lambda s: None, clock=lambda: next(ticks),
+                               forecast_lock=forecast, maps_lock=maps, memory_mb=lambda: 9000)
+    assert waits and set(waits) == {"daily forecast"}
+
+
+def test_prefetch_calls_the_hook_after_each_hour_in_the_order_given_and_survives_it_failing(root):
+    calls = []
+
+    def hook(lead, done):
+        calls.append((lead, done))
+        raise RuntimeError("the callback blew up")          # must not stop the prefetch
+
+    result, _clock, fetched = prefetch(root, lambda c, h: True, hours=(4, 5, 0), on_hour_done=hook)
+    assert fetched == [4, 5, 0]                              # the order the caller listed them in
+    assert calls == [(4, [4]), (5, [4, 5]), (0, [4, 5, 0])]
+    assert result["hours_done"] == [4, 5, 0] and result["reason"] == "complete"
+
+
+def test_prefetch_calls_the_hook_for_hours_that_were_already_saved(root):
+    work = root / ".work" / CYCLE_ID
+    work.mkdir(parents=True)
+    job._save_work_file(work / "f00.npz", *grid(), fields())
+    calls = []
+    prefetch(root, lambda c, h: True, hours=(0, 1), on_hour_done=lambda lead, done: calls.append(lead))
+    assert calls == [0, 1]                                   # a re-run can still trigger what depends on the hours
+
+
+# --- every hourly cycle ---------------------------------------------------------------------------------------------
+
+def at(hour, day=16):
+    return datetime(2026, 10, day, hour, tzinfo=timezone.utc)
+
+
+def test_candidates_are_the_newest_cycle_old_enough_to_be_ready_then_earlier_ones():
+    # f18 is published about 1h14m after the cycle, so a cycle is only worth checking after 1h05m.
+    assert fetch.cycle_candidates(datetime(2026, 10, 16, 13, 30, tzinfo=timezone.utc), lookback=2) == [at(12), at(11), at(10)]
+    assert fetch.cycle_candidates(datetime(2026, 10, 16, 13, 4, tzinfo=timezone.utc), lookback=1) == [at(11), at(10)]
+    assert fetch.cycle_candidates(datetime(2026, 10, 16, 13, 5, tzinfo=timezone.utc), lookback=0) == [at(12)]
+    assert fetch.cycle_candidates(datetime(2026, 10, 16, 0, 30, tzinfo=timezone.utc), lookback=1) == [at(23, 15), at(22, 15)]
+
+
+def auto_run(root, now, ready, forecast_done=lambda c: True, lock_free=lambda: True, hours=(0, 1, 2)):
+    """One scheduler tick with every external piece stubbed; returns (result, cycles that were built)."""
+    built = []
+
+    def build(cycle_time, hours, root, on_progress=None, wait=None):
+        built.append(cycle_time)
+        return write(root, cycle=cycle_time, hours=hours, expected=hours)
+
+    result = job.run_auto(now=now, root=root, hours=hours, ready=lambda cycle, last: cycle in ready,
+                          forecast_done=forecast_done, lock_free=lock_free, build=build)
+    return result, built
+
+
+def test_a_tick_builds_the_newest_ready_cycle_then_backfills_older_ones(root):
+    now = datetime(2026, 10, 16, 14, 30, tzinfo=timezone.utc)         # candidates: 13z, 12z, 11z, 10z; 13z is not out yet
+    result, built = auto_run(root, now, ready={at(12), at(11), at(10)})
+    assert built == [at(12)] and result["action"] == "built" and result["cycle"] == "20261016_12z"
+    result, built = auto_run(root, now, ready={at(12), at(11), at(10)})
+    assert built == [at(11)]                                             # 12z is done, so the next newest
+    result, built = auto_run(root, now, ready={at(12), at(11), at(10)})
+    assert built == [at(10)]
+    result, built = auto_run(root, now, ready={at(12), at(11), at(10)})
+    assert built == [] and result["reason"] == "cycle not fully published" and result["cycle"] == "20261016_13z"
+    assert job.read_status(root)["state"] == "waiting_for_hrrr"
+
+
+def test_a_cycle_that_is_not_published_yet_is_skipped_for_an_older_one(root):
+    now = datetime(2026, 10, 16, 14, 30, tzinfo=timezone.utc)
+    result, built = auto_run(root, now, ready={at(11)})               # 12z is not out yet
+    assert built == [at(11)]
+
+
+def test_only_the_12z_cycle_waits_for_the_daily_forecast(root):
+    now = datetime(2026, 10, 16, 15, 30, tzinfo=timezone.utc)         # candidates: 14z, 13z, 12z, 11z
+    ready = {at(14), at(13), at(12), at(11)}
+    result, built = auto_run(root, now, ready, forecast_done=lambda c: False)
+    assert built == [at(14)]                                             # not the 12z: the forecast has not reported
+    result, built = auto_run(root, now, ready, forecast_done=lambda c: False)
+    assert built == [at(13)]
+    result, built = auto_run(root, now, ready, forecast_done=lambda c: False)
+    assert built == [at(11)] and at(12) not in built                   # 12z skipped until the forecast is done
+    result, built = auto_run(root, now, ready, forecast_done=lambda c: True)
+    assert built == [at(12)]
+
+
+def test_the_12z_cycle_builds_after_the_forecast_grace_even_if_it_never_reports(root):
+    now = datetime(2026, 10, 16, 16, 30, tzinfo=timezone.utc)         # 12z + 4h30m: past FORECAST_GRACE, 12z still a candidate
+    assert fetch.cycle_candidates(now, lookback=3)[-1] == at(12)
+    result, built = auto_run(root, now, ready={at(12)}, forecast_done=lambda c: False)
+    assert built == [at(12)]
+
+
+def test_no_cycle_builds_while_the_forecast_holds_its_lock(root):
+    now = datetime(2026, 10, 16, 14, 30, tzinfo=timezone.utc)
+    result, built = auto_run(root, now, ready={at(12), at(11)}, lock_free=lambda: False)
+    assert built == [] and result["reason"] == "forecast running"
+    assert job.read_status(root)["state"] == "waiting_for_forecast"
+
+
+def test_when_everything_is_built_a_tick_does_nothing_and_leaves_the_status_alone(root):
+    now = datetime(2026, 10, 16, 14, 30, tzinfo=timezone.utc)
+    ready = {at(13), at(12), at(11), at(10)}                           # all four candidates
+    for _ in range(4):
+        auto_run(root, now, ready)
+    before = job.read_status(root)
+    result, built = auto_run(root, now, ready)
+    assert built == [] and result == {"action": "skip", "reason": "already built", "cycle": "20261016_13z"}
+    assert job.read_status(root) == before
+
+
+def test_latest_pointer_never_goes_back_to_an_older_run(root):
+    write(root, cycle=at(12))
+    write(root, cycle=at(11))                                            # a late older cycle finishing afterwards
+    assert json.loads((root / "latest.json").read_text())["cycle"] == "20261016_12z"
+    write(root, cycle=at(13))
+    assert json.loads((root / "latest.json").read_text())["cycle"] == "20261016_13z"
+    write(root, cycle=at(13))                                            # rebuilding the same cycle keeps it current
+    assert json.loads((root / "latest.json").read_text())["cycle"] == "20261016_13z"
+
+
+def test_dataset_and_label_name_the_cycles_own_hour(root):
+    import xarray as xr
+    manifest = write(root, cycle=at(14))
+    assert manifest["label"] == "Forecast from the 14z HRRR run" and manifest["cycle"] == "20261016_14z"
+    with xr.open_dataset(store.nc_path("20261016_14z", root)) as ds:
+        assert ds.attrs["title"].endswith("14z run") and ds.attrs["cycle"] == "14z"
+
+
+def test_prune_removes_abandoned_work_folders_but_not_recent_ones(root):
+    old, recent = root / ".work" / "20261010_12z", root / ".work" / "20261016_11z"
+    old.mkdir(parents=True), recent.mkdir(parents=True)
+    store.prune(now=datetime(2026, 10, 16, 15, tzinfo=timezone.utc), root=root)
+    assert not old.exists() and recent.exists()
+
+
+def test_default_local_retention_is_seven_days():
+    from services.hrrr_hourly import keep_days
+    assert keep_days() == 7
+
+
+def test_cycle_hours_switch_backs_down_to_fewer_runs(monkeypatch):
+    from services.hrrr_hourly import enabled_cycle_hours
+    monkeypatch.delenv("SMF_HRRR_HOURLY_CYCLE_HOURS", raising=False)
+    assert enabled_cycle_hours() == tuple(range(24))
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "0, 6,12 ,18")
+    assert enabled_cycle_hours() == (0, 6, 12, 18)
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "12,99,x,-1")          # junk is ignored
+    assert enabled_cycle_hours() == (12,)
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "nonsense")             # nothing usable: all 24, not none
+    assert enabled_cycle_hours() == tuple(range(24))
+
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "0,6,12,18")
+    now = datetime(2026, 10, 16, 14, 30, tzinfo=timezone.utc)                # newest ready cycle would be 13z
+    assert fetch.cycle_candidates(now, lookback=2) == [at(12), at(6), at(0)]
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "12")
+    assert fetch.cycle_candidates(now, lookback=1) == [at(12), at(12, 15)]    # today's 12z, then yesterday's
+
+
+def test_only_enabled_cycles_are_built(root, monkeypatch):
+    monkeypatch.setenv("SMF_HRRR_HOURLY_CYCLE_HOURS", "12")
+    now = datetime(2026, 10, 16, 16, 0, tzinfo=timezone.utc)
+    everything = {at(h) for h in range(0, 16)} | {at(h, 15) for h in range(0, 24)}
+    result, built = auto_run(root, now, ready=everything)
+    assert built == [at(12)]                                                  # not 14z, even though it is published
+    result, built = auto_run(root, now, ready=everything)
+    assert built == [at(12, 15)]                                              # backfill is the previous enabled cycle

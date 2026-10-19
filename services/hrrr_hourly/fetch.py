@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import numpy as np
 import requests
@@ -39,6 +39,33 @@ def cycle_ready(run: datetime, last_hour: int, head: Callable[[str], int] | None
     """True when both the prs and sfc files for the last forecast hour are published."""
     head = head or (lambda url: requests.head(url, headers=hp.HEADERS, timeout=20).status_code)
     return all(head(_idx_url(run, product, last_hour)) == 200 for product in ("prs", "sfc"))
+
+
+# HRRR's last forecast hour we use (f18) is published about 1h14m after the cycle (measured on AWS); a cycle is not worth
+# checking before this.
+EARLIEST_READY = timedelta(hours=1, minutes=5)
+
+
+def cycle_candidates(now: Optional[datetime] = None, lookback: int = 3,
+                     hours: Optional[Iterable[int]] = None) -> list[datetime]:
+    """Cycles that could be fully published by `now`, newest first.
+
+    The newest enabled cycle that is old enough to be ready, then `lookback` earlier enabled ones: if the builder falls
+    behind, older cycles are skipped rather than built long after they stopped being current. `hours` (UTC) restricts
+    which cycles count; by default every hour, or SMF_HRRR_HOURLY_CYCLE_HOURS (see enabled_cycle_hours)."""
+    from services.hrrr_hourly import enabled_cycle_hours
+
+    allowed = set(hours) if hours is not None else set(enabled_cycle_hours())
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cycle = (now - EARLIEST_READY).replace(minute=0, second=0, microsecond=0)
+    found: list[datetime] = []
+    for _ in range(24 * 3):                       # never look back more than three days
+        if cycle.hour in allowed:
+            found.append(cycle)
+            if len(found) > lookback:
+                break
+        cycle -= timedelta(hours=1)
+    return found
 
 
 def latest_cycle(now: Optional[datetime] = None, cycle_hour: int = 12) -> datetime:

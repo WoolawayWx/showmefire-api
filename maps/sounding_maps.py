@@ -1,9 +1,9 @@
-"""Skew-T plots of balloon soundings in and around Missouri (routine 00Z/12Z
-and special launches), annotated with the same fire-weather metrics as the
-hourly HRRR maps, the change since the previous launch, and HRRR omega.
+"""Skew-T plots of balloon soundings in and around Missouri, annotated with the
+same fire-weather metrics as the hourly HRRR maps, the change since the
+previous launch, and HRRR omega.
 
-For each site the two most recent launches and any special launch from the
-last week are kept, each as its own image (sounding-<site>-YYYYMMDD-HHMMz.png),
+For each site the most recent launches (snd.KEEP_LATEST) are kept, each as its
+own image (sounding-<site>-YYYYMMDD-HHMMz.png),
 with sounding-<site>.png always the newest. images/soundings.json lists what is
 available per site (newest first, with metrics and changes) for the website.
 
@@ -82,8 +82,21 @@ def latest_name(station: str) -> str:
     return f"sounding-{snd.site_slug(station)}.png"
 
 
+def _local_time(valid: datetime) -> str:
+    """Launch time in Central, local first: "7 PM CT Mon Oct 19 (00Z)". The day shown is the local
+    day, so tonight's 00Z launch reads Monday, not the UTC date (Tuesday)."""
+    local = valid.astimezone(spx.CENTRAL)
+    return f"{_clock(local)} CT {local:%a %b} {local.day} ({valid:%HZ})"
+
+
 def _short_time(valid: datetime) -> str:
-    return f"{valid:%HZ %b %-d}"
+    local = valid.astimezone(spx.CENTRAL)
+    return f"{_clock(local)} CT {local:%b} {local.day}"
+
+
+def _clock(local: datetime) -> str:
+    """12-hour clock without a leading zero ("7 PM"); %-I is not portable to Windows."""
+    return f"{local.hour % 12 or 12} {local:%p}"
 
 
 # --- archive ----------------------------------------------------------------------
@@ -91,7 +104,7 @@ def _short_time(valid: datetime) -> str:
 def archive(sounding: snd.Sounding, fw: dict, thermo: dict) -> None:
     s = sounding
     atomic_write_json(_record_path(s.station, s.valid), {
-        "station": s.station, "valid_time": s.valid.isoformat(), "special": snd.launch_is_special(s.station, s.valid),
+        "station": s.station, "valid_time": s.valid.isoformat(),
         "fire_weather": fw, "thermodynamics": thermo,
         "profile": {key: [None if not np.isfinite(v) else round(float(v), 2) for v in values]
                     for key, values in (("pressure_hpa", s.pressure_hpa), ("height_m", s.height_m),
@@ -133,7 +146,7 @@ def archive_new_launches(station: str, ledger: dict, now: datetime) -> int:
         archive(sounding, snd.fire_weather_metrics(sounding), snd.thermodynamic_metrics(sounding))
         done.add(_key(valid))
         added += 1
-        print(f"{station} {valid:%Y-%m-%d %H%MZ}{' (special)' if snd.launch_is_special(station, valid) else ''} archived "
+        print(f"{station} {valid:%Y-%m-%d %H%MZ} archived "
               f"({time.time() - started:.1f}s)")
     ledger[station] = sorted(key for key in done if key >= _key(now - timedelta(days=ARCHIVE_SCAN_DAYS)))
     return added
@@ -286,15 +299,14 @@ def render(record: dict, previous: Optional[dict], out: Path) -> None:
         _omega_panel(fig, skew.ax, record["omega"])
 
     local = s.valid.astimezone(spx.CENTRAL)
-    kind = "Special Sounding" if record["special"] else "Sounding"
     sp.add_branding(
-        fig, skew.ax, title=f"{name} {kind}",
-        subtitle=f"{snd.site_slug(s.station).upper()}  {s.valid:%HZ %a %b %-d, %Y}  ({local:%-I:%M %p} CT)",
+        fig, skew.ax, title=f"{name} Sounding",
+        subtitle=f"{snd.site_slug(s.station).upper()}  {_clock(local)} CT {local:%a %b} {local.day}, {local:%Y}  ({s.valid:%HZ})",
         description=_description(fw, thermo, _change_line(record, previous, changes(record, previous)),
                                  source_text(s.station)),
     )
     status = {"product": f"sounding_{snd.site_slug(s.station)}", "status": "updated", "valid_time": record["valid_time"],
-              "special": record["special"], "last_update": spx.valid_time_label(), **fw, **thermo}
+              "last_update": spx.valid_time_label(), **fw, **thermo}
     sp.save_and_record_status(fig, out, spx.STATUS_DIR / f"sounding_{snd.site_slug(s.station)}.json", status)
 
 
@@ -326,8 +338,8 @@ def add_omega(plans: dict[str, list[datetime]], records: dict[str, dict[datetime
         print(f"HRRR omega for {valid:%Y-%m-%d %HZ} ({len(found)}/{len(stations)} sites, {time.time() - started:.1f}s)")
 
 
-def site_plan(station: str, records: dict[datetime, dict], now: datetime) -> list[datetime]:
-    return snd.kept_launches(list(records), now, station)
+def site_plan(records: dict[datetime, dict]) -> list[datetime]:
+    return snd.kept_launches(list(records))
 
 
 def prune_images(station: str, keep: set[str]) -> None:
@@ -356,8 +368,7 @@ def manifest_entry(station: str, record: dict, previous: Optional[dict]) -> dict
     image = image_name(station, valid)
     return {
         "valid_time": valid.strftime("%Y-%m-%dT%H:%MZ"),
-        "label": f"{valid:%HZ %a %b %-d}" + (" (Special)" if record["special"] else ""),
-        "special": record["special"],
+        "label": _local_time(valid),
         "image": image,
         "thumbnail": thumbnail_name(image),
         "fire_weather": record["fire_weather"],
@@ -370,7 +381,7 @@ def manifest_entry(station: str, record: dict, previous: Optional[dict]) -> dict
 def build_manifest(entries: dict[str, list[dict]]) -> dict:
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
-        "retention": {"latest_launches": snd.KEEP_LATEST, "special_days": snd.KEEP_SPECIAL_DAYS},
+        "retention": {"latest_launches": snd.KEEP_LATEST},
         "stations": {
             station: {
                 "name": snd.STATIONS[station][0], "latitude": snd.STATIONS[station][1],
@@ -418,7 +429,7 @@ def main() -> None:
     atomic_write_json(LEDGER_PATH, ledger)
 
     records = {station: load_records(station, now) for station in snd.STATIONS}
-    plans = {station: site_plan(station, records[station], now) for station in snd.STATIONS}
+    plans = {station: site_plan(records[station]) for station in snd.STATIONS}
     missing = {station: [v for v in valids if not (spx.IMAGES_DIR / image_name(station, v)).is_file()]
                for station, valids in plans.items()}
     add_omega(missing, records, now)

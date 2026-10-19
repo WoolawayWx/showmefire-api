@@ -98,6 +98,10 @@ fi
 # Ensure project-root imports like core.* and maps.* resolve in script mode.
 export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
 
+# Pull fresh station observations before plotting, instead of whatever the API's 5-minute poll last
+# fetched. Best effort: a failure here must never stop the cycle (the script always exits 0).
+"$PYTHON" "$PROJECT_DIR/scripts/refresh_stations.py" || true
+
 failed_scripts=()
 skipped_scripts=0
 

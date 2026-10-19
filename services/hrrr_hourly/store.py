@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from services.hrrr_hourly import (BY_NAME, CYCLE_HOUR, ELEMENTS, PRODUCT, SCHEMA_VERSION, cycle_id, root_dir)
+from services.hrrr_hourly import (BY_NAME, ELEMENTS, PRODUCT, SCHEMA_VERSION, cycle_id, root_dir)
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def build_dataset(cycle_time: datetime, hours: dict[int, dict[str, np.ndarray]],
         coords={"lead_hour": ("lead_hour", np.array(leads, dtype="int16"), {"long_name": "forecast hour"}),
                 "valid_time": ("lead_hour", valid), "latitude": (("y", "x"), lat.astype("float32")),
                 "longitude": (("y", "x"), lon.astype("float32"))},
-        attrs={"title": f"HRRR hourly fire-weather forecast, {CYCLE_HOUR:02d}z run", "model": "HRRR",
+        attrs={"title": f"HRRR hourly fire-weather forecast, {cycle_time:%H}z run", "model": "HRRR",
                "cycle": f"{cycle_time:%H}z", "cycle_time_utc": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                "issued_at_utc": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
                "note": f"Forecast issued from the {cycle_time:%H}z HRRR run; valid_time = cycle time + lead_hour",
@@ -183,10 +183,21 @@ def write_cycle(cycle_time: datetime, hours: dict[int, dict[str, np.ndarray]], l
         os.replace(final, retired)
     os.replace(staging, final)
     shutil.rmtree(retired, ignore_errors=True)
-    _atomic_json(root / "latest.json", {"cycle": cycle, "cycle_time_utc": manifest["cycle_time_utc"],
-                                        "issued_at_utc": manifest["issued_at_utc"]})
+    # Cycles are built newest first but not always in order (a late older one can finish after a newer one), and
+    # the pointer must never go back to an older run than the one being served.
+    current = _latest_cycle_id(root)
+    if current is None or cycle >= current:
+        _atomic_json(root / "latest.json", {"cycle": cycle, "cycle_time_utc": manifest["cycle_time_utc"],
+                                            "issued_at_utc": manifest["issued_at_utc"]})
     manifest["write_timings"] = timings  # returned for the build's timings report; not part of manifest.json
     return manifest
+
+
+def _latest_cycle_id(root: Path) -> Optional[str]:
+    try:
+        return json.loads((root / "latest.json").read_text())["cycle"]
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def list_cycles(root: Optional[Path] = None) -> list[str]:
@@ -231,6 +242,15 @@ def prune(now: Optional[datetime] = None, days: Optional[int] = None, root: Opti
             shutil.rmtree(root / cycle, ignore_errors=True)
             nc_path(cycle, root).unlink(missing_ok=True)
             removed.append(cycle)
+    # Work folders (.work/<cycle>) are normally removed when a build ends; a failed or abandoned build leaves one.
+    work_cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=2)
+    for folder in (root / ".work").glob("*") if (root / ".work").is_dir() else ():
+        try:
+            when = datetime.strptime(folder.name, "%Y%m%d_%Hz").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if when < work_cutoff:
+            shutil.rmtree(folder, ignore_errors=True)
     return removed
 
 

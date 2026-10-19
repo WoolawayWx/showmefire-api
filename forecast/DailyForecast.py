@@ -60,6 +60,7 @@ from core.fire_danger import (
     seasonal_dampening_adjustment,
 )
 from services.seasonal_fuel_state import current_gdd_accum
+from services.hrrr_readiness import default_availability_lag_hours
 from core.domain import crop as crop_to_missouri
 from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
@@ -1382,14 +1383,17 @@ def generate_complete_forecast():
     IMAGE_SUFFIX = os.getenv('FORECAST_IMAGE_SUFFIX', '')
 
     # Always use the most recent available run for this cycle.
-    # HRRR runs are available ~1-2 hours after model time.
-    if now.hour < CYCLE_HOUR + 2:
+    # HRRR runs are available ~1-2 hours after model time (the 12z f15 file is out ~1.2 h after the cycle).
+    # FORECAST_AVAILABILITY_LAG_HOURS (default 2) is how long after the cycle hour a run counts as "today's"; the 12z
+    # script sets 1 and waits for the files themselves (scripts/wait_for_hrrr.py) before starting this.
+    availability_lag_hours = default_availability_lag_hours()
+    if now.hour < CYCLE_HOUR + availability_lag_hours:
         logger.info(f"Using previous day's {CYCLE_HOUR:02d}z HRRR run.")
-        # If before cycle+2z, use yesterday's run (most recent available)
+        # If before cycle+lag, use yesterday's run (most recent available)
         RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=CYCLE_HOUR, minute=0, second=0, microsecond=0)
     else:
         logger.info(f"Using today's {CYCLE_HOUR:02d}z HRRR run.")
-        # If after cycle+2z, today's run should be available
+        # If after cycle+lag, today's run should be available
         RUN_DATE = now.replace(hour=CYCLE_HOUR, minute=0, second=0, microsecond=0)
 
     # Ensure RUN_DATE is tz-naive (UTC)
@@ -1459,6 +1463,12 @@ def generate_complete_forecast():
         try:
             # Remove chunks argument to avoid dask dependency
             ds_full = xr.open_dataset(cache_file, decode_cf=False)
+            # A cache can also be assembled by the hourly prefetch (services/hrrr_shared_cache.py). Never trust one
+            # that lacks an input or a forecast hour: treat it like a corrupt file and download instead.
+            missing_vars = [name for name in ("t2m", "r2", "u10", "v10") if name not in ds_full.variables]
+            if missing_vars or int(ds_full.sizes.get("step", 0)) != len(FORECAST_HOURS):
+                raise ValueError(f"cache is incomplete (missing {missing_vars or 'nothing'}; "
+                                 f"{ds_full.sizes.get('step', 0)} of {len(FORECAST_HOURS)} forecast hours)")
             print("Loaded from cache successfully")
         except Exception as e:
             print(f"Error loading cache: {e}")

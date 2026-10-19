@@ -54,6 +54,7 @@ from core.beta_fire_danger import score_fire_danger
 from core.domain import crop as crop_to_missouri
 from core.temperature_palette import load_wsi_temperature_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
+from services.hrrr_readiness import default_availability_lag_hours
 from services.model_shadow import run_shadow
 from services.spatial_fm import try_predict as try_predict_spatial_fm
 
@@ -1440,14 +1441,16 @@ def generate_complete_forecast():
     
     # Always use the most recent available 12z run
     # HRRR runs are available ~1-2 hours after model time
-    # So 12z run is typically available by ~14z (2pm UTC)
-    if now.hour < 14:
+    # So 12z run is typically available by ~14z (2pm UTC): FORECAST_AVAILABILITY_LAG_HOURS (default 2) is that
+    # lag. scripts/forecasts.sh sets 1 and waits for the files before starting, so the beta run that follows the
+    # operational forecast there picks the same (today's) run.
+    if now.hour < 12 + default_availability_lag_hours():
         logger.info("Using previous day's 12z HRRR run.")
-        # If before 14z, use yesterday's 12z run (most recent available)
+        # If before the lag has passed, use yesterday's 12z run (most recent available)
         RUN_DATE = (now - pd.Timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
     else:
         logger.info("Using today's 12z HRRR run.")
-        # If after 14z, today's 12z run should be available
+        # If after the lag, today's 12z run should be available
         RUN_DATE = now.replace(hour=12, minute=0, second=0, microsecond=0)
 
     # Ensure RUN_DATE is tz-naive (UTC)

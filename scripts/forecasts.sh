@@ -7,12 +7,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1
 
-# Hold an exclusive lock for the whole run so maps.sh skips its cycles instead
-# of competing with the forecast (and the API it calls) for CPU/memory. It
-# lives in the project folder so every copy of maps.sh (container or host
-# cron) sees it; see scripts/forecast_lock.sh.
-source "$SCRIPT_DIR/forecast_lock.sh"
-take_forecast_lock
+# The forecast lock (scripts/forecast_lock.sh) is taken further down, after the
+# wait for HRRR, so maps.sh keeps running while this script is only polling.
 
 # Detect correct Python executable
 if [ -f "/opt/venv/bin/python" ]; then
@@ -58,6 +54,35 @@ run_step() {
     return 0
 }
 
+# Start when the 12z HRRR hours this forecast uses (f04-f15, on AWS about 1.2 h
+# after the cycle, ~13:10Z) are published, not at a fixed clock time. The cron
+# fires at 13:00Z and this polls; the wait also holds the start until 07:30
+# Central so the morning RAWS fuel-moisture observations are in. The lag makes
+# DailyForecast (and the beta run below) treat today's 12z as the current run.
+export FORECAST_CYCLE_HOUR=12
+export FORECAST_START_HOUR=4
+export FORECAST_END_HOUR=15
+export FORECAST_AVAILABILITY_LAG_HOURS=1
+export FORECAST_NOT_BEFORE_LOCAL=07:30
+export REQUIRE_COMPLETE_HRRR=true
+# 14:30Z was the old fixed start, so it is also the latest a late HRRR run can delay this.
+export HRRR_READINESS_TIMEOUT_SECONDS=5400
+
+run_step "Waiting for complete 12z HRRR f04-f15 data" "$PROJECT_DIR/scripts/wait_for_hrrr.py"
+if [ $? -ne 0 ]; then
+    echo "WARNING: HRRR was not confirmed complete by $(date); starting the forecast anyway, as the old fixed 14:30Z start did" >> "$LOG_FILE" 2>&1
+    export REQUIRE_COMPLETE_HRRR=false
+fi
+
+# Hold an exclusive lock for the rest of the run so maps.sh skips its cycles
+# instead of competing with the forecast (and the API it calls) for CPU/memory.
+# It lives in the project folder so every copy of maps.sh (container or host
+# cron) sees it. Taken after the wait, so a running 09z forecast (which holds
+# it) just delays this one until it finishes.
+source "$SCRIPT_DIR/forecast_lock.sh"
+take_forecast_lock
+echo "=== Holding forecast lock; map refreshes paused ===" >> "$LOG_FILE" 2>&1
+
 run_step "Running Daily Forecast" "$PROJECT_DIR/forecast/DailyForecast.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
@@ -65,12 +90,14 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
-# Ensemble fire danger (BETA): HREF-style multi-model + REFS/HREF ensprod
-# probabilities and a categorical ensemble forecast. Runs after the
-# operational forecast so it can anchor on this run's own fuel moisture
-# (forecast-state hand-off). Advisory-only and must never block publication.
-run_step "Running Ensemble Fire Danger (beta)" "$PROJECT_DIR/scripts/run_ensemble_fire_danger.py" || \
-  echo "WARNING: Ensemble fire danger (beta) generation failed at $(date)" >> "$LOG_FILE" 2>&1
+# While FORECAST_USE_SHARED_HRRR is off, check that the cache the hourly prefetch assembled would have matched
+# the one DailyForecast just downloaded for itself. Report only: it always exits 0.
+run_step "Comparing shared HRRR cache with the downloaded one" "$PROJECT_DIR/scripts/compare_hrrr_cache.py" || \
+  echo "WARNING: shared HRRR cache comparison failed at $(date)" >> "$LOG_FILE" 2>&1
+
+# The ensemble fire danger (beta) step used to run here. It needs REFS/HREF,
+# which publish at about 14:36Z/15:06Z, so it now has its own run at 15:00Z
+# (scripts/ensemble_12z.sh) and no longer holds up this forecast's publication.
 
 # The 09z comparison must run after this operational 12z archive exists.
 # It is observational/reporting-only and must not block forecast publication.

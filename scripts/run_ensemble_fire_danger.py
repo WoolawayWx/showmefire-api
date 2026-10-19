@@ -1,9 +1,9 @@
 """
 Run the Day-1 ensemble fire danger product (BETA) once.
 
-Called from scripts/forecasts.sh right after DailyForecast.py, as a
-non-blocking step (a failure here never blocks or changes the public
-forecast). See services/ensemble_fire_danger/runtime.py for what one run
+Called from scripts/ensemble_12z.sh (cron 15:00Z, once REFS and HREF are
+published; it used to be a step in scripts/forecasts.sh), as a non-blocking
+job (a failure here never blocks or changes the public forecast). See services/ensemble_fire_danger/runtime.py for what one run
 does, and model-training/docs/ensemble_fire_danger.md for the design.
 
 Usage:

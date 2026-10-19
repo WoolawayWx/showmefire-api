@@ -168,8 +168,20 @@ async def lifespan(app: FastAPI):
 
     # Start the fetch in the background so the API starts immediately
     asyncio.create_task(run_initial_fetches())
+
+    try:
+        logger.info("API metrics: reloaded %d minutes from the last snapshot", start_persistence())
+    except Exception as exc:  # metrics are never worth failing a start-up over
+        logger.warning("API metrics persistence did not start (non-fatal): %s", exc)
+    try:
+        logger.info("Server metrics: reloaded %d minutes from the last snapshot", start_server_metrics())
+    except Exception as exc:
+        logger.warning("Server metrics did not start (non-fatal): %s", exc)
     
     yield
+
+    stop_persistence()
+    stop_server_metrics()
     
     if scheduler_local:
         logger.info("Shutting down scheduler...")
@@ -304,6 +316,8 @@ app.include_router(api_index.router)
 app.include_router(day_archive_admin.router)
 app.include_router(hrrr_hourly.router)
 app.include_router(hrrr_hourly_admin.router)
+from routers import admin_metrics
+app.include_router(admin_metrics.router)
 app.include_router(feedback.router)
 app.include_router(forecast_discussions.router)
 app.include_router(burn_bans.router)
@@ -378,6 +392,13 @@ app.middleware("http")(admin_cookie_context)
 from core.graphics_session import graphics_cookie_context
 
 app.middleware("http")(graphics_cookie_context)
+
+from core.metrics import MetricsMiddleware, start_persistence, stop_persistence
+from core.server_metrics import start_server_metrics, stop_server_metrics
+
+# Added last, so it is outermost and times everything inside it (CORS, the cookie middleware, the route itself).
+# Per-route counts, errors and latency for the admin API metrics page (routers/admin_metrics.py).
+app.add_middleware(MetricsMiddleware)
 
 class DevProjectCreate(BaseModel):
     name: str

@@ -43,6 +43,38 @@ OBSERVATION_LIMITS = {
 }
 
 
+# Station metadata (names, coordinates, networks, sensor lists) almost never changes, but it is a large
+# response, so the 5-minute jobs reuse it instead of requesting it every run. A station added in the last
+# few hours is simply missing its network until the entry expires.
+METADATA_CACHE_TTL = timedelta(hours=float(os.getenv("SMF_METADATA_CACHE_HOURS", "6")))
+_metadata_cache: dict[str, tuple[datetime, dict]] = {}
+
+
+async def fetch_metadata_cached(session, url, params):
+    """Station metadata JSON for `params`, requested at most once per METADATA_CACHE_TTL.
+
+    Entries are keyed by the query (token excluded), so each job keeps its own. If a refresh fails the
+    last good copy is served, however old; with nothing cached the error is raised as before."""
+    key = urlencode(sorted((k, v) for k, v in params.items() if k != "token"))
+    now = datetime.now(timezone.utc)
+    cached = _metadata_cache.get(key)
+    if cached and now - cached[0] < METADATA_CACHE_TTL:
+        return cached[1]
+    try:
+        response = await session.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        payload = await response.json()
+        if not payload.get("STATION"):
+            raise ValueError("metadata response had no stations")
+    except Exception as error:
+        if cached:
+            logger.warning("Station metadata refresh failed (%s); reusing copy from %s", error, cached[0].isoformat())
+            return cached[1]
+        raise
+    _metadata_cache[key] = (now, payload)
+    return payload
+
+
 def observation_is_usable(key, value, observed_at, now=None):
     """True when a reading is recent enough (and not future-dated) and inside the plausible range for its variable."""
     if value is None:
@@ -205,13 +237,8 @@ async def fetch_synoptic_data():
                 f"stations={len(weather_json.get('STATION') or [])}"
             )
             
-            metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
-            metadata_response.raise_for_status()
-            metadata_json = await metadata_response.json()
-            _debug(
-                f"Metadata API OK: status={metadata_response.status} "
-                f"stations={len(metadata_json.get('STATION') or [])}"
-            )
+            metadata_json = await fetch_metadata_cached(session, metadata_url, metadata_params)
+            _debug(f"Metadata OK: stations={len(metadata_json.get('STATION') or [])}")
         
         metadata_lookup = {}
         if metadata_json.get("STATION"):
@@ -312,9 +339,8 @@ async def fetch_buffer_stations():
             weather_response = await session.get("https://api.synopticdata.com/v2/stations/latest", params=weather_params, timeout=30)
             weather_response.raise_for_status()
             weather_json = await weather_response.json()
-            metadata_response = await session.get("https://api.synopticdata.com/v2/stations/metadata", params=metadata_params, timeout=30)
-            metadata_response.raise_for_status()
-            metadata_json = await metadata_response.json()
+            metadata_json = await fetch_metadata_cached(
+                session, "https://api.synopticdata.com/v2/stations/metadata", metadata_params)
 
         metadata_lookup = {s["STID"]: s for s in metadata_json.get("STATION") or [] if s.get("STID")}
         ignored = get_ignored_stations()
@@ -379,13 +405,8 @@ async def fetch_raws_stations_multi_state(states=None):
             f"stations={len(weather_json.get('STATION') or [])}"
         )
 
-        metadata_response = await session.get(metadata_url, params=metadata_params, timeout=30)
-        metadata_response.raise_for_status()
-        metadata_json = await metadata_response.json()
-        _debug(
-            f"RAWS metadata API OK: status={metadata_response.status} "
-            f"stations={len(metadata_json.get('STATION') or [])}"
-        )
+        metadata_json = await fetch_metadata_cached(session, metadata_url, metadata_params)
+        _debug(f"RAWS metadata OK: stations={len(metadata_json.get('STATION') or [])}")
 
     metadata_lookup = {}
     if metadata_json.get("STATION"):

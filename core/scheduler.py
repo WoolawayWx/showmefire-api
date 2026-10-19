@@ -749,13 +749,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         max_instances=1,
         coalesce=True
     )
-    # Hour-by-hour HRRR product from the 12z run. Each tick is a cheap no-op until the run is fully
-    # published and the daily forecast is idle; the build itself runs in a subprocess.
+    # Hour-by-hour HRRR product from every hourly HRRR run. Each tick is a cheap no-op until a run is fully
+    # published (and, for the 12z run the daily forecast also uses, until that forecast is done); the build itself runs
+    # in a subprocess. HRRR publishes f18 about 1h14m after each cycle, so a tick every 10 minutes starts a build
+    # within minutes of it, around the clock.
     scheduler.add_job(
         hrrr_hourly_job.run_scheduled,
         'cron',
-        hour='9-14',
-        minute='*/20',
+        minute='*/10',
         id='hrrr_hourly_forecast',
         max_instances=1,
         coalesce=True
