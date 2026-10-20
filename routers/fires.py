@@ -1313,7 +1313,7 @@ def admin_refresh_fire_incident_graphics(
     """Regenerate incident PNG cards on demand (admin only)."""
     from services.fire_incident_graphics import refresh_incident_graphics
     result = refresh_incident_graphics(incident_id=incident_id, force=force)
-    if incident_id is not None and result["rendered"] == 0:
+    if incident_id is not None and result["rendered"] + result["skipped"] == 0:
         raise HTTPException(status_code=404, detail="Incident not found or has no usable detections")
     return {"success": True, **result}
 

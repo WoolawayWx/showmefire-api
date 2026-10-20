@@ -209,10 +209,15 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
                 else:
                     road_frame = gpd.read_file(road_path).to_crs("EPSG:4326")
                 road_frame = road_frame[road_frame.geometry.notna() & ~road_frame.geometry.is_empty]
-                for geometry in road_frame.geometry:
-                    ax.add_geometries([geometry], ccrs.PlateCarree(), facecolor="none",
+                # One layer per style for all roads, not two per road: each call builds a feature artist and a
+                # projection object, which was a third of a card's render time. Same picture, since every dark
+                # casing (zorder 4) was already drawn under every light centre line (zorder 5).
+                plate = ccrs.PlateCarree()
+                roads = list(road_frame.geometry)
+                if roads:
+                    ax.add_geometries(roads, plate, facecolor="none",
                                       edgecolor="#111827", linewidth=2.4, alpha=0.82, zorder=4)
-                    ax.add_geometries([geometry], ccrs.PlateCarree(), facecolor="none",
+                    ax.add_geometries(roads, plate, facecolor="none",
                                       edgecolor="#f8fafc", linewidth=1.0, alpha=0.95, zorder=5)
 
                 # Label only distinct named roads, centered on their geometry.
@@ -315,9 +320,46 @@ def render_incident_graphic(incident: dict, detections: Iterable[dict], output: 
     return output
 
 
+# Bump when the card's design changes, so every card is drawn again once instead of only the ones whose data changed.
+CARD_VERSION = 1
+
+
+def card_fingerprint(incident: dict, rows: list[dict]) -> str:
+    """Hash of everything drawn on an incident card. The job runs every five minutes over up to 200 incidents; most
+    of them have not changed since the last run, and redrawing them kept a whole core busy in the API process."""
+    import hashlib
+    import json
+
+    drawn = {
+        "version": CARD_VERSION,
+        "incident": {key: incident.get(key) for key in (
+            "public_slug", "detection_count", "first_detected_at", "last_detected_at",
+            "centroid_latitude", "centroid_longitude", "county_names", "shape_geojson")},
+        "detections": sorted(
+            (row.get("id"), row.get("latitude"), row.get("longitude"), row.get("source"),
+             row.get("county_name"), row.get("detection_confidence_pct"))
+            for row in rows),
+    }
+    return hashlib.sha256(json.dumps(drawn, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _fingerprint_path(output: Path) -> Path:
+    # One small file per card (not a shared index) so the scheduled job and a single-card refresh from the admin
+    # routes never overwrite each other's entries.
+    return output.with_name(f".{output.stem}.fingerprint")
+
+
+def _card_is_current(output: Path, fingerprint: str) -> bool:
+    try:
+        return output.is_file() and _fingerprint_path(output).read_text().strip() == fingerprint
+    except OSError:
+        return False
+
+
 def refresh_incident_graphics(incident_id: int | None = None, force: bool = False) -> dict:
-    """Render cards only for dense clusters and return a small job summary."""
+    """Render cards only for dense clusters whose card would look different (or `force`), and return a small summary."""
     rendered = 0
+    skipped = 0
     failed = 0
     failed_ids = []
     for incident in list_fire_incidents(limit=200):
@@ -327,12 +369,19 @@ def refresh_incident_graphics(incident_id: int | None = None, force: bool = Fals
             continue
         rows = list_fire_incident_members(incident["id"])
         output = Path(IMAGES_DIR) / "fire-incidents" / f"{incident['public_slug']}.png"
+        fingerprint = card_fingerprint(incident, rows)
+        if not force and _card_is_current(output, fingerprint):
+            if incident.get("graphic_filename") != output.name:
+                set_fire_incident_graphic(incident["id"], output.name)
+            skipped += 1
+            continue
         try:
             render_incident_graphic(incident, rows, output)
             set_fire_incident_graphic(incident["id"], output.name)
+            _fingerprint_path(output).write_text(fingerprint)
             rendered += 1
         except Exception:
             failed += 1
             failed_ids.append(int(incident["id"]))
             logger.exception("Could not render incident graphic %s", incident["id"])
-    return {"rendered": rendered, "failed": failed, "failed_ids": failed_ids}
+    return {"rendered": rendered, "skipped": skipped, "failed": failed, "failed_ids": failed_ids}
