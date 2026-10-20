@@ -353,6 +353,7 @@ origins = [
     "https://showmefire.org",
     "https://preview.showmefire.org",# Your production frontend domain
     "https://dev.showmefire.org",
+    "https://dev.woolawaywx.com",
     # You can also add specific port numbers if your frontend is served from one
 ]
 # Extra browser origins that may call the API with credentials, comma separated, for example the

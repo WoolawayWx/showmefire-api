@@ -16,6 +16,7 @@ response, with or without an ``Origin`` header. This middleware must be added **
 from typing import Iterable
 
 from starlette.datastructures import MutableHeaders
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Map tiles, and the public burn check (other agencies call it from their own pages, with no credentials).
@@ -31,6 +32,22 @@ class PublicTileCorsMiddleware:
         if scope["type"] != "http" or not scope.get("path", "").startswith(self.prefixes):
             await self.app(scope, receive, send)
             return
+
+        # CORSMiddleware rejects a preflight (400) from any origin not on its credentialed list, which blocks
+        # the public burn check from every other site as soon as the request has a header like Content-Type.
+        # Answer the preflight here for public paths instead.
+        if scope["method"] == "OPTIONS":
+            request_headers = dict(scope.get("headers") or [])
+            if b"access-control-request-method" in request_headers:
+                allow_headers = request_headers.get(b"access-control-request-headers", b"*").decode("latin-1")
+                response = Response(status_code=204, headers={
+                    "access-control-allow-origin": "*",
+                    "access-control-allow-methods": "GET, HEAD, OPTIONS",
+                    "access-control-allow-headers": allow_headers,
+                    "access-control-max-age": "600",
+                })
+                await response(scope, receive, send)
+                return
 
         async def send_with_cors(message: Message) -> None:
             if message["type"] == "http.response.start":
