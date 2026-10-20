@@ -2,8 +2,8 @@
 
 A free, public, read-only screening aid for Missouri. For a location it answers **Do not burn**, **Use extreme caution** or
 **Conditions look okay**, with the reasons. It is not a burn permit and not a guarantee, and Show Me Fire is not responsible for what
-anyone does with it. **Using the API or the embed means you accept the [terms](burn_check_terms.md)** (shown at
-https://showmefire.org/tools/burn-check-api#terms). The most important rule: always show the disclaimer from the response next to the answer.
+anyone does with it. **Using the API or the embed means you accept the [terms](api_terms.md)** (shown at
+https://showmefire.org/api-terms; Burn Check has its own section). The most important rule: always show the disclaimer from the response next to the answer.
 
 ## Quick start
 
@@ -22,7 +22,7 @@ No key is needed. Be polite: identify your application in the `User-Agent` heade
 
 A key (`Authorization: Bearer <key>`) raises the limits (ten times by default). Apply on the key request page, https://showmefire.org/tools/api-key-request: staff review each request and email the key when it is approved. Responses are
 CORS-enabled for browsers. `/v1/burn-check` answers are never cacheable (`Cache-Control: no-store`): they describe right now, so do not
-reuse one for more than a few minutes. Every response carries `Link: <https://showmefire.org/tools/burn-check-api#terms>; rel="terms-of-service"`.
+reuse one for more than a few minutes. Every response carries `Link: <https://showmefire.org/api-terms>; rel="terms-of-service"`. API keys are general: one key works on the whole public API (apply at https://showmefire.org/tools/api-key-request).
 
 ## The answer
 
@@ -79,4 +79,4 @@ credit. Do not hide or alter them (see the terms).
 ## Rules in one list
 
 Show the disclaimer. Show the label as given. Do not call it official, a permit or "safe". Keep the credit. Stay within the limits. Do not
-use it to issue or automate permits or for emergencies. Do not keep visitors' addresses beyond what you need. Full text: [terms](burn_check_terms.md).
+use it to issue or automate permits or for emergencies. Do not keep visitors' addresses beyond what you need. Full text: [terms](api_terms.md).

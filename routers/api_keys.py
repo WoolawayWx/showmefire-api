@@ -45,11 +45,12 @@ def _announce(request_row: dict, answers: list[dict]) -> None:
         {"name": "Agency", "value": request_row["agency"], "inline": True},
         {"name": "Type", "value": key_form.answer_value(answers, "agency_type") or "-", "inline": True},
         {"name": "Contact", "value": f"{request_row['name']} <{request_row['email']}>", "inline": False},
+        {"name": "Wants to use", "value": key_form.answer_value(answers, "interest") or "-", "inline": True},
         {"name": "Reason", "value": key_form.answer_value(answers, "reason") or "-", "inline": False},
         {"name": "Plan", "value": key_form.answer_value(answers, "plan") or "-", "inline": False},
     ]
     notify_staff_alert(alert_type="api_key_request", title=f"API key request {request_row['reference']}: {request_row['agency']}",
-                       description="A new Burn Check API key request is waiting for review.", fields=fields,
+                       description="A new Show Me Fire API key request is waiting for review.", fields=fields,
                        admin_path="/admin/api-keys", force=True)
 
 

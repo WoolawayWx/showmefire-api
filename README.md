@@ -232,7 +232,7 @@ Discord ping (type `api_key_request`, always sent while a staff channel is set) 
 (`smf_...`, stored only as a SHA-256 hash), emails it to the applicant through Resend and shows it once on screen; Deny can email a message.
 Keys raise the per-minute rate limits (default 10x, set per key) and can be revoked or rotated; revocation takes up to a minute to apply
 (`core/rate_limit.py` caches lookups). Email needs `RESEND_API_KEY` and a from address (`API_KEY_EMAIL_FROM`, else the graphics or bulletin one).
-The keys in `API_READ_KEYS` still work. Terms: `docs/burn_check_terms.md`; routes: `routers/api_keys.py`, `routers/api_keys_admin.py`;
+The keys in `API_READ_KEYS` still work. Terms: `docs/api_terms.md` (general, with a Burn Check section; shown at `/api-terms`); keys are general, not tied to one tool; routes: `routers/api_keys.py`, `routers/api_keys_admin.py`;
 tests: `tests/test_api_keys.py`.
 
 ## Admin sessions

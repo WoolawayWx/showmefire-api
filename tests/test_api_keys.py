@@ -18,7 +18,7 @@ from services.api_keys import mail, store
 
 GOOD = {"name": "Pat Chief", "email": "Pat@Example.GOV", "phone": "573-555-0100", "role": "Fire chief", "agency": "Central Fire District",
         "agency_type": "fire", "website": "https://example.gov", "reason": "Residents ask about burning.", "plan": "Embed it on our site.",
-        "integration": "embed", "volume": "under_100", "agree_terms": True}
+        "interest": "burn_check", "integration": "embed", "volume": "under_100", "agree_terms": True}
 
 
 @pytest.fixture
@@ -50,7 +50,7 @@ def submit(env, answers=None, token="good", **extra):
 def test_the_shipped_form_is_valid_and_keeps_the_fields_the_emails_need():
     form = key_form.load_form()
     ids = [f["id"] for f in form["fields"]]
-    assert {"name", "email", "agency", "reason", "plan", "agree_terms"} <= set(ids)
+    assert {"name", "email", "agency", "interest", "reason", "plan", "agree_terms"} <= set(ids)
     assert not any(key.startswith("_") for key in key_form.public_form(form))
 
 
@@ -75,7 +75,7 @@ def test_validation_cleans_and_reports_errors():
     assert key_form.answer_value(answers, "agency_type") == "Fire department or fire district"
 
     _answers, errors = key_form.validate_answers({"name": " ", "email": "nope", "agency": "A", "agency_type": "wizard", "reason": "r", "plan": "p",
-                                                  "integration": "embed", "website": "ftp://x", "phone": "abc", "agree_terms": False})
+                                                  "interest": "forecasts", "integration": "embed", "website": "ftp://x", "phone": "abc", "agree_terms": False})
     assert set(errors) == {"name", "email", "agency_type", "website", "phone", "agree_terms"}
     assert key_form.validate_answers("not a dict")[1] == {"_form": "The request was not understood."}
     assert "reason" in key_form.validate_answers({**GOOD, "reason": "x" * 2001})[1]
@@ -111,7 +111,7 @@ def test_a_request_is_stored_announced_and_confirmed(env):
     assert "ip_hash" not in row
     assert len(env.alerts) == 1 and env.alerts[0]["alert_type"] == "api_key_request" and env.alerts[0]["force"] is True
     assert env.alerts[0]["admin_path"] == "/admin/api-keys" and "Central Fire District" in env.alerts[0]["title"]
-    assert {f["name"] for f in env.alerts[0]["fields"]} >= {"Agency", "Contact", "Reason", "Plan"}
+    assert {f["name"] for f in env.alerts[0]["fields"]} >= {"Agency", "Contact", "Wants to use", "Reason", "Plan"}
     assert [m.to for m in env.sent] == ["pat@example.gov"] and body["reference"] in env.sent[0].text
 
 
@@ -151,7 +151,8 @@ def test_approving_creates_a_key_emails_it_and_stores_only_its_hash(env):
     assert body["request"]["status"] == "approved" and body["request"]["reviewed_by"] == "admin-user" and body["request"]["decision_email_sent"] is True
     message = env.sent[0]
     assert message.to == "pat@example.gov" and body["key"] in message.text and body["key"] in message.html and "Welcome" in message.text
-    assert "20 times" in message.text and "terms" in message.text.lower()
+    assert "20 times" in message.text and "terms" in message.text.lower() and "Show Me Fire API key" in message.subject + message.text
+    assert "burn check api key" not in (message.subject + message.text).lower() and "whole public Show Me Fire API" in message.text
     with sqlite3.connect(str(store.get_db_path())) as conn:
         stored = json.dumps([list(r) for r in conn.execute("SELECT * FROM api_keys").fetchall()])
     assert body["key"] not in stored and store.hash_key(body["key"]) in stored

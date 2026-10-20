@@ -6,7 +6,7 @@ tool is promoted widely; bump VERSION whenever the wording changes so a client c
 from __future__ import annotations
 
 VERSION = "2026-10-20"
-TERMS_URL = "https://showmefire.org/tools/burn-check-api#terms"   # terms for agencies, developers and embeds: docs/burn_check_terms.md
+TERMS_URL = "https://showmefire.org/api-terms"   # terms for the API, keys and embeds (Burn Check has its own section): docs/api_terms.md
 
 SHORT = (
     "For general awareness only. This is not a burn permit, not official fire-agency guidance, and not a promise that "
