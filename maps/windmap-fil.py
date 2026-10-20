@@ -12,7 +12,6 @@ blur) and is unchanged.
 import json
 import logging
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -22,6 +21,7 @@ from scipy.interpolate import Rbf
 
 import station_plot as sp
 import status_lock
+from core.logging_setup import file_logger
 from realtime_geotiff import export_continuous_rgba_geotiff
 from station_rbf import buffer_points
 
@@ -134,14 +134,7 @@ print(updated_msg)
 print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = PROJECT_DIR / 'logs/windmap-fil.log'
-log_file.parent.mkdir(exist_ok=True)
-logger = logging.getLogger('windmap-fil')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+logger = file_logger('windmap-fil', 'windmap-fil.log')
 logger.info(updated_msg)
 logger.info(runtime_msg)
 

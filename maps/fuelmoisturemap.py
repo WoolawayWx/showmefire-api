@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import matplotlib.patheffects as path_effects
@@ -28,6 +27,7 @@ from scipy.interpolate import Rbf
 
 import station_plot as sp
 import status_lock
+from core.logging_setup import file_logger
 from realtime_geotiff import export_continuous_rgba_geotiff
 
 start_time = time.time()
@@ -141,14 +141,7 @@ print(updated_msg)
 print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = PROJECT_DIR / 'logs/fuelmoisturemap.log'
-log_file.parent.mkdir(exist_ok=True)
-logger = logging.getLogger('fuelmoisturemap')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+logger = file_logger('fuelmoisturemap', 'fuelmoisturemap.log')
 logger.info(updated_msg)
 logger.info(runtime_msg)
 

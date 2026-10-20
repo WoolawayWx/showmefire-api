@@ -664,13 +664,13 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
     )
     
     # Log the response for debugging
-    logger.info(f"API Response: SUMMARY={data.get('SUMMARY', {})}")
+    logger.debug(f"API Response: SUMMARY={data.get('SUMMARY', {})}")
     if data.get("STATION"):
         logger.info(f"Received {len(data['STATION'])} stations from API")
         # Log first station structure for debugging
         if len(data['STATION']) > 0:
             first_station = data['STATION'][0]
-            logger.info(f"Sample station STID={first_station.get('STID')}, "
+            logger.debug(f"Sample station STID={first_station.get('STID')}, "
                        f"OBS keys={list(first_station.get('OBSERVATIONS', {}).keys())}")
     else:
         logger.warning(f"No STATION data in response. Keys: {list(data.keys())}")

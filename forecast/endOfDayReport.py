@@ -20,11 +20,6 @@ from core.ignored_stations import get_ignored_stations
 from core import observation_qc
 from services.verification_rainfall import CONTRACT_VERSION, provider_precedence
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 ARCHIVE_DIR = Path(BASE_DIR) / "archive"
@@ -1068,4 +1063,7 @@ def main():
 
 
 if __name__ == "__main__":
+    from core.logging_setup import configure_logging
+
+    configure_logging()
     main()

@@ -3,7 +3,6 @@ import logging
 import argparse
 from datetime import datetime
 from io import BytesIO
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 import textwrap
@@ -20,6 +19,7 @@ from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_DIR))
+from core.logging_setup import file_logger
 
 STATUS_FILE = PROJECT_DIR / "status.json"
 
@@ -117,17 +117,7 @@ def log_file(day: int) -> Path:
 
 
 def setup_logger(day: int) -> logging.Logger:
-    logger = logging.getLogger(f"outlookgraphic_day{day}")
-    logger.setLevel(logging.INFO)
-
-    if not logger.handlers:
-        active_log_file = log_file(day)
-        active_log_file.parent.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(active_log_file, maxBytes=5 * 1024 * 1024, backupCount=5)
-        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-        logger.addHandler(handler)
-
-    return logger
+    return file_logger(f"outlookgraphic_day{day}", log_file(day).name)
 
 
 def generate_basemap():

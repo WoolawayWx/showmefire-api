@@ -1,7 +1,10 @@
+import logging
 import requests
 import os
 import json
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Define the API endpoint
 API_URL = 'https://api.weather.gov/alerts/active?area=MO'
@@ -26,7 +29,7 @@ def fetch_weather_data(api_url):
         response.raise_for_status()  # Raise an exception for HTTP errors
         return response.json()
     except requests.RequestException as e:
-        print(f"Error fetching data: {e}")
+        logger.warning("NWS active alerts fetch failed: %s", e)
         return None
 
 def load_zones(file_path):
@@ -34,7 +37,7 @@ def load_zones(file_path):
         with open(file_path, 'r') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error loading zones: {e}")
+        logger.warning("Could not load zones from %s: %s", file_path, e)
         return None
 
 _county_zone_cache = None
@@ -60,7 +63,7 @@ def load_county_zone_lookup():
                     'geometry': row.geometry.__geo_interface__,
                 }
     except Exception as e:
-        print(f"Error loading county zones: {e}")
+        logger.warning("Could not load county zones: %s", e)
         return {}  # don't cache a failure; retry next poll
     _county_zone_cache = lookup
     return lookup
@@ -112,11 +115,11 @@ def save_json_to_file(data, file_path):
         
         with open(file_path, 'w') as json_file:
             json.dump(data, json_file, indent=4)
-        print(f"Data saved to {file_path}")
     except Exception as e:
-        print(f"Error saving data: {e}")
+        logger.error("Could not save active alerts to %s: %s", file_path, e)
         
 def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_path=ACTIVE_JSON_PATH, public_zones_path=MO_PUBLIC_ZONES_PATH):
+    """Poll NWS active alerts for Missouri, write gis/active.json, refresh advisory maps, push and Discord alerts."""
     alerts = fetch_weather_data(api_url)
     zones = load_zones(zones_path)
     public_zones = load_zones(public_zones_path)  # optional: without it only fire-zone alerts get geometry
@@ -132,7 +135,7 @@ def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_pat
             from maps.advisory_category_maps import refresh_changed_advisory_maps
             refresh_changed_advisory_maps(enriched_alerts)
         except Exception as exc:
-            print(f"Advisory map refresh failed: {exc}")
+            logger.warning("Advisory map refresh failed: %s", exc, exc_info=True)
         try:
             from services.mobile_content import active_fire_weather_alerts, record_daily_fire_weather_alerts
             from services.mobile_push import process_fire_weather_alerts
@@ -140,19 +143,19 @@ def run_active_mo_alerts(api_url=API_URL, zones_path=MO_FIRE_ZONES_PATH, out_pat
             process_fire_weather_alerts(fire_weather_alerts)
             record_daily_fire_weather_alerts(fire_weather_alerts)
         except Exception as exc:
-            print(f"Mobile fire weather notification processing failed: {exc}")
+            logger.warning("Mobile fire weather notification processing failed: %s", exc, exc_info=True)
         try:
             from services.fire_weather_alert_map import maybe_regenerate_fire_weather_alert_map
             maybe_regenerate_fire_weather_alert_map()
         except Exception as exc:
-            print(f"Fire weather alert map regeneration failed: {exc}")
+            logger.warning("Fire weather alert map regeneration failed: %s", exc, exc_info=True)
         # After the map regenerates, so the posted image shows the new alert.
         try:
             from services.discord_notifier import process_fire_weather_alerts_for_discord
             from services.mobile_content import active_fire_weather_alerts
             process_fire_weather_alerts_for_discord(active_fire_weather_alerts(Path(out_path)))
         except Exception as exc:
-            print(f"Discord fire weather alert posting failed: {exc}")
+            logger.warning("Discord fire weather alert posting failed: %s", exc, exc_info=True)
         return True
     return False
 

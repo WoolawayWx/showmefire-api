@@ -138,26 +138,18 @@ SNOW_FM_FLOOR_PCT = env_float('SNOW_FM_FLOOR_PCT', 30.0)
 # Suppress Herbie regex warnings
 warnings.filterwarnings('ignore', message='This pattern is interpreted as a regular expression')
 
-# Set up logging to file in logs folder
-LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-os.makedirs(LOGS_DIR, exist_ok=True)
-log_file_path = os.path.join(LOGS_DIR, 'forecastedfiredanger.log')
+# Log to stderr only, in the shared format (core/logging_setup.py). Whoever runs this already
+# captures it: forecasts.sh / forecast_RRFS.sh into logs/forecast_YYYYMMDD.log, and
+# services/forecast_jobs.py into the beta run's forecast.log. Every line used to be written
+# to a second file in logs/ as well.
+from core.logging_setup import UtcFormatter
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-# File handler
-file_handler = logging.FileHandler(log_file_path, mode='a')
-file_handler.setLevel(logging.INFO)
-file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
-
-# Console handler (optional, keeps previous behavior)
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(file_formatter)
-logger.addHandler(console_handler)
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(UtcFormatter())
+    logger.addHandler(console_handler)
 
 
 def log_memory_usage(note=""):
@@ -2718,9 +2710,7 @@ def generate_complete_forecast():
     print(f"Script runtime: {runtime_sec:.2f} seconds")
 
     # Log results
-    logging.basicConfig(filename='logs/forecastfiredanger.log', level=logging.INFO)
-    logging.info(f"All forecast maps updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
-    logging.info(f"Script runtime: {runtime_sec:.2f} seconds")
+    logger.info(f"All forecast maps updated at {pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT')}")
 
     # Update status file
     status_file = PROJECT_DIR / 'status.json'

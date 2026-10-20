@@ -9,6 +9,12 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Change to project directory
 cd "$PROJECT_DIR" || exit 1
 
+# One-line result for scripts/run_job.sh to record (cron runs this through it).
+summary() {
+    [ -n "${JOB_SUMMARY_FILE:-}" ] && echo "$*" > "$JOB_SUMMARY_FILE"
+    return 0
+}
+
 # Lock files live in the project folder (not /tmp) so every copy of this job -
 # the worker container's cron and any host cron pointed at the same checkout -
 # shares them: overlapping map runs exclude each other and all of them see the
@@ -30,10 +36,12 @@ lock_file() {
 LOCK_FILE="$(lock_file showmefire-maps.lock)"
 if ! exec 9<>"$LOCK_FILE"; then
     echo "Cannot open map lock $LOCK_FILE; skipping this cycle."
+    summary "skipped: cannot open the map lock"
     exit 0
 fi
 if ! flock -n 9; then
     echo "Another maps.sh run is still in progress (lock: $LOCK_FILE); skipping this cycle."
+    summary "skipped: previous cycle still running"
     exit 0
 fi
 
@@ -51,31 +59,11 @@ forecast_running() {
 }
 if forecast_running; then
     echo "Daily forecast is running (lock: $FORECAST_LOCK_FILE); skipping this cycle."
+    summary "skipped: daily forecast running"
     exit 0
 fi
 renice -n 19 -p $$ > /dev/null 2>&1 || true
 ionice -c 3 -p $$ > /dev/null 2>&1 || true
-
-# Rotate oversized logs (maps.log alone grows ~1 MB/hour). Copy-then-truncate,
-# so cron jobs still appending to a log keep writing to the same open file;
-# the copy is gzipped and the oldest beyond LOG_KEEP copies is dropped.
-LOG_MAX_BYTES=$((20 * 1024 * 1024))
-LOG_KEEP=5
-rotate_logs() {
-    local log size i
-    for log in "$PROJECT_DIR"/logs/*.log; do
-        [ -f "$log" ] || continue
-        size=$(stat -c %s "$log" 2>/dev/null || echo 0)
-        [ "$size" -gt "$LOG_MAX_BYTES" ] || continue
-        rm -f "$log.$LOG_KEEP.gz"
-        for ((i = LOG_KEEP - 1; i >= 1; i--)); do
-            [ -f "$log.$i.gz" ] && mv -f "$log.$i.gz" "$log.$((i + 1)).gz"
-        done
-        cp "$log" "$log.1" && : > "$log" && gzip -f "$log.1"
-        echo "Rotated $(basename "$log") ($((size / 1024 / 1024)) MB)"
-    done
-}
-rotate_logs
 
 # Detect correct Python executable (same convention as forecasts.sh / forecast_RRFS.sh).
 # Cron does not inherit the Docker image's VIRTUAL_ENV/PATH, and in production the
@@ -97,6 +85,10 @@ fi
 
 # Ensure project-root imports like core.* and maps.* resolve in script mode.
 export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
+
+# Rotate any log in logs/ over 10 MB (maps.log alone grows ~1 MB/hour) and drop
+# ones untouched for 30 days. The policy lives in services/log_maintenance.py.
+"$PYTHON" -m services.log_maintenance || echo "WARNING: log maintenance failed"
 
 # Pull fresh station observations before plotting, instead of whatever the API's 5-minute poll last
 # fetched. Best effort: a failure here must never stop the cycle (the script always exits 0).
@@ -154,25 +146,30 @@ export PYTHON SCRIPT_LOG_DIR FORECAST_LOCK_FILE
 run_started=$SECONDS
 printf '%s\0' "${scripts[@]}" | xargs -0 -n1 -P "$MAPS_PARALLEL" bash -c 'run_map_script "$0"'
 
+# One status line per script, its output indented under it (the Logs page shows each as one entry).
+ok_scripts=0
 for script in "${scripts[@]}"; do
     base_script="$(basename "$script")"
     read -r rc elapsed < "$SCRIPT_LOG_DIR/$base_script.rc" || { rc=1; elapsed=0; }
-    echo "Running $script..."
-    cat "$SCRIPT_LOG_DIR/$base_script.log"
     if [ "$rc" == "skip" ]; then
+        echo "--- $base_script: skipped (daily forecast started)"
         skipped_scripts=$((skipped_scripts + 1))
         continue
+    elif [ "$rc" != "0" ]; then
+        echo "--- $base_script: FAILED with exit code $rc after ${elapsed}s"
+        failed_scripts+=("$base_script")
+    else
+        echo "--- $base_script: ok in ${elapsed}s"
+        ok_scripts=$((ok_scripts + 1))
     fi
-    echo "[timing] $base_script: ${elapsed}s"
-    if [ "$rc" != "0" ]; then
-        echo "[ERROR] Failed: $script"
-        failed_scripts+=("$script")
-    fi
+    sed 's/^/    /' "$SCRIPT_LOG_DIR/$base_script.log"
 done
-echo "[timing] all map scripts: $((SECONDS - run_started))s (MAPS_PARALLEL=$MAPS_PARALLEL)"
-if (( skipped_scripts > 0 )); then
-    echo "Daily forecast started mid-cycle: $skipped_scripts map script(s) skipped until the next cycle."
+cycle_summary="$ok_scripts ok, ${#failed_scripts[@]} failed, $skipped_scripts skipped in $((SECONDS - run_started))s (MAPS_PARALLEL=$MAPS_PARALLEL)"
+if (( ${#failed_scripts[@]} > 0 )); then
+    cycle_summary="$cycle_summary; failed: ${failed_scripts[*]}"
 fi
+echo "Map scripts: $cycle_summary"
+summary "$cycle_summary"
 
 UPLOAD_FORECAST_VALUE="${uploadForecast:-true}"
 UPLOAD_FORECAST_VALUE="$(echo "$UPLOAD_FORECAST_VALUE" | tr '[:upper:]' '[:lower:]')"
@@ -199,10 +196,5 @@ echo "Generating RSS feed..."
 "$PYTHON" scripts/check_product_health.py || echo "Product health check failed"
 
 if (( ${#failed_scripts[@]} > 0 )); then
-    echo ""
-    echo "Map run completed with failures:"
-    for failed in "${failed_scripts[@]}"; do
-        echo " - $failed"
-    done
     exit 1
 fi

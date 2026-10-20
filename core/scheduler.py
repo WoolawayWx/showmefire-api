@@ -34,6 +34,7 @@ from core.database import (
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.log_maintenance import purge_old_logs
+from services import job_runs
 from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from services.spread_rate import run_spread_rate_job, run_spread_rate_pipeline
@@ -425,12 +426,14 @@ async def purge_spatial_fm_uncertainty_cache_job():
 
 
 async def purge_old_logs_job():
-    """Delete stale dated log files and truncate ever-growing cron logs past their size cap."""
+    """Rotate log files over 10 MB, delete ones untouched for 30 days, and prune old job-run history."""
     try:
         result = await asyncio.to_thread(purge_old_logs)
-        logger.info("Log purge: removed=%d truncated=%d", len(result["removed"]), len(result["truncated"]))
+        pruned = await asyncio.to_thread(job_runs.prune_runs)
+        logger.info("Log maintenance: rotated=%d removed=%d job_runs_pruned=%d",
+                    len(result["rotated"]), len(result["removed"]), pruned)
     except Exception as error:
-        logger.error("Log purge failed: %s", error, exc_info=True)
+        logger.error("Log maintenance failed: %s", error, exc_info=True)
 
 
 async def purge_fire_report_pii_job():
@@ -921,8 +924,10 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
 
+    # Record every run for the admin Logs page (services/job_runs.py). Must stay after the last add_job.
+    tracked = job_runs.track_scheduler_jobs(scheduler)
     scheduler.start()
-    logger.info("Scheduler started")
+    logger.info("Scheduler started with %d jobs", tracked)
 
 async def run_initial_fetches():
     await fetch_synoptic_data()

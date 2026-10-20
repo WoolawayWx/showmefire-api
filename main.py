@@ -18,6 +18,8 @@ from services.station_et import get_et_data, fetch_station_et
 from services.banner import BannerData, load_banner_config, save_banner_config
 from services.file_manager import list_files, view_file
 from services.log_maintenance import purge_old_logs
+from core.logging_setup import configure_logging
+from services import job_runs, log_viewer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -106,10 +108,8 @@ from starlette.concurrency import run_in_threadpool
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# stderr (docker logs) plus logs/api.log, which the admin Logs page shows. See core/logging_setup.py.
+configure_logging(log_file="api.log")
 
 logger = logging.getLogger(__name__)
 
@@ -1327,9 +1327,25 @@ async def view_log(filepath: str, email: str = Depends(require_admin)):
     """Serve a specific log file securely from logs directory"""
     return view_file(str(LOGS_DIR), filepath, email)
 
+@app.get("/api/admin/logs/overview")
+def logs_overview(request: Request, email: str = Depends(require_admin)):
+    """Every scheduled job and cron script with its last run, plus every log file with recent warnings/errors."""
+    return log_viewer.overview(getattr(request.app.state, "scheduler", None))
+
+@app.get("/api/admin/logs/read/{filepath:path}")
+def read_log_file(filepath: str, lines: int = 500, level: str = "all", q: str = "",
+                  email: str = Depends(require_admin)):
+    """The end of one log file as entries; `level` (all|warning|error) and `q` search the whole file."""
+    return log_viewer.read_log(filepath, lines=lines, level=level, query=q)
+
+@app.get("/api/admin/logs/runs/{job_id}")
+def job_run_history(job_id: str, limit: int = 50, email: str = Depends(require_admin)):
+    """Recent runs of one scheduled job or cron script, newest first."""
+    return {"job": job_id, "runs": job_runs.recent_runs(job_id, limit)}
+
 @app.post("/api/admin/logs/cleanup")
 async def cleanup_logs(email: str = Depends(require_admin)):
-    """Run the log purge (delete stale dated logs, truncate oversized ever-growing ones) immediately."""
+    """Run log maintenance now: rotate (gzip) logs over 10 MB, delete files untouched for 30 days."""
     result = await asyncio.to_thread(purge_old_logs)
     return {"success": True, **result}
 

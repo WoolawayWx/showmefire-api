@@ -4,11 +4,12 @@ import json
 import os
 from datetime import datetime
 import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+
+from core.logging_setup import file_logger
 
 # --- Path Configurations ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,19 +24,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 GIS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Set up rotating log handler
 LOG_FILE = LOGS_DIR / 'firedetections.log'
-logger = logging.getLogger('firedetections')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    try:
-        handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
-    except OSError as exc:
-        logger.addHandler(logging.NullHandler())
-        logging.getLogger(__name__).warning("firedetections file log unavailable at %s: %s", LOG_FILE, exc)
-    else:
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(handler)
+logger = file_logger('firedetections', 'firedetections.log')
 
 # API endpoint for advanced fire detections
 FIRMS_CSV_BASE_TEMPLATE = "https://firms.modaps.eosdis.nasa.gov/usfs/api/area/csv/{key}/{source}/{bbox}/1/"
@@ -316,7 +306,6 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
     merged_features: List[Dict[str, Any]] = []
     per_source_counts: Dict[str, int] = {}
 
-    logger.info('Fetching FIRMS detections from CSV area endpoint')
     for source in FIRMS_CSV_SOURCES:
         source_url = FIRMS_CSV_BASE_TEMPLATE.format(
             key=modis_key,
@@ -329,7 +318,6 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
             resp.raise_for_status()
             rows = _parse_csv_rows(resp.text)
             per_source_counts[source] = len(rows)
-            logger.info('FIRMS source %s returned %s CSV rows', source, len(rows))
 
             for row in rows:
                 normalized = _normalize_csv_row(row, source)
@@ -338,7 +326,8 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
 
         except requests.exceptions.RequestException as exc:
             per_source_counts[source] = 0
-            logger.error('FIRMS CSV request failed for %s: %s', source, exc)
+            # The map key is part of the URL, and requests' errors quote the URL.
+            logger.error('FIRMS CSV request failed for %s: %s', source, str(exc).replace(modis_key, '[redacted]'))
 
     unique_features: List[Dict[str, Any]] = []
     seen = set()
@@ -350,13 +339,6 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
             continue
         seen.add(key)
         unique_features.append(feature)
-
-    logger.info(
-        'FIRMS merge complete: raw=%s unique=%s duplicates=%s',
-        len(merged_features),
-        len(unique_features),
-        duplicates,
-    )
 
     return {
         'type': 'FeatureCollection',
@@ -402,11 +384,7 @@ def save_detections(data, suffix=''):
                 metadata['fallback_reason'] = 'Fetched dataset contained zero features'
                 data['metadata'] = metadata
 
-                logger.warning(
-                    'Fetched zero features; reusing %s existing features from %s',
-                    len(existing_features),
-                    output_path,
-                )
+                # Normal whenever nothing is burning, so not a warning; main() reports it in the run summary.
         except Exception as e:
             logger.warning(f"Unable to reuse existing detections from {output_path}: {e}")
     
@@ -414,8 +392,6 @@ def save_detections(data, suffix=''):
         with open(output_path, 'w') as f:
             json.dump(data, f, indent=2)
         
-        feature_count = len(data.get('features', []))
-        logger.info(f"Saved {feature_count} fire detection features to {output_path}")
         return str(output_path)
     
     except Exception as e:
@@ -425,30 +401,35 @@ def save_detections(data, suffix=''):
 def main():
     """Main execution function for scheduled runs"""
     run_started_at = datetime.utcnow()
-    logger.info("Starting FIRMS 24h fire detection fetch at %s", run_started_at.isoformat() + 'Z')
-    
+
     mo_data = fetch_firms_24h_detections()
     output_path = save_detections(mo_data, suffix='_missouri')
-    
+
     mo_count = len(mo_data.get('features', []))
     metadata = mo_data.get('metadata', {}) if isinstance(mo_data, dict) else {}
-    fetched_at = metadata.get('fetched_at', 'unknown')
+    run_duration_sec = (datetime.utcnow() - run_started_at).total_seconds()
 
-    run_finished_at = datetime.utcnow()
-    run_duration_sec = (run_finished_at - run_started_at).total_seconds()
+    # One line per poll: what each FIRMS product returned and what was kept.
+    by_source = ' '.join(f'{source}={count}' for source, count in (metadata.get('product_counts') or {}).items())
+    if not output_path:
+        outcome = 'NOT saved (see error above)'
+    elif metadata.get('used_previous_features'):  # set by save_detections on this same metadata dict
+        outcome = f"none fetched; kept the previous {metadata.get('previous_feature_count')}"
+    else:
+        outcome = f'saved {mo_count}'
     logger.info(
-        'Run finished at %s | fetched_at=%s | missouri_detections=%s | output=%s | duration_seconds=%.2f',
-        run_finished_at.isoformat() + 'Z',
-        fetched_at,
+        'FIRMS poll: %s Missouri detections (%s, %s duplicates dropped); %s in %.1fs',
         mo_count,
-        output_path or 'save_failed',
+        by_source or 'no products fetched',
+        metadata.get('duplicates_removed', 0),
+        outcome,
         run_duration_sec,
     )
-    
-    print(f"✓ Successfully fetched and saved fire detections")
-    print(f"  - Missouri: {mo_count} detections")
-    
+
     return mo_data
 
 if __name__ == "__main__":
+    from core.logging_setup import configure_logging
+
+    configure_logging()
     main()

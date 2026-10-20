@@ -50,7 +50,7 @@ def flatten_timeseries_data(response_json):
 async def fetchtimeseriesdata():
     global timeseriesdata
     
-    logger.info("Starting timeseries data fetch...")
+    logger.debug("Starting timeseries data fetch...")
     
     try:
         if not SYNOPTIC_API_TOKEN:
@@ -69,7 +69,7 @@ async def fetchtimeseriesdata():
         
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=url_params, timeout=30) as response:
-                logger.info(f"API Response Status: {response.status}")
+                logger.debug(f"API Response Status: {response.status}")
                 response.raise_for_status()
                 response_json = await response.json()
         

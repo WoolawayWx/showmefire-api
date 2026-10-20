@@ -10,10 +10,11 @@ detections, no auth required. Missouri sits entirely in the East CONUS scene.
 import json
 import logging
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import requests
+
+from core.logging_setup import file_logger
 
 # --- Path Configurations ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,12 +26,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_FILE = LOGS_DIR / 'ngfs_ogc_firedetect.log'
-logger = logging.getLogger('ngfs_ogc_firedetect')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+logger = file_logger('ngfs_ogc_firedetect', 'ngfs_ogc_firedetect.log')
 
 # Same Missouri bbox convention used by tools/firedetections.py (FIRMS).
 MISSOURI_BBOX_PARAM = "-95.8,35.9,-89.0,40.7"
@@ -113,14 +109,11 @@ def _archive_raw_capture(all_features, fetch_time):
 def main():
     """Fetch NGFS detections and write missouri_fires.geojson /
     missouri_fires_coords.json in the paths fire_ingest.py already reads."""
-    print(f"Starting NGFS OGC fire detection fetch. Logging to: {LOG_FILE}")
-
     fetch_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         all_features = fetch_missouri_detections()
     except requests.RequestException as exc:
         logger.error(f"Error fetching NGFS OGC detections: {exc}")
-        print(f"Error fetching NGFS OGC detections: {exc}")
         return {"error": str(exc), "features": []}
 
     _archive_raw_capture(all_features, fetch_time)
@@ -148,10 +141,12 @@ def main():
     with open(json_path, 'w') as f:
         json.dump(coords_payload, f, indent=2)
 
-    print(f"Success! Found {len(mo_features)} Missouri NGFS detections.")
-    print(f"  - Files saved in: {DATA_DIR}")
+    logger.info("NGFS poll: %d detections in the bounding box, %d in Missouri", len(all_features), len(mo_features))
     return geojson
 
 
 if __name__ == "__main__":
+    from core.logging_setup import configure_logging
+
+    configure_logging()
     main()

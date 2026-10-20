@@ -133,10 +133,13 @@ ENV DATA_DIR=/app/data
 RUN mkdir -p ${DATA_DIR} && chown -R 1000:1000 ${DATA_DIR}
 VOLUME ["/app/data"]
 
+# Every cron entry goes through scripts/run_job.sh <job-id>, which adds UTC start/finish lines to the
+# log and records the run for the admin Logs page. The job ids are listed in services/log_viewer.py.
+
 # The 12z forecast. It starts polling at 13:00Z and runs once its HRRR f04-f15 files are on AWS (about 13:10Z; see
 # the wait at the top of scripts/forecasts.sh), no earlier than 07:30 Central. This used to be a fixed 30 14.
 RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
-    && echo "00 13 * * * root /bin/bash /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
+    && echo "00 13 * * * root /bin/bash /app/scripts/run_job.sh forecasts_12z /app/scripts/forecasts.sh >> /app/logs/cron.log 2>&1" >> /etc/cron.d/forecasts \
     && echo "" >> /etc/cron.d/forecasts \
     && chmod 0644 /etc/cron.d/forecasts
 
@@ -145,31 +148,31 @@ RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
 
 # The ensemble fire danger (beta) step, split out of forecasts.sh: it needs REFS (~14:36Z) and HREF (~15:06Z).
 RUN echo "TZ=UTC" > /etc/cron.d/ensemble12z \
-    && echo "00 15 * * * root /bin/bash /app/scripts/ensemble_12z.sh >> /app/logs/cron_ensemble12z.log 2>&1" >> /etc/cron.d/ensemble12z \
+    && echo "00 15 * * * root /bin/bash /app/scripts/run_job.sh ensemble_12z /app/scripts/ensemble_12z.sh >> /app/logs/cron_ensemble12z.log 2>&1" >> /etc/cron.d/ensemble12z \
     && echo "" >> /etc/cron.d/ensemble12z \
     && chmod 0644 /etc/cron.d/ensemble12z
 
 # Begin checking the 09z HRRR f05-f18 window just after 12z. The job itself
 # waits for every required frame and field before forecast generation.
 RUN echo "TZ=UTC" > /etc/cron.d/forecasts09z \
-    && echo "05 12 * * * root /bin/bash /app/scripts/forecasts_09z.sh >> /app/logs/cron09z.log 2>&1" >> /etc/cron.d/forecasts09z \
+    && echo "05 12 * * * root /bin/bash /app/scripts/run_job.sh forecasts_09z /app/scripts/forecasts_09z.sh >> /app/logs/cron09z.log 2>&1" >> /etc/cron.d/forecasts09z \
     && echo "" >> /etc/cron.d/forecasts09z \
     && chmod 0644 /etc/cron.d/forecasts09z
 
 # Verification covers 10:00-21:00 Central. Run at 04:30 UTC on the following
 # UTC day: 22:30 CST / 23:30 CDT, safely after the local observation window.
 RUN echo "TZ=UTC" > /etc/cron.d/validate \
-    && echo "30 04 * * * root /bin/bash /app/scripts/validateForecast.sh >> /app/logs/valForecast.log 2>&1" >> /etc/cron.d/validate \
+    && echo "30 04 * * * root /bin/bash /app/scripts/run_job.sh verification /app/scripts/validateForecast.sh >> /app/logs/valForecast.log 2>&1" >> /etc/cron.d/validate \
     && echo "" >> /etc/cron.d/validate \
     && chmod 0644 /etc/cron.d/validate
 
 RUN echo "TZ=America/Chicago" > /etc/cron.d/createemptymaps \
-    && echo "00 02 * * * root /bin/bash /app/scripts/create_empty_outlook_maps.sh >> /app/logs/create_empty_outlook_maps.log 2>&1" >> /etc/cron.d/createemptymaps \
+    && echo "00 02 * * * root /bin/bash /app/scripts/run_job.sh empty_outlook_maps /app/scripts/create_empty_outlook_maps.sh >> /app/logs/create_empty_outlook_maps.log 2>&1" >> /etc/cron.d/createemptymaps \
     && echo "" >> /etc/cron.d/createemptymaps \
     && chmod 0644 /etc/cron.d/createemptymaps
 
 RUN echo "TZ=UTC" > /etc/cron.d/maps \
-    && echo "*/15 * * * * root /bin/bash /app/scripts/maps.sh >> /app/logs/maps.log 2>&1" >> /etc/cron.d/maps \
+    && echo "*/15 * * * * root /bin/bash /app/scripts/run_job.sh maps /app/scripts/maps.sh >> /app/logs/maps.log 2>&1" >> /etc/cron.d/maps \
     && echo "" >> /etc/cron.d/maps \
     && chmod 0644 /etc/cron.d/maps
 

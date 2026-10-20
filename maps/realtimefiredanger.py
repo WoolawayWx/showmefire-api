@@ -20,7 +20,6 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -35,6 +34,7 @@ from scipy.ndimage import binary_dilation, gaussian_filter
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from core.fire_danger import calculate_fire_danger
 from core.fire_danger import CATEGORY_BINS, CATEGORY_HEX_COLORS, CATEGORY_LABELS, CATEGORY_RGBA_COLORS
+from core.logging_setup import file_logger
 
 import station_plot as sp
 import status_lock
@@ -256,14 +256,7 @@ print(updated_msg)
 print(runtime_msg)
 
 # Set up rotating log handler (max 5MB per file, keep 5 backup files)
-log_file = PROJECT_DIR / 'logs/realtimefiredanger.log'
-log_file.parent.mkdir(exist_ok=True)
-logger = logging.getLogger('realtimefiredanger')
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+logger = file_logger('realtimefiredanger', 'realtimefiredanger.log')
 logger.info(updated_msg)
 logger.info(runtime_msg)
 
