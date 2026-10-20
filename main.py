@@ -99,7 +99,7 @@ from routers import fire_weather_data, map_archive as map_archive_router, soundi
 from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, burn_check, api_keys, api_keys_admin
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
-from core.cors_origins import ORIGIN_REGEX
+from core.cors_origins import ORIGIN_REGEX, origin_allowed
 from core.public_cors import PublicTileCorsMiddleware
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
@@ -374,7 +374,7 @@ app.add_middleware(
 )
 # Added after CORSMiddleware so it runs outside it: public map tiles always answer
 # "Access-Control-Allow-Origin: *" so a CDN cache can never hand out a copy that some site rejects.
-app.add_middleware(PublicTileCorsMiddleware)
+app.add_middleware(PublicTileCorsMiddleware, credentialed_origin=lambda origin: origin in origins or origin_allowed(origin))
 
 class LoginRequest(BaseModel):
     email:str

@@ -16,6 +16,10 @@ def make_app() -> FastAPI:
     def tile():
         return Response(content=b"png", media_type="image/png", headers={"Cache-Control": "public, max-age=60"})
 
+    @app.get("/v1/burn-check")
+    def burn_check():
+        return {"ok": True}
+
     @app.get("/api/private")
     def private():
         return {"ok": True}
@@ -29,7 +33,7 @@ def make_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(PublicTileCorsMiddleware)
+    app.add_middleware(PublicTileCorsMiddleware, credentialed_origin=lambda o: o == "https://showmefire.org")
     return app
 
 
@@ -45,6 +49,23 @@ class PublicTileCorsTests(unittest.TestCase):
             self.assertEqual(r.headers["access-control-allow-origin"], "*", origin)
             self.assertNotIn("access-control-allow-credentials", r.headers, origin)
             self.assertNotIn("origin", r.headers.get("vary", "").lower(), origin)
+
+    def test_burn_check_echoes_a_trusted_origin_so_credentialed_requests_work(self):
+        trusted = {"Origin": "https://showmefire.org"}
+        r = self.client.get("/v1/burn-check", headers=trusted)
+        self.assertEqual(r.headers["access-control-allow-origin"], "https://showmefire.org")
+        self.assertEqual(r.headers["access-control-allow-credentials"], "true")
+        r = self.client.options("/v1/burn-check", headers={**trusted, "Access-Control-Request-Method": "GET"})
+        self.assertEqual((r.status_code, r.headers["access-control-allow-origin"]), (200, "https://showmefire.org"))
+
+    def test_burn_check_is_open_to_other_sites_without_credentials(self):
+        other = {"Origin": "https://agency.example"}
+        r = self.client.get("/v1/burn-check", headers=other)
+        self.assertEqual(r.headers["access-control-allow-origin"], "*")
+        self.assertNotIn("access-control-allow-credentials", r.headers)
+        r = self.client.options("/v1/burn-check", headers={**other, "Access-Control-Request-Method": "GET",
+                                                           "Access-Control-Request-Headers": "content-type"})
+        self.assertEqual((r.status_code, r.headers["access-control-allow-origin"]), (204, "*"))
 
     def test_every_caller_gets_the_same_cacheable_response(self):
         a = self.client.get("/tiles/cog/tiles/1/0/0.png")

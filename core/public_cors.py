@@ -13,7 +13,7 @@ Tiles are public data and are fetched without cookies, so they can safely say ``
 response, with or without an ``Origin`` header. This middleware must be added **after** the
 ``CORSMiddleware`` so that it runs outside it and has the last word.
 """
-from typing import Iterable
+from typing import Callable, Iterable, Optional
 
 from starlette.datastructures import MutableHeaders
 from starlette.responses import Response
@@ -21,15 +21,28 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Map tiles, and the public burn check (other agencies call it from their own pages, with no credentials).
 DEFAULT_PREFIXES = ("/tiles/", "/v1/burn-check")
+# Tiles always answer "*". Everything else here (the burn check) is not shared by caches, so a caller whose origin the API
+# already trusts is left to CORSMiddleware: our own sites send every API request with credentials, and a browser rejects
+# "*" on a credentialed request.
+ALWAYS_WILDCARD = ("/tiles/",)
 
 
 class PublicTileCorsMiddleware:
-    def __init__(self, app: ASGIApp, prefixes: Iterable[str] = DEFAULT_PREFIXES) -> None:
+    def __init__(self, app: ASGIApp, prefixes: Iterable[str] = DEFAULT_PREFIXES,
+                 credentialed_origin: Optional[Callable[[str], bool]] = None) -> None:
         self.app = app
         self.prefixes = tuple(prefixes)
+        self.credentialed_origin = credentialed_origin
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not scope.get("path", "").startswith(self.prefixes):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope["path"]
+        origin = dict(scope.get("headers") or []).get(b"origin", b"").decode("latin-1")
+        if (origin and self.credentialed_origin and self.credentialed_origin(origin)
+                and not path.startswith(ALWAYS_WILDCARD)):
             await self.app(scope, receive, send)
             return
 
