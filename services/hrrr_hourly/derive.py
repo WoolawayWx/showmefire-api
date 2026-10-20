@@ -5,6 +5,7 @@ import numpy as np
 
 from services.fire_weather import hrrr_profiles as hp
 from services.fire_weather import indices as ix
+from services.hrrr_hourly import danger
 
 MS_TO_MPH = ix.MS_TO_MPH
 ESTIMATED_FM_INTERCEPT = 3.0
@@ -42,6 +43,8 @@ def derive_hour(profiles: hp.Profiles, extras: dict[str, np.ndarray]) -> dict[st
         # Espy approximation; adequate for a 3 km display field.
         "lcl_m": np.maximum(125.0 * (p.t2_c - p.td2_c), 0.0),
     })
+    out["fire_danger_est"] = danger.fire_danger_category(
+        out["fuel_moisture_pct"], rh, out["wind_speed_mph"] * danger.MPH_TO_KT)
     if "gust" in extras:
         out["wind_gust_mph"] = extras["gust"] * MS_TO_MPH
     for key, name in (("cape", "cape_jkg"), ("cin", "cin_jkg"), ("pwat", "pwat_mm"), ("cloud", "cloud_cover_pct"),

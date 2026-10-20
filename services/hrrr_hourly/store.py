@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from services.hrrr_hourly import (BY_NAME, ELEMENTS, PRODUCT, SCHEMA_VERSION, cycle_id, root_dir)
+from services.hrrr_hourly import (BY_NAME, ELEMENTS, PRODUCT, SCHEMA_VERSION, cycle_id, live_store, root_dir)
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,12 @@ def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None
 
     path = nc_path(cycle, root)
     if not path.is_file():
-        return None
+        # A cycle still being filled in has no NetCDF copy yet (it is written when the cycle finishes): read the Zarr store.
+        manifest = read_manifest(cycle, root)
+        zarr_dir = Path(root or root_dir()) / cycle / "forecast.zarr"
+        if manifest is None or manifest.get("complete", True) or not zarr_dir.is_dir():
+            return None
+        return live_store.point_series(zarr_dir, manifest, lat, lon, MAX_POINT_DISTANCE_KM)
     with xr.open_dataset(path) as ds:
         glat, glon = ds["latitude"].values, ds["longitude"].values
         dy = np.radians(glat - lat)

@@ -92,6 +92,8 @@ ELEMENTS: tuple[Element, ...] = (
     Element("lapse_rate_c_km", "0-1 km lapse rate", "degC/km", 0.05, "HRRR profile", True,
             cmap="RdYlBu_r", vmin=-6, vmax=12, ticks=(-6, -3, 0, 3, 6, 9.8, 12)),
     Element("haines", "Haines index (low elevation)", "index 2-6", 1, "HRRR 950/850 mb", True, categorical=True),
+    Element("fire_danger_est", "Fire danger (HRRR-only estimate, 0 Low .. 4 Extreme)", "category", 1,
+            "show-me-fire rule on estimated fuel moisture, HRRR RH and wind", True, categorical=True),
     Element("hdw", "Hot-Dry-Windy index", "hPa m/s", 0.5, "HRRR VPD x wind, lowest 50 hPa", True,
             cmap="YlOrRd", vmax=300, ticks=tuple(range(0, 301, 50))),
     Element("temp_f", "2 m temperature", "degF", 0.1, "HRRR TMP 2 m", cmap="RdYlBu_r", vmin=-10, vmax=110,

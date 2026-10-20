@@ -34,6 +34,7 @@ STAFF_ALERT_TYPES: dict[str, str] = {
     "incident_feedback": "Fire incident feedback",
     "site_feedback": "Site feedback",
     "system_issue": "System / API error alerts",
+    "api_key_request": "API key requests",
 }
 DISCORD_EVENT_TIMEOUT_SEC = float(os.getenv("DISCORD_EVENT_TIMEOUT_SEC", "10"))
 

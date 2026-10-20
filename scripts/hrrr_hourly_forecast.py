@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build the hour-by-hour HRRR product for an HRRR cycle (see services/hrrr_hourly).
 
-    scripts/hrrr_hourly_forecast.py --auto            scheduler tick: newest hourly cycle that is ready and not built
+    scripts/hrrr_hourly_forecast.py --auto            scheduler tick: add each newly published hour of the newest cycle to the
+                                                      product and publish it (services/hrrr_hourly/progressive.py);
+                                                      SMF_HRRR_HOURLY_PROGRESSIVE=0 builds whole cycles after f18 instead
     scripts/hrrr_hourly_forecast.py --cycle 20261016  build that day's 12z cycle (add --force to rebuild)
     scripts/hrrr_hourly_forecast.py --cycle 2026101614  build the 14z cycle of that day
     scripts/hrrr_hourly_forecast.py --publish 20261016  upload an already built 12z cycle to the CDN (no rebuild)
@@ -29,7 +31,7 @@ if "--prefetch" in sys.argv:
 
 from dotenv import load_dotenv  # noqa: E402
 
-from services.hrrr_hourly import CYCLE_HOUR, cycle_id, job, publish, root_dir  # noqa: E402
+from services.hrrr_hourly import CYCLE_HOUR, cycle_id, job, progressive, publish, root_dir  # noqa: E402
 
 
 def _parse_cycle(text: str) -> datetime:
@@ -46,6 +48,11 @@ def _prefetch(cycle_time, hours) -> int:
     from services.hrrr_hourly import fetch
 
     cycle_time = cycle_time or fetch.latest_cycle(datetime.now(timezone.utc), CYCLE_HOUR)
+    if progressive.enabled():
+        # The scheduler's progressive build now does this work every few minutes (and builds the shared cache itself); a
+        # leftover cron entry just makes one quick pass instead of holding the build lock while it polls.
+        print(json.dumps(progressive.advance(hours=hours, candidates=[cycle_time])))
+        return 0
     needed = hrrr_shared_cache.required_hours()
     order = [*needed, *(hour for hour in hours if hour not in needed)]   # the forecast's hours first
     state = {"built": False}
@@ -95,7 +102,10 @@ def main(argv=None) -> int:
         if hasattr(os, "nice"):
             os.nice(19)
         return _prefetch(cycle_time, hours)
-    result = job.run_auto(force=args.force or bool(args.cycle), cycle_time=cycle_time, hours=hours)
+    if args.auto and not args.cycle and not args.force and progressive.enabled():
+        result = progressive.advance(hours=hours)
+    else:
+        result = job.run_auto(force=args.force or bool(args.cycle), cycle_time=cycle_time, hours=hours)
     print(json.dumps(result))
     return 0
 

@@ -18,6 +18,9 @@ datasets/<dataset>/runs/<run>/...           the run's files (HRRR: forecast.zarr
   newest run is never deleted.
 * Publishing is best effort. With no R2 credentials, or if R2 fails, the build still completes and the API still serves
   every run; the viewer falls back to the API for anything the CDN does not have.
+* Two datasets use it: `hrrr-hourly` and `hrrr-fire-danger-peak` (the peak fire danger estimate). Both are published **while the run is
+  being built** (`publish_update`): each new chunk once (cached for a year), a manifest that changes (cached for a minute until the run
+  is `complete`), and a `runs.json` row with `ready: false` until enough of the run is in to be the dataset's latest.
 * Not on the CDN: the NetCDF copy (large; the R2 archive already picks it up, `archive_store.py` source `hrrr_hourly`)
   and `/hrrr-hourly/point` and `/status`, which the API computes.
 

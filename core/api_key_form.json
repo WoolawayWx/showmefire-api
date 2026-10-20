@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "title": "Request a Burn Check API key",
+  "intro": "Keys give approved agencies and developers higher rate limits for the Burn Check API. Tell us who you are and how you plan to use it. A staff member reviews every request, and we email your key when it is approved.",
+  "submit_label": "Send request",
+  "success_message": "Thank you. Your request was received and a staff member will review it. We will email you at the address you gave when there is a decision.",
+  "_how_to_edit": "To add or change a question, edit the `fields` list below and deploy; nothing else needs to change. The website draws this form from it, the API validates against it, and staff see every answer (with the question's label as it was when the request was sent) on the admin page. Field keys: id (unique, letters/digits/underscore), label, type (text, email, tel, url, textarea, select, radio, checkbox, number), required, help, placeholder, max_length (text/textarea), options [{value, label}] (select/radio), min/max (number), section (heading to group fields), show_if {field, equals} (only ask when another answer matches). The `name`, `email` and `agency` ids must stay: they are used for the review list and the emails.",
+  "fields": [
+    {"id": "name", "label": "Your full name", "type": "text", "required": true, "section": "About you", "max_length": 120, "autocomplete": "name"},
+    {"id": "email", "label": "Email address", "type": "email", "required": true, "section": "About you", "max_length": 200, "autocomplete": "email",
+     "help": "We send your key here, so use an address you check."},
+    {"id": "phone", "label": "Phone number", "type": "tel", "required": false, "section": "About you", "max_length": 40, "autocomplete": "tel",
+     "help": "Optional. Only used if we need to reach you about your request."},
+    {"id": "role", "label": "Your role or title", "type": "text", "required": false, "section": "About you", "max_length": 120, "placeholder": "Fire chief, GIS analyst, web developer..."},
+
+    {"id": "agency", "label": "Agency or organization", "type": "text", "required": true, "section": "Your organization", "max_length": 200},
+    {"id": "agency_type", "label": "Type of organization", "type": "select", "required": true, "section": "Your organization",
+     "options": [
+       {"value": "fire", "label": "Fire department or fire district"},
+       {"value": "emergency_management", "label": "Emergency management"},
+       {"value": "public_safety", "label": "Law enforcement, EMS or other public safety"},
+       {"value": "government", "label": "Other local, state or federal government"},
+       {"value": "school", "label": "School or university"},
+       {"value": "nonprofit", "label": "Non-profit or community organization"},
+       {"value": "business", "label": "Business or commercial use"},
+       {"value": "personal", "label": "Personal or hobby project"},
+       {"value": "other", "label": "Other"}
+     ]},
+    {"id": "website", "label": "Organization website", "type": "url", "required": false, "section": "Your organization", "max_length": 300, "placeholder": "https://"},
+
+    {"id": "reason", "label": "Why do you want an API key?", "type": "textarea", "required": true, "section": "How you will use it", "max_length": 2000,
+     "help": "What problem are you solving? Who will see the results?"},
+    {"id": "plan", "label": "How do you plan to use Burn Check?", "type": "textarea", "required": true, "section": "How you will use it", "max_length": 2000,
+     "help": "Where will it appear (website, app, dispatch screen, report), and how will you show the disclaimer and the answer to people?"},
+    {"id": "integration", "label": "How will you connect to it?", "type": "select", "required": true, "section": "How you will use it",
+     "options": [
+       {"value": "embed", "label": "Embed it in a web page (iframe)"},
+       {"value": "api_server", "label": "Call the API from our server"},
+       {"value": "api_browser", "label": "Call the API from a web page or app"},
+       {"value": "other", "label": "Something else"}
+     ]},
+    {"id": "volume", "label": "About how many checks a day?", "type": "select", "required": false, "section": "How you will use it",
+     "options": [
+       {"value": "under_100", "label": "Under 100"},
+       {"value": "100_1000", "label": "100 to 1,000"},
+       {"value": "1000_10000", "label": "1,000 to 10,000"},
+       {"value": "over_10000", "label": "More than 10,000"},
+       {"value": "unsure", "label": "Not sure yet"}
+     ]},
+
+    {"id": "agree_terms", "label": "I have read and agree to the Burn Check terms of use and disclaimer. I understand that Burn Check is not a burn permit or a guarantee, and that Show Me Fire is not responsible for what happens when it is used.",
+     "type": "checkbox", "required": true, "section": "Agreement", "link": {"label": "Read the terms", "href": "/tools/burn-check-api#terms"}}
+  ]
+}

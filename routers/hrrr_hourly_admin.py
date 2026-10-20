@@ -87,6 +87,7 @@ def get_coverage(hours: int = Query(72, ge=6, le=168), _admin: str = Depends(req
             "cycle": cycle, "cycle_time_utc": cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"), "hour_utc": cycle_time.hour,
             "enabled": cycle_time.hour in enabled, "built": manifest is not None,
             "partial": bool(manifest and manifest.get("missing_hours")),
+            "building": bool(manifest and not manifest.get("complete", True)),
             "runtime_sec": (manifest or {}).get("runtime_sec")})
     return {"cycles": cycles, "enabled_cycle_hours": sorted(enabled)}
 

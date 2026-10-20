@@ -46,9 +46,14 @@ def cycle_ready(run: datetime, last_hour: int, head: Callable[[str], int] | None
 EARLIEST_READY = timedelta(hours=1, minutes=5)
 
 
+# HRRR's first forecast hour (f00) is published about 51 minutes after the cycle (measured on AWS).
+FIRST_HOUR_LAG = timedelta(minutes=45)
+
+
 def cycle_candidates(now: Optional[datetime] = None, lookback: int = 3,
-                     hours: Optional[Iterable[int]] = None) -> list[datetime]:
-    """Cycles that could be fully published by `now`, newest first.
+                     hours: Optional[Iterable[int]] = None, earliest: timedelta = EARLIEST_READY) -> list[datetime]:
+    """Cycles that could be fully published by `now` (`earliest` after the cycle), newest first. Pass FIRST_HOUR_LAG for the
+    cycles whose first hour could be out, to build them as their hours arrive.
 
     The newest enabled cycle that is old enough to be ready, then `lookback` earlier enabled ones: if the builder falls
     behind, older cycles are skipped rather than built long after they stopped being current. `hours` (UTC) restricts
@@ -57,7 +62,7 @@ def cycle_candidates(now: Optional[datetime] = None, lookback: int = 3,
 
     allowed = set(hours) if hours is not None else set(enabled_cycle_hours())
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    cycle = (now - EARLIEST_READY).replace(minute=0, second=0, microsecond=0)
+    cycle = (now - earliest).replace(minute=0, second=0, microsecond=0)
     found: list[datetime] = []
     for _ in range(24 * 3):                       # never look back more than three days
         if cycle.hour in allowed:

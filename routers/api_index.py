@@ -63,6 +63,12 @@ _ROUTES: List[tuple] = [
      "Hourly series of every element at the nearest grid cell (30/min).", "cycle; lat; lon", "public"),
     ("GET", "/hrrr-hourly/runs/{cycle}/image/{element}/{hour}", "HRRR hourly forecast",
      "Map image (PNG) of one element for one forecast hour.", "cycle; element; hour 0-18", "public"),
+    ("GET", "/v1/burn-check", "Burn check",
+     "Burn screening for a Missouri location: Do not burn / Use extreme caution / Conditions look okay, with the reasons, the "
+     "county burn ban, Red Flag alerts, current conditions, today's hourly outlook and the disclaimer. A screening aid, not a "
+     "burn permit or a guarantee; Show Me Fire is not responsible for any outcome. 20/min.", "lat + lon, or address", "public"),
+    ("GET", "/v1/burn-check/geocode", "Burn check",
+     "Missouri candidates for an address, place or 'lat, lon' (12/min).", "q", "public"),
 ]
 
 

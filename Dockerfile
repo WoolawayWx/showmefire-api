@@ -140,13 +140,8 @@ RUN echo "TZ=UTC" > /etc/cron.d/forecasts \
     && echo "" >> /etc/cron.d/forecasts \
     && chmod 0644 /etc/cron.d/forecasts
 
-# Process each hour of the 12z HRRR run as it is published (f00 is out about 12:51Z, f18 about 13:14Z), at the lowest
-# priority, so the hourly product's later build only has to write the store. See job.prefetch_cycle. The script
-# lowers its own priority and waits per hour, so a late run just starts later.
-RUN echo "TZ=UTC" > /etc/cron.d/hrrrprefetch \
-    && echo "45 12 * * * root cd /app && /opt/venv/bin/python /app/scripts/hrrr_hourly_forecast.py --prefetch >> /app/logs/cron_hrrr_prefetch.log 2>&1" >> /etc/cron.d/hrrrprefetch \
-    && echo "" >> /etc/cron.d/hrrrprefetch \
-    && chmod 0644 /etc/cron.d/hrrrprefetch
+# (The 12:45Z "--prefetch" cron that used to be here is gone: the scheduler's progressive hourly build processes each HRRR
+# hour as it posts, and assembles the daily forecast's shared HRRR cache itself. See services/hrrr_hourly/progressive.py.)
 
 # The ensemble fire danger (beta) step, split out of forecasts.sh: it needs REFS (~14:36Z) and HREF (~15:06Z).
 RUN echo "TZ=UTC" > /etc/cron.d/ensemble12z \

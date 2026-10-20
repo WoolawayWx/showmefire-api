@@ -21,7 +21,9 @@ def run_summary(manifest: dict) -> dict:
     return {"id": manifest["cycle"], "cycle": manifest["cycle"], "label": manifest.get("label"),
             "cycle_time_utc": manifest.get("cycle_time_utc"), "issued_at_utc": manifest.get("issued_at_utc"),
             "forecast_hours": manifest.get("forecast_hours"), "missing_hours": manifest.get("missing_hours"),
-            "variables": len(manifest.get("variables", {})), "time_utc": manifest["cycle_time_utc"]}
+            "variables": len(manifest.get("variables", {})), "time_utc": manifest["cycle_time_utc"],
+            "complete": manifest.get("complete", True), "pending_hours": manifest.get("pending_hours", []),
+            "hours_expected": manifest.get("hours_expected")}
 
 
 def try_publish_cycle(cycle: str, root: Optional[Path] = None, client=None) -> Optional[dict]:

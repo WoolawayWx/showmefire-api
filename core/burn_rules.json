@@ -1,0 +1,20 @@
+{
+  "version": "2026-10-20.1",
+  "note": "Show Me Fire's own conservative screening thresholds. They are not official guidance from any fire agency, are not a burn permit, and are not a promise that burning is safe. Edit here; the version is returned with every answer.",
+  "not_safe": {
+    "wind_mph_at_least": 20,
+    "gust_mph_at_least": 25,
+    "rh_pct_below": 25,
+    "fire_danger_at_least": 2
+  },
+  "caution": {
+    "wind_mph_at_least": 10,
+    "gust_mph_at_least": 15,
+    "rh_pct_below": 35,
+    "fire_danger_at_least": 1,
+    "temp_f_at_least": 90
+  },
+  "lookahead_not_safe_hours": 3,
+  "day_ends_local_hour": 21,
+  "max_age_hours": {"current": 3, "outlook": 8, "alerts_minutes": 30}
+}

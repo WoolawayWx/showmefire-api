@@ -17,7 +17,7 @@ from typing import Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 
-DISCORD_STAFF_ALERT_TYPES_DEFAULT = "burn_ban,fire_report,incident_feedback,site_feedback,system_issue"
+DISCORD_STAFF_ALERT_TYPES_DEFAULT = "burn_ban,fire_report,incident_feedback,site_feedback,system_issue,api_key_request"
 
 
 def _ensure_discord_settings_table(cursor: sqlite3.Cursor) -> None:

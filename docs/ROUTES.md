@@ -52,6 +52,26 @@ Auth column: `public` = no credentials; `admin` = `require_admin` dependency (ad
 | GET | `/arcgis/rest/services/{service}/FeatureServer/{layer_id}` | public |  | `feature_layer` |  |
 | GET,POST | `/arcgis/rest/services/{service}/FeatureServer/{layer_id}/query` | public |  | `query_layer` |  |
 
+## api_keys
+
+| Method | Path | Auth | Limit | Handler | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/v1/api-keys/form` | public | 60/min (api_key_form) | `get_form` |  |
+| POST | `/v1/api-keys/requests` | public | 10/min (api_key_request) | `submit_request` |  |
+
+## api_keys_admin
+
+| Method | Path | Auth | Limit | Handler | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/admin/api-key-requests/keys` | admin |  | `list_keys` |  |
+| POST | `/admin/api-key-requests/keys/{key_id}/revoke` | admin |  | `revoke` |  |
+| POST | `/admin/api-key-requests/keys/{key_id}/rotate` | admin |  | `rotate` |  |
+| GET | `/admin/api-key-requests/requests` | admin |  | `list_requests` |  |
+| GET | `/admin/api-key-requests/requests/{request_id}` | admin |  | `get_request` |  |
+| POST | `/admin/api-key-requests/requests/{request_id}/approve` | admin |  | `approve` |  |
+| POST | `/admin/api-key-requests/requests/{request_id}/deny` | admin |  | `deny` |  |
+| GET | `/admin/api-key-requests/summary` | admin |  | `summary` |  |
+
 ## archive_admin
 
 | Method | Path | Auth | Limit | Handler | Notes |
@@ -115,6 +135,14 @@ Auth column: `public` = no credentials; `admin` = `require_admin` dependency (ad
 | GET | `/burn-bans/history` | public |  | `list_public_burn_ban_history` | alias |
 | POST | `/burn-bans/submissions` | public |  | `submit_burn_ban` | alias |
 | POST | `/burn-bans/submissions/{submission_id}/proof` | public |  | `upload_burn_ban_proof` | alias |
+
+## burn_check
+
+| Method | Path | Auth | Limit | Handler | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/v1/burn-check` | public | 20/min (burn_check) | `burn_check_for_location` |  |
+| GET | `/v1/burn-check/disclaimer` | public | 20/min (burn_check) | `get_disclaimer` |  |
+| GET | `/v1/burn-check/geocode` | public | 12/min (burn_check_geocode) | `geocode_address` |  |
 
 ## conditions
 
@@ -498,6 +526,16 @@ Auth column: `public` = no credentials; `admin` = `require_admin` dependency (ad
 | DELETE | `/api/admin/home-video/upload` | admin |  | `admin_delete_home_video_upload` |  |
 | POST | `/api/admin/home-video/upload` | admin |  | `admin_upload_home_video` |  |
 | GET | `/api/home-video` | public |  | `public_home_video` |  |
+
+## hrrr_fire_danger_peak
+
+| Method | Path | Auth | Limit | Handler | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GET | `/hrrr-fire-danger-peak/runs` | public | 60/min (hrrr_peak) | `list_runs` |  |
+| GET | `/hrrr-fire-danger-peak/runs/{cycle}` | public | 60/min (hrrr_peak) | `get_manifest` |  |
+| GET | `/hrrr-fire-danger-peak/runs/{cycle}/point` | public | 30/min (hrrr_peak_point) | `get_point` |  |
+| GET | `/hrrr-fire-danger-peak/runs/{cycle}/zarr/{path:path}` | public | 600/min (hrrr_peak_chunks) | `get_zarr_file` |  |
+| GET | `/hrrr-fire-danger-peak/status` | public | 120/min (hrrr_peak_status) | `get_status` |  |
 
 ## hrrr_hourly
 

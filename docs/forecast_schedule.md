@@ -8,10 +8,42 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 | Time | What | Where |
 |---|---|---|
 | 12:05 | 09z forecast starts polling, then runs (holds the forecast lock while it runs) | `scripts/forecasts_09z.sh` |
-| 12:45 | **Prefetch**: process each 12z hour as HRRR publishes it, lowest priority | `scripts/hrrr_hourly_forecast.py --prefetch` |
 | 13:00 | **12z forecast** starts polling; runs once f04-f15 are on AWS (about 13:10Z) and it is at least 07:30 Central | `scripts/forecasts.sh` |
 | 15:00 | **Ensemble (beta)**, needs REFS (~14:36Z) and HREF (~15:06Z) | `scripts/ensemble_12z.sh` |
-| every 10 min, all day | hourly product build + CDN publish for the newest ready cycle (the 12z one after the forecast is done) | APScheduler `hrrr_hourly_forecast` |
+| every 3 min, all day | **progressive hourly build**: add each newly published HRRR hour of the newest cycle to the product and publish it to the CDN (the peak fire danger product too) | APScheduler `hrrr_hourly_forecast` |
+
+## Progressive build: each hour is shown as soon as it is processed
+
+`services/hrrr_hourly/progressive.py`. Each tick (`scripts/hrrr_hourly_forecast.py --auto`) looks at the newest cycles (from 45 minutes
+after the cycle, when f00 is about to post) and, for the newest one with work, processes every hour HRRR has published and that is not
+done yet (fetch, derive, save a work file, as the one-shot build did). After **every** hour it:
+
+* writes that hour's chunk into `<cycle>/forecast.zarr`, which was created at full length (f00-f18) with every array empty, so the
+  metadata never changes and only new chunk files appear (`live_store.py`);
+* rewrites `manifest.json`: `forecast_hours` (the hours in so far), `pending_hours`, `complete: false`, `zarr_leads` (the Zarr index
+  of every hour), `revision`;
+* updates the peak fire danger product for the local day the hour belongs to;
+* uploads the new chunk(s) and the manifest to the CDN (`cdn_datasets.publish_update`). A chunk is cached for a year, a manifest
+  for a run still filling in for a minute; the finished run's manifest is re-uploaded with the year-long cache. An upload that fails is
+  queued in `<cycle>/live.json` and goes up with the next hour.
+
+The cycle is only made **latest** (`latest.json` locally and on the CDN) once `SMF_HRRR_HOURLY_LATEST_AFTER_HOURS` (default 6) hours are
+in. Until then it is listed in `runs.json` with `ready: false` and reachable by its id. When all 19 hours are in (or an hour has failed
+3 times, or has not appeared 3 hours after the cycle, `SMF_HRRR_HOURLY_GIVE_UP_HOURS`) the cycle is finished: the NetCDF copy is written,
+the manifest is marked `complete` and the work files are removed. State is all on disk, so a crashed tick carries on at the next one.
+
+No longer waits for the daily forecast: it runs alongside it (it still waits for the 15-minute maps and for free memory and disk).
+`SMF_HRRR_HOURLY_PROGRESSIVE=0` goes back to building whole cycles after f18 (`job.run_auto`); `--cycle` builds are always one-shot.
+
+## Peak fire danger product (estimate)
+
+`services/hrrr_hourly/peak.py`, dataset `hrrr-fire-danger-peak` on the CDN, `/hrrr-fire-danger-peak/...` on the API. For each local day an
+HRRR run reaches at least 3 hours of the 10 AM - 9 PM Central window of: the peak fire danger (maximum over the window), the hour it first
+happens, minimum RH and fuel moisture, maximum wind, gust, temperature and HDW. The same peak logic as the daily forecast, but an
+**HRRR-only estimate**: the rule is applied (`danger.py`, parity-tested against `core.fire_danger.calculate_fire_danger`) to the hourly
+product's estimated fuel moisture (3 + 0.25 x RH), not the RAWS-based fuel moisture the official forecast starts from, and without its snow
+mask, smoothing or green-up adjustment. A day shows the peak so far until all its window hours are in (`volatile_steps` in the manifest).
+The hourly product also has the per-hour `fire_danger_est` layer it is built from. Local files: `data/hrrr_fire_danger_peak/` (`SMF_HRRR_PEAK_DIR`).
 
 ## How the 12z forecast start works
 
@@ -29,15 +61,15 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 * The ensemble step moved to its own cron at 15:00Z (`scripts/ensemble_12z.sh`, same lock, always exits 0) so it still
   gets REFS/HREF and no longer delays publication or the notices.
 
-## Prefetch and the shared cache
+## The shared cache
 
-* `job.prefetch_cycle` (`services/hrrr_hourly/job.py`) waits for each hour's `.idx` files, then does what the build does
-  per hour (fetch, derive, save `.work/<cycle>/f##.npz`) and nothing else: no Zarr, manifest, publish or `status.json`
-  change. The later `--auto` build finds every hour done and only writes the store. It holds `.build.lock`, waits for
-  memory and disk but **not** for the forecast lock, and processes the forecast's hours (f04-f15) first.
+* The 12:45Z prefetch cron is gone: the progressive build (above) saves each hour's work file `.work/<cycle>/f##.npz` as it
+  posts and, once f04-f15 are in, assembles the forecast's cache file. (`--prefetch` still works by hand, or from a leftover
+  cron entry in an old image: it makes one quick progressive pass. With `SMF_HRRR_HOURLY_PROGRESSIVE=0` it is the old
+  polling `job.prefetch_cycle`.)
 * The work files also keep `raw_*` surface fields (2 m T in K, RH, 10 m wind, gust) and `grid_*` projection details; the
   loader drops them so they never reach the Zarr, series or manifest.
-* When f04-f15 are saved the prefetch assembles the forecast's cache file (`services/hrrr_shared_cache.py`):
+* When f04-f15 are saved the progressive build assembles the forecast's cache file (`services/hrrr_shared_cache.py`):
   the four fields above from the work files, precipitation from the identical `:APCP:` FastHerbie call (the forecast
   differences it as a cumulative record, so it is not rebuilt from the 1-hour windows).
 
@@ -46,7 +78,7 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 1. **Comparison mode (default).** The file is written to `cache/hrrr_shared/` and `DailyForecast` downloads its own as
    always. `scripts/compare_hrrr_cache.py` (run from `forecasts.sh`, report only) compares the two and appends a line to
    `data/hrrr_shared_cache_compare.jsonl`; the log says MATCHES or DIFFERS with the reasons.
-2. After a few days of MATCHES, set `FORECAST_USE_SHARED_HRRR=true` in the worker environment. The prefetch then writes
+2. After a few days of MATCHES, set `FORECAST_USE_SHARED_HRRR=true` in the worker environment. The build then writes
    `/app/cache/hrrr/hrrr_<date>_12z_f04-15.nc` (atomically) and `DailyForecast` takes its existing cache-hit path.
    `DailyForecast` refuses a cache that lacks `t2m/r2/u10/v10` or any forecast hour and downloads instead.
 3. Rollback: unset `FORECAST_USE_SHARED_HRRR`. Nothing else depends on it.
@@ -55,7 +87,7 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 
 The hourly viewer product is built for **every** HRRR cycle (24 a day), not just 12z.
 
-* `job.run_auto` runs every 10 minutes (APScheduler, all day). Each tick takes the newest cycle old enough to be ready
+* `progressive.advance` runs every 3 minutes (APScheduler, all day; `job.run_auto` when `SMF_HRRR_HOURLY_PROGRESSIVE=0`). Each tick takes the newest cycle old enough to be ready
   (`fetch.cycle_candidates`: cycle + 1h05m or later; f18 is out about 1h14m after the cycle) plus
   `SMF_HRRR_HOURLY_BACKFILL_CYCLES` (default 3) earlier ones, and builds the newest that is published and not built yet.
   A builder that falls behind therefore skips old cycles instead of building them hours late.
@@ -64,11 +96,11 @@ The hourly viewer product is built for **every** HRRR cycle (24 a day), not just
 * `latest.json` (and so the viewer's "Latest") only ever moves forward, even if a late older cycle finishes after a newer one.
 * Retention: 7 days locally (`SMF_HRRR_HOURLY_KEEP_DAYS`, was 14) and 7 days on the CDN, about 168 runs. The CDN run list is
   capped at 400. Abandoned `.work/<cycle>` folders are removed after 2 days.
-* The early prefetch, the shared cache and the 12:45Z cron remain 12z only.
+* The shared HRRR cache for the daily forecast remains 12z only.
 * The viewer groups its Run menu by local (Central) day.
 
 Rough load at 24 runs a day (estimates; check `timings.json` and the server): about 32 MB of Zarr per run on the CDN
-(about 5.4 GB for 7 days, about 12,000 uploads a day), the NetCDF copies grow `data/hrrr_hourly/nc` and the R2 archive
+(about 5.4 GB for 7 days; progressive publishing makes about 28 chunk uploads per hour plus a few small files, so roughly 14,000 uploads a day, and the peak product adds a few thousand), the NetCDF copies grow `data/hrrr_hourly/nc` and the R2 archive
 (`archive_store.py` source `hrrr_hourly`) by one file per run, and each run downloads roughly 19 hours of HRRR (the code
 comments say about 60 MB per hour, so on the order of 1 GB per run, 25 GB a day). To back down, set `SMF_HRRR_HOURLY_CYCLE_HOURS`
 (for example `0,6,12,18`, or `12` for the old one-a-day) on the backend and restart it; runs already built stay until they age out.
@@ -76,7 +108,7 @@ comments say about 60 MB per hour, so on the order of 1 GB per run, 25 GB a day)
 ## Admin controls (website: Admin > System > HRRR Runs)
 
 * **Which runs are built.** The page edits `data/hrrr_hourly/settings.json` (`services/hrrr_hourly/controls.py`), through
-  `GET/PUT /admin/hrrr-hourly/settings`. The scheduler starts a fresh `--auto` process every 10 minutes and it reads the file,
+  `GET/PUT /admin/hrrr-hourly/settings`. The scheduler starts a fresh `--auto` process every 3 minutes and it reads the file,
   so a change applies within 10 minutes with no restart. Precedence: the saved hours, then `SMF_HRRR_HOURLY_CYCLE_HOURS`, then
   all 24. "Stop overriding" clears the saved hours.
 * **Pause.** Stops new builds from starting (a build already running finishes); the status reads `paused` and the viewer

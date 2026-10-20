@@ -18,7 +18,8 @@ from typing import Iterable
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-DEFAULT_PREFIXES = ("/tiles/",)
+# Map tiles, and the public burn check (other agencies call it from their own pages, with no credentials).
+DEFAULT_PREFIXES = ("/tiles/", "/v1/burn-check")
 
 
 class PublicTileCorsMiddleware:

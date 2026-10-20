@@ -166,8 +166,13 @@ estimated fuel moisture, LCL, CAPE/CIN, PWAT, cloud cover, hourly precip and smo
 forecast: its own directories (`data/hrrr_hourly/`, `images/hrrr_hourly/`), and it never writes to
 `archive/forecasts`, `cache/hrrr`, `images/mo-*`, `gis/` or the station forecast table.
 
-- Job: `scripts/hrrr_hourly_forecast.py --auto` (APScheduler `hrrr_hourly_forecast`, every 10 min, all day). Each tick
-  builds the newest hourly cycle whose f18 is published and that is not built yet, then older ones up to
+- Job: `scripts/hrrr_hourly_forecast.py --auto` (APScheduler `hrrr_hourly_forecast`, every 3 min, all day). It is
+  **progressive** (`services/hrrr_hourly/progressive.py`): each tick adds every newly published hour of the newest hourly cycle
+  to the Zarr store and publishes it to the CDN, so the viewer fills in as HRRR does (f00 about 51 minutes after the cycle); a
+  cycle becomes "latest" once `SMF_HRRR_HOURLY_LATEST_AFTER_HOURS` (6) hours are in. It also builds a peak fire danger
+  **estimate** per local day (`services/hrrr_hourly/peak.py`, `/hrrr-fire-danger-peak`). Details: `docs/forecast_schedule.md`.
+  `SMF_HRRR_HOURLY_PROGRESSIVE=0` goes back to the one-shot build described next: the newest hourly cycle whose f18 is
+  published and that is not built yet, then older ones up to
   `SMF_HRRR_HOURLY_BACKFILL_CYCLES` (default 3) back, so a builder that falls behind skips old runs. Back down with
   `SMF_HRRR_HOURLY_CYCLE_HOURS` (e.g. `0,6,12,18`, or `12`). f18 is out about
   1h14m after a cycle. The **12z** run (the daily forecast's) goes after that forecast: it waits until `status.json`
@@ -179,7 +184,7 @@ forecast: its own directories (`data/hrrr_hourly/`, `images/hrrr_hourly/`), and 
   min), waits for 3 GB of free memory, and refuses to start with under 3 GB of free disk
   (`SMF_HRRR_HOURLY_MIN_MEM_MB`, `SMF_HRRR_HOURLY_MIN_DISK_MB`). The status file shows `phase: paused` and `paused_for`.
 - Schedule: the 12z forecast now starts when its HRRR hours are published (about 13:10Z) instead of at a fixed 14:30Z, an
-  early prefetch (`--prefetch`, 12:45Z) processes each hour as it posts, and the ensemble step runs separately at 15:00Z.
+  progressive hourly build processes each hour as it posts, and the ensemble step runs separately at 15:00Z.
   Details, switches and rollout: `docs/forecast_schedule.md`.
 - Front-end status: `data/hrrr_hourly/status.json`, also `GET /hrrr-hourly/status`. `state` is `waiting_for_hrrr`,
   `waiting_for_forecast`, `building` (`phase` fetching, `hours_done`/`hours_total`), `rendering`, `complete`,
@@ -206,6 +211,29 @@ forecast: its own directories (`data/hrrr_hourly/`, `images/hrrr_hourly/`), and 
   profiles vs. surface extras, per field), derive, cache I/O, series, Zarr, NetCDF, plus `slowest_phase`, the
   slowest hour and a per-hour breakdown. Use it to decide what to optimise.
 - Python: `xr.open_zarr("https://api.showmefire.org/hrrr-hourly/runs/latest/zarr")`. JS: open the same URL with zarrita.
+
+## Burn check (public `/v1/burn-check`)
+
+`services/burn_check/` answers "is it a reasonable time to burn here?" for a Missouri location given as coordinates or an address
+(`GET /v1/burn-check?lat=&lon=` or `?address=`; `/v1/burn-check/geocode?q=` lists the matches). It combines the current RTMA
+conditions, the county burn ban, any Red Flag Warning / Fire Weather Watch, and today's hourly HRRR forecast for the point, screens
+them with the thresholds in `core/burn_rules.json` (edit there; the version is returned with every answer), and returns **Do not
+burn**, **Use extreme caution** or **Conditions look okay** with the reasons. It fails closed: a ban or alert always means "do not
+burn", and anything that could not be checked (old or missing data, an unreadable ban list, a stale alert file) keeps the answer from
+being "okay". The word "safe" is never used. Every response carries the disclaimer (`services/burn_check/disclaimer.py`: not a permit,
+not a guarantee, Show Me Fire is not responsible; have it reviewed by someone qualified before promoting the tool, and bump
+`VERSION` when the wording changes). Addresses go to the US Census geocoder, falling back to OpenStreetMap Nominatim, are cached for
+a day in memory and are never logged or stored. The website tool is `/tools/burn-check`. Tests: `tests/test_burn_check.py`.
+
+**API keys for agencies.** Other agencies apply at `/tools/api-key-request` (public form, Turnstile-protected). The questions live in
+`core/api_key_form.json` (edit that file to add or change a question; the website draws the form from `GET /v1/api-keys/form`, the API
+validates against it, and staff see each answer with the label it had when it was sent). A request is stored in `showmefire.db`, staff get a
+Discord ping (type `api_key_request`, always sent while a staff channel is set) and review it at `/admin/api-keys`: Approve creates a key
+(`smf_...`, stored only as a SHA-256 hash), emails it to the applicant through Resend and shows it once on screen; Deny can email a message.
+Keys raise the per-minute rate limits (default 10x, set per key) and can be revoked or rotated; revocation takes up to a minute to apply
+(`core/rate_limit.py` caches lookups). Email needs `RESEND_API_KEY` and a from address (`API_KEY_EMAIL_FROM`, else the graphics or bulletin one).
+The keys in `API_READ_KEYS` still work. Terms: `docs/burn_check_terms.md`; routes: `routers/api_keys.py`, `routers/api_keys_admin.py`;
+tests: `tests/test_api_keys.py`.
 
 ## Admin sessions
 

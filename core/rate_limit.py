@@ -41,12 +41,66 @@ def _configured_keys() -> list[str]:
     return [k.strip() for k in os.getenv("API_READ_KEYS", "").split(",") if k.strip()]
 
 
-def valid_api_key(request: Request) -> bool:
+def _supplied_key(request: Request) -> str:
     header = request.headers.get("authorization") or ""
-    if not header.lower().startswith("bearer "):
-        return False
-    supplied = header[7:].strip().encode()
-    return any(hmac.compare_digest(supplied, key.encode()) for key in _configured_keys())
+    return header[7:].strip() if header.lower().startswith("bearer ") else ""
+
+
+# Keys issued through the application form (services/api_keys) live in the database. A lookup result is remembered for a minute so
+# a busy client does not cost a query per request; revoking a key therefore takes up to a minute to bite. Uses are counted in memory
+# and written back with each refresh.
+DB_KEY_CACHE_SECONDS = 60
+_db_keys: Dict[str, tuple] = {}
+_db_key_uses: Dict[int, int] = {}
+_db_key_lock = threading.Lock()
+
+
+def _database_key(supplied: str) -> Optional[dict]:
+    now = time.monotonic()
+    with _db_key_lock:
+        cached = _db_keys.get(supplied)
+        if cached and cached[0] > now:
+            row = cached[1]
+            if row:
+                _db_key_uses[row["id"]] = _db_key_uses.get(row["id"], 0) + 1
+            return row
+        if len(_db_keys) > 5000:
+            _db_keys.clear()
+    row = None
+    try:
+        from services.api_keys import store
+
+        row = store.verify_key(supplied)
+        with _db_key_lock:
+            pending = _db_key_uses.pop(row["id"], 0) if row else 0
+        if row:
+            store.touch_key(row["id"], pending + 1)
+    except Exception:  # noqa: BLE001 - a database problem must not take the public API down; the caller is just unkeyed
+        row = None
+    with _db_key_lock:
+        _db_keys[supplied] = (now + DB_KEY_CACHE_SECONDS, row)
+    return row
+
+
+def clear_database_key_cache() -> None:
+    """Forget remembered lookups (after a key is revoked or replaced). Uses not yet written back are kept for the next refresh."""
+    with _db_key_lock:
+        _db_keys.clear()
+
+
+def key_multiplier(request: Request) -> int:
+    """0 for no valid key, otherwise how many times the public limit this caller gets (see KEY_TIER_MULTIPLIER)."""
+    supplied = _supplied_key(request)
+    if not supplied:
+        return 0
+    if any(hmac.compare_digest(supplied.encode(), key.encode()) for key in _configured_keys()):
+        return KEY_TIER_MULTIPLIER
+    row = _database_key(supplied)
+    return int(row["multiplier"]) if row else 0
+
+
+def valid_api_key(request: Request) -> bool:
+    return key_multiplier(request) > 0
 
 
 def is_admin(request: Request) -> bool:
@@ -91,8 +145,9 @@ class RateLimiter:
     def __call__(self, request: Request) -> None:
         if is_admin(request):
             return
-        keyed = valid_api_key(request)
-        limit = self.per_minute * (KEY_TIER_MULTIPLIER if keyed else 1)
+        multiplier = key_multiplier(request)
+        keyed = multiplier > 0
+        limit = self.per_minute * (multiplier if keyed else 1)
         bucket = f"{'key' if keyed else 'ip'}:{client_ip(request)}"
         now = self._clock()
         with self._lock:

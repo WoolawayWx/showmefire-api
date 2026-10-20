@@ -456,7 +456,7 @@ def prefetch_cycle(cycle_time: Optional[datetime] = None, hours=FORECAST_HOURS, 
     cycle_time = cycle_time or fetch.latest_cycle(now, CYCLE_HOUR)
     cycle = cycle_id(cycle_time)
     existing = store.read_manifest(cycle, root)
-    if existing and not existing.get("missing_hours"):
+    if existing and existing.get("complete", True) and not existing.get("missing_hours"):
         return {"action": "skip", "reason": "already built", "cycle": cycle}
     root.mkdir(parents=True, exist_ok=True)
     guard = open(root / ".build.lock", "a+")
@@ -559,7 +559,7 @@ def run_auto(now: Optional[datetime] = None, force: bool = False, cycle_time: Op
     for candidate in candidates:
         cycle = cycle_id(candidate)
         existing = store.read_manifest(cycle, root)
-        if existing and not existing.get("missing_hours") and not force:
+        if existing and existing.get("complete", True) and not existing.get("missing_hours") and not force:
             built = built or cycle
             continue
         reason = None

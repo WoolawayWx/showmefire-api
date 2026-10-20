@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from core.fire_danger import CATEGORY_HEX_COLORS, CATEGORY_LABELS
 from services.hrrr_hourly import BY_NAME, ELEMENTS, Element, cycle_id, images_dir
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ SOURCE = "Data Source: NOAA HRRR (3 km)"
 CATEGORY_CLASSES = {
     "haines": [("2  Very Low", "#1a9850"), ("3  Very Low", "#91cf60"), ("4  Low", "#fee08b"),
                ("5  Moderate", "#fc8d59"), ("6  High", "#d73027")],
+    "fire_danger_est": list(zip(CATEGORY_LABELS, CATEGORY_HEX_COLORS)),
 }
 
 

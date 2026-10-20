@@ -61,8 +61,11 @@ def list_runs():
         manifest = store.read_manifest(cycle) or {}
         runs.append({"cycle": cycle, "label": manifest.get("label"), "cycle_time_utc": manifest.get("cycle_time_utc"),
                      "issued_at_utc": manifest.get("issued_at_utc"), "forecast_hours": manifest.get("forecast_hours"),
-                     "missing_hours": manifest.get("missing_hours"), "variables": len(manifest.get("variables", {}))})
-    return {"latest": runs[0]["cycle"] if runs else None, "runs": runs}
+                     "missing_hours": manifest.get("missing_hours"), "variables": len(manifest.get("variables", {})),
+                     "complete": manifest.get("complete", True), "pending_hours": manifest.get("pending_hours", []),
+                     "hours_expected": manifest.get("hours_expected")})
+    # A run still filling in is listed but is not "latest" until enough of it is in (progressive.LATEST_AFTER_HOURS).
+    return {"latest": store._latest_cycle_id(root_dir()) or next((r["cycle"] for r in runs if r["complete"]), None), "runs": runs}
 
 
 @router.get("/runs/{cycle}", dependencies=[Depends(data_limiter)])
@@ -79,8 +82,10 @@ def get_zarr_file(cycle: str, path: str):
     if base not in target.parents or not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     is_meta = target.name.startswith(".z")
+    # A run that is still being filled in can rewrite a file (the peak product's days), so it is not cached for long.
+    finished = (store.read_manifest(cycle) or {}).get("complete", True)
     return FileResponse(target, media_type="application/json" if is_meta else "application/octet-stream",
-                        headers={"Cache-Control": "public, max-age=300"})
+                        headers={"Cache-Control": "public, max-age=300" if finished else "public, max-age=30"})
 
 
 @router.get("/runs/{cycle}/netcdf", dependencies=[Depends(data_limiter)])
