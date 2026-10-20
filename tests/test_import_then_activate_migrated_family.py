@@ -23,8 +23,9 @@ from models import shadow_bundles
 import routers.model_admin as model_admin
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run(result):
+    # Handlers that do blocking work are plain `def` (FastAPI runs them in a thread); the rest are still coroutines.
+    return asyncio.run(result) if asyncio.iscoroutine(result) else result
 
 
 class ImportThenActivateTests(unittest.TestCase):

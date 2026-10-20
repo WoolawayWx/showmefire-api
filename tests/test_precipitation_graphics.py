@@ -141,3 +141,44 @@ def test_departure_legend_labels_keep_negative_ranges_readable():
     assert graphics._shorten_legend_label("2 to 3") == "2–3"
     assert graphics._shorten_legend_label("Less than -8") == "< -8"
     assert graphics._shorten_legend_label("Greater than or equal to 8") == "≥ 8"
+
+
+def test_scheduled_jobs_render_in_the_process_pool_then_upload(monkeypatch, tmp_path):
+    import asyncio
+
+    from core import executors, scheduler
+
+    outputs = [tmp_path / "mo-precip-1hr.png"]
+    pool_calls, uploads = [], []
+
+    async def fake_pool(func, *args, **kwargs):
+        # The render must hold the grid-job lock so it never shares the pool with an RTMA/spread-rate job.
+        assert executors.get_rtma_job_lock().locked()
+        pool_calls.append((func, args))
+        return outputs
+
+    monkeypatch.setattr(scheduler, "run_in_process_pool_async", fake_pool)
+    monkeypatch.setattr(scheduler, "upload_precipitation_graphics", lambda paths: uploads.append(paths) or ["latest/x"])
+    monkeypatch.setattr(executors, "_rtma_job_lock", None)
+
+    asyncio.run(scheduler.publish_hourly_precipitation_graphics_job())
+    asyncio.run(scheduler.publish_precipitation_graphics_job())
+    assert pool_calls == [(scheduler.render_precipitation_graphics, (graphics.HOURLY_STEMS,)),
+                          (scheduler.render_precipitation_graphics, ())]
+    assert uploads == [outputs, outputs]
+
+
+def test_scheduled_render_failure_uploads_nothing(monkeypatch):
+    import asyncio
+
+    from core import executors, scheduler
+
+    async def failing_pool(func, *args, **kwargs):
+        raise RuntimeError("NOAA unavailable")
+
+    uploads = []
+    monkeypatch.setattr(scheduler, "run_in_process_pool_async", failing_pool)
+    monkeypatch.setattr(scheduler, "upload_precipitation_graphics", lambda paths: uploads.append(paths))
+    monkeypatch.setattr(executors, "_rtma_job_lock", None)
+    asyncio.run(scheduler.publish_hourly_precipitation_graphics_job())  # logs, never raises
+    assert uploads == []

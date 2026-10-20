@@ -33,7 +33,7 @@ HISTORY_FILE = Path(REPORTS_DIR) / "validation_history.json"
 
 
 @router.get("/rainfall/diagnostics")
-async def get_rainfall_verification_diagnostics():
+def get_rainfall_verification_diagnostics():
     """Return the active rainfall/fuel-model verification contract state."""
     return rainfall_diagnostics()
 
@@ -95,11 +95,37 @@ def _report_is_available(entry, fallback_date=None):
     return _report_covers_closed_window({'date': entry.get('date') or fallback_date})
 
 
+def _file_version(path: Path) -> Optional[Tuple[str, int, int]]:
+    """(path, mtime, size), or None for a missing file: what decides whether a cached read of it is still good."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return str(path), stat.st_mtime_ns, stat.st_size
+
+
+# The parsed history as (files key, entries), kept until one of its files changes. Parsing every daily report on every
+# request was the slow part of /history (the report count only grows); listing and stat-ing them is cheap. One tuple,
+# replaced in a single assignment, so a request in another thread never sees a new key with old entries.
+_history_cache: Tuple[Any, List[Dict[str, Any]]] = (None, [])
+
+
 def _load_history() -> List[Dict[str, Any]]:
-    entries = {}
+    """Every day's report entry. Callers only read the entries; the list itself is a fresh copy each call."""
     daily_paths = sorted(Path(REPORTS_DIR).glob('*/validation_summary.json'),
                          key=lambda path: (len(path.parent.name) == 10, str(path)))
     paths = [HISTORY_FILE, *daily_paths]
+    global _history_cache
+    key = tuple(_file_version(path) for path in paths)
+    cached_key, entries = _history_cache
+    if key != cached_key:
+        entries = _parse_history(paths)
+        _history_cache = (key, entries)
+    return list(entries)
+
+
+def _parse_history(paths: List[Path]) -> List[Dict[str, Any]]:
+    entries = {}
     for path in paths:
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -203,6 +229,29 @@ def _rtma_peak_archive_dir() -> Path:
     return Path(GIS_DIR) / "rtma_peak" / "archive"
 
 
+# Statewide peak class per archived GeoTIFF, keyed by (kind, path, mtime, size): an archived day's raster does not change,
+# so /peak-history reads each file once instead of on every request.
+_PEAK_CLASS_CACHE_MAX = 4096
+_peak_class_cache: Dict[Tuple, Optional[int]] = {}
+
+
+def _cached_peak_class(kind: str, path: Path, read) -> Optional[int]:
+    version = _file_version(path)
+    if version is None:
+        return None
+    key = (kind, *version)
+    try:
+        return _peak_class_cache[key]
+    except KeyError:
+        pass
+    # Requests run in threads: keep the value in hand rather than reading it back after another thread may have cleared.
+    value = read(path)
+    if len(_peak_class_cache) >= _PEAK_CLASS_CACHE_MAX:
+        _peak_class_cache.clear()
+    _peak_class_cache[key] = value
+    return value
+
+
 def _max_class_single_band(path: Path) -> Optional[int]:
     """Statewide peak category from a single-band 0-4 (255=nodata) GeoTIFF.
 
@@ -252,7 +301,7 @@ def _max_class_rgba(path: Path, class_colors: Mapping[int, Tuple[int, int, int, 
 
 
 @router.get("/peak-history")
-async def get_peak_verification_history(limit: int = Query(90, ge=1, le=366)):
+def get_peak_verification_history(limit: int = Query(90, ge=1, le=366)):
     """Daily statewide peak fire-danger category: forecasted vs. station-observed vs. RTMA-observed.
 
     Bias is forecast minus observed (matching the sign convention used by
@@ -270,14 +319,20 @@ async def get_peak_verification_history(limit: int = Query(90, ge=1, le=366)):
         if directory.is_dir():
             dates.update(path.stem for path in directory.glob("*.tif"))
 
+    def read_rgba(path):
+        return _max_class_rgba(path, STATION_CLASS_COLORS)
+
+    # Newest first, stopping at `limit`: only the days that will be returned are read.
+    dated = sorted(((_normalize_date(date), date) for date in dates if _normalize_date(date)), reverse=True)
     days = []
-    for date in dates:
-        normalized = _normalize_date(date)
-        if normalized is None or not _report_covers_closed_window({"date": normalized}):
+    for normalized, date in dated:
+        if len(days) >= limit:
+            break
+        if not _report_covers_closed_window({"date": normalized}):
             continue
-        forecast_class = _max_class_single_band(forecast_dir / f"{date}.tif")
-        station_class = _max_class_rgba(station_dir / f"{date}.tif", STATION_CLASS_COLORS)
-        rtma_class = _max_class_single_band(rtma_dir / f"{date}.tif")
+        forecast_class = _cached_peak_class("single", forecast_dir / f"{date}.tif", _max_class_single_band)
+        station_class = _cached_peak_class("rgba", station_dir / f"{date}.tif", read_rgba)
+        rtma_class = _cached_peak_class("single", rtma_dir / f"{date}.tif", _max_class_single_band)
         if forecast_class is None and station_class is None and rtma_class is None:
             continue
         days.append({
@@ -293,8 +348,7 @@ async def get_peak_verification_history(limit: int = Query(90, ge=1, le=366)):
             ),
         })
 
-    days.sort(key=lambda row: row["date"], reverse=True)
-    return {"days": sorted(days[:limit], key=lambda row: row["date"])}
+    return {"days": sorted(days, key=lambda row: row["date"])}
 
 
 def _mae_for(entry: Dict[str, Any], metric_label: str) -> Optional[float]:
@@ -321,7 +375,7 @@ def _rtma_point(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @router.get("/rtma/history")
-async def get_rtma_verification_history(limit: int = Query(90, ge=1, le=366)):
+def get_rtma_verification_history(limit: int = Query(90, ge=1, le=366)):
     """Daily forecast-vs-RTMA and station-vs-RTMA scores next to the station-only MAE."""
     entries = sorted(
         (e for e in _load_history() if _report_is_available(e) and isinstance(e.get("rtma_metrics"), dict)),
@@ -351,7 +405,7 @@ async def get_rtma_verification_history(limit: int = Query(90, ge=1, le=366)):
 
 
 @router.get("/rtma/{date}")
-async def get_rtma_verification_report(date: str):
+def get_rtma_verification_report(date: str):
     """Full RTMA metrics for one date: station-point, station-vs-RTMA, and gridded peak class."""
     summary = _read_summary(date)
     date = summary["date"]
@@ -370,7 +424,7 @@ async def get_rtma_verification_report(date: str):
 
 
 @router.get("/history")
-async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
+def get_verification_history(limit: int = Query(90, ge=1, le=366)):
     history = _load_history()
     history_sorted = sorted((e for e in history if _report_is_available(e)), key=lambda e: e["date"], reverse=True)[:limit]
 
@@ -399,7 +453,7 @@ async def get_verification_history(limit: int = Query(90, ge=1, le=366)):
 
 
 @router.get("/report/{date}")
-async def get_verification_report(date: str):
+def get_verification_report(date: str):
     summary = _read_summary(date)
     date = summary['date']
     if not _report_is_available(summary, date):
@@ -468,7 +522,7 @@ async def get_verification_report(date: str):
     "/report/{date}/comparisons",
     dependencies=[Depends(station_limiter), Depends(require_station_data_access)],
 )
-async def get_verification_comparisons(date: str, station: Optional[str] = None, limit: int = 500):
+def get_verification_comparisons(date: str, station: Optional[str] = None, limit: int = 500):
     """Return canonical hourly forecast/observation pairs for a report date."""
     summary = _read_summary(date)
     date = summary['date']

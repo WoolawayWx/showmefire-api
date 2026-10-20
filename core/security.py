@@ -131,7 +131,7 @@ def require_admin(token: Optional[str] = None) -> str:
     """FastAPI dependency: the current Show Me Fire administrator's email.
 
     Normally authenticates via the admin_access cookie alone -
-    admin_cookie_context (core/admin_session.py), registered as global
+    AdminCookieMiddleware (core/admin_session.py), registered as global
     middleware in main.py, already populates the request-scoped token this
     reads via verify_token() on every request, so an endpoint using this
     dependency does not need to declare its own `token` param at all. The

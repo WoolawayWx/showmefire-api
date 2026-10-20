@@ -16,7 +16,7 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 
@@ -254,8 +254,12 @@ def prune(now: Optional[datetime] = None, days: Optional[int] = None, root: Opti
     return removed
 
 
-def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None) -> dict | None:
-    """Every element's hourly series at the grid cell nearest (lat, lon), read from the NetCDF copy."""
+def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None,
+                 names: Optional[Iterable[str]] = None) -> dict | None:
+    """Every element's hourly series at the grid cell nearest (lat, lon), read from the NetCDF copy.
+
+    `names` limits it to those elements (unknown names are left out): each element read decompresses its whole grid for
+    every lead, so a caller that needs a few (the burn check needs 5 of ~28) should say which."""
     import xarray as xr
 
     path = nc_path(cycle, root)
@@ -265,7 +269,7 @@ def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None
         zarr_dir = Path(root or root_dir()) / cycle / "forecast.zarr"
         if manifest is None or manifest.get("complete", True) or not zarr_dir.is_dir():
             return None
-        return live_store.point_series(zarr_dir, manifest, lat, lon, MAX_POINT_DISTANCE_KM)
+        return live_store.point_series(zarr_dir, manifest, lat, lon, MAX_POINT_DISTANCE_KM, names=names)
     with xr.open_dataset(path) as ds:
         glat, glon = ds["latitude"].values, ds["longitude"].values
         dy = np.radians(glat - lat)
@@ -275,8 +279,12 @@ def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None
         if distance[y, x] > MAX_POINT_DISTANCE_KM:
             return {"error": "outside_grid", "distance_km": round(float(distance[y, x]), 1)}
         series = {}
+        wanted = set(names) if names is not None else None
         for name in ds.data_vars:
-            values = ds[name].values[:, y, x]
+            if wanted is not None and name not in wanted:
+                continue
+            # Index before .values: `.values[:, y, x]` would load the whole grid for every lead to keep one cell.
+            values = ds[name][:, y, x].values
             series[name] = [None if not np.isfinite(v) else round(float(v), 3) for v in values]
         return {"cycle": cycle, "grid_lat": float(glat[y, x]), "grid_lon": float(glon[y, x]),
                 "distance_km": round(float(distance[y, x]), 2),

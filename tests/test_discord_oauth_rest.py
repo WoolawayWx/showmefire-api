@@ -13,8 +13,9 @@ from services import discord_notifier, discord_rest
 ENV = {"DISCORD_CLIENT_ID": "app1", "DISCORD_CLIENT_SECRET": "shh", "DISCORD_BOT_TOKEN": ""}
 
 
-def run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+def run(result):
+    # Handlers that do blocking work are plain `def` (FastAPI runs them in a thread); the rest are still coroutines.
+    return asyncio.new_event_loop().run_until_complete(result) if asyncio.iscoroutine(result) else result
 
 
 class DiscordOAuthTests(unittest.TestCase):

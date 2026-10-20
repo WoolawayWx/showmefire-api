@@ -82,7 +82,7 @@ class BetaVerificationRequest(BaseModel):
 
 
 @router.get("/status")
-async def get_model_status(token: Optional[str] = None):
+def get_model_status(token: Optional[str] = None):
     require_admin(token)
     shadows = {
         "fuel_moisture": fuel_moisture_shadow_diagnostics(),
@@ -132,7 +132,7 @@ async def get_model_status(token: Optional[str] = None):
 
 
 @router.get("/families")
-async def list_model_families(token: Optional[str] = None):
+def list_model_families(token: Optional[str] = None):
     """Every model family this page can show/manage, with which kind it is
     (registry vs guarded-shadow) - the single source the frontend's family
     dropdown is built from, so a new family only needs adding here.
@@ -156,7 +156,7 @@ class ShadowSettingsRequest(BaseModel):
 
 
 @router.get("/{family}/settings")
-async def get_family_settings(family: str, token: Optional[str] = None):
+def get_family_settings(family: str, token: Optional[str] = None):
     """Live, no-restart enable/disable state for a shadow/advisory family -
     see core.database.shadow_model_settings. Registry families
     (fuel_moisture, fuel_moisture_spatial, etc.) and risk_fusion (Phase A,
@@ -171,7 +171,7 @@ async def get_family_settings(family: str, token: Optional[str] = None):
 
 
 @router.post("/{family}/settings")
-async def set_family_settings(family: str, payload: ShadowSettingsRequest, token: Optional[str] = None):
+def set_family_settings(family: str, payload: ShadowSettingsRequest, token: Optional[str] = None):
     email = require_admin(token)
     if family not in shadow_bundles.SHADOW_FAMILIES:
         raise HTTPException(status_code=404, detail=f"{family} has no live enable/disable setting")
@@ -179,7 +179,7 @@ async def set_family_settings(family: str, payload: ShadowSettingsRequest, token
 
 
 @router.get("/schedule")
-async def get_model_schedule(request: Request, token: Optional[str] = None):
+def get_model_schedule(request: Request, token: Optional[str] = None):
     """Read-only introspection of the live APScheduler instance, filtered to
     the curated core.scheduler.MODEL_RELEVANT_JOBS allowlist - no editing
     capability is exposed here by design (see the plan this shipped under)."""
@@ -249,7 +249,7 @@ def _guarded_shadow_versions(family: str) -> dict:
 
 
 @router.get("/{family}/versions")
-async def list_family_versions(family: str, token: Optional[str] = None):
+def list_family_versions(family: str, token: Optional[str] = None):
     require_admin(token)
     if family in REGISTRY_MODEL_TYPES:
         return _registry_summary(family)
@@ -398,7 +398,7 @@ def _registry_action_for_shadow_bundle(family: str, version: str):
 
 
 @router.post("/{family}/activate")
-async def activate_family_version(family: str, payload: ActivateRequest, token: Optional[str] = None):
+def activate_family_version(family: str, payload: ActivateRequest, token: Optional[str] = None):
     """Guarded-shadow families: flips the live active bundle pointer with no
     restart required. Registry families: this IS promotion (stable takes on
     the named beta candidate) - wraps the existing, previously CLI-only
@@ -463,7 +463,7 @@ class RollbackRequest(BaseModel):
 
 
 @router.post("/{family}/rollback")
-async def rollback_family(family: str, payload: RollbackRequest, token: Optional[str] = None):
+def rollback_family(family: str, payload: RollbackRequest, token: Optional[str] = None):
     """Registry families only - wraps the existing, previously CLI-only
     models.versioning.rollback(). A guarded-shadow family "rolls back" by
     activating an older already-installed version through /activate

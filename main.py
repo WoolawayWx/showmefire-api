@@ -101,6 +101,8 @@ from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
 from core.cors_origins import ORIGIN_REGEX, origin_allowed
 from core.public_cors import PublicTileCorsMiddleware
+from core.json_snapshot import snapshot_response
+from starlette.concurrency import run_in_threadpool
 
 IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
 
@@ -380,7 +382,7 @@ class LoginRequest(BaseModel):
     email:str
     password:str
 
-from core.admin_session import admin_cookie_context, set_auth_cookie as _set_auth_cookie
+from core.admin_session import AdminCookieMiddleware, set_auth_cookie as _set_auth_cookie
 
 def _clear_auth_cookie(response: Response, name: str) -> None:
     response.delete_cookie(
@@ -392,11 +394,11 @@ def _clear_auth_cookie(response: Response, name: str) -> None:
         path="/",
     )
 
-app.middleware("http")(admin_cookie_context)
+app.add_middleware(AdminCookieMiddleware)
 
-from core.graphics_session import graphics_cookie_context
+from core.graphics_session import GraphicsCookieMiddleware
 
-app.middleware("http")(graphics_cookie_context)
+app.add_middleware(GraphicsCookieMiddleware)
 
 from core.metrics import MetricsMiddleware, start_persistence, stop_persistence
 from core.server_metrics import start_server_metrics, stop_server_metrics
@@ -432,9 +434,9 @@ def hello():
     return {'message': 'Show Me Fire Weather API', 'status': 'running'}
 
 @app.get('/stations')
-def get_stations():
+def get_stations(request: Request):
     """Get all stations with weather data and metadata combined"""
-    return get_station_data()
+    return snapshot_response("stations", get_station_data(), request)
 
 @app.get('/stations/refresh')
 async def refresh_stations():
@@ -444,29 +446,29 @@ async def refresh_stations():
     return {"message": "Station data refreshed", "last_updated": data["last_updated"]}
 
 @app.get('/stations/buffer')
-async def station_buffer(refresh: bool = False):
+async def station_buffer(request: Request, refresh: bool = False):
     """Neighbor-state stations (same shape as /stations) used only to anchor border interpolation."""
     if refresh or get_buffer_station_data()["stations"] is None:
         await fetch_buffer_stations()
-    return get_buffer_station_data()
+    return await run_in_threadpool(snapshot_response, "stations_buffer", get_buffer_station_data(), request)
 
 @app.get('/stations/precip')
-async def station_precip(refresh: bool = False):
+async def station_precip(request: Request, refresh: bool = False):
     """1h/24h precipitation (inches) for Missouri and neighbor-state stations; 0.0 = sensor reported no rain."""
     if refresh or get_precip_data()["stations"] is None:
         await fetch_station_precip()
-    return get_precip_data()
+    return await run_in_threadpool(snapshot_response, "stations_precip", get_precip_data(), request)
 
 @app.get('/stations/et')
-async def station_et(refresh: bool = False):
+async def station_et(request: Request, refresh: bool = False):
     """Reference ET (inches) at RAWS stations: current hourly rate, rolling 24 h total, peak and low hourly rate."""
     if refresh or get_et_data()["stations"] is None:
         await fetch_station_et()
-    return get_et_data()
+    return await run_in_threadpool(snapshot_response, "stations_et", get_et_data(), request)
 
 @app.get('/stations/timeseries')
-async def timeseries():
-    return get_timeseries_data()
+def timeseries(request: Request):
+    return snapshot_response("stations_timeseries", get_timeseries_data(), request)
 
 @app.get('/stations/timeseries/refresh')
 async def timeseries_refresh():
@@ -608,18 +610,18 @@ async def logout_admin(response: Response):
     return {"success": True, "message": "Logged out"}
 
 @app.get("/api/banner")
-async def get_banner_public():
+def get_banner_public():
     """Get current banner (public endpoint)"""
     # Always load from file for latest value
     return load_banner_config()
 
 @app.get("/api/admin/banner")
-async def get_banner_admin(email: str = Depends(require_admin)):
+def get_banner_admin(email: str = Depends(require_admin)):
     """Get banner data (admin only)"""
     return load_banner_config()
 
 @app.post("/api/admin/banner")
-async def update_banner(banner: BannerData, email: str = Depends(require_admin)):
+def update_banner(banner: BannerData, email: str = Depends(require_admin)):
     """Update banner (admin only)"""
     save_banner_config(banner)
     logger.info(f"Banner updated by {email}: enabled={banner.enabled}, type={banner.type}")
@@ -1332,7 +1334,7 @@ async def cleanup_logs(email: str = Depends(require_admin)):
     return {"success": True, **result}
 
 @app.get("/api/training/latest-stats")
-async def get_latest_training_stats():
+def get_latest_training_stats():
     """Returns the JSON stats from the most recent training folder"""
     reports_dir = REPORTS_DIR
     # Get the most recent date folder
@@ -1502,7 +1504,7 @@ def list_fuel_sensor_readings(site_id: Optional[str] = None, device_id: Optional
 
 
 @app.get("/api/models/history")
-async def get_model_history():
+def get_model_history():
     """
     Get the history of all trained models including archived versions.
     
@@ -1546,7 +1548,7 @@ async def get_model_history():
         raise HTTPException(status_code=500, detail=f"Error retrieving model history: {str(e)}")
 
 @app.get("/api/models/formulas")
-async def get_model_formulas():
+def get_model_formulas():
     """
     Get the formulas and criteria used by the fuel moisture and fire danger models.
     
@@ -1640,7 +1642,7 @@ async def get_model_formulas():
         raise HTTPException(status_code=500, detail=f"Error retrieving model formulas: {str(e)}")
 
 @app.get("/web/issues")
-async def get_issues():
+def get_issues():
     """Get GitHub issues data as JSON"""
     issues_file = Path("data/issues.json")
     if issues_file.exists():
@@ -1658,7 +1660,7 @@ def get_verificationcsv ():
         raise HTTPException(status_code=404, detail="File not found")
     
 @app.get("/get-csv/")
-async def get_csv():
+def get_csv():
     try:
         csv_data = get_verificationcsv()
         return csv_data

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 KT_TO_MPH = 1.15078
+# The only hourly HRRR elements the burn check reads; asking for just these skips decompressing the other ~23.
+OUTLOOK_ELEMENTS = ("temp_f", "rh_pct", "wind_speed_mph", "wind_gust_mph", "fire_danger_est")
 
 
 def county(lat: float, lon: float) -> tuple[Optional[str], Optional[str]]:
@@ -84,7 +86,7 @@ def hourly_outlook(lat: float, lon: float, now: datetime, max_age_hours: float, 
     cycle_time = datetime.strptime(manifest["cycle_time_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     if (now - cycle_time).total_seconds() > max_age_hours * 3600:
         return None
-    point = store.point_series(cycle, lat, lon, root)
+    point = store.point_series(cycle, lat, lon, root, names=OUTLOOK_ELEMENTS)
     if not point or point.get("error"):
         return None
     series = point["series"]

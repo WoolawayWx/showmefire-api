@@ -104,7 +104,7 @@ def _observed_history() -> list[dict]:
 
 
 @router.get("/history")
-async def get_09z_metrics_history(limit: int = Query(default=90, ge=1, le=365)):
+def get_09z_metrics_history(limit: int = Query(default=90, ge=1, le=365)):
     rows = []
     for path in _summary_files()[:limit]:
         summary = _load_json(path)
@@ -120,7 +120,7 @@ async def get_09z_metrics_history(limit: int = Query(default=90, ge=1, le=365)):
 
 
 @router.get("/latest")
-async def get_latest_09z_metrics():
+def get_latest_09z_metrics():
     files = _summary_files()
     if not files:
         raise HTTPException(status_code=404, detail="No 09z comparison metrics are available")
@@ -128,14 +128,14 @@ async def get_latest_09z_metrics():
 
 
 @router.get("/observed/history")
-async def get_09z_observed_history(limit: int = Query(default=90, ge=1, le=365)):
+def get_09z_observed_history(limit: int = Query(default=90, ge=1, le=365)):
     completed = [entry for entry in _observed_history() if _report_covers_closed_window(entry)]
     completed.sort(key=lambda entry: str(entry.get("date", "")), reverse=True)
     return {"dates": [_station_report_public(entry) for entry in completed[:limit]]}
 
 
 @router.get("/observed/{date}")
-async def get_09z_observed_metrics(date: str):
+def get_09z_observed_metrics(date: str):
     safe_date = _validate_date(date)
     summary = _load_json(Path(REPORTS_DIR) / safe_date / "validation_summary_09z.json")
     if not _report_covers_closed_window(summary, safe_date):
@@ -144,7 +144,7 @@ async def get_09z_observed_metrics(date: str):
 
 
 @router.get("/rtma/history")
-async def get_09z_rtma_history(limit: int = Query(default=90, ge=1, le=365)):
+def get_09z_rtma_history(limit: int = Query(default=90, ge=1, le=365)):
     rows = []
     for path in sorted(RTMA_METRICS_DIR.glob("????-??-??.json"), reverse=True):
         summary = _load_json(path)
@@ -156,7 +156,7 @@ async def get_09z_rtma_history(limit: int = Query(default=90, ge=1, le=365)):
 
 
 @router.get("/rtma/{date}")
-async def get_09z_rtma_metrics(date: str):
+def get_09z_rtma_metrics(date: str):
     safe_date = _validate_date(date)
     summary = _load_json(RTMA_METRICS_DIR / f"{safe_date}.json")
     if not _report_covers_closed_window(summary, safe_date):
@@ -165,12 +165,12 @@ async def get_09z_rtma_metrics(date: str):
 
 
 @router.get("/{date}/stations")
-async def get_09z_station_metrics(date: str):
+def get_09z_station_metrics(date: str):
     safe_date = _validate_date(date)
     return _load_json(STATIONS_DIR / f"{safe_date}.geojson")
 
 
 @router.get("/{date}")
-async def get_09z_metrics(date: str):
+def get_09z_metrics(date: str):
     safe_date = _validate_date(date)
     return _load_json(METRICS_DIR / f"{safe_date}.json")

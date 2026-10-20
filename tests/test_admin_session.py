@@ -5,13 +5,13 @@ from unittest.mock import patch
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.testclient import TestClient
 from core import security
-from core.admin_session import admin_cookie_context
+from core.admin_session import AdminCookieMiddleware
 
 
 class AdminSessionTests(unittest.TestCase):
     def setUp(self):
         app = FastAPI()
-        app.middleware('http')(admin_cookie_context)
+        app.add_middleware(AdminCookieMiddleware)
 
         @app.get('/protected')
         def protected(token: str | None = None):
@@ -88,6 +88,52 @@ class AdminSessionTests(unittest.TestCase):
             claims = jwt.get_unverified_claims(security.create_refresh_token({'sub': 'admin@example.com'}))
         remaining = claims['exp'] - datetime.now(timezone.utc).timestamp()
         self.assertAlmostEqual(remaining, 30 * 86400, delta=2)
+
+
+class GraphicsSessionTests(unittest.TestCase):
+    def setUp(self):
+        from core.graphics_session import GraphicsCookieMiddleware
+
+        app = FastAPI()
+        app.add_middleware(GraphicsCookieMiddleware)
+
+        @app.get('/api/graphics/me')
+        def me():
+            payload = security.verify_graphics_token()
+            if not payload:
+                raise HTTPException(401)
+            return {'email': payload['sub'], 'department_id': payload['department_id']}
+
+        @app.get('/api/graphics/stream')
+        async def stream():
+            from fastapi.responses import StreamingResponse
+            return StreamingResponse(iter([b'a', b'b']), media_type='text/plain')
+
+        self.client = TestClient(app)
+        self.cookie_settings = patch.object(security, 'AUTH_COOKIE_SECURE', False)
+        self.cookie_settings.start()
+        self.addCleanup(self.cookie_settings.stop)
+
+    def test_refresh_cookie_renews_access_and_the_route_sees_the_token(self):
+        self.client.cookies.set(security.GRAPHICS_REFRESH_COOKIE_NAME,
+                                security.create_graphics_refresh_token('dept@example.com', 7, 3))
+        response = self.client.get('/api/graphics/me')
+        self.assertEqual(response.json(), {'email': 'dept@example.com', 'department_id': 7})
+        self.assertIn(security.GRAPHICS_ACCESS_COOKIE_NAME, response.headers['set-cookie'])
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+
+    def test_renewed_cookie_is_added_to_a_streaming_response(self):
+        self.client.cookies.set(security.GRAPHICS_REFRESH_COOKIE_NAME,
+                                security.create_graphics_refresh_token('dept@example.com', 7, 3))
+        response = self.client.get('/api/graphics/stream')
+        self.assertEqual(response.text, 'ab')
+        self.assertIn(security.GRAPHICS_ACCESS_COOKIE_NAME, response.headers['set-cookie'])
+
+    def test_no_session_leaves_the_response_alone(self):
+        response = self.client.get('/api/graphics/me')
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn('set-cookie', response.headers)
+        self.assertIsNone(security._graphics_request_token.get())
 
 
 if __name__ == '__main__':

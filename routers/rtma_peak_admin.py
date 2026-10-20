@@ -23,7 +23,7 @@ class RainfallImpactGenerateRequest(BaseModel):
 
 
 @router.get("/status")
-async def rtma_peak_status(date: str, _admin: str = Depends(require_admin)):
+def rtma_peak_status(date: str, _admin: str = Depends(require_admin)):
     from services.rtma_peak import RTMA_PEAK_IMAGE_ARCHIVE_DIR, RTMA_PEAK_ARCHIVE_DIR
     metadata = {}
     try:
@@ -58,7 +58,7 @@ async def generate_rtma_peak_admin(payload: GenerateRequest, email: str = Depend
 
 
 @router.get("/fuel-moisture/status")
-async def fuel_moisture_status(date: str, _admin: str = Depends(require_admin)):
+def fuel_moisture_status(date: str, _admin: str = Depends(require_admin)):
     """Status of the calibrated (RTMA + RAWS) fuel-moisture map for one date.
 
     Generated automatically as part of /generate; there is no separate
@@ -77,7 +77,7 @@ async def fuel_moisture_status(date: str, _admin: str = Depends(require_admin)):
 
 
 @router.get("/rainfall-impact/status")
-async def rainfall_impact_status(date: str, _admin: str = Depends(require_admin)):
+def rainfall_impact_status(date: str, _admin: str = Depends(require_admin)):
     """Status of the trailing-window rainfall-suppression map for one generation date."""
     from services.rtma_peak import RTMA_IMPACT_ARCHIVE_DIR, RTMA_IMPACT_IMAGE_ARCHIVE_DIR
     return {

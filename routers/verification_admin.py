@@ -30,7 +30,7 @@ class RerunRequest(BaseModel):
 
 
 @router.post("/rerun")
-async def rerun_verification(payload: RerunRequest, email: str = Depends(require_admin)):
+def rerun_verification(payload: RerunRequest, email: str = Depends(require_admin)):
     try:
         from maps.observed_peak_history import snapshot_observed_peak_for_date
         from services.rtma_peak import generate_rtma_peak_for_verification

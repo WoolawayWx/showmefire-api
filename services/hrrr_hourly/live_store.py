@@ -102,7 +102,8 @@ def metadata_files(path: Path, element_names: Iterable[str]) -> list[str]:
                   if p.is_file() and (p.name.startswith(".z") or p.parent.name not in elements))
 
 
-def point_series(path: Path, manifest: dict, lat: float, lon: float, max_distance_km: float) -> Optional[dict]:
+def point_series(path: Path, manifest: dict, lat: float, lon: float, max_distance_km: float,
+                 names: Optional[Iterable[str]] = None) -> Optional[dict]:
     """Every element's series at the grid cell nearest (lat, lon), read from the store, for the steps the manifest lists.
     The same answer store.point_series gives from the NetCDF copy; used while a run is still being filled in."""
     import zarr
@@ -118,7 +119,10 @@ def point_series(path: Path, manifest: dict, lat: float, lon: float, max_distanc
     steps = list(manifest.get("zarr_leads") or manifest["forecast_hours"])
     present = list(manifest["forecast_hours"])
     series = {}
+    wanted = set(names) if names is not None else None
     for name, info in manifest["variables"].items():
+        if wanted is not None and name not in wanted:
+            continue
         have = set(info.get("hours_present", present))
         values = []
         for step in present:

@@ -44,9 +44,18 @@ from services.forecast_v1_job import prune_forecast_v1_hot_storage, run_forecast
 from scripts.monitor_model_rollout import monitor_all
 from services.gis_vectors import publish_fire_detections, publish_weather_stations
 from services.spc_graphics_watcher import refresh_spc_graphics_job, refresh_usdm_graphics_job
-from scripts.publish_precipitation_graphics import publish as publish_precipitation_graphics
+from scripts.publish_precipitation_graphics import render as render_precipitation_graphics, upload as upload_precipitation_graphics
 
 logger = logging.getLogger(__name__)
+
+
+async def _render_in_pool(func, *args):
+    """Run a scheduled job's matplotlib/cartopy drawing in the shared process pool instead of a thread of the API
+    process, where it shared the API's CPU and GIL with request handling (the hourly precipitation set is ~9 s of CPU)
+    and grew the API's own memory. Holds the grid-job lock: the precipitation render peaks around 650 MB, about what a
+    grid job takes, and two of those at once have OOM-killed a pool worker before (see get_rtma_job_lock)."""
+    async with get_rtma_job_lock():
+        return await run_in_process_pool_async(func, *args)
 
 # Global storage for RAWS stations
 raws_station_data = {
@@ -199,7 +208,9 @@ async def publish_hourly_precipitation_graphics_job():
     try:
         from maps.precipitation_graphics import HOURLY_STEMS
 
-        published = await asyncio.to_thread(publish_precipitation_graphics, HOURLY_STEMS)
+        # Render everything before uploading, so a source or render error never replaces a published image.
+        outputs = await _render_in_pool(render_precipitation_graphics, HOURLY_STEMS)
+        published = await asyncio.to_thread(upload_precipitation_graphics, outputs)
         logger.info("Hourly precipitation graphics published: %s", published)
     except Exception as error:
         logger.error("Hourly precipitation graphics publish failed: %s", error, exc_info=True)
@@ -214,7 +225,8 @@ async def publish_precipitation_graphics_job():
     silently skipped with no record anywhere.
     """
     try:
-        published = await asyncio.to_thread(publish_precipitation_graphics)
+        outputs = await _render_in_pool(render_precipitation_graphics)
+        published = await asyncio.to_thread(upload_precipitation_graphics, outputs)
         logger.info("Precipitation graphics published: %s", published)
     except Exception as error:
         logger.error("Precipitation graphics publish failed: %s", error, exc_info=True)
@@ -368,7 +380,7 @@ async def ingest_fire_detections_job():
         await asyncio.to_thread(refresh_detection_confidence)
         await asyncio.to_thread(publish_fire_detections)
         from services.fire_incident_graphics import refresh_incident_graphics
-        await asyncio.to_thread(refresh_incident_graphics)
+        await _render_in_pool(refresh_incident_graphics)
         from services.incident_shape_extractor import refresh_incident_shapes
         await asyncio.to_thread(refresh_incident_shapes)
         from services.fire_confidence import refresh_confidence_shapes
@@ -471,7 +483,7 @@ async def refresh_burn_ban_static_map_job():
     try:
         from services.burn_ban_map import generate_burn_ban_map
 
-        result = await asyncio.to_thread(generate_burn_ban_map)
+        result = await _render_in_pool(generate_burn_ban_map)
         logger.info("Daily burn-ban static-map refresh: %s", result)
     except Exception as error:
         logger.error("Daily burn-ban static-map refresh failed: %s", error, exc_info=True)

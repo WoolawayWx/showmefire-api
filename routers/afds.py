@@ -10,7 +10,7 @@ router = APIRouter(tags=["afds"])
 
 
 @router.get("/afds/{office}")
-async def get_afds_for_office(
+def get_afds_for_office(
     office: str,
     limit: int = 10,
     since: Optional[str] = None,

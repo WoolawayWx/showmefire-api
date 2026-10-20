@@ -17,17 +17,17 @@ class OutlookSaveRequest(BaseModel):
 
 
 @router.get("/outlook/published")
-async def get_published_outlook(day: int = 2):
+def get_published_outlook(day: int = 2):
     return outlook_service.get_published(day)
 
 
 @router.get("/api/admin/outlook/draft")
-async def get_outlook_draft(day: int = 2, email: str = Depends(require_admin)):
+def get_outlook_draft(day: int = 2, email: str = Depends(require_admin)):
     return outlook_service.get_draft(day)
 
 
 @router.post("/api/admin/outlook/draft")
-async def save_outlook_draft(payload: OutlookSaveRequest, day: int = 2, email: str = Depends(require_admin)):
+def save_outlook_draft(payload: OutlookSaveRequest, day: int = 2, email: str = Depends(require_admin)):
     try:
         return outlook_service.save_draft(payload.geojson, email, day)
     except HTTPException:
@@ -38,7 +38,7 @@ async def save_outlook_draft(payload: OutlookSaveRequest, day: int = 2, email: s
 
 
 @router.post("/api/admin/outlook/publish")
-async def publish_outlook(day: int = 2, email: str = Depends(require_admin)):
+def publish_outlook(day: int = 2, email: str = Depends(require_admin)):
     try:
         return outlook_service.publish_draft(email, day)
     except HTTPException:
@@ -49,7 +49,7 @@ async def publish_outlook(day: int = 2, email: str = Depends(require_admin)):
 
 
 @router.delete("/api/admin/outlook/draft")
-async def delete_outlook_draft(day: int = 2, email: str = Depends(require_admin)):
+def delete_outlook_draft(day: int = 2, email: str = Depends(require_admin)):
     try:
         return outlook_service.clear_draft(email, day)
     except Exception as exc:
@@ -58,12 +58,12 @@ async def delete_outlook_draft(day: int = 2, email: str = Depends(require_admin)
 
 
 @router.get("/api/admin/outlook/status")
-async def get_outlook_status(day: int = 2, email: str = Depends(require_admin)):
+def get_outlook_status(day: int = 2, email: str = Depends(require_admin)):
     return outlook_service.get_status(day)
 
 
 @router.post("/api/admin/outlook/generate-graphic")
-async def generate_outlook_graphic(day: int = 2, valid_date: Optional[str] = None, issue_time: Optional[str] = None, email: str = Depends(require_admin)):
+def generate_outlook_graphic(day: int = 2, valid_date: Optional[str] = None, issue_time: Optional[str] = None, email: str = Depends(require_admin)):
     try:
         return outlook_service.generate_graphic(email, day, valid_date, issue_time)
     except HTTPException:

@@ -229,6 +229,8 @@ def test_a_cycle_in_progress_answers_point_queries_from_the_zarr_store(env):
     point = store.point_series(CYCLE_ID, 37.4, -92.5, env.root)
     assert point["lead_hours"] == [0, 1, 2] and point["series"]["temp_f"] == [60.0, 61.0, 62.0]
     assert store.point_series(CYCLE_ID, 10.0, -92.5, env.root)["error"] == "outside_grid"
+    some = store.point_series(CYCLE_ID, 37.4, -92.5, env.root, names=("temp_f",))
+    assert set(some["series"]) == {"temp_f"} and some["series"]["temp_f"] == [60.0, 61.0, 62.0]
 
 
 def test_an_hour_that_keeps_failing_is_given_up_on_and_the_rest_are_kept(env):

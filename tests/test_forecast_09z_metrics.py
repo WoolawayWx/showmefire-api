@@ -1,4 +1,3 @@
-import asyncio
 import json
 
 from routers import forecast_09z_metrics
@@ -23,8 +22,8 @@ def test_metrics_history_and_station_geojson(tmp_path, monkeypatch):
     monkeypatch.setattr(forecast_09z_metrics, "METRICS_DIR", metrics_dir)
     monkeypatch.setattr(forecast_09z_metrics, "STATIONS_DIR", stations_dir)
 
-    history = asyncio.run(forecast_09z_metrics.get_09z_metrics_history(limit=90))
-    stations = asyncio.run(forecast_09z_metrics.get_09z_station_metrics("2026-09-04"))
+    history = forecast_09z_metrics.get_09z_metrics_history(limit=90)
+    stations = forecast_09z_metrics.get_09z_station_metrics("2026-09-04")
 
     assert history["dates"][0]["record_count"] == 12
     assert stations["type"] == "FeatureCollection"
@@ -62,8 +61,8 @@ def test_observed_and_rtma_histories_are_normalized(tmp_path, monkeypatch):
     monkeypatch.setattr(forecast_09z_metrics, "OBSERVED_HISTORY_FILE", history_file)
     monkeypatch.setattr(forecast_09z_metrics, "RTMA_METRICS_DIR", rtma_dir)
 
-    station_history = asyncio.run(forecast_09z_metrics.get_09z_observed_history(limit=90))
-    rtma_history = asyncio.run(forecast_09z_metrics.get_09z_rtma_history(limit=90))
+    station_history = forecast_09z_metrics.get_09z_observed_history(limit=90)
+    rtma_history = forecast_09z_metrics.get_09z_rtma_history(limit=90)
 
     station = station_history["dates"][0]
     assert station["metrics"]["temp_c"]["mean_abs_diff"] == 1.2

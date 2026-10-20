@@ -122,6 +122,15 @@ def test_point_series_and_outside_grid(root):
     assert store.point_series(CYCLE_ID, 45.0, -92.5, root)["error"] == "outside_grid"
 
 
+def test_point_series_can_read_only_some_elements(root):
+    write(root)
+    every = store.point_series(CYCLE_ID, 37.4, -92.5, root)
+    some = store.point_series(CYCLE_ID, 37.4, -92.5, root, names=["mixing_height_ft", "not_an_element"])
+    assert set(some["series"]) == {"mixing_height_ft"} and len(every["series"]) > 1
+    assert some["series"]["mixing_height_ft"] == every["series"]["mixing_height_ft"]
+    assert {k: v for k, v in some.items() if k != "series"} == {k: v for k, v in every.items() if k != "series"}
+
+
 def test_prune_removes_old_cycles_everywhere(root):
     write(root)
     write(root, cycle=CYCLE - timedelta(days=20))

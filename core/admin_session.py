@@ -1,5 +1,6 @@
 """Renew expired admin access cookies before protected requests are handled."""
 from core import security
+from core.cookie_renewal import CookieRenewalMiddleware
 
 # These routes explicitly manage authentication and must not get an implicit
 # renewal (especially logout, which must be the last writer of its cookies).
@@ -15,25 +16,26 @@ def set_auth_cookie(response, name, value, max_age):
     )
 
 
-async def admin_cookie_context(request, call_next):
-    access = request.cookies.get(security.ACCESS_COOKIE_NAME)
-    renewed = False
-    if (request.url.path.rstrip('/') not in AUTH_ACTIONS
-            and not security.verify_token(access)
-            and request.cookies.get(security.REFRESH_COOKIE_NAME)):
-        email = security.verify_token(
-            request.cookies[security.REFRESH_COOKIE_NAME], expected_type='refresh',
-        )
-        if email:
-            access = security.create_access_token({'sub': email})
-            renewed = True
-    context = security.set_request_token(access)
-    try:
-        response = await call_next(request)
-        if renewed:
-            response.headers['Cache-Control'] = 'no-store'
-            set_auth_cookie(response, security.ACCESS_COOKIE_NAME, access,
-                            security.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
-        return response
-    finally:
+class AdminCookieMiddleware(CookieRenewalMiddleware):
+    """Renews an expired admin access cookie from the refresh cookie and makes the token available to the request."""
+
+    def resolve(self, request):
+        access = request.cookies.get(security.ACCESS_COOKIE_NAME)
+        if (request.url.path.rstrip('/') not in AUTH_ACTIONS
+                and not security.verify_token(access)
+                and request.cookies.get(security.REFRESH_COOKIE_NAME)):
+            email = security.verify_token(
+                request.cookies[security.REFRESH_COOKIE_NAME], expected_type='refresh',
+            )
+            if email:
+                return security.create_access_token({'sub': email}), True
+        return access, False
+
+    def set_token(self, token):
+        return security.set_request_token(token)
+
+    def reset_token(self, context):
         security.reset_request_token(context)
+
+    def set_cookie(self, response, access):
+        set_auth_cookie(response, security.ACCESS_COOKIE_NAME, access, security.ACCESS_TOKEN_EXPIRE_MINUTES * 60)

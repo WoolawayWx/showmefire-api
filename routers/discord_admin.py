@@ -367,7 +367,7 @@ def _bot_invite_url(application_id: str, guild_id: Optional[str] = None) -> str:
 
 
 @router.get("/api/admin/discord/config")
-async def get_discord_config(_admin: str = Depends(require_admin)):
+def get_discord_config(_admin: str = Depends(require_admin)):
     settings = get_discord_admin_settings()
 
     return {
@@ -400,7 +400,7 @@ async def get_discord_config(_admin: str = Depends(require_admin)):
 
 
 @router.post("/api/admin/discord/config")
-async def update_discord_config(payload: DiscordConfigUpdateRequest, email: str = Depends(require_admin)):
+def update_discord_config(payload: DiscordConfigUpdateRequest, email: str = Depends(require_admin)):
     if payload.channel_id is not None and payload.channel_name is not None:
         if not payload.channel_id and not payload.channel_name:
             raise HTTPException(status_code=422, detail="Provide channel_id or channel_name")
@@ -499,7 +499,7 @@ async def update_discord_config(payload: DiscordConfigUpdateRequest, email: str 
 
 
 @router.get("/api/admin/discord/status")
-async def get_discord_status(_admin: str = Depends(require_admin)):
+def get_discord_status(_admin: str = Depends(require_admin)):
     settings = get_discord_admin_settings()
     health = _fetch_discord_health()
 
@@ -546,7 +546,7 @@ async def get_discord_status(_admin: str = Depends(require_admin)):
 
 
 @router.get("/api/admin/discord/servers")
-async def get_discord_servers(_admin: str = Depends(require_admin)):
+def get_discord_servers(_admin: str = Depends(require_admin)):
     payload = _fetch_discord_servers()
     application_id = _bot_application_id(payload)
     return {
@@ -563,7 +563,7 @@ async def get_discord_servers(_admin: str = Depends(require_admin)):
 
 
 @router.post("/api/admin/discord/test-event")
-async def send_discord_test_event(payload: DiscordTestEventRequest, email: str = Depends(require_admin)):
+def send_discord_test_event(payload: DiscordTestEventRequest, email: str = Depends(require_admin)):
     now_dt = datetime.now(timezone.utc)
     last_sent = _TEST_EVENT_LAST_SENT_AT.get(email)
     if last_sent and (now_dt - last_sent).total_seconds() < 15:
@@ -690,7 +690,7 @@ def _server_invite_url(application_id: str) -> Optional[str]:
 
 
 @router.get("/api/admin/discord/oauth/start")
-async def discord_oauth_start(purpose: str = "connect", guild_id: Optional[str] = None, email: str = Depends(require_admin)):
+def discord_oauth_start(purpose: str = "connect", guild_id: Optional[str] = None, email: str = Depends(require_admin)):
     """Browser navigation target for "Connect with Discord" / "Add bot"."""
     import secrets
     from urllib.parse import urlencode
@@ -741,7 +741,7 @@ def _exchange_oauth_code(code: str) -> dict:
 
 
 @router.get("/api/admin/discord/oauth/callback")
-async def discord_oauth_callback(
+def discord_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     guild_id: Optional[str] = None,
@@ -789,7 +789,7 @@ async def discord_oauth_callback(
 
 
 @router.get("/api/admin/discord/account")
-async def get_discord_account(email: str = Depends(require_admin)):
+def get_discord_account(email: str = Depends(require_admin)):
     from urllib.parse import urlencode
 
     from core.database import get_discord_admin_link
@@ -839,7 +839,7 @@ async def get_discord_account(email: str = Depends(require_admin)):
 
 
 @router.delete("/api/admin/discord/account")
-async def disconnect_discord_account(email: str = Depends(require_admin)):
+def disconnect_discord_account(email: str = Depends(require_admin)):
     from core.database import delete_discord_admin_link
 
     delete_discord_admin_link(email)
