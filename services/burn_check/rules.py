@@ -89,7 +89,8 @@ def combine(now_state: str, now_reasons: list[dict], *, ban: Optional[dict], ale
         reasons.insert(0, reason("fire_weather_alert", NOT_SAFE, f"{alert['event']} is in effect for this area."))
         state = NOT_SAFE
     if later_not_safe and state != NOT_SAFE:
-        reasons.append(reason("worsening", CAUTION, f"Conditions are expected to turn unsafe around {later_not_safe['hour_label']}."))
+        turn = "unsafe" if later_not_safe.get("state", NOT_SAFE) == NOT_SAFE else "riskier"
+        reasons.append(reason("worsening", CAUTION, f"Conditions are expected to turn {turn} around {later_not_safe['hour_label']}."))
         if state == OK:
             state = CAUTION
     for name in checks_failed:

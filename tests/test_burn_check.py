@@ -130,6 +130,14 @@ def test_okay_now_but_unsafe_within_three_hours_is_caution():
     assert [h["state"] for h in result["today"]["hours"]][:3] == [rules.OK, rules.OK, rules.NOT_SAFE]
 
 
+def test_okay_now_but_riskier_within_three_hours_is_caution():
+    rows = hourly((0, {}), (1, {"wind_mph": 15}))
+    result = burn_check.assess(38.95, -92.33, now=NOW, src=make_src(rows=rows))
+    assert [h["state"] for h in result["today"]["hours"]][:2] == [rules.OK, rules.CAUTION]
+    assert result["verdict"]["state"] == rules.CAUTION
+    assert any(r["code"] == "worsening" and "riskier" in r["text"] for r in result["reasons"])
+
+
 def test_an_unsafe_hour_beyond_the_lookahead_does_not_change_the_answer():
     rows = hourly((0, {}), (1, {}), (2, {}), (3, {}), (4, {"wind_mph": 25}))
     assert burn_check.assess(38.95, -92.33, now=NOW, src=make_src(rows=rows))["verdict"]["state"] == rules.OK

@@ -111,7 +111,10 @@ def assess(lat: float, lon: float, *, now: Optional[datetime] = None, matched_ad
     if not hours:
         notes.append("The hourly forecast for today is not available, so this answer only covers conditions right now.")
     soon = now + timedelta(hours=rule_set["lookahead_not_safe_hours"])
-    later = next((h for h in hours if h["state"] == rules.NOT_SAFE
+    # The first hour soon that is worse than right now: okay turning risky counts, not only turning unsafe.
+    # When right now could not be checked the answer is already "caution", so only an unsafe hour adds anything.
+    baseline = rules.ORDER.get(now_state, rules.ORDER[rules.CAUTION])
+    later = next((h for h in hours if rules.ORDER.get(h["state"], 0) > baseline
                   and _parse_time(h["time_utc"]) > now and _parse_time(h["time_utc"]) <= soon), None)
 
     state, reasons = rules.combine(now_state, now_reasons, ban=ban, alerts=alerts, later_not_safe=later, checks_failed=failed)
