@@ -303,10 +303,17 @@ def test_synoptic_observations_normalize_and_match_completed_forecast(tmp_path):
 
 
 def _lead_dataset(leads):
-    coords = {
-        "step": ("step", np.array([lead * 3600 for lead in leads], dtype="timedelta64[s]").astype("timedelta64[ns]")),
-        "latitude": ("y", [36.0, 37.0]), "longitude": ("x", [-94.0, -93.0]),
-    }
+    """What FastHerbie.xarray really returns (checked against HRRR 2026-10-20 12Z):
+    several leads give a `step` dimension with `valid_time` along it; a single
+    lead is squeezed, so `step` and `valid_time` are scalars and there is no
+    time-like dimension at all."""
+    init = np.datetime64(CYCLE.replace(tzinfo=None), "ns")
+    steps = np.array([lead * 3600 for lead in leads], dtype="timedelta64[s]").astype("timedelta64[ns]")
+    spatial = {"latitude": ("y", [36.0, 37.0]), "longitude": ("x", [-94.0, -93.0])}
+    if len(leads) == 1:
+        coords = {"time": init, "step": steps[0], "valid_time": init + steps[0], **spatial}
+        return xr.Dataset({"tp": (("y", "x"), np.ones((2, 2), dtype=np.float32))}, coords=coords)
+    coords = {"time": init, "step": ("step", steps), "valid_time": ("step", init + steps), **spatial}
     return xr.Dataset({"tp": (("step", "y", "x"), np.ones((len(leads), 2, 2), dtype=np.float32))}, coords=coords)
 
 
@@ -330,6 +337,26 @@ def test_query_leads_chunks_and_skips_hours_without_the_field(monkeypatch):
 
     assert result.sizes["time"] == 6  # f001..f006; f000 skipped instead of failing the query
     assert max(len(batch) for batch in requested) == 3  # never asked for all hours at once
+
+
+def test_query_leads_joins_a_single_lead_last_chunk(monkeypatch):
+    # 49 HRRR leads in chunks of 8 leave f048 alone; that chunk used to make every run fail.
+    from forecast_v1.acquisition import _query_leads
+
+    monkeypatch.setenv("SMF_HERBIE_LEAD_CHUNK", "8")
+
+    def make_client(leads):
+        class Client:
+            def xarray(self, search, **kwargs):
+                return _lead_dataset(leads)
+        return Client()
+
+    result = _query_leads(make_client, tuple(range(49)), ":TMP:2 m above ground", CYCLE)
+
+    expected = np.datetime64(CYCLE.replace(tzinfo=None), "ns") + np.arange(49) * np.timedelta64(1, "h")
+    assert result.sizes["time"] == 49
+    np.testing.assert_array_equal(result.time.values, expected)
+    assert "valid_time" not in result.coords and "step" not in result.coords
 
 
 def test_query_leads_raises_when_no_hour_has_the_field(monkeypatch):

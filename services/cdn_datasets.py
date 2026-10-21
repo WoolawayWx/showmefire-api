@@ -124,24 +124,25 @@ def _upload_files(client, dataset: str, run_id: str, files: list[tuple[Path, str
 
 
 def _update_indexes(client, dataset: str, run_id: str, summary: dict, *, title: str, kind: str, schema_version: int,
-                    now: datetime) -> list[str]:
+                    now: datetime, keep: Optional[int] = None) -> list[str]:
     """Add or replace the run's row in runs.json, repoint latest.json and the registry, then delete expired runs.
 
     A row with `"ready": false` is listed but never becomes the dataset's latest: a run still filling in is reachable by
-    its id until enough of it is there (the caller sets `ready`). Returns the run ids that were deleted."""
+    its id until enough of it is there (the caller sets `ready`). `keep` overrides keep_days() for this dataset (an
+    archive keeps far more than a week). Returns the run ids that were deleted."""
     previous = _get_json(client, dataset_key(dataset, "runs.json")) or {}
     runs = [row for row in previous.get("runs", []) if row.get("id") != run_id] + [summary]
     runs.sort(key=lambda row: row["time_utc"], reverse=True)
     newest = next((row for row in runs if row.get("ready", True)), None)
     # With nothing ready yet the pointer stays where it was (and that run is kept), so a run still filling in is never "latest".
-    keep = newest["id"] if newest else previous.get("latest")
-    cutoff = _now_iso(now - timedelta(days=keep_days()))
+    pinned = newest["id"] if newest else previous.get("latest")
+    cutoff = _now_iso(now - timedelta(days=keep if keep is not None else keep_days()))
     expired = list(dict.fromkeys(  # never the run latest.json points to
-        [row["id"] for row in runs if row["id"] != keep and row["time_utc"] < cutoff]
-        + [row["id"] for row in runs[RUNS_LISTED:] if row["id"] != keep]))
+        [row["id"] for row in runs if row["id"] != pinned and row["time_utc"] < cutoff]
+        + [row["id"] for row in runs[RUNS_LISTED:] if row["id"] != pinned]))
     runs = [row for row in runs if row["id"] not in expired]
 
-    _put_json(client, dataset_key(dataset, "runs.json"), {"latest": keep, "runs": runs})
+    _put_json(client, dataset_key(dataset, "runs.json"), {"latest": pinned, "runs": runs})
     if newest:
         _put_json(client, dataset_key(dataset, "latest.json"), {
             "run": newest["id"], "manifest": f"runs/{newest['id']}/{MANIFEST_NAME}", "time_utc": newest["time_utc"],
@@ -160,14 +161,14 @@ def _update_indexes(client, dataset: str, run_id: str, summary: dict, *, title: 
 
 def publish_run(dataset: str, run_id: str, run_dir: Path, summary: dict, *, title: str, kind: str,
                 schema_version: int, include: Optional[list[str]] = None, client=None,
-                now: Optional[datetime] = None) -> dict:
+                now: Optional[datetime] = None, keep_days: Optional[int] = None) -> dict:
     """Upload a run and make it the dataset's newest.
 
     `run_dir` holds the run; everything under it is uploaded unless `include` names the entries to
     publish (files or folders, relative to it). It must contain manifest.json. `summary` is the run's row
     in runs.json and needs `id` (the run id) and `time_utc` (ISO, used to age runs out); put any other
-    fields viewers list (label, forecast hours, ...) in it too. Runs older than `keep_days()` are removed
-    from the CDN. Returns {"uploaded": file count, "pruned": [run ids]}."""
+    fields viewers list (label, forecast hours, ...) in it too. Runs older than `keep_days` (default the module's
+    keep_days()) are removed from the CDN. Returns {"uploaded": file count, "pruned": [run ids]}."""
     run_dir = Path(run_dir)
     if not (run_dir / MANIFEST_NAME).is_file():
         raise FileNotFoundError(f"{run_dir / MANIFEST_NAME} is missing")
@@ -188,7 +189,7 @@ def publish_run(dataset: str, run_id: str, run_dir: Path, summary: dict, *, titl
                        ExtraArgs={"ContentType": "application/json", "CacheControl": IMMUTABLE_CACHE})
 
     expired = _update_indexes(client, dataset, run_id, summary, title=title, kind=kind, schema_version=schema_version,
-                              now=now)
+                              now=now, keep=keep_days)
     return {"uploaded": uploaded + 1, "pruned": expired}
 
 

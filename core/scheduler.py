@@ -35,6 +35,7 @@ from core.database import (
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.log_maintenance import purge_old_logs
 from services import job_runs
+from services import rtma_analysis
 from services.seasonal_fuel_state import update_daily_gdd
 from services.rtma_peak import generate_rtma_peak, run_rtma_peak_job
 from services.spread_rate import run_spread_rate_job, run_spread_rate_pipeline
@@ -492,6 +493,16 @@ async def refresh_burn_ban_static_map_job():
         logger.error("Daily burn-ban static-map refresh failed: %s", error, exc_info=True)
 
 
+async def refresh_rtma_analysis_job():
+    """Rebuild today's "what happened" RTMA analysis day for the data viewer, finish and publish yesterday's."""
+    try:
+        result = await asyncio.to_thread(rtma_analysis.refresh)
+        logger.info("RTMA analysis days: built=%s published=%s pruned=%d",
+                    result["built"], result["published"] or "none", len(result["pruned"]))
+    except Exception as error:
+        logger.error("RTMA analysis refresh failed: %s", error, exc_info=True)
+
+
 def create_scheduler():
     central_tz = timezone('America/Chicago')
     # Warm up the process pool now, before any to_thread workers accumulate,
@@ -649,6 +660,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         'interval',
         minutes=spread_rate_poll,
         id='rtma_spread_rate_pipeline',
+        max_instances=1,
+        coalesce=True,
+    )
+    # After the 15-minute RTMA capture has had time to pick up the hour (RTMA posts ~30-50 minutes after it).
+    scheduler.add_job(
+        refresh_rtma_analysis_job,
+        'cron',
+        minute=55,
+        id='refresh_rtma_analysis',
         max_instances=1,
         coalesce=True,
     )

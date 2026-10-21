@@ -216,7 +216,17 @@ def _canonicalize_variables(dataset: xr.Dataset) -> xr.Dataset:
 
 
 def _time_axis(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
-    """Turn Herbie/cfgrib scalar time + step coordinates into valid-time axis."""
+    """Turn Herbie/cfgrib scalar time + step coordinates into valid-time axis.
+
+    Every branch returns the same shape: a `time` dimension holding valid
+    times and no separate `valid_time` coordinate. _query_leads concatenates
+    chunks of lead hours, and a multi-hour chunk (a `step` dimension with
+    `valid_time` along it) used to keep `valid_time` while a single-hour
+    chunk (scalar `step`/`valid_time`) dropped it, so the concat raised
+    "coordinate 'valid_time' not present in all datasets" whenever the last
+    chunk held one hour - every source, every run, since 49/73/25 leads in
+    chunks of 8 always leave one over.
+    """
     dataset = _sanitize(dataset)
     initialization = np.datetime64(cycle.replace(tzinfo=None), "ns")
     if "valid_time" in dataset.dims:
@@ -225,8 +235,7 @@ def _time_axis(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
         return dataset.rename(valid_time="time")
     if "step" in dataset.dims:
         valid = initialization + dataset.step.values.astype("timedelta64[ns]")
-        if "time" in dataset.coords:
-            dataset = dataset.drop_vars("time")
+        dataset = dataset.drop_vars([name for name in ("time", "valid_time") if name in dataset.coords])
         return dataset.rename(step="time").assign_coords(time=valid)
     if "time" in dataset.dims:
         time_values = np.asarray(dataset.time.values)
@@ -241,7 +250,7 @@ def _time_axis(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
         elif "valid_time" in dataset.coords and dataset.valid_time.ndim == 0 and dataset.sizes["time"] == 1:
             valid = np.asarray(dataset.valid_time.values).reshape(-1)[0]
             dataset = dataset.drop_vars("valid_time").assign_coords(time=[valid])
-        return dataset
+        return dataset.drop_vars([name for name in ("valid_time", "step") if name in dataset.coords and name not in dataset.dims])
     valid = dataset.coords.get("valid_time")
     if valid is not None:
         value = np.asarray(valid.values).reshape(-1)[0]

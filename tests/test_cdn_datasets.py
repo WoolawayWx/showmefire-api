@@ -135,6 +135,13 @@ class PublishTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in self.doc("datasets/demo/runs.json")["runs"]], ["20261016_12z", "20261014_12z"])
         self.assertIn("datasets/demo/runs/20261014_12z/manifest.json", self.client.objects)
 
+    def test_a_dataset_can_keep_more_than_a_week(self):
+        # An archive (rtma-analysis) keeps months; the 7-day default would delete it the day after publishing.
+        publish(self.client, self.root, "20261001_12z", 1, 1, keep_days=30)
+        result = publish(self.client, self.root, "20261016_12z", 16, 16, keep_days=30)
+        self.assertEqual(result["pruned"], [])
+        self.assertIn("datasets/demo/runs/20261001_12z/manifest.json", self.client.objects)
+
     def test_republishing_a_run_does_not_duplicate_it(self):
         publish(self.client, self.root, "20261016_12z", 16, 16)
         publish(self.client, self.root, "20261016_12z", 16, 16)
