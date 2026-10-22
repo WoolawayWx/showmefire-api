@@ -21,6 +21,7 @@ import json
 from functools import lru_cache
 import os
 import tempfile
+import textwrap
 import time
 from io import BytesIO
 from pathlib import Path
@@ -358,12 +359,41 @@ def logo_image() -> Optional[np.ndarray]:
     return mpimg.imread(BytesIO(png_bytes), format="png")
 
 
-def add_branding(fig, ax, *, title: str, subtitle: str, description: str) -> None:
-    """Title/subtitle/description block + "ShowMeFire.org" wordmark + logo,
-    matching the look of rhmap-fil.py/windmap-fil.py/fuelmoisturemap.py."""
+# How often maps.sh redraws a product (cron */15). Products refreshed on another
+# schedule pass their own `update_schedule` to add_branding.
+UPDATES_EVERY_15_MIN = "Updates every 15 minutes"
+
+# Longer titles run into the map at fontsize 26, so they wrap at a word boundary.
+# Each extra title line pushes the subtitle and update lines down by one line
+# (26 pt x 1.2 line spacing at MAP_DPI, as a fraction of the figure height).
+TITLE_WRAP_CHARS = 40
+TITLE_LINE_HEIGHT = 26 * 1.2 / 72 * MAP_DPI / PIXEL_HEIGHT
+
+
+def wrap_title(title: str) -> tuple[str, float]:
+    """(title wrapped to TITLE_WRAP_CHARS per line, how far to lower the lines below it)."""
+    lines = textwrap.wrap(title, TITLE_WRAP_CHARS) or [title]
+    return "\n".join(lines), (len(lines) - 1) * TITLE_LINE_HEIGHT
+
+
+def add_update_schedule(fig, update_schedule: Optional[str], *, y: float = 0.855) -> None:
+    """The "Updates every 15 minutes" line under the subtitle, so a saved or
+    shared copy of the image says how fresh it is supposed to be."""
+    if update_schedule:
+        fig.text(0.99, y, update_schedule, fontsize=12, color="#555555",
+                 ha="right", va="top", fontname="Montserrat")
+
+
+def add_branding(fig, ax, *, title: str, subtitle: str, description: str,
+                 update_schedule: Optional[str] = UPDATES_EVERY_15_MIN) -> None:
+    """Title/subtitle/update-schedule/description block + "ShowMeFire.org"
+    wordmark + logo, matching the look of rhmap-fil.py/windmap-fil.py/fuelmoisturemap.py.
+    Pass update_schedule=None to leave the schedule line off."""
     _ensure_fonts_loaded()
+    title, drop = wrap_title(title)
     fig.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans")
-    fig.text(0.99, 0.90, subtitle, fontsize=16, ha="right", va="top", fontname="Montserrat")
+    fig.text(0.99, 0.90 - drop, subtitle, fontsize=16, ha="right", va="top", fontname="Montserrat")
+    add_update_schedule(fig, update_schedule, y=0.855 - drop)
     fig.text(0.99, 0.6, description, fontsize=12, ha="right", va="top", fontname="Montserrat", linespacing=1.4)
     fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight="bold", ha="left", va="bottom", fontname="Montserrat")
 

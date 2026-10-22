@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from io import BytesIO
@@ -74,6 +75,11 @@ PRODUCTS = (
 # with the twice-daily run.
 HOURLY_STEMS = frozenset({"precip-1hr", "precip-3hr", "precip-6hr", "precip-12hr", "precip-24hr"})
 LOG = logging.getLogger("precipitation_graphics")
+
+
+def update_schedule_for(stem: str) -> str:
+    """The schedule printed on the graphic; matches the core/scheduler.py jobs."""
+    return "Updates hourly" if stem in HOURLY_STEMS else "Updates twice daily (6 AM & 6 PM CT)"
 
 
 def _get_json(url: str, *, session=requests, timeout: int = 45) -> dict:
@@ -203,7 +209,7 @@ def _smooth_and_mask_to_state(raster: np.ndarray, state_geometry, extent: tuple[
     return np.clip(result, 0.0, 1.0)
 
 
-def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, float, float]]], title: str, units: str, timestamp: datetime, output: Path) -> None:
+def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, float, float]]], title: str, units: str, timestamp: datetime, output: Path, update_schedule: str) -> None:
     data_crs = ccrs.PlateCarree()
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
     # A bit lighter than the other graphics' #E8E8E8: NOAA's own "greater than
@@ -245,8 +251,13 @@ def _draw_map(image_bytes: bytes, legend: list[tuple[str, tuple[float, float, fl
         font_path = PROJECT_DIR / relative
         if font_path.exists():
             font_manager.fontManager.addfont(str(font_path))
-    fig.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans", color="#202020")
-    fig.text(0.99, 0.90, f"NOAA RFC QPE | Valid Time: {timestamp.strftime('%Y-%m-%d %H:%M CT')}", fontsize=16, ha="right", va="top", fontname="Montserrat", color="#333333")
+    # Same wrapping as station_plot.wrap_title: past 40 characters the title would run into the map.
+    title_lines = textwrap.wrap(title, 40) or [title]
+    drop = (len(title_lines) - 1) * 26 * 1.2 / 72 * 144 / 1152
+    fig.text(0.99, 0.97, "\n".join(title_lines), fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans", color="#202020")
+    fig.text(0.99, 0.90 - drop, f"NOAA RFC QPE | Valid Time: {timestamp.strftime('%Y-%m-%d %H:%M CT')}", fontsize=16, ha="right", va="top", fontname="Montserrat", color="#333333")
+    # Same line as station_plot.add_update_schedule (not imported: this runs in the API process).
+    fig.text(0.99, 0.855 - drop, update_schedule, fontsize=12, color="#555555", ha="right", va="top", fontname="Montserrat")
     description = {
         "inches": f"Accumulated precipitation ({units})",
         "departure": "Observed minus normal precipitation (inches);\npositive is wetter than normal, negative is drier",
@@ -335,7 +346,7 @@ def generate_graphics(
     for (stem, _layer_name, title, units), (image, legend) in zip(products, fetched):
         path = output_dir / f"mo-{stem}.png"
         temporary = path.with_suffix(".tmp.png")
-        _draw_map(image, legend, title, units, timestamp, temporary)
+        _draw_map(image, legend, title, units, timestamp, temporary, update_schedule_for(stem))
         temporary.replace(path)
         outputs.append(path)
         LOG.info("Rendered %s", path)

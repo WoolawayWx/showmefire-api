@@ -98,7 +98,7 @@ from core.config import (
     MISSOURI_FIRES_GEOJSON
 )
 from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, api_keys, api_keys_admin
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, api_keys, api_keys_admin, dev_access
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
 from core.cors_origins import ORIGIN_REGEX, origin_allowed
@@ -168,8 +168,12 @@ async def lifespan(app: FastAPI):
     # a bare local variable here, unreachable from anywhere else in the app.
     app.state.scheduler = scheduler_local
 
-    # Start the fetch in the background so the API starts immediately
-    asyncio.create_task(run_initial_fetches())
+    # Start the fetch in the background so the API starts immediately. Local dev (docker-compose.dev.yml) turns it off with
+    # SMF_SKIP_INITIAL_FETCHES=1, since every reload would otherwise download Synoptic, RAWS and AFD data again.
+    if os.getenv("SMF_SKIP_INITIAL_FETCHES", "0") != "1":
+        asyncio.create_task(run_initial_fetches())
+    else:
+        logger.info("Initial data fetches skipped (SMF_SKIP_INITIAL_FETCHES=1)")
 
     try:
         logger.info("API metrics: reloaded %d minutes from the last snapshot", start_persistence())
@@ -323,6 +327,8 @@ app.include_router(rtma_analysis.router)
 app.include_router(burn_check.router)
 app.include_router(api_keys.router)
 app.include_router(api_keys_admin.router)
+app.include_router(dev_access.router)
+app.include_router(dev_access.admin_router)
 from routers import admin_metrics
 app.include_router(admin_metrics.router)
 app.include_router(feedback.router)

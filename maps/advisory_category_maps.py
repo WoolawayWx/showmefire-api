@@ -200,6 +200,7 @@ def render_advisory_category(category: str, alerts_geojson: dict, out_png: Path,
             "Data Source: National Weather Service\n\n"
             + description
         ),
+        update_schedule="Updates every 15 minutes and as alerts change",
     )
 
     sp.save_and_record_status(

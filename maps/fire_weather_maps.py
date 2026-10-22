@@ -59,7 +59,8 @@ def _mesh(ax, fields, values, **kwargs):
 
 
 def _save(fig, ax, *, key: str, png: str, title: str, valid: datetime, description: str, started: float, **extra) -> dict:
-    sp.add_branding(fig, ax, title=title, subtitle=_valid_label(valid), description=f"{SOURCE}\n\n{description}")
+    sp.add_branding(fig, ax, title=title, subtitle=_valid_label(valid), description=f"{SOURCE}\n\n{description}",
+                    update_schedule="Updates hourly")
     status = {"product": f"fire_weather_{key}", "status": "updated", "valid_time": valid.strftime("%Y-%m-%dT%H:00:00Z"),
               "last_update": spx.valid_time_label(), "runtime_sec": round(time.time() - started, 2), **extra}
     sp.save_and_record_status(fig, spx.IMAGES_DIR / png, spx.STATUS_DIR / f"fire_weather_{key}.json", status)
@@ -210,7 +211,8 @@ def render_trend(now: datetime) -> dict:
     sp.add_branding(fig, axes[-1], title="Missouri Dispersion Trend",
                     subtitle=f"Last 48 hours through {spx.valid_time_label(now.astimezone(spx.CENTRAL))}",
                     description=(f"{SOURCE}\n\nHourly median mixing height, transport\nwind and ventilation, statewide (black)\n"
-                                 "and by region. Shading shows NWS Springfield\nsmoke-dispersal categories."))
+                                 "and by region. Shading shows NWS Springfield\nsmoke-dispersal categories."),
+                    update_schedule="Updates hourly")
     status = {"product": "fire_weather_trend", "status": "updated", "hours": len(records),
               "last_update": spx.valid_time_label(), "runtime_sec": round(time.time() - started, 2)}
     sp.save_and_record_status(fig, spx.IMAGES_DIR / "mo-fw-trend.png", spx.STATUS_DIR / "fire_weather_trend.json", status)

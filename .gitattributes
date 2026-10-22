@@ -1,0 +1,6 @@
+# Files that run inside Linux (the Docker image, cron, docker-entrypoint.sh) keep LF line endings in every checkout,
+# including Windows ones with core.autocrlf=true: a CRLF shebang cannot run, and the Dockerfile's exact-match
+# `grep -qx` on requirements.pyretechnics.txt fails on a trailing \r.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+requirements*.txt text eol=lf

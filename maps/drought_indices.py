@@ -212,8 +212,9 @@ def _tiff_valid_date(tags: dict) -> str:
     return "Week ending " + _sunday_on_or_before(processed).strftime("%b %d, %Y")
 
 
-def _save(fig, ax, *, product: str, png_name: str, title: str, subtitle: str, description: str, started: float, **extra) -> None:
-    sp.add_branding(fig, ax, title=title, subtitle=subtitle, description=description)
+def _save(fig, ax, *, product: str, png_name: str, title: str, subtitle: str, description: str, started: float,
+          update_schedule: str = "Updates weekly", **extra) -> None:
+    sp.add_branding(fig, ax, title=title, subtitle=subtitle, description=description, update_schedule=update_schedule)
     status = {
         "product": product, "status": "updated", "valid": subtitle.removeprefix("Valid: "),
         "last_update": spx.valid_time_label(), "runtime_sec": round(time.time() - started, 2), **extra,
@@ -274,7 +275,7 @@ def render_eddi(scale: str, slug: str, label: str, period: str, day: date) -> No
             f"How unusual the atmosphere's thirst for water has\nbeen over the past {period} (warm, dry, windy,\n"
             "sunny). High demand dries fuels and soils fast\nand is an early warning of flash drought."
         ),
-        started=started, timescale=label,
+        started=started, update_schedule="Updates daily", timescale=label,
         area_percent=_area_share(classes, [code or "Normal" for code, _name, _color in EDDI_CLASSES]),
     )
 
@@ -323,7 +324,7 @@ def render_vegdri() -> None:
         description=(
             "Data Source: Vegetation Drought Response Index\n(NDMC, USGS EROS, HPRCC) via NOAA NCEI\n\n"
             "Satellite vegetation greenness combined with\nclimate data to show drought stress on\n"
-            "vegetation at 1 km. Updated weekly."
+            "vegetation at 1 km."
         ),
         started=started, area_percent=_area_share(classes, names),
     )
@@ -392,9 +393,9 @@ def render_fordri(day: date) -> None:
         description=(
             "Data Source: Forest Drought Response Index\n(NDMC, USDA Forest Service)\n\n"
             "Drought stress in forests from satellite\nvegetation, soil moisture, ET and climate\n"
-            "indices. Non-forest land is unshaded.\nUpdated weekly on Mondays."
+            "indices. Non-forest land is unshaded."
         ),
-        started=started,
+        started=started, update_schedule="Updates weekly (Mondays)",
         missouri_mean=round(float(inside.mean()), 2) if inside.size else None,
         missouri_pct_below_minus1=round(100 * float((inside <= -1).mean()), 1) if inside.size else None,
     )

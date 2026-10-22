@@ -82,9 +82,11 @@ def render_station_png(grid, spec, labels, out_path):
 
     ax.set_anchor('W')
     plt.subplots_adjust(left=0.05)
-    fig.text(0.99, 0.97, spec['title'], fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans')
-    fig.text(0.99, 0.90, 'Valid Time: ' + pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
+    title, drop = sp.wrap_title(spec['title'])
+    fig.text(0.99, 0.97, title, fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans')
+    fig.text(0.99, 0.90 - drop, 'Valid Time: ' + pd.Timestamp.now(tz='America/Chicago').strftime('%Y-%m-%d %H:%M CT'),
              fontsize=16, ha='right', va='top', fontname='Montserrat')
+    sp.add_update_schedule(fig, sp.UPDATES_EVERY_15_MIN, y=0.855 - drop)
     fig.text(0.99, 0.6, spec['blurb'], fontsize=12, ha='right', va='top', fontname='Montserrat')
     fig.text(0.02, 0.01, 'ShowMeFire.org', fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
     logo = sp.logo_image()

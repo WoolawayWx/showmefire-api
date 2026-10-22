@@ -12,6 +12,30 @@ for the general publish/import/promote workflow shared by every model family
 (`POST /api/admin/models/{family}/import`) as an alternative to the CLI
 commands below.
 
+## Running locally (Docker)
+
+The API runs on Linux (`maps/status_lock.py` needs `fcntl`), so on Windows run it in Docker with
+`docker-compose.dev.yml`. Your working copy is mounted into the container and uvicorn reloads when you save a
+`.py` file, so you only build the image again when `requirements*.txt` or the `Dockerfile` change:
+
+```powershell
+cd M:\_Development\ShowMeFire\api
+docker compose -f docker-compose.dev.yml up -d      # first run builds the image (slow, once); later runs start in seconds
+docker compose -f docker-compose.dev.yml logs -f    # follow the log
+docker compose -f docker-compose.dev.yml restart    # after editing main.py (only the code folders are watched)
+docker compose -f docker-compose.dev.yml up -d --build   # after a requirements or Dockerfile change
+docker compose -f docker-compose.dev.yml down       # stop (the local database volume is kept; add -v to wipe it)
+```
+
+It reads your `.env`, but the compose file switches off everything that would reach the real world from your
+machine: the scheduler and cron, the startup data fetches, Discord, email, and uploads to R2/CDN and GitHub. The
+database is its own Docker volume (`api-dev-data`), not `./data`. Admin login uses `ADMIN_EMAIL` and
+`ADMIN_PASSWORD_HASH` from `.env` as usual.
+
+To point the website at it, run `pnpm dev:local` in `website\` (`pnpm dev:local --gate` turns on the
+development-site gate too), or `start-dev.ps1` from the workspace folder, which also starts this container.
+The workspace's `DEVELOPMENT.md` covers the whole setup.
+
 ## RTMA and historical fuel-moisture capture
 
 Hourly RTMA capture is registered with APScheduler at minute 50 and targets
