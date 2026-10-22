@@ -131,12 +131,16 @@ ARCHIVE_ENCODINGS: Final = {
     "quality_mask": ArchiveEncoding("uint16", None, 65535),
 }
 
+# REFS is not in the blend: its member files are gone from the operational
+# feed and the REFS mean product carries only APCP (see default_specs). Its
+# share used to be renormalized away every hour, flagging every cell
+# source_degraded. Day 3 takes the GEFS mean alongside RRFS so it is not one
+# 13 km deterministic run. Starting weights; refit from verification later.
 BLEND_WEIGHTS: Final = (
-    (0, 18, {"hrrr": 0.50, "rrfs": 0.40, "refs": 0.10}),
-    (19, 36, {"hrrr": 0.40, "rrfs": 0.50, "refs": 0.10}),
-    (37, 48, {"hrrr": 0.25, "rrfs": 0.60, "refs": 0.15}),
-    (49, 60, {"rrfs": 0.75, "refs": 0.25}),
-    (61, 72, {"rrfs": 0.65, "refs": 0.35}),
+    (0, 18, {"hrrr": 0.55, "rrfs": 0.45}),
+    (19, 36, {"hrrr": 0.45, "rrfs": 0.55}),
+    (37, 48, {"hrrr": 0.30, "rrfs": 0.70}),
+    (49, 72, {"rrfs": 0.70, "gefs": 0.30}),
 )
 
 CORRECTION_LIMITS: Final = {

@@ -14,10 +14,23 @@ pointer is not changed by a failed attempt.
 The downloader requests indexed GRIB byte ranges rather than complete model
 files, clips every source to the Missouri one-degree buffer, validates the
 valid-time sequence, and archives the clipped native grid before reprojecting.
-It acquires HRRR f00-f48, RRFS control f00-f72, seven REFS/RRFS ensemble
-members f00-f72, and GEFS control plus all 30 perturbed members at three-hour
-source intervals. GEFS precipitation is distributed over its source interval
-and continuous fields are interpolated to the hourly uncertainty grid.
+It acquires HRRR f00-f48, RRFS control f00-f72, and GEFS control plus all 30
+perturbed members at three-hour source intervals. REFS is off
+(`SMF_REFS_ENABLED=false`): the operational feed no longer has its member
+files and its mean product carries only precipitation.
+
+Precipitation: HRRR and RRFS are read from their run-total APCP message and
+differenced into hourly amounts (GRIB packing dips under 0.1 mm are not
+treated as resets). GEFS APCP, DSWRF and TCDC cover buckets that reset every
+six hours (f06 holds 0-6 h, f09 holds 6-9 h); they are split into three-hour
+intervals and spread evenly over each interval's hours. Other GEFS fields are
+interpolated to hourly. A run where more than 2% of cell-hours exceed 25 mm
+of rain carries the warning `precipitation_semantics_suspect`.
+
+Blend weights (`contracts.BLEND_WEIGHTS`): HRRR/RRFS 0.55/0.45 for hours
+0-18, 0.45/0.55 for 19-36, 0.30/0.70 for 37-48, then RRFS/GEFS mean
+0.70/0.30 for 49-72. Missing sources are renormalized per hour and flagged
+`source_degraded`.
 
 GEFS members are normalized and appended to one disk-backed NetCDF cube as
 they download, so only one loaded member is retained in memory at a time. All
@@ -67,7 +80,7 @@ sanitized full acquisition error. FV3-HIRES is a zero-weight shadow source;
 its missing fields remain informational and do not raise the global degraded
 banner.
 
-Meteorological confidence uses available model agreement, REFS/GEFS ensemble
+Meteorological confidence uses available model agreement, GEFS ensemble
 spread, previous-cycle consistency at matching valid times, 30-day station
 verification, and lead time. It renormalizes the configured weights over
 available components. A real score needs agreement or spread and at least

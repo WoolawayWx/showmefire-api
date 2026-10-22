@@ -15,7 +15,7 @@ from forecast_v1.acquisition import (
     acquire_source, latest_publishable_12z,
 )
 from forecast_v1.artifacts import write_cog, write_netcdf, write_points_parquet
-from forecast_v1.contracts import PUBLIC_GRID, QUALITY_BITS, REQUIRED_VARIABLES
+from forecast_v1.contracts import PUBLIC_GRID, QUALITY_BITS, REQUIRED_VARIABLES, SOURCE_BITS
 from forecast_v1.contracts import GridDefinition
 from forecast_v1.engine import _classify_arrays, apply_corrections, blend_sources, build_forecast_cube, local_day_slices
 from core.fire_danger import calculate_fire_danger, MPS_TO_KNOTS
@@ -172,14 +172,20 @@ def test_gefs_members_are_streamed_to_disk_without_reduction(tmp_path, monkeypat
         staged.close()
 
 
-def test_lead_weights_are_renormalized_when_optional_source_is_missing():
-    blended = blend_sources({"hrrr": source_cube("hrrr", 10), "refs": source_cube("refs", 40), "rrfs": source_cube("rrfs", 20)})
-    assert float(blended.temperature_2m.isel(time=0, y=0, x=0)) == pytest.approx(17.0)
-    assert float(blended.temperature_2m.isel(time=50, y=0, x=0)) == pytest.approx(25.0)
+def test_lead_weights_blend_gefs_into_day_3_and_renormalize_missing_sources():
+    sources = {"hrrr": source_cube("hrrr", 10, hours=49), "rrfs": source_cube("rrfs", 20), "gefs": source_cube("gefs", 30)}
+    blended = blend_sources(sources)
+    assert float(blended.temperature_2m.isel(time=0, y=0, x=0)) == pytest.approx(14.5)  # .55*10 + .45*20
+    assert float(blended.temperature_2m.isel(time=48, y=0, x=0)) == pytest.approx(17.0)  # .30*10 + .70*20
+    assert float(blended.temperature_2m.isel(time=50, y=0, x=0)) == pytest.approx(23.0)  # .70*20 + .30*30
+    # With every expected source present no hour is degraded (REFS used to flag them all).
+    assert not ((blended.quality_mask & QUALITY_BITS["source_degraded"]) != 0).any()
+    assert int(blended.source_mask.isel(time=50, y=0, x=0)) == SOURCE_BITS["rrfs"] | SOURCE_BITS["gefs"]
 
-    degraded = blend_sources({"hrrr": source_cube("hrrr", 10), "refs": source_cube("refs", 40)})
-    assert float(degraded.temperature_2m.isel(time=0, y=0, x=0)) == pytest.approx(15.0)
-    assert np.isnan(float(degraded.temperature_2m.isel(time=50, y=0, x=0)))
+    degraded = blend_sources({"rrfs": source_cube("rrfs", 20), "gefs": source_cube("gefs", 30)})
+    assert float(degraded.temperature_2m.isel(time=0, y=0, x=0)) == pytest.approx(20.0)
+    assert int(degraded.quality_mask.isel(time=0, y=0, x=0)) & QUALITY_BITS["source_degraded"]
+    assert not int(degraded.quality_mask.isel(time=50, y=0, x=0)) & QUALITY_BITS["source_degraded"]
 
 
 def test_gefs_mean_is_degraded_fallback_only_after_hrrr_horizon():
