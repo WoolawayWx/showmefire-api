@@ -55,8 +55,8 @@ def _configure_run_log() -> None:
     A hang or failure here previously had to be reconstructed by grepping
     the whole container's stdout across every other scheduled job - this
     gives a single chronological file to tail instead. Set up at import
-    time (before the scheduler warms up the process pool) so a forked
-    worker inherits the handler and its acquisition/pipeline-stage logs
+    time, so a pool worker (which imports this module to run the job)
+    sets up the handler too and its acquisition/pipeline-stage logs
     land here too, not just this module's. A plain append handler, since
     several processes write it; services/log_maintenance.py rotates it.
     Not under pytest: the reliability tests' simulated failures used to
@@ -409,9 +409,8 @@ def _run_forecast_v1_operational_impl(
 
 def run_forecast_v1_operational(now: datetime | None = None, make_public: bool | None = None) -> dict:
     # Snapshot the live station cache here, in the caller's process, and hand
-    # it to the worker as plain data - the worker is a long-lived forked
-    # process pool member and would otherwise only ever see synoptic.py's
-    # in-memory cache as it was at pool startup.
+    # it to the worker as plain data - the worker is a separate process
+    # pool member and cannot see synoptic.py's in-memory cache.
     raw_stations = get_station_data().get("stations") or []
     return _exclusive_run(_run_forecast_v1_operational_impl, now, make_public, raw_stations)
 

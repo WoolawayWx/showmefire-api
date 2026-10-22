@@ -4,9 +4,10 @@ across cores instead of serializing on the GIL inside `asyncio.to_thread` worker
 threads - and so a job that blows up its memory only takes down its own worker
 process, not the API server itself.
 
-Created lazily but expected to be warmed up once at scheduler startup
-(`core.scheduler.create_scheduler`) so the fork happens before the process
-accumulates many threads.
+Created lazily and warmed up once at scheduler startup
+(`core.scheduler.create_scheduler`). Workers are spawned fresh rather than
+forked from the API process, so they never inherit a lock some other thread
+was holding (see `get_process_pool`).
 
 A worker that's killed out-of-band (OOM, segfault) leaves the executor
 permanently broken - every future submission raises BrokenProcessPool until
@@ -26,7 +27,9 @@ and the pool recreated instead of being abandoned to leak forever.
 """
 import asyncio
 import logging
+import multiprocessing
 import os
+import socket
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 
@@ -43,6 +46,21 @@ _rtma_job_lock: asyncio.Lock | None = None
 # its own (much longer) SMF_FORECAST_V1_JOB_TIMEOUT_SECONDS ceiling.
 DEFAULT_JOB_TIMEOUT_SECONDS = int(os.getenv("SMF_CPU_POOL_JOB_TIMEOUT_SECONDS", "1800"))
 
+# Default timeout for any socket a worker opens without its own (Cartopy's
+# Google satellite tiles for the incident graphics use a bare urlopen). A
+# stalled download then fails in a minute instead of holding the job - and
+# the RTMA job lock - until the 30-minute pool timeout.
+WORKER_SOCKET_TIMEOUT_SECONDS = float(os.getenv("SMF_CPU_POOL_SOCKET_TIMEOUT_SECONDS", "60"))
+
+
+def _init_worker() -> None:
+    """Per-worker setup. Workers are spawned, not forked, so they start with
+    no logging handlers and need the API's stderr/api.log setup again."""
+    from core.logging_setup import configure_logging
+
+    configure_logging(log_file="api.log")
+    socket.setdefaulttimeout(WORKER_SOCKET_TIMEOUT_SECONDS)
+
 
 def get_process_pool() -> ProcessPoolExecutor:
     global _process_pool
@@ -53,7 +71,16 @@ def get_process_pool() -> ProcessPoolExecutor:
         default_workers = min(2, max(1, (os.cpu_count() or 2) - 2))
         workers = max(1, int(os.getenv("SMF_CPU_POOL_WORKERS", str(default_workers))))
         logger.info("Starting CPU job process pool with %d workers", workers)
-        _process_pool = ProcessPoolExecutor(max_workers=workers)
+        # Spawn, not fork: ProcessPoolExecutor forks its workers on first
+        # submit, and a pool recreated after a hang forks from the busy API
+        # process. A child forked while another thread holds a lock (logging,
+        # HTTP, SQLite) can block on it forever - the pattern behind repeat
+        # 30-minute hangs right after each pool recreation.
+        _process_pool = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_init_worker,
+        )
     return _process_pool
 
 

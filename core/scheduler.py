@@ -509,8 +509,7 @@ async def refresh_rtma_analysis_job():
 
 def create_scheduler():
     central_tz = timezone('America/Chicago')
-    # Warm up the process pool now, before any to_thread workers accumulate,
-    # so its fork() happens against a clean process.
+    # Create the process pool up front so its startup is logged with the scheduler's.
     get_process_pool()
     return AsyncIOScheduler(timezone=central_tz)
 
