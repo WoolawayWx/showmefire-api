@@ -35,6 +35,7 @@ from services.fire_weather import indices as ix
 from services.hrrr_hourly import BY_NAME as HOURLY, live_store
 from services.hrrr_hourly import danger
 from services.hrrr_hourly.derive import ESTIMATED_FM_INTERCEPT, ESTIMATED_FM_RH_SLOPE
+from services.raws_calibration import calibrate, fade_km
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,18 @@ _SOURCES = {
     "fuel_moisture_pct": "3.0 + 0.25 x RTMA RH (uncalibrated, as the hourly HRRR product)",
     "fire_danger_est": "Show Me Fire rule on estimated fuel moisture, RTMA RH and wind",
 }
+CALIBRATED_FM = "fuel_moisture_cal_pct"
 # Stored at archive precision, coarser than the forecast's but still finer than RTMA's own accuracy: it halves the size
 # of a day (19 -> ~9 MB measured on 2026-10-19), which matters when months of days are kept.
 _SCALES = {"temp_f": 0.5, "dewpoint_f": 0.5, "vpd_hpa": 0.25, "wind_speed_mph": 0.5, "wind_dir_deg": 5,
            "fuel_moisture_pct": 0.25}
 ELEMENTS = tuple(dataclasses.replace(HOURLY[name], source=source, scale=_SCALES.get(name, HOURLY[name].scale))
-                 for name, source in _SOURCES.items())
+                 for name, source in _SOURCES.items()) + (
+    dataclasses.replace(HOURLY["fuel_moisture_pct"], name=CALIBRATED_FM, scale=_SCALES["fuel_moisture_pct"],
+                        long_name="Fuel moisture, calibrated to RAWS",
+                        source="The estimate above, corrected toward the RAWS 10-hr fuel sticks reporting that hour, "
+                               "fading out away from them (services/raws_calibration.py)"),
+)
 BY_NAME = {element.name: element for element in ELEMENTS}
 
 
@@ -160,6 +167,67 @@ def _open_hour(hour_utc: datetime, cache_dir: Optional[Path], fetch: bool):
         return None
 
 
+# --- RAWS fuel moisture for calibration ----------------------------------------------------------
+
+def _read_json(path: Path) -> Optional[dict]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _history_observations(hour_utc: datetime, coordinates: dict) -> list[dict]:
+    """RAWS fuel moisture recorded by the 5-minute station-history job (kept 36 h) closest to the hour."""
+    from maps.station_history import get_values_n_hours_ago_batch
+
+    values = get_values_n_hours_ago_batch("fuel_moisture_pct", 0, now_utc=hour_utc)
+    return [{"station": stid, "longitude": coordinates[stid][0], "latitude": coordinates[stid][1], "fuel_moisture": value}
+            for stid, value in values.items() if stid in coordinates and value is not None]
+
+
+def _station_coordinates() -> dict:
+    from services.synoptic import get_station_data
+
+    coordinates = {}
+    for station in get_station_data().get("stations") or []:
+        if station.get("stid") and station.get("longitude") is not None and station.get("latitude") is not None:
+            coordinates[station["stid"]] = (float(station["longitude"]), float(station["latitude"]))
+    return coordinates
+
+
+def raws_observations(day: Date, hours: list[datetime], now: datetime) -> dict[int, list[dict]]:
+    """Step index -> RAWS fuel-moisture readings for that hour (only hours with enough stations to calibrate).
+
+    The whole-day observation archive (services/full_obs_archive.py, written at 01:00 for the day before) is used when
+    it exists, else the 10:00-21:00 end-of-day RAWS archive; hours neither covers (today, so far) come from the
+    station history.
+    """
+    from core.config import ARCHIVE_RAW_DATA_DIR
+    from services import full_obs_archive
+    from services.raws_calibration import MIN_STATIONS, synoptic_fuel_observations
+
+    payload = (_read_json(full_obs_archive.output_path(day.isoformat()))
+               or _read_json(Path(ARCHIVE_RAW_DATA_DIR) / f"raw_data_{day:%Y%m%d}.json"))
+    coordinates = None
+    found = {}
+    for index, hour in enumerate(hours):
+        if hour > now:
+            continue
+        readings = synoptic_fuel_observations(payload, hour) if payload else []
+        if len(readings) < MIN_STATIONS and now - hour < timedelta(hours=36):
+            try:
+                if coordinates is None:
+                    coordinates = _station_coordinates()
+                readings = _history_observations(hour, coordinates)
+            except Exception as error:  # noqa: BLE001 - calibration is optional; the estimate still gets written
+                logger.warning("No station-history RAWS fuel moisture for %s: %s", hour, error)
+                coordinates = {}
+        if len(readings) >= MIN_STATIONS:
+            found[index] = readings
+    return found
+
+
 # --- one day ----------------------------------------------------------------------------------
 
 def build_manifest(day: Date, hours: list[datetime], present: dict[int, list[str]], grid: dict, complete: bool,
@@ -172,7 +240,8 @@ def build_manifest(day: Date, hours: list[datetime], present: dict[int, list[str
         "product": PRODUCT, "schema_version": SCHEMA_VERSION, "model": "RTMA", "kind": KIND,
         "label": f"What happened on {label_day:%a %b} {day.day}",
         "note": ("RTMA analysis: what was observed, gridded, hour by hour. Fuel moisture and fire danger are the same "
-                 "estimate the hourly HRRR view uses, so the two compare directly."),
+                 "estimate the hourly HRRR view uses, so the two compare directly; the calibrated fuel moisture is "
+                 "that estimate corrected toward the RAWS fuel sticks near them."),
         "cycle": run_id(day), "date": day.isoformat(),
         "cycle_time_utc": hours[0].strftime("%Y-%m-%dT%H:%M:%SZ"),
         "issued_at_utc": issued_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -203,6 +272,8 @@ def build_day(day: Date, *, root: Optional[Path] = None, cache_dir: Optional[Pat
     shutil.rmtree(staging, ignore_errors=True)
     store_dir = staging / "forecast.zarr"
     present: dict[int, list[str]] = {}
+    calibration: dict[int, dict] = {}
+    raws = raws_observations(day, hours, now)
     lat = None
     # Each hour is written as soon as it is derived, so only one hour's fields are in memory at a time.
     for index, hour in enumerate(hours):
@@ -225,6 +296,11 @@ def build_day(day: Date, *, root: Optional[Path] = None, cache_dir: Optional[Pat
             values = derive_hour(dataset)
         finally:
             dataset.close()
+        if "fuel_moisture_pct" in values and index in raws:
+            calibrated, meta = calibrate(values["fuel_moisture_pct"], lon, lat, raws[index])
+            if meta["applied"]:
+                values[CALIBRATED_FM] = calibrated.astype("float32")
+                calibration[index] = {"stations": meta["station_count"], "mean_residual": meta["mean_residual"]}
         for name, array in values.items():
             live_store.write_step(store_dir, name, index, array, BY_NAME[name].scale)
         present[index] = sorted(values)
@@ -235,6 +311,9 @@ def build_day(day: Date, *, root: Optional[Path] = None, cache_dir: Optional[Pat
     complete = now >= hours[-1] + timedelta(hours=3)
     grid = {"ny": int(lat.shape[0]), "nx": int(lat.shape[1]), "source": "RTMA 2.5 km, Missouri and a buffer around it"}
     manifest = build_manifest(day, hours, present, grid, complete, now)
+    if calibration:
+        manifest["calibration"] = {"method": "RAWS 10-hr fuel moisture residuals, fading out away from stations",
+                                   "fade_km": fade_km(), "hours": {str(i): calibration[i] for i in sorted(calibration)}}
     (staging / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True))
 
     final, retired = root / run, root / f".{run}.old"

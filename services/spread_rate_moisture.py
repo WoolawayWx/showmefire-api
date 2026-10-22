@@ -11,6 +11,7 @@ import xarray as xr
 from scipy.spatial import cKDTree
 
 from core.fire_danger import _green_factor
+from services.raws_calibration import fade_km, station_correction
 from services.rtma_capture import _root, count_cached_hours, latest_complete_hour
 from services.seasonal_fuel_state import current_gdd_accum
 
@@ -167,16 +168,13 @@ def apply_raws_10hr_correction(
         dtype=float,
     )
     residuals = np.asarray([point["fm10"] for point in stations], dtype=float) - model_at_stations
-    distance, index = tree.query(np.column_stack((target_lat.ravel(), target_lon.ravel())), k=min(8, len(stations)))
-    if distance.ndim == 1:
-        distance, index = distance[:, None], index[:, None]
-    weights = 1.0 / np.maximum(distance, 1e-3) ** 2
-    weights /= weights.sum(axis=1, keepdims=True)
-    correction = (weights * residuals[index]).sum(axis=1).reshape(target_lat.shape)
+    # Statewide offset everywhere; each station's own departure fades out away from it (services/raws_calibration.py).
+    correction = station_correction(target_lon, target_lat, coords[:, 1], coords[:, 0], residuals)
     corrected = np.clip(fm10 + correction, FM_MIN_PERCENT, FM_MAX_PERCENT)
     nearest_distance, _ = tree.query(np.column_stack((target_lat.ravel(), target_lon.ravel())), k=1)
     meta = {
         "station_count": len(stations),
+        "fade_km": fade_km(),
         "mean_residual": float(np.mean(residuals)),
         "mean_nearest_station_distance_deg": float(np.mean(nearest_distance)),
         "max_nearest_station_distance_deg": float(np.max(nearest_distance)),

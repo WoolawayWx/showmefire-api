@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from services import cdn_datasets, rtma_analysis as ra
 from services.hrrr_hourly import live_store
 
+_real_raws_observations = ra.raws_observations
+
 DAY = date(2026, 10, 19)                       # a CDT day: 05Z on the 19th to 05Z on the 20th
 LOV, LATIN = 265.0, 25.0
 
@@ -34,6 +36,12 @@ def dirs(tmp_path):
     cache, root = tmp_path / "cache", tmp_path / "out"
     cache.mkdir()
     return cache, root
+
+
+@pytest.fixture(autouse=True)
+def no_raws(monkeypatch):
+    """No RAWS readings unless a test supplies them (the real archives and station history stay out of it)."""
+    monkeypatch.setattr(ra, "raws_observations", lambda day, hours, now: {})
 
 
 def test_a_day_is_its_local_hours_including_the_clock_change_days():
@@ -141,3 +149,69 @@ def test_api_serves_runs_manifest_zarr_and_points(dirs, monkeypatch):
     point = client.get("/rtma-analysis/runs/20261019/point", params={"lat": 38.0, "lon": -95.0}).json()
     assert point["units"]["temp_f"] == "degF" and len(point["series"]["rh_pct"]) == 4
     assert client.get("/rtma-analysis/runs/20261019/point", params={"lat": 45.0, "lon": -80.0}).status_code == 404
+
+
+def _raws_payload(hour_utc, value):
+    """Three RAWS in a Synoptic timeseries payload, each reading `value` 7 minutes before `hour_utc`."""
+    when = (hour_utc - timedelta(minutes=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"STATION": [{"STID": f"RAWS{i}", "LATITUDE": str(lat), "LONGITUDE": str(lon),
+                         "OBSERVATIONS": {"date_time": [when], "fuel_moisture_set_1": [value]}}
+                        for i, (lat, lon) in enumerate([(37.0, -94.0), (38.0, -95.0), (39.0, -92.0)])]}
+
+
+def test_calibrated_fuel_moisture_layer_where_raws_reported(dirs, monkeypatch):
+    cache, root = dirs
+    hours = ra.day_hours(DAY)
+    for hour in hours[:3]:
+        write_hour(cache, hour, rh=40.0)                  # estimate 3 + 0.25 x 40 = 13 %
+    from services.raws_calibration import synoptic_fuel_observations
+    readings = {i: synoptic_fuel_observations(_raws_payload(hours[i], 19.0), hours[i]) for i in (0, 1)}
+    monkeypatch.setattr(ra, "raws_observations", lambda day, hours, now: readings)
+
+    manifest = ra.build_day(DAY, root=root, cache_dir=cache, now=hours[-1] + timedelta(hours=4))
+
+    assert manifest["variables"]["fuel_moisture_cal_pct"]["hours_present"] == [0, 1]
+    assert manifest["variables"]["fuel_moisture_pct"]["hours_present"] == [0, 1, 2]
+    assert manifest["calibration"]["hours"] == {"0": {"stations": 3, "mean_residual": 6.0},
+                                                "1": {"stations": 3, "mean_residual": 6.0}}
+    store = root / "20261019" / "forecast.zarr"
+    calibrated = live_store.read_step(store, "fuel_moisture_cal_pct", 0)
+    estimate = live_store.read_step(store, "fuel_moisture_pct", 0)
+    assert estimate[0, 0] == pytest.approx(13.0)
+    assert calibrated[0, 0] == pytest.approx(19.0, abs=0.5)    # the RAWS at 37 N, 94 W
+    assert live_store.read_step(store, "fuel_moisture_cal_pct", 2) is None
+
+
+def test_raws_readings_prefer_the_full_day_archive_then_fill_today_from_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "raws_observations", _real_raws_observations)
+    hours = ra.day_hours(DAY)
+    monkeypatch.setenv("SMF_ARCHIVE_ROOT", str(tmp_path))
+    monkeypatch.setattr("core.config.ARCHIVE_RAW_DATA_DIR", str(tmp_path / "archive" / "raw_data"))
+    history_calls = []
+    monkeypatch.setattr(ra, "_station_coordinates", lambda: {"RAWS0": (-94.0, 37.0)})
+    monkeypatch.setattr(ra, "_history_observations",
+                        lambda hour, coordinates: history_calls.append(hour) or [{"fuel_moisture": 9.0}] * 3)
+
+    # Nothing archived yet: hours of the last 36 h come from the station history, later hours are skipped.
+    now = hours[3] + timedelta(minutes=30)
+    found = ra.raws_observations(DAY, hours, now)
+    assert sorted(found) == [0, 1, 2, 3] and history_calls == hours[:4]
+
+    # The whole-day archive covers every hour, so the history is not consulted.
+    from services import full_obs_archive
+    path = full_obs_archive.output_path(DAY.isoformat())
+    path.parent.mkdir(parents=True)
+    payload = {"STATION": []}
+    for hour in hours:
+        for station in _raws_payload(hour, 15.0)["STATION"]:
+            entry = next((s for s in payload["STATION"] if s["STID"] == station["STID"]), None)
+            if entry is None:
+                payload["STATION"].append(station)
+            else:
+                for key in ("date_time", "fuel_moisture_set_1"):
+                    entry["OBSERVATIONS"][key] += station["OBSERVATIONS"][key]
+    path.write_text(json.dumps(payload))
+    history_calls.clear()
+    found = ra.raws_observations(DAY, hours, hours[-1] + timedelta(hours=4))
+    assert sorted(found) == list(range(24)) and history_calls == []
+    assert {reading["fuel_moisture"] for reading in found[12]} == {15.0}

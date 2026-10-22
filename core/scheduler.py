@@ -114,6 +114,7 @@ async def record_station_history_job():
     try:
         from maps.station_history import prune_old, record_observations
         from services import derived_met
+        from services.raws_calibration import fresh_station_fuel_moisture
 
         def _record():
             stations = get_station_data().get("stations") or []
@@ -149,6 +150,8 @@ async def record_station_history_job():
                 "wind_speed_mph": wind_speed,
                 "feels_like_f": _feels_like,
                 "wbgt_f": _wbgt,
+                # RAWS only; calibrates today's "what happened" fuel moisture (services/rtma_analysis.py).
+                "fuel_moisture_pct": fresh_station_fuel_moisture,
             }
             record_observations(stations, fields)
             # Neighbor-state stations: pressure only, to anchor the 3-hour change maps at the border.

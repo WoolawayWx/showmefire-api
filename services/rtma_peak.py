@@ -103,16 +103,6 @@ def _parse_local_date(target_date: str | date | None) -> date:
         raise ValueError(f"date must be YYYY-MM-DD, got: {target_date}") from exc
 
 
-def _observation_series(observations: dict, *names: str) -> list:
-    for name in names:
-        values = observations.get(name)
-        if isinstance(values, dict):
-            values = values.get("value")
-        if values is not None:
-            return values if isinstance(values, list) else [values]
-    return []
-
-
 def _load_fuel_moisture_archive(target_date: date, archive_dir: Path | None = None) -> dict | None:
     path = Path(archive_dir or ARCHIVE_RAW_DATA_DIR) / f"raw_data_{target_date:%Y%m%d}.json"
     try:
@@ -128,49 +118,9 @@ def _load_fuel_moisture_archive(target_date: date, archive_dir: Path | None = No
 
 def _fuel_moisture_observations(payload: dict | None, valid_time: datetime) -> list[dict]:
     """Return each station's closest measured fuel moisture for an RTMA hour."""
-    if not payload:
-        return []
-    selected = []
-    target = valid_time.astimezone(timezone.utc)
-    for station in payload.get("STATION", []):
-        observations = station.get("OBSERVATIONS", {})
-        times = _observation_series(observations, "date_time")
-        values = _observation_series(
-            observations,
-            "fuel_moisture_value_1",
-            "fuel_moisture_set_1",
-            "fuel_moisture",
-        )
-        candidates = []
-        for index, raw_time in enumerate(times):
-            if index >= len(values) or values[index] is None:
-                continue
-            try:
-                observed_time = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
-                if observed_time.tzinfo is None:
-                    observed_time = observed_time.replace(tzinfo=timezone.utc)
-                age = abs(target - observed_time.astimezone(timezone.utc))
-                value = float(values[index])
-            except (TypeError, ValueError):
-                continue
-            if age <= FUEL_MOISTURE_MAX_AGE and np.isfinite(value) and 0 < value <= 60:
-                candidates.append((age, value, observed_time))
-        if not candidates:
-            continue
-        try:
-            longitude = float(station["LONGITUDE"])
-            latitude = float(station["LATITUDE"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        _, value, observed_time = min(candidates, key=lambda candidate: candidate[0])
-        selected.append({
-            "station": station.get("STID") or station.get("ID"),
-            "longitude": longitude,
-            "latitude": latitude,
-            "fuel_moisture": value,
-            "observation_time": observed_time.isoformat(),
-        })
-    return selected
+    from services.raws_calibration import synoptic_fuel_observations
+
+    return synoptic_fuel_observations(payload, valid_time, FUEL_MOISTURE_MAX_AGE)
 
 
 def _calibrate_fuel_moisture(
@@ -179,36 +129,10 @@ def _calibrate_fuel_moisture(
     lat: np.ndarray,
     observations: list[dict],
 ) -> np.ndarray:
-    """Bias-correct the RH estimate with inverse-distance RAWS residuals."""
-    if len(observations) < MINIMUM_FUEL_MOISTURE_STATIONS:
-        return estimate
+    """Bias-correct the RH estimate with RAWS residuals, fading out away from stations (services/raws_calibration.py)."""
+    from services.raws_calibration import calibrate
 
-    weighted_residual = np.zeros(estimate.shape, dtype=float)
-    weight_sum = np.zeros(estimate.shape, dtype=float)
-    latitude_scale = np.cos(np.deg2rad(float(np.nanmean(lat))))
-    for observation in observations:
-        station_lon = observation["longitude"]
-        station_lat = observation["latitude"]
-        nearest = np.nanargmin(
-            np.square((lon - station_lon) * latitude_scale) + np.square(lat - station_lat)
-        )
-        estimated_at_station = float(estimate.ravel()[nearest])
-        residual = np.clip(observation["fuel_moisture"] - estimated_at_station, -15.0, 15.0)
-        distance_squared = (
-            np.square((lon - station_lon) * latitude_scale)
-            + np.square(lat - station_lat)
-        )
-        weights = 1.0 / (distance_squared + 0.05 ** 2)
-        weighted_residual += weights * residual
-        weight_sum += weights
-
-    correction = np.divide(
-        weighted_residual,
-        weight_sum,
-        out=np.zeros_like(weighted_residual),
-        where=weight_sum > 0,
-    )
-    return np.clip(estimate + correction, 1.0, 40.0)
+    return calibrate(estimate, lon, lat, observations)[0]
 
 
 def _classify_grid(
