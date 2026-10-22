@@ -83,13 +83,20 @@ def _normalize_units(variable: str, data: xr.DataArray) -> xr.DataArray:
     return data
 
 
+# GRIB packing makes a run total dip slightly between hours (HRRR 2026-10-01
+# 12Z: up to 0.005 mm in 3,247 places). Counting each dip as a bucket reset put
+# the whole run total into a dry hour (up to 104 mm), so only a real drop resets.
+PACKING_NOISE_MM = 0.1
+
+
 def _precip_to_increments(data: xr.DataArray) -> xr.DataArray:
     semantics = str(data.attrs.get("accumulation_semantics", "incremental")).lower()
     if semantics not in {"cumulative", "accumulated", "since_initialization"}:
         return data
     diffs = data.diff("time", label="upper")
     first = data.isel(time=0)
-    increments = xr.concat([first, xr.where(diffs < 0, data.isel(time=slice(1, None)), diffs)], dim="time")
+    reset = diffs < -PACKING_NOISE_MM
+    increments = xr.concat([first, xr.where(reset, data.isel(time=slice(1, None)), diffs.clip(min=0))], dim="time")
     increments = increments.assign_coords(time=data.time)
     increments.attrs.update(data.attrs)
     increments.attrs["accumulation_semantics"] = "incremental"
@@ -121,6 +128,10 @@ class DatasetAdapter:
                 continue
             data = _normalize_units(variable, source[found])
             if variable == "precipitation_increment":
+                # Unit scaling (m -> mm) drops attrs, so carry the semantics across.
+                semantics = source[found].attrs.get("accumulation_semantics")
+                if semantics:
+                    data.attrs["accumulation_semantics"] = semantics
                 data = _precip_to_increments(data)
             renamed[variable] = data
         if missing and self.strict_required:

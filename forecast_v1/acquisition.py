@@ -37,6 +37,19 @@ def _sanitized_error(error: object) -> str:
     return re.sub(r"\s+", " ", message).strip()
 
 MO_BUFFERED_BBOX = (-96.8, -88.1, 34.8, 41.8)  # west, east, south, north
+# HRRR and RRFS publish both the run total ("0-5 hour acc", "0-2 day acc" at
+# f48) and the last hour ("4-5 hour acc"). Matching both left the run total in
+# place of hourly rain, so request only the run total and let the adapter
+# difference it (acquire_source marks it cumulative).
+# Herbie's inventory text has no trailing colon (":APCP:surface:0-5 hour acc fcst"),
+# so patterns must not require one after the time range.
+APCP_RUN_TOTAL_SEARCH = r":APCP:surface:0-\d+ (?:hour|day) acc fcst"
+# RRFS's 2dfld product carries both an instantaneous TCDC message and a
+# period-averaged one under the same "entire atmosphere" label; matching both
+# makes xarray try to merge incompatible time-step shapes ("do not form a
+# hypercube"). DSWRF has the same pair. Keep the instantaneous message.
+TCDC_INSTANT_SEARCH = r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:(?!\d+-\d+ hour ave fcst)"
+DSWRF_INSTANT_SEARCH = r":DSWRF:surface:(?!\d+-\d+ hour ave fcst)"
 SURFACE_SEARCHES = (
     # Keep critical fields separate so a cfgrib/read failure for one message
     # cannot discard temperature, humidity, and dewpoint together.
@@ -45,23 +58,32 @@ SURFACE_SEARCHES = (
     r":RH:2 m above ground:",
     r":UGRD:10 m above ground:",
     r":VGRD:10 m above ground:",
-    # RRFS's 2dfld product carries both an instantaneous TCDC message and a
-    # period-averaged one under the same "entire atmosphere" label; matching
-    # both makes xarray try to merge incompatible time-step shapes ("do not
-    # form a hypercube"). Exclude the averaged variant explicitly.
-    r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:(?!\d+-\d+ hour ave fcst:)",
+    TCDC_INSTANT_SEARCH,
     r":(?:SOILW|MSTAV):",
     r":(?:HGT:planetary boundary layer|HPBL|MIXHT):",
     r":GUST:(?:surface|10 m above ground):",
-    r":APCP:surface:",
-    r":DSWRF:surface:",
+    APCP_RUN_TOTAL_SEARCH,
+    DSWRF_INSTANT_SEARCH,
     # HRRR exposes forecast-state and interval-accumulation WEASD messages;
     # only the state field belongs in the SWE forecast cube.
     r":WEASD:surface:(?:anl|[0-9]+ hour fcst)",
 )
+# GEFS publishes APCP, TCDC and DSWRF once per file, as totals/means over
+# buckets that reset every 6 hours (f03 "0-3", f06 "0-6", f09 "6-9", f12
+# "6-12"), so it needs the messages the searches above skip. _hourly_gefs
+# splits the buckets into 3-hour intervals.
+_GEFS_SEARCH_OVERRIDES = {
+    APCP_RUN_TOTAL_SEARCH: r":APCP:surface:",
+    TCDC_INSTANT_SEARCH: r":TCDC:entire atmosphere:",
+    DSWRF_INSTANT_SEARCH: r":DSWRF:surface:",
+}
+GEFS_SURFACE_SEARCHES = tuple(_GEFS_SEARCH_OVERRIDES.get(search, search) for search in SURFACE_SEARCHES)
+GEFS_BUCKET_MEANS = ("dswrf", "tcc")
 # Kept as a public union for inventory diagnostics and compatibility.
 SURFACE_SEARCH = "|".join(SURFACE_SEARCHES)
 UPPER_AIR_SEARCH = r":(?:TMP|UGRD|VGRD):(?:700|850) mb:"
+GEFS_BUCKET_HOURS = 6
+GEFS_STEP_HOURS = 3
 
 
 @dataclass(frozen=True)
@@ -74,6 +96,7 @@ class AcquisitionSpec:
     domain: str | None = None
     required: bool = False
     role: Literal["operational", "fallback", "shadow"] = "operational"
+    searches: tuple[str, ...] = SURFACE_SEARCHES
 
 
 @dataclass(frozen=True)
@@ -155,7 +178,10 @@ def default_specs() -> tuple[AcquisitionSpec, ...]:
         specs.append(
             AcquisitionSpec("refs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), refs, domain=rrfs_domain)
         )
-    specs.append(AcquisitionSpec("gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, 3)), gefs, role="fallback"))
+    specs.append(AcquisitionSpec(
+        "gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, GEFS_STEP_HOURS)), gefs,
+        role="fallback", searches=GEFS_SURFACE_SEARCHES,
+    ))
     # Local import: registry.py imports AcquisitionSpec from this module, so a
     # module-level import here would be circular.
     from .registry import extra_specs
@@ -430,7 +456,7 @@ def _fetch_member(
 
     groups = []
     errors = []
-    for search in SURFACE_SEARCHES:
+    for search in spec.searches:
         attempts = max(1, int(os.getenv("SMF_HERBIE_QUERY_ATTEMPTS", "3")))
         for attempt in range(1, attempts + 1):
             try:
@@ -476,6 +502,39 @@ def _fetch_member(
     return canonical.load()
 
 
+def _gefs_intervals(source: xr.DataArray, cycle: datetime, *, average: bool) -> list[tuple[int, int, xr.DataArray]]:
+    """Split GEFS 6-hour-reset buckets into (start, end, value) lead intervals.
+
+    GEFS APCP and DSWRF cover the time since the last 6-hour boundary: f03
+    holds 0-3, f06 holds 0-6, f09 holds 6-9, f12 holds 6-12. So the 3-6 hour
+    rain is f06 - f03, and the 3-6 hour mean flux is 2*f06 - f03. Treating
+    f06 as a 3-hour amount counted the first three hours of every bucket twice.
+    """
+    initialization = np.datetime64(cycle.replace(tzinfo=None), "h")
+    values: dict[int, xr.DataArray] = {}
+    for index, valid in enumerate(source.time.values.astype("datetime64[h]")):
+        lead = int((valid - initialization) / np.timedelta64(1, "h"))
+        value = source.isel(time=index, drop=True)
+        if lead > 0 and bool(value.notnull().any()):
+            if lead % GEFS_STEP_HOURS:
+                raise ValueError(f"GEFS {source.name} f{lead:03d} is off the {GEFS_STEP_HOURS}-hour bucket grid")
+            values[lead] = value
+    intervals = []
+    for lead, value in sorted(values.items()):
+        bucket_start = lead - (lead - 1) % GEFS_BUCKET_HOURS - 1
+        previous = lead - GEFS_STEP_HOURS
+        if bucket_start < previous and previous in values:
+            if average:
+                value = ((lead - bucket_start) * value - (previous - bucket_start) * values[previous]) / (lead - previous)
+            else:
+                value = value - values[previous]
+            start = previous
+        else:
+            start = bucket_start
+        intervals.append((start, lead, value.clip(min=0)))
+    return intervals
+
+
 def _hourly_gefs(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
     target = np.array([np.datetime64(cycle.replace(tzinfo=None)) + np.timedelta64(hour, "h") for hour in range(HORIZON_HOURS + 1)])
     precipitation = next((name for name in ("tp", "apcp", "precipitation_increment") if name in dataset), None)
@@ -484,15 +543,24 @@ def _hourly_gefs(dataset: xr.Dataset, cycle: datetime) -> xr.Dataset:
     if precipitation:
         source = dataset[precipitation]
         output = xr.full_like(source.reindex(time=target), np.nan, dtype="float32")
-        source_times = source.time.values.astype("datetime64[h]")
-        for index, valid in enumerate(source_times):
-            end = int((valid - np.datetime64(cycle.replace(tzinfo=None), "h")) / np.timedelta64(1, "h"))
-            previous = 0 if index == 0 else int((source_times[index - 1] - np.datetime64(cycle.replace(tzinfo=None), "h")) / np.timedelta64(1, "h"))
-            width = max(end - previous, 1)
-            for lead in range(previous + (0 if index == 0 else 1), end + 1):
-                output.loc[{"time": target[lead]}] = source.isel(time=index) / width
+        intervals = _gefs_intervals(source, cycle, average=False)
+        if intervals:
+            output.loc[{"time": target[0]}] = 0.0
+        for start, end, amount in intervals:
+            for lead in range(start + 1, end + 1):
+                output.loc[{"time": target[lead]}] = amount / (end - start)
         output.attrs.update(source.attrs, accumulation_semantics="incremental")
         hourly[precipitation] = output
+    for name in GEFS_BUCKET_MEANS:
+        if name not in dataset:
+            continue
+        # Interpolating bucket means as if they were instantaneous mixed 3- and
+        # 6-hour averages; hold each 3-hour mean across its own hours instead.
+        values = hourly[name].copy()
+        for start, end, mean in _gefs_intervals(dataset[name], cycle, average=True):
+            for lead in range(start + 1, end + 1):
+                values.loc[{"time": target[lead]}] = mean
+        hourly[name] = values
     return hourly
 
 
@@ -637,6 +705,8 @@ def acquire_source(
             tuple(sorted(quality_flags)),
         )
     else:
+        if precipitation and APCP_RUN_TOTAL_SEARCH in spec.searches:
+            combined[precipitation].attrs["accumulation_semantics"] = "cumulative"
         try:
             cube = ADAPTERS[spec.public_name]().normalize(combined, cycle)
         except ValueError as error:

@@ -368,3 +368,171 @@ def test_query_leads_raises_when_no_hour_has_the_field(monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         _query_leads(lambda leads: Client(), (0, 1, 2), ":APCP:surface:", CYCLE)
+
+
+# APCP entries as Herbie's inventory()["search_this"] shows them (checked for
+# HRRR 2026-10-01 12Z and the NOAA .idx files for 2026-10-21 12Z). There is
+# no trailing colon unless the line has an extra field, as GEFS lines do.
+HRRR_RRFS_APCP_RUN_TOTALS = (
+    ":APCP:surface:0-0 day acc fcst",       # HRRR f00
+    ":APCP:surface:0-1 hour acc fcst",      # HRRR/RRFS f01 (the only message)
+    ":APCP:surface:0-5 hour acc fcst",      # HRRR/RRFS f05
+    ":APCP:surface:0-1 day acc fcst",       # HRRR f24
+    ":APCP:surface:0-2 day acc fcst",       # HRRR f48
+    ":APCP:surface:0-50 hour acc fcst",     # RRFS f50
+)
+HRRR_RRFS_APCP_LAST_HOUR = (
+    ":APCP:surface:4-5 hour acc fcst",
+    ":APCP:surface:10-11 hour acc fcst",
+    ":APCP:surface:47-48 hour acc fcst",
+    ":APCP:surface:49-50 hour acc fcst",
+)
+GEFS_APCP = (
+    ":APCP:surface:0-3 hour acc fcst:ENS=low-res ctl",
+    ":APCP:surface:0-6 hour acc fcst:ENS=low-res ctl",
+    ":APCP:surface:6-9 hour acc fcst:ENS=low-res ctl",
+    ":APCP:surface:6-12 hour acc fcst:ENS=low-res ctl",
+    ":APCP:surface:48-54 hour acc fcst:ENS=low-res ctl",
+)
+
+
+def test_apcp_searches_pick_the_run_total_for_hrrr_rrfs_and_every_gefs_bucket():
+    import re
+    from forecast_v1.acquisition import APCP_RUN_TOTAL_SEARCH, GEFS_SURFACE_SEARCHES, default_specs
+
+    assert all(re.search(APCP_RUN_TOTAL_SEARCH, line) for line in HRRR_RRFS_APCP_RUN_TOTALS)
+    assert not any(re.search(APCP_RUN_TOTAL_SEARCH, line) for line in HRRR_RRFS_APCP_LAST_HOUR)
+    gefs_apcp = next(search for search in GEFS_SURFACE_SEARCHES if "APCP" in search)
+    assert all(re.search(gefs_apcp, line) for line in GEFS_APCP)
+    specs = {spec.public_name: spec for spec in default_specs()}
+    assert APCP_RUN_TOTAL_SEARCH in specs["hrrr"].searches and APCP_RUN_TOTAL_SEARCH in specs["rrfs"].searches
+    assert APCP_RUN_TOTAL_SEARCH not in specs["gefs"].searches
+
+
+def test_cloud_and_sunshine_searches_keep_one_message_per_model():
+    # The old TCDC pattern excluded "... hour ave fcst:" with a trailing colon:
+    # Herbie's RRFS text has none, so both messages matched; GEFS's text has
+    # one (":ENS=..."), so its only cloud message was rejected every run.
+    import re
+    from forecast_v1.acquisition import DSWRF_INSTANT_SEARCH, GEFS_SURFACE_SEARCHES, TCDC_INSTANT_SEARCH
+
+    rrfs_cloud = (
+        ":TCDC:entire atmosphere (considered as a single layer):5 hour fcst",
+        ":TCDC:entire atmosphere (considered as a single layer):4-5 hour ave fcst",
+    )
+    rrfs_sun = (":DSWRF:surface:4-5 hour ave fcst", ":DSWRF:surface:5 hour fcst")
+    assert [line for line in rrfs_cloud if re.search(TCDC_INSTANT_SEARCH, line)] == [rrfs_cloud[0]]
+    assert [line for line in rrfs_sun if re.search(DSWRF_INSTANT_SEARCH, line)] == [rrfs_sun[1]]
+    assert re.search(TCDC_INSTANT_SEARCH, ":TCDC:entire atmosphere:5 hour fcst")  # HRRR
+    assert re.search(DSWRF_INSTANT_SEARCH, ":DSWRF:surface:anl")  # HRRR f00
+    gefs = (
+        ":TCDC:entire atmosphere:0-6 hour ave fcst:ENS=low-res ctl",
+        ":DSWRF:surface:0-6 hour ave fcst:ENS=low-res ctl",
+    )
+    assert all(any(re.search(search, line) for search in GEFS_SURFACE_SEARCHES) for line in gefs)
+
+
+def test_hrrr_run_total_precipitation_becomes_hourly_rain(tmp_path):
+    # The 2026-10-01 run kept the run total: one cell read 0, 16, 20, 25 ... 180 mm "per hour".
+    run_total = np.array([0.0, 16.2, 19.9, 25.0, 25.0, 31.4])
+    coords = {
+        "step": np.arange(6).astype("timedelta64[h]"), "time": np.datetime64(CYCLE.replace(tzinfo=None)),
+        "latitude": ("y", [36.0]), "longitude": ("x", [-93.0]),
+    }
+    shape = (6, 1, 1)
+    variables = {
+        "t2m": (("step", "y", "x"), np.full(shape, 293.15), {"units": "K"}),
+        "r2": (("step", "y", "x"), np.full(shape, 40.0), {"units": "%"}),
+        "u10": (("step", "y", "x"), np.full(shape, 3.0), {"units": "m s-1"}),
+        "v10": (("step", "y", "x"), np.full(shape, 2.0), {"units": "m s-1"}),
+        "gust": (("step", "y", "x"), np.full(shape, 6.0), {"units": "m s-1"}),
+        "tp": (("step", "y", "x"), run_total.reshape(shape), {"units": "kg m**-2"}),
+        "dswrf": (("step", "y", "x"), np.full(shape, 400.0), {"units": "W m-2"}),
+        "tcc": (("step", "y", "x"), np.full(shape, 25.0), {"units": "%"}),
+        "hpbl": (("step", "y", "x"), np.full(shape, 1000.0), {"units": "m"}),
+        "soilw": (("step", "y", "x"), np.full(shape, 0.2), {"units": "1"}),
+        "weasd": (("step", "y", "x"), np.zeros(shape), {"units": "mm"}),
+    }
+    raw = xr.Dataset(variables, coords=coords)
+
+    class Herbie:
+        def __init__(self, **kwargs): pass
+        def xarray(self, *args, **kwargs): return raw
+
+    result = acquire_source(AcquisitionSpec("hrrr", "hrrr", "sfc", tuple(range(6)), (None,)), CYCLE, tmp_path, fast_herbie_factory=Herbie)
+    hourly = result.dataset.precipitation_increment.isel(member=0, y=0, x=0).values
+    assert hourly.tolist() == pytest.approx([0.0, 16.2, 3.7, 5.1, 0.0, 6.4], abs=1e-4)
+    assert hourly.sum() == pytest.approx(run_total[-1], abs=1e-4)
+
+
+def test_packing_dips_in_a_run_total_are_not_bucket_resets():
+    from forecast_v1.adapters import _precip_to_increments
+
+    # Real HRRR cell, 2026-10-01 12Z f00-f04: 3.085 -> 3.080 is GRIB packing noise.
+    total = xr.DataArray(
+        np.array([0.0, 3.085, 3.080, 3.12, 6.95, 0.4]), dims="time",
+        coords={"time": np.arange(6)}, attrs={"accumulation_semantics": "cumulative"},
+    )
+    hourly = _precip_to_increments(total).values
+    assert hourly.tolist() == pytest.approx([0.0, 3.085, 0.0, 0.04, 3.83, 0.4], abs=1e-6)  # last step is a real reset
+
+
+def _gefs_buckets(three_hour_values: np.ndarray, *, average: bool) -> np.ndarray:
+    """Lay out 3-hour values the way GEFS publishes them: f03 0-3, f06 0-6, f09 6-9, ..."""
+    published = []
+    for index, value in enumerate(three_hour_values):
+        if index % 2 == 0:
+            published.append(value)
+        else:
+            pair = three_hour_values[index - 1:index + 1]
+            published.append(pair.mean() if average else pair.sum())
+    return np.array(published)
+
+
+def test_gefs_six_hour_buckets_are_not_double_counted():
+    from forecast_v1.acquisition import _hourly_gefs
+
+    rng = np.random.default_rng(3)
+    rain_3h = rng.uniform(0, 6, size=24)  # mm in each 3-hour interval, f00-f72
+    flux_3h = rng.uniform(0, 800, size=24)  # mean W m-2 in each interval
+    cloud_3h = rng.uniform(0, 100, size=24)  # mean % in each interval
+    times = [np.datetime64(CYCLE.replace(tzinfo=None) + timedelta(hours=3 * i), "ns") for i in range(25)]
+    nan = np.array([np.nan])  # GEFS publishes no APCP or DSWRF at f000
+    dataset = xr.Dataset(
+        {
+            "t2m": (("time", "y", "x"), np.full((25, 1, 1), 290.0)),
+            "tp": (("time", "y", "x"), np.concatenate([nan, _gefs_buckets(rain_3h, average=False)]).reshape(25, 1, 1)),
+            "dswrf": (("time", "y", "x"), np.concatenate([nan, _gefs_buckets(flux_3h, average=True)]).reshape(25, 1, 1)),
+            "tcc": (("time", "y", "x"), np.concatenate([nan, _gefs_buckets(cloud_3h, average=True)]).reshape(25, 1, 1)),
+        },
+        coords={"time": times, "y": [0.0], "x": [0.0]},
+    )
+    hourly = _hourly_gefs(dataset, CYCLE)
+    rain = hourly.tp.isel(y=0, x=0).values
+    assert rain[0] == 0
+    assert rain[1:].tolist() == pytest.approx(np.repeat(rain_3h / 3, 3).tolist())
+    assert rain.sum() == pytest.approx(rain_3h.sum())
+    assert hourly.dswrf.isel(y=0, x=0).values[1:].tolist() == pytest.approx(np.repeat(flux_3h, 3).tolist())
+    assert hourly.tcc.isel(y=0, x=0).values[1:].tolist() == pytest.approx(np.repeat(cloud_3h, 3).tolist())
+
+
+def test_gefs_lead_off_the_three_hour_grid_fails_loudly():
+    from forecast_v1.acquisition import _hourly_gefs
+
+    times = [np.datetime64(CYCLE.replace(tzinfo=None) + timedelta(hours=hour), "ns") for hour in (0, 3, 4)]
+    dataset = xr.Dataset(
+        {"tp": (("time", "y", "x"), np.array([np.nan, 1.0, 1.0]).reshape(3, 1, 1))},
+        coords={"time": times, "y": [0.0], "x": [0.0]},
+    )
+    with pytest.raises(ValueError, match="off the 3-hour bucket grid"):
+        _hourly_gefs(dataset, CYCLE)
+
+
+def test_widespread_heavy_hourly_rain_flags_the_run_but_one_extreme_cell_does_not():
+    from forecast_v1.pipeline import precipitation_suspect
+
+    rain = xr.DataArray(np.full((49, 10, 10), 0.5), dims=("time", "y", "x"))
+    rain[13, 4, 4] = 103.6  # a real HRRR cell on 2026-10-01
+    assert not precipitation_suspect(xr.Dataset({"precipitation_increment": rain}))
+    rain[20:, :, :5] = 40.0  # a run total that stays high after the rain, as beta-1 published
+    assert precipitation_suspect(xr.Dataset({"precipitation_increment": rain}))

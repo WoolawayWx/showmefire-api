@@ -28,6 +28,16 @@ from .r2_store import ForecastR2Store
 
 
 SCHEMA_VERSION = "forecast-v1"
+# beta-2: hourly rain fixed (beta-1 used HRRR's run total as each hour's rain
+# and double-counted GEFS 6-hour buckets), REFS out of the blend.
+CONFIG_VERSION = "beta-2"
+# A run total read as hourly rain stays high everywhere it has rained, so heavy
+# "hourly" rain becomes widespread. Real HRRR on the very wet 2026-10-01 12Z
+# cycle had 0.12% of cell-hours above 25 mm (one real cell reached 104 mm);
+# the beta-1 runs that kept the run total had 7-18%. A single extreme cell is
+# legitimate, so the guard looks at the share, not the maximum.
+HEAVY_HOURLY_PRECIPITATION_MM = 25.0
+SUSPECT_HEAVY_PRECIPITATION_SHARE = 0.02
 PUBLIC_RASTER_VARIABLES = (
     "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gust_10m",
     "precipitation_increment", "precipitation_accumulated", "fuel_moisture_p10",
@@ -386,9 +396,16 @@ def _update_legacy_aliases(final: Path, root: Path, aliases: dict[str, str], r2:
             r2.put_alias(source, alias_key)
 
 
+def precipitation_suspect(forecast: xr.Dataset) -> bool:
+    rain = forecast.precipitation_increment
+    valid = int(rain.notnull().sum())
+    heavy = int((rain > HEAVY_HOURLY_PRECIPITATION_MM).sum())
+    return valid > 0 and heavy / valid > SUSPECT_HEAVY_PRECIPITATION_SHARE
+
+
 def _publish_run_impl(
     cubes: dict[str, SourceCube], stations: list[dict], *, initial_fuel_moisture: float | xr.DataArray | FuelInitialization,
-    publish_root: str | Path, config_version: str = "beta-1", model_version: str = "physics-only-beta-1",
+    publish_root: str | Path, config_version: str = CONFIG_VERSION, model_version: str = "physics-only-beta-1",
     make_public: bool = False, db_path: str | Path | None = None, r2_store: ForecastR2Store | None = None,
     confidence_components: dict[str, xr.DataArray | float] | None = None,
     run_warnings: tuple[str, ...] | list[str] = (),
@@ -435,6 +452,8 @@ def _publish_run_impl(
     warnings = list(run_warnings)
     if bool(((forecast.quality_mask & QUALITY_BITS["coarse_synoptic_fallback"]) != 0).any()):
         warnings.append("coarse_synoptic_fallback:gefs:49-72")
+    if precipitation_suspect(forecast):
+        warnings.append("precipitation_semantics_suspect")
     confidence_available = bool((forecast.meteorological_confidence != 255).any())
     if not confidence_available:
         warnings.append("meteorological_confidence_inputs_unavailable")
@@ -595,7 +614,7 @@ def _publish_run_impl(
 
 def publish_run(
     cubes: dict[str, SourceCube], stations: list[dict], *, initial_fuel_moisture: float | xr.DataArray | FuelInitialization,
-    publish_root: str | Path, config_version: str = "beta-1", model_version: str = "physics-only-beta-1",
+    publish_root: str | Path, config_version: str = CONFIG_VERSION, model_version: str = "physics-only-beta-1",
     make_public: bool = False, db_path: str | Path | None = None, r2_store: ForecastR2Store | None = None,
     confidence_components: dict[str, xr.DataArray | float] | None = None,
     run_warnings: tuple[str, ...] | list[str] = (),
