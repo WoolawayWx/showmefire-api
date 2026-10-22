@@ -34,6 +34,7 @@ from core.database import (
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.log_maintenance import purge_old_logs
+from services import storage_cleanup
 from services import job_runs
 from services import rtma_analysis
 from services.seasonal_fuel_state import update_daily_gdd
@@ -891,6 +892,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=3,
         minute=45,
         id='purge_old_logs',
+    )
+
+    # Safety net for disk space: finished forecast_v1 downloads, stale staging folders, low-disk alert.
+    scheduler.add_job(
+        storage_cleanup.run_scheduled,
+        'cron',
+        minute=35,
+        id='storage_cleanup',
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.add_job(

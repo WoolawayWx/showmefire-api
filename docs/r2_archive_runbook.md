@@ -157,3 +157,32 @@ never pruned (the public `/verification` routes serve them). Leave the flag off
 
 The full route list, including admin routes, is in `docs/ROUTES.md`
 (`python scripts/generate_routes_doc.py`).
+
+## Server disk space
+
+`services/storage_cleanup.py` runs hourly (scheduler job `storage_cleanup`, shown on `/admin/logs`):
+it deletes forecast_v1 raw downloads of finished runs (a run also clears its own when it publishes),
+removes staging folders left by interrupted publishes/builds after a day, and checks free space on
+every disk the app uses: a warning under `SMF_DISK_WARN_FREE_GB` (15), an error plus a staff Discord
+alert (`system_issue`, at most every 6 h) under `SMF_DISK_CRITICAL_FREE_GB` (5).
+
+    docker exec show-me-fire-api python -m services.storage_cleanup report   # free space, big folders
+    docker exec show-me-fire-api python -m services.storage_cleanup run      # the hourly pass now
+
+Host-level space (Docker build cache, unused images, journal): `bash scripts/host_disk_cleanup.sh`
+shows what it would free; add `--apply` to free it.
+
+### Moving a folder that isn't archived into R2
+
+`archive-folder` uploads every file to `<prefix>/<relative path>`, reads each one back and checks its
+sha256, keeps a `manifest.json` under the prefix, and with `--delete` removes a local file only after
+its R2 copy verified. Re-running skips verified files, so it can be stopped and restarted. For a folder
+the API container doesn't mount, use a one-off container (no `--env-file`: the app loads `/app/.env`):
+
+    docker run --rm -v /home/ubuntu/showmefire/showmefire-api:/app \
+      -v /mnt/adrive/showmefire-data/data_archive_day:/legacy -w /app --entrypoint python \
+      showmefire-api:latest -m services.storage_cleanup archive-folder /legacy \
+      --r2-prefix legacy-archive/data_archive_day --delete
+
+`/mnt/adrive/showmefire-data/data_archive_day` (163 daily HRRR zips, 2026-01-25..07-11, ~74 GB, made by
+hand on 2026-07-11) was not in R2 as of 2026-10-22.

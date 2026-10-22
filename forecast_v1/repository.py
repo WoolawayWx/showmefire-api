@@ -258,17 +258,40 @@ def prune_hot_storage(forecast_root: str | Path, *, archive_verified: bool, now:
                     path.unlink()
                     removed_files += 1
                 connection.execute("UPDATE forecast_assets SET local_path=NULL WHERE rowid=?", (asset["rowid"],))
-    cache_root = root / "download-cache"
-    # Each cycle's raw downloads are ~6 GB and are archived to R2 on publish,
-    # so only keep enough locally to retry a recent cycle.
+    removed_cache = prune_download_cache(root, now=current)
+    return {"pointRunsPruned": len(old_runs), "artifactFilesRemoved": removed_files, "cacheFilesRemoved": removed_cache}
+
+
+def prune_download_cache(forecast_root: str | Path, *, now: datetime | None = None) -> int:
+    """Delete raw downloads that are no longer needed; returns the number of files removed.
+
+    Each cycle's raw downloads (~6-7 GB, ``download-cache/YYYYMMDDHH``) are only kept so an
+    unfinished cycle can be retried; the sources are packed and archived to R2 as part of the run.
+    A cycle whose run is complete or superseded is removed outright; anything else after
+    SMF_FORECAST_V1_CACHE_RETENTION_DAYS (2).
+    """
+    import shutil
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cache_root = Path(forecast_root).resolve() / "download-cache"
+    if not cache_root.is_dir():
+        return 0
+    with transaction() as connection:
+        finished = {row[0] for row in connection.execute(
+            "SELECT run_id FROM forecast_runs WHERE status IN ('complete','superseded')")}
+    removed = 0
+    for cycle_dir in cache_root.iterdir():
+        name = cycle_dir.name
+        if cycle_dir.is_dir() and len(name) == 10 and name.isdigit() and f"{name[:8]}T{name[8:]}00Z-v1" in finished:
+            removed += sum(1 for path in cycle_dir.rglob("*") if path.is_file())
+            shutil.rmtree(cycle_dir)
     cache_days = float(os.getenv("SMF_FORECAST_V1_CACHE_RETENTION_DAYS", "2"))
     cache_cutoff = (current - timedelta(days=cache_days)).timestamp()
-    if cache_root.is_dir():
-        for path in cache_root.rglob("*"):
-            if path.is_file() and path.stat().st_mtime < cache_cutoff:
-                path.unlink()
-                removed_cache += 1
-        for cycle_dir in sorted(cache_root.rglob("*"), reverse=True):
-            if cycle_dir.is_dir() and not any(cycle_dir.iterdir()):
-                cycle_dir.rmdir()
-    return {"pointRunsPruned": len(old_runs), "artifactFilesRemoved": removed_files, "cacheFilesRemoved": removed_cache}
+    for path in cache_root.rglob("*"):
+        if path.is_file() and path.stat().st_mtime < cache_cutoff:
+            path.unlink()
+            removed += 1
+    for cycle_dir in sorted(cache_root.rglob("*"), reverse=True):
+        if cycle_dir.is_dir() and not any(cycle_dir.iterdir()):
+            cycle_dir.rmdir()
+    return removed

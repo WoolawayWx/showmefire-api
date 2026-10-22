@@ -26,7 +26,7 @@ from forecast_v1.pipeline import (
     summarize_ensemble_for_public,
 )
 from forecast_v1.r2_store import ForecastR2Store
-from forecast_v1.repository import ensure_schema, prune_hot_storage, transaction
+from forecast_v1.repository import ensure_schema, prune_download_cache, prune_hot_storage, transaction
 from core.config import FORECAST_V1_DIR
 from core.logging_setup import UtcFormatter, file_handler, running_tests
 
@@ -384,6 +384,11 @@ def _run_forecast_v1_operational_impl(
         source_member_rows=source_member_rows,
         progress_callback=_publication_progress,
     )
+    # The run is complete, so its ~7 GB of raw downloads are no longer needed.
+    try:
+        prune_download_cache(publish_root)
+    except OSError as error:
+        logger.warning("forecast_v1 download cache cleanup failed: %s", error)
     return {"run_id": manifest["runId"], "status": "complete", "warnings": manifest["warnings"]}
 
 
