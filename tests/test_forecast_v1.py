@@ -486,11 +486,18 @@ def test_synthetic_publication_writes_73_hour_three_day_contract(tmp_path, monke
     monkeypatch.setattr("forecast_v1.repository.get_db_path", lambda: db)
     class OfflineArchive:
         configured = False
+    hours = source_cube("hrrr", 20).dataset.time.values
     manifest = publish_run(
         {"hrrr": source_cube("hrrr", 20), "rrfs": source_cube("rrfs", 22), "refs": source_cube("refs", 24)},
         [{"station_id": "TEST", "name": "Test", "latitude": 36.2, "longitude": -93.0, "network_type": "RAWS"}],
         initial_fuel_moisture=10.0, publish_root=tmp_path / "products", db_path=db, make_public=True, r2_store=OfflineArchive(),
+        predicted_residuals={"temperature_2m": xr.DataArray(np.full(73, -1.5, dtype=np.float32), dims="time", coords={"time": hours})},
+        bias_summary={"applied": True, "variables": {"temperature_2m": {"applied": True}}},
     )
+    assert manifest["biasCorrection"]["applied"] is True
+    with sqlite3.connect(db) as connection:
+        applied = connection.execute("SELECT COUNT(*), MIN(residual), MAX(residual) FROM forecast_bias_applied WHERE run_id=? AND variable='temperature_2m'", (manifest["runId"],)).fetchone()
+    assert applied == (73, -1.5, -1.5)
     assert manifest["timeCount"] == 73
     assert len(manifest["staticAssets"]) == 32
     assert {asset["day"] for asset in manifest["staticAssets"]} == {2, 3}

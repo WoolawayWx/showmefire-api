@@ -148,6 +148,7 @@ CORRECTION_LIMITS: Final = {
     "relative_humidity_2m": 8.0,
     "wind_u_10m": 2.25,
     "wind_v_10m": 2.25,
+    "wind_speed_10m": 2.25,
     "wind_gust_10m": 2.25,
 }
 

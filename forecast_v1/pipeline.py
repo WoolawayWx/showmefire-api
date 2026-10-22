@@ -411,6 +411,7 @@ def _publish_run_impl(
     run_warnings: tuple[str, ...] | list[str] = (),
     source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
+    bias_summary: dict | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
@@ -540,6 +541,7 @@ def _publish_run_impl(
         "sources": [{"model": name, "cycleTime": utc_rfc3339(cube.cycle_time), "members": source_member_count(cube), "publicSummaryMembers": len(cube.member_ids), "status": "available", "qualityFlags": list(cube.quality_flags)} for name, cube in cubes.items()],
         "modelVersion": model_version, "configVersion": config_version, "warnings": warnings,
         "sourceDiagnostics": list(source_diagnostics), "confidenceCoverage": confidence_coverage,
+        "biasCorrection": bias_summary or {"applied": False},
         "layers": layers,
         "confidenceMethod": {
             "meteorological": {"modelAgreement": 0.30, "ensembleSpread": 0.25, "cycleConsistency": 0.20, "rollingVerification": 0.15, "leadTime": 0.10},
@@ -592,6 +594,16 @@ def _publish_run_impl(
         replace_assets(connection, run_id, assets)
         _insert_rows(connection, "station_forecast_hours", hourly_rows)
         _insert_rows(connection, "station_forecast_days", daily_rows)
+        # Verification errors are measured on corrected forecasts; bias.py adds
+        # these back to recover the raw model's error.
+        connection.executemany(
+            "INSERT OR REPLACE INTO forecast_bias_applied(run_id,valid_time_utc,variable,residual) VALUES(?,?,?,?)",
+            [
+                (run_id, valid_times[index], variable, float(residual.isel(time=index).mean()))
+                for variable, residual in (predicted_residuals or {}).items()
+                for index in range(residual.sizes.get("time", 0))
+            ],
+        )
         for cube in cubes.values():
             if cube.object_key and cube.checksum:
                 source_path = root / cube.object_key.removeprefix("forecast-v1/")
@@ -620,6 +632,7 @@ def publish_run(
     run_warnings: tuple[str, ...] | list[str] = (),
     source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
+    bias_summary: dict | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
@@ -650,7 +663,7 @@ def publish_run(
             cubes, stations, initial_fuel_moisture=initial_fuel_moisture, publish_root=publish_root,
             config_version=config_version, model_version=model_version, make_public=make_public, db_path=database,
             r2_store=r2_store, confidence_components=confidence_components, predicted_residuals=predicted_residuals,
-            run_warnings=run_warnings, source_diagnostics=source_diagnostics,
+            bias_summary=bias_summary, run_warnings=run_warnings, source_diagnostics=source_diagnostics,
             fuel_quantile_residuals=fuel_quantile_residuals, source_member_rows=source_member_rows,
             progress_callback=progress_callback,
         )

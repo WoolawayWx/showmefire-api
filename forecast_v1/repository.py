@@ -137,6 +137,15 @@ CREATE TABLE IF NOT EXISTS forecast_verification (
     FOREIGN KEY(run_id) REFERENCES forecast_runs(run_id)
 );
 
+CREATE TABLE IF NOT EXISTS forecast_bias_applied (
+    run_id TEXT NOT NULL,
+    valid_time_utc TEXT NOT NULL,
+    variable TEXT NOT NULL,
+    residual REAL NOT NULL,
+    PRIMARY KEY(run_id, valid_time_utc, variable),
+    FOREIGN KEY(run_id) REFERENCES forecast_runs(run_id)
+);
+
 CREATE TABLE IF NOT EXISTS forecast_station_metadata (
     station_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

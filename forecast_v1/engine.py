@@ -25,6 +25,8 @@ from .contracts import (
 
 logger = logging.getLogger(__name__)
 
+CALM_WIND_MS = 0.5
+
 
 @dataclass(frozen=True)
 class CorrectionResult:
@@ -138,6 +140,14 @@ def apply_corrections(dataset: xr.Dataset, predicted_residuals: dict[str, xr.Dat
         ).broadcast_like(dataset[variable])
         clipped = residual.clip(-lead_caps, lead_caps)
         capped_any = capped_any | (abs(residual) > lead_caps)
+        if variable == "wind_speed_10m":
+            # Speed is derived from u/v below, so correct it by scaling both
+            # components; calm cells keep their (undefined) direction as is.
+            speed = np.hypot(corrected.wind_u_10m, corrected.wind_v_10m)
+            scale = ((speed + clipped).clip(min=0) / speed.where(speed > CALM_WIND_MS)).fillna(1.0)
+            corrected["wind_u_10m"] = (corrected.wind_u_10m * scale).astype("float32")
+            corrected["wind_v_10m"] = (corrected.wind_v_10m * scale).astype("float32")
+            continue
         corrected[variable] = (dataset[variable] + clipped).astype("float32")
     corrected["relative_humidity_2m"] = corrected.relative_humidity_2m.clip(0, 100)
     corrected["wind_speed_10m"] = np.hypot(corrected.wind_u_10m, corrected.wind_v_10m).astype("float32")

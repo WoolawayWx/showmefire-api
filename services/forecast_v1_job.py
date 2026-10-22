@@ -14,6 +14,7 @@ from core.database import get_db_path
 from services.synoptic import get_station_data
 from forecast_v1.acquisition import acquire_cycle, latest_publishable_12z
 from forecast_v1.adapters import ADAPTERS
+from forecast_v1.bias import rolling_bias_correction
 from forecast_v1.contracts import run_id_for_cycle
 from forecast_v1.confidence import build_confidence_inputs, load_previous_forecast
 from forecast_v1.engine import blend_sources
@@ -206,6 +207,17 @@ def _run_with_memory_limit(func, *args):
         resource.setrlimit(resource.RLIMIT_AS, previous)
 
 
+def _bias_arguments(atmosphere, cycle: datetime, database) -> dict:
+    """Rolling station-bias residuals for publish_run, and the matching model version."""
+    _report_progress("bias_correction", "Estimating model bias from recent station verification", 76)
+    bias = rolling_bias_correction(atmosphere.time, cycle, database)
+    return {
+        "predicted_residuals": bias.residuals or None,
+        "bias_summary": bias.summary,
+        "model_version": "physics-biascorr-beta-1" if bias.residuals else "physics-only-beta-1",
+    }
+
+
 def _run_forecast_v1_staged_impl(make_public: bool | None = None) -> dict:
     _report_progress("preparing", "Reading the staged forecast inputs", 3)
     source_root = Path(os.getenv("SMF_FORECAST_V1_SOURCE_DIR", "data/forecast-v1-input"))
@@ -250,6 +262,7 @@ def _run_forecast_v1_staged_impl(make_public: bool | None = None) -> dict:
         make_public=os.getenv("SMF_FORECAST_V1_PUBLIC", "false").lower() == "true" if make_public is None else make_public,
         r2_store=r2,
         confidence_components=confidence.components,
+        **_bias_arguments(atmosphere, cycle, get_db_path()),
         source_member_rows=source_member_rows,
         progress_callback=_publication_progress,
     )
@@ -379,6 +392,7 @@ def _run_forecast_v1_operational_impl(
         make_public=os.getenv("SMF_FORECAST_V1_PUBLIC", "false").lower() == "true" if make_public is None else make_public,
         r2_store=r2,
         confidence_components=confidence.components,
+        **_bias_arguments(atmosphere, cycle, database),
         run_warnings=result.warnings,
         source_diagnostics=[diagnostic.as_dict() for diagnostic in result.diagnostics],
         source_member_rows=source_member_rows,
