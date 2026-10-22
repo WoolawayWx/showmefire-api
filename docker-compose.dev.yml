@@ -1,0 +1,57 @@
+# Local development only: the API on http://localhost:8000 from your working copy, reloading when you save a .py file.
+#
+#   docker compose -f docker-compose.dev.yml up            first run builds the image (slow, once); after that it starts in seconds
+#   docker compose -f docker-compose.dev.yml up --build    only after requirements*.txt or the Dockerfile change
+#
+# The image is the production Dockerfile, but the source is mounted over /app, so code changes never need a rebuild.
+# main.py loads your .env through that mount; everything set under `environment` below wins over it (load_dotenv never
+# overrides a variable that is already set). That is what keeps a local run from touching anything real: no scheduler or
+# cron, no Discord, no email, no uploads to R2/CDN or GitHub. The database is a separate Docker volume, not ./data.
+services:
+  api:
+    build: .
+    image: smf-api-dev
+    container_name: smf-api-dev
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - .:/app
+      - api-dev-data:/app/data
+    environment:
+      ENVIRONMENT: development
+      DATA_DIR: /app/data
+      # Fast start and no background work: no APScheduler jobs, no cron, no MoDOT road download, no startup data fetches.
+      run_sch: "false"
+      SMF_START_CRON: "0"
+      SMF_DOWNLOAD_MODOT_ROADS: "0"
+      SMF_SKIP_INITIAL_FETCHES: "1"
+      # Nothing leaves this machine: blank every outbound credential from .env.
+      DISCORD_EVENT_URL: ""
+      DISCORD_EVENT_SECRET: ""
+      DISCORD_BOT_TOKEN: ""
+      DISCORD_WEBHOOK_SECRET: ""
+      RESEND_API_KEY: ""
+      R2_ACCESS_KEY_ID: ""
+      R2_SECRET_ACCESS_KEY: ""
+      R2_ACCOUNT_ID: ""
+      R2_Token: ""
+      GITHUB_TOKEN: ""
+      CLOUDFLARE_API_TOKEN: ""
+      uploadForecast: "false"
+      # Plain-http cookies on localhost (the website's dev proxy strips the cookie domain anyway).
+      AUTH_COOKIE_SECURE: "false"
+      AUTH_COOKIE_DOMAIN: ""
+      # Development-site gate. Use the same value as NUXT_DEV_ACCESS_SECRET for the website.
+      DEV_ACCESS_SECRET: ${DEV_ACCESS_SECRET:-local-dev-access-secret-0123456789abcdef}
+      PYTHONDONTWRITEBYTECODE: "1"
+    # The image has no watchfiles, so uvicorn's reload polls file times itself (StatReload), which also works on a Windows
+    # drive where change events never reach the container. Only the code folders below are polled, to keep it cheap.
+    # Changes to main.py itself are not watched (only folders can be): `docker compose -f docker-compose.dev.yml restart`.
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      --reload-dir ai --reload-dir alerts --reload-dir analysis --reload-dir core --reload-dir forecast
+      --reload-dir forecast_v1 --reload-dir maps --reload-dir models --reload-dir nws --reload-dir pipelines
+      --reload-dir routers --reload-dir services
+
+volumes:
+  api-dev-data:

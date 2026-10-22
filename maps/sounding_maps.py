@@ -304,6 +304,7 @@ def render(record: dict, previous: Optional[dict], out: Path) -> None:
         subtitle=f"{snd.site_slug(s.station).upper()}  {_clock(local)} CT {local:%a %b} {local.day}, {local:%Y}  ({s.valid:%HZ})",
         description=_description(fw, thermo, _change_line(record, previous, changes(record, previous)),
                                  source_text(s.station)),
+        update_schedule="Updates after each balloon launch (00Z & 12Z)",
     )
     status = {"product": f"sounding_{snd.site_slug(s.station)}", "status": "updated", "valid_time": record["valid_time"],
               "last_update": spx.valid_time_label(), **fw, **thermo}

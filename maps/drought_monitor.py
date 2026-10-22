@@ -96,8 +96,9 @@ def render(last_modified: str) -> None:
         fig, ax, title="Missouri Drought Monitor", subtitle=f"Valid: {valid}",
         description=(
             "Data Source: U.S. Drought Monitor\n(NDMC, USDA, NOAA)\n\n"
-            "Updated weekly on Thursdays.\nDrought categories reflect\nlong-term dryness and impacts."
+            "Drought categories reflect\nlong-term dryness and impacts."
         ),
+        update_schedule="Updates weekly on Thursdays",
     )
     status = {
         "product": "drought_monitor", "status": "updated", "valid_date": valid,

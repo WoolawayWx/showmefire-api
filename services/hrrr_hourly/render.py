@@ -85,7 +85,7 @@ def render_image(element_name: str, values: np.ndarray, lat: np.ndarray, lon: np
         rm.left_colorbar(fig, colors, norm, f"{element.long_name} ({element.units})", ticks=element.ticks or None,
                          extend="both" if element.vmin < 0 else "max")
     sp.add_branding(fig, ax, title=f"Missouri {element.long_name.split('(')[0].strip()}", subtitle=subtitle,
-                    description=f"{SOURCE}\n{run_label}\n\nSource: {element.source}")
+                    description=f"{SOURCE}\n{run_label}\n\nSource: {element.source}", update_schedule=None)
     path = image_path(cycle_id(cycle_time), element_name, lead, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".png", dir=path.parent)
