@@ -590,18 +590,25 @@ def list_days(s3) -> list[dict]:
 
 
 def presigned_links(s3, day: str, expires_in: int = 3600) -> Optional[list[dict]]:
+    """Each link saves as ``<day>_<name>`` (attachment), so several days can share one download folder."""
     manifest = read_manifest(s3, day)
     if manifest is None:
         return None
-    links = [{"name": "manifest.json", "size": None, "url": s3.generate_presigned_url(
-        "get_object", Params={"Bucket": bucket(), "Key": day_key(day, "manifest.json")}, ExpiresIn=expires_in)}]
+
+    def link(key: str, name: str, **extra) -> dict:
+        filename = f"{day}_{name}"
+        url = s3.generate_presigned_url("get_object", Params={
+            "Bucket": bucket(), "Key": key, "ResponseContentDisposition": f'attachment; filename="{filename}"',
+        }, ExpiresIn=expires_in)
+        return {"name": name, "filename": filename, **extra, "url": url}
+
+    links = [link(day_key(day, "manifest.json"), "manifest.json", size=None)]
     for name, component in sorted(manifest["components"].items()):
         parts = component.get("parts") or ([component] if component.get("key") else [])
         for part in parts:
             if part.get("key"):
-                links.append({"name": part.get("name") or f"{name}.zip", "component": name, "size": part.get("size"),
-                              "sha256": part.get("sha256"), "url": s3.generate_presigned_url(
-                    "get_object", Params={"Bucket": bucket(), "Key": part["key"]}, ExpiresIn=expires_in)})
+                links.append(link(part["key"], part.get("name") or f"{name}.zip", component=name,
+                                  size=part.get("size"), sha256=part.get("sha256")))
     return links
 
 

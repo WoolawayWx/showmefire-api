@@ -40,7 +40,10 @@ def test_list_manifest_links_and_mark_downloaded_read_from_r2(env):
         listing = client.get("/admin/day-archive").json()
         assert listing["days"][0]["day"] == DAY and listing["days"][0]["downloaded"] is False
         assert client.get(f"/admin/day-archive/{DAY}").json()["day"] == DAY
-        links = client.get(f"/admin/day-archive/{DAY}/links?expires_in=600").json()["files"]
+        body = client.get(f"/admin/day-archive/{DAY}/links?expires_in=600").json()
+        links = body["files"]
+        manifest = da.read_manifest(s3, DAY)["components"]
+        assert {m["component"] for m in body["missing"]} == {n for n, c in manifest.items() if c["status"] != "present"}
         assert all(link["url"].startswith("https://r2.example/day-archive/") for link in links)
         assert client.get("/admin/day-archive/2000-01-01").status_code == 404
         assert client.get("/admin/day-archive/not-a-date").status_code == 422

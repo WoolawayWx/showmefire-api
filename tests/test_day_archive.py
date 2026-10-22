@@ -228,8 +228,16 @@ def test_prune_local_ignores_failed_components(env):
 def test_presigned_links_cover_every_part(env):
     root, s3 = env
     da.build_day(s3, DAY, now=NOW)
-    names = {link["name"] for link in da.presigned_links(s3, DAY, expires_in=600)}
+    signed = []
+    sign = s3.generate_presigned_url
+    s3.generate_presigned_url = lambda op, Params, ExpiresIn: signed.append(Params) or sign(op, Params, ExpiresIn)
+    links = da.presigned_links(s3, DAY, expires_in=600)
+    names = {link["name"] for link in links}
     assert {"manifest.json", "forecasts.zip", "rtma.zip", "maps_utc_20261010.zip", "maps_utc_20261011.zip"} <= names
+    # Saved with the day in the name, so bundles from different days don't overwrite each other.
+    assert all(link["filename"] == f"{DAY}_{link['name']}" for link in links)
+    assert all(params["ResponseContentDisposition"] == f'attachment; filename="{link["filename"]}"'
+               for params, link in zip(signed, links))
     assert da.presigned_links(s3, "2000-01-01") is None
 
 

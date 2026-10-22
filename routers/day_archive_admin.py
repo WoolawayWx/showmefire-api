@@ -53,11 +53,15 @@ def get_day_manifest(date: str, _admin: str = Depends(require_admin)):
 @router.get("/{date}/links")
 def get_day_links(date: str, expires_in: int = Query(3600, ge=60, le=86400),
                   _admin: str = Depends(require_admin)):
-    """Short-lived presigned R2 download URLs for every file in the bundle."""
-    links = day_archive.presigned_links(_s3(), _day(date), expires_in=expires_in)
+    """Short-lived presigned R2 download URLs for every file in the bundle, and the parts it lacks."""
+    s3 = _s3()
+    links = day_archive.presigned_links(s3, _day(date), expires_in=expires_in)
     if links is None:
         raise HTTPException(status_code=404, detail=f"No day archive for {date}")
-    return {"day": date, "expires_in": expires_in, "files": links}
+    components = (day_archive.read_manifest(s3, date) or {}).get("components", {})
+    missing = [{"component": name, "status": c.get("status"), "reason": c.get("reason") or c.get("error")}
+               for name, c in sorted(components.items()) if c.get("status") != "present"]
+    return {"day": date, "expires_in": expires_in, "files": links, "missing": missing}
 
 
 @router.post("/{date}/mark-downloaded")
