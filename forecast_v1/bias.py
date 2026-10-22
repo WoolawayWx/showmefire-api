@@ -10,6 +10,9 @@ one confidence.rolling_verification uses: 30 pairs from 3 stations.
 Errors are measured on published, already corrected forecasts, so each run's
 applied residuals are stored (forecast_bias_applied) and added back here;
 otherwise the correction would cancel itself out after one window.
+
+The same window also gives the spread of the errors around that bias per lead
+bucket (error_sigma), which sizes the fire-danger scenarios in the engine.
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ from .contracts import CORRECTION_LIMITS, LOCAL_TIMEZONE, correction_multiplier,
 from .repository import ensure_schema
 
 CORRECTED_VARIABLES = ("temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gust_10m")
+SIGMA_VARIABLES = ("relative_humidity_2m", "wind_speed_10m", "wind_gust_10m", "fuel_moisture_p50")
+QUERIED_VARIABLES = tuple(dict.fromkeys(CORRECTED_VARIABLES + SIGMA_VARIABLES))
 WINDOW_DAYS = 30
 MIN_PAIRS = 30
 MIN_STATIONS = 3
@@ -37,6 +42,7 @@ LOCAL_BLOCK_HOURS = 3
 class BiasCorrection:
     residuals: dict[str, xr.DataArray]
     summary: dict
+    error_sigma: dict[str, xr.DataArray]
 
 
 def lead_bucket(lead_hour: int) -> str:
@@ -50,7 +56,7 @@ def _local_block(utc: datetime) -> int:
 def _error_sums(database: Path, cycle: datetime) -> tuple[dict, dict]:
     """Raw (uncorrected) error sums per (variable, bucket, block) and per (variable, bucket)."""
     window = (utc_rfc3339(cycle - timedelta(days=WINDOW_DAYS)), utc_rfc3339(cycle))
-    placeholders = ",".join("?" for _ in CORRECTED_VARIABLES)
+    placeholders = ",".join("?" for _ in QUERIED_VARIABLES)
     # GEFS-only Day 3 (RRFS missing) is a different model; keep its errors out.
     filters = f"""
         FROM forecast_verification v
@@ -61,13 +67,14 @@ def _error_sums(database: Path, cycle: datetime) -> tuple[dict, dict]:
           AND v.valid_time_utc >= ? AND v.valid_time_utc < ?
           AND v.variable IN ({placeholders})
           AND NOT (v.lead_bucket = '49-72' AND COALESCE(r.warnings_json, '') LIKE '%coarse_synoptic_fallback%')"""
-    parameters = (*window, *CORRECTED_VARIABLES)
+    parameters = (*window, *QUERIED_VARIABLES)
     blocks: dict[tuple[str, str, int], list[float]] = {}
     buckets: dict[tuple[str, str], list[float]] = {}
     with sqlite3.connect(database) as connection:
         hourly = connection.execute(
             f"""SELECT v.variable, v.lead_bucket, substr(v.valid_time_utc, 1, 13),
-                       SUM(v.error - COALESCE(a.residual, 0)), COUNT(*)
+                       SUM(v.error - COALESCE(a.residual, 0)), COUNT(*),
+                       SUM((v.error - COALESCE(a.residual, 0)) * (v.error - COALESCE(a.residual, 0)))
                 {filters}
                 GROUP BY v.variable, v.lead_bucket, substr(v.valid_time_utc, 1, 13)""",
             parameters,
@@ -78,14 +85,15 @@ def _error_sums(database: Path, cycle: datetime) -> tuple[dict, dict]:
                 GROUP BY v.variable, v.lead_bucket""",
             parameters,
         ).fetchall()
-    for variable, bucket, valid_hour, total, count in hourly:
+    for variable, bucket, valid_hour, total, count, squares in hourly:
         block = _local_block(datetime.fromisoformat(valid_hour + ":00:00+00:00"))
         for key, store in (((variable, bucket, block), blocks), ((variable, bucket), buckets)):
-            entry = store.setdefault(key, [0.0, 0, 0])
+            entry = store.setdefault(key, [0.0, 0, 0, 0.0])
             entry[0] += float(total)
             entry[1] += int(count)
+            entry[3] += float(squares)
     for variable, bucket, count in stations:
-        buckets.setdefault((variable, bucket), [0.0, 0, 0])[2] = int(count)
+        buckets.setdefault((variable, bucket), [0.0, 0, 0, 0.0])[2] = int(count)
     return blocks, buckets
 
 
@@ -111,11 +119,11 @@ def rolling_bias_correction(
         sources = {"block": 0, "bucket": 0, "none": 0}
         for lead, valid in enumerate(valid_times):
             bucket = lead_bucket(lead)
-            total, count, station_count = buckets.get((variable, bucket), (0.0, 0, 0))
+            total, count, station_count, _ = buckets.get((variable, bucket), (0.0, 0, 0, 0.0))
             if count < MIN_PAIRS or station_count < MIN_STATIONS:
                 sources["none"] += 1
                 continue
-            block_total, block_count, _ = blocks.get((variable, bucket, _local_block(valid)), (0.0, 0, 0))
+            block_total, block_count, _, _ = blocks.get((variable, bucket, _local_block(valid)), (0.0, 0, 0, 0.0))
             if block_count >= MIN_PAIRS:
                 mean_error, source = block_total / block_count, "block"
             else:
@@ -135,4 +143,21 @@ def rolling_bias_correction(
         if np.any(values != 0):
             residuals[variable] = xr.DataArray(values, dims="time", coords={"time": times.values})
     summary["applied"] = bool(residuals)
-    return BiasCorrection(residuals, summary)
+    error_sigma: dict[str, xr.DataArray] = {}
+    for variable in SIGMA_VARIABLES:
+        values = np.full(len(valid_times), np.nan, dtype=np.float32)
+        for lead in range(len(valid_times)):
+            total, count, station_count, squares = buckets.get((variable, lead_bucket(lead)), (0.0, 0, 0, 0.0))
+            if count >= MIN_PAIRS and station_count >= MIN_STATIONS:
+                values[lead] = float(np.sqrt(max(squares / count - (total / count) ** 2, 0.0)))
+        if np.isfinite(values).any():
+            error_sigma[variable] = xr.DataArray(values, dims="time", coords={"time": times.values})
+    summary["errorSigma"] = {
+        variable: {
+            bucket: round(float(sigma.values[lead]), 3)
+            for bucket, lead in (("0-24", 0), ("25-48", 25), ("49-72", 49))
+            if lead < sigma.sizes["time"] and np.isfinite(sigma.values[lead])
+        }
+        for variable, sigma in error_sigma.items()
+    }
+    return BiasCorrection(residuals, summary, error_sigma)

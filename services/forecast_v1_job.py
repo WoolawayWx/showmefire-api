@@ -208,12 +208,13 @@ def _run_with_memory_limit(func, *args):
 
 
 def _bias_arguments(atmosphere, cycle: datetime, database) -> dict:
-    """Rolling station-bias residuals for publish_run, and the matching model version."""
+    """Rolling station-bias residuals and error spreads for publish_run, and the model version."""
     _report_progress("bias_correction", "Estimating model bias from recent station verification", 76)
     bias = rolling_bias_correction(atmosphere.time, cycle, database)
     return {
         "predicted_residuals": bias.residuals or None,
         "bias_summary": bias.summary,
+        "error_sigma": bias.error_sigma or None,
         "model_version": "physics-biascorr-beta-1" if bias.residuals else "physics-only-beta-1",
     }
 

@@ -175,6 +175,7 @@ def write_static_graphic(
     status: str,
     categorical: bool = False,
     boundary_geojson: str | Path | None = None,
+    value_range: tuple[float, float] | None = None,
 ) -> tuple[Path, Path]:
     """Render one archival PNG/WebP in the same branded style (projection,
     county/state boundaries, title block, logo) as every other map the site
@@ -231,7 +232,8 @@ def write_static_graphic(
         image = axis.contourf(lon, lat, values, transform=data_crs, levels=bins, cmap=cmap, norm=norm, alpha=0.85, zorder=7)
         axis.contour(lon, lat, values, transform=data_crs, levels=bins[1:-1], colors="black", linewidths=0.3, alpha=0.2, zorder=8)
     else:
-        image = axis.pcolormesh(lon, lat, values, transform=data_crs, cmap="viridis", shading="nearest", alpha=0.85, zorder=7)
+        vmin, vmax = value_range or (None, None)
+        image = axis.pcolormesh(lon, lat, values, transform=data_crs, cmap="viridis", shading="nearest", alpha=0.85, zorder=7, vmin=vmin, vmax=vmax)
 
     if have_boundaries:
         counties = gpd.read_file(_COUNTY_SHAPEFILE).to_crs(epsg=4326)

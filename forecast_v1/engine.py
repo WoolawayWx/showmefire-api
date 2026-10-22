@@ -9,6 +9,7 @@ import numpy as np
 import xarray as xr
 
 from core.fire_danger import MPS_TO_KNOTS, RULE_SPEC
+from services.rule_uncertainty import CATEGORY_CRITICAL, CATEGORY_ELEVATED, category_vectorized
 from .adapters import SourceCube
 from .contracts import (
     CONVECTION_ALLOWING_MODELS,
@@ -17,6 +18,7 @@ from .contracts import (
     LOCAL_TIMEZONE,
     QUALITY_BITS,
     REQUIRED_VARIABLES,
+    SCENARIO_SIGMA_FLOORS,
     SOURCE_BITS,
     VARIABLE_UNITS,
     correction_multiplier,
@@ -201,27 +203,50 @@ def evolve_fuel_moisture(
     return result
 
 
+def _classify_values(fm: np.ndarray, rh: np.ndarray, wind_ms: np.ndarray) -> np.ndarray:
+    """The canonical rule (services/rule_uncertainty.category_vectorized, parity-checked
+    against core.fire_danger.calculate_fire_danger), 255 where an input is missing."""
+    category = category_vectorized(fm, rh, wind_ms * MPS_TO_KNOTS, RULE_SPEC["thresholds"])
+    return np.where(category < 0, 255, category).astype(np.uint8)
+
+
 def _classify_arrays(fm: xr.DataArray, rh: xr.DataArray, wind_ms: xr.DataArray) -> xr.DataArray:
-    fuel = fm.values
-    humidity = rh.values
-    wind = wind_ms.values * MPS_TO_KNOTS
-    values = np.full(fm.shape, 255, dtype=np.uint8)
-    valid = np.isfinite(fuel) & np.isfinite(humidity) & np.isfinite(wind)
-    thresholds = RULE_SPEC["thresholds"]
-    values[valid] = 0
-    dry_fuel = fuel < thresholds["low_fm"]
-    moderate = dry_fuel & ((humidity < thresholds["moderate_rh"]) | (wind >= thresholds["moderate_wind"]))
-    elevated = (fuel < thresholds["elevated_fm"]) & (
-        ((humidity < thresholds["elevated_rh"]) & (wind >= thresholds["elevated_wind"]))
-        | ((humidity < thresholds["elevated_very_dry_rh"]) & (wind >= thresholds["elevated_very_dry_wind"]))
-    )
-    critical = (fuel < thresholds["elevated_fm"]) & (humidity < thresholds["critical_rh"]) & (wind >= thresholds["critical_wind"])
-    extreme = (fuel < thresholds["extreme_fm"]) & (humidity < thresholds["extreme_rh"]) & (wind >= thresholds["extreme_wind"])
-    values[valid & moderate] = 1
-    values[valid & elevated] = 2
-    values[valid & critical] = 3
-    values[valid & extreme] = 4
+    values = _classify_values(fm.values, rh.values, wind_ms.values)
     return xr.DataArray(values, dims=fm.dims, coords=fm.coords, attrs={"units": "category", "nodata": 255})
+
+
+def _scenario_sigma(
+    variable: str, template: xr.DataArray, spread: xr.DataArray | None,
+    error_sigma: dict[str, xr.DataArray] | None,
+) -> np.ndarray:
+    """Per-hour error spread: the measured verification spread when there is one,
+    otherwise the lead-growing floor, raised wherever the models disagree more."""
+    hours = template.sizes["time"]
+    start, end = SCENARIO_SIGMA_FLOORS[variable]
+    base = start + (end - start) * np.minimum(np.arange(hours), HORIZON_HOURS) / HORIZON_HOURS
+    measured = (error_sigma or {}).get(variable)
+    if measured is not None:
+        values = np.asarray(measured.values, dtype=np.float64)
+        base = np.where(np.isfinite(values) & (values > 0), values, base)
+    sigma = np.broadcast_to(base[:, None, None], template.shape)
+    if spread is not None:
+        sigma = np.maximum(sigma, spread.broadcast_like(template).fillna(0).values)
+    return np.asarray(sigma, dtype=np.float32)
+
+
+def _emc_rh_sensitivity(temperature_c: xr.DataArray, rh: xr.DataArray) -> np.ndarray:
+    """Equilibrium fuel moisture change per 1% RH, so fuel errors follow RH errors."""
+    up = nelson_emc(temperature_c, (rh + 1).clip(0, 100))
+    down = nelson_emc(temperature_c, (rh - 1).clip(0, 100))
+    return ((up - down) / 2.0).values.astype(np.float32)
+
+
+def _local_dates(times: xr.DataArray) -> list[str]:
+    return [
+        datetime.fromisoformat(np.datetime_as_string(value, unit="s")).replace(tzinfo=timezone.utc)
+        .astimezone(ZoneInfo(LOCAL_TIMEZONE)).date().isoformat()
+        for value in times.values
+    ]
 
 
 def add_risk_and_confidence(
@@ -230,6 +255,7 @@ def add_risk_and_confidence(
     scenario_scales: dict[str, xr.DataArray] | None = None,
     scenario_count: int = 51,
     seed: int = 42,
+    error_sigma: dict[str, xr.DataArray] | None = None,
 ) -> xr.Dataset:
     result = dataset.copy()
     result["fire_danger"] = _classify_arrays(result.fuel_moisture_p50, result.relative_humidity_2m, result.wind_speed_10m)
@@ -271,35 +297,65 @@ def add_risk_and_confidence(
         insufficient, result.quality_mask | QUALITY_BITS["insufficient_confidence"], result.quality_mask
     ).astype("uint16")
 
-    rng = np.random.default_rng(seed)
-    published = result.fire_danger.values
-    matches = np.zeros(published.shape, dtype=np.uint16)
-    rh_hits = np.zeros(published.shape, dtype=np.uint16)
-    gust_hits = np.zeros(published.shape, dtype=np.uint16)
-    both_hits = np.zeros(published.shape, dtype=np.uint16)
+    # Scenarios. Each draw holds its error for a whole local day (forecast
+    # errors persist for hours, and independent hourly noise would inflate the
+    # chance that *some* hour crosses a threshold), and fuel moisture moves with
+    # the RH error through the equilibrium-moisture slope instead of on its own.
+    template = result.temperature_2m.transpose("time", "y", "x")
     scales = scenario_scales or {}
-    rh_scale = scales.get("relative_humidity_2m", xr.full_like(result.relative_humidity_2m, 4.0))
-    gust_scale = scales.get("wind_gust_10m", xr.full_like(result.wind_gust_10m, 1.5))
-    wind_scale = scales.get("wind_speed_10m", xr.full_like(result.wind_speed_10m, 1.2))
-    fuel_scale = scales.get("fuel_moisture", ((result.fuel_moisture_p90 - result.fuel_moisture_p10) / 2.563).clip(min=.75))
+    rh_sigma = _scenario_sigma("relative_humidity_2m", template, scales.get("relative_humidity_2m"), error_sigma)
+    wind_sigma = _scenario_sigma("wind_speed_10m", template, scales.get("wind_speed_10m"), error_sigma)
+    gust_sigma = _scenario_sigma("wind_gust_10m", template, scales.get("wind_gust_10m"), error_sigma)
+    fuel_spread = scales.get("fuel_moisture", (result.fuel_moisture_p90 - result.fuel_moisture_p10) / 2.563)
+    fuel_sigma = _scenario_sigma("fuel_moisture_p50", template, fuel_spread, error_sigma)
+    sensitivity = _emc_rh_sensitivity(result.temperature_2m, result.relative_humidity_2m)
+    fuel_independent = np.sqrt(np.clip(fuel_sigma**2 - (sensitivity * rh_sigma) ** 2, 0.25, None))
+    dates = _local_dates(result.time)
+    unique_dates = list(dict.fromkeys(dates))
+    day_of_hour = np.array([unique_dates.index(value) for value in dates])
+    published_days = local_day_slices(result.time)
+
+    rng = np.random.default_rng(seed)
+    published = result.fire_danger.transpose("time", "y", "x").values
+    rh0 = result.relative_humidity_2m.transpose("time", "y", "x").values
+    wind0 = result.wind_speed_10m.transpose("time", "y", "x").values
+    gust0 = result.wind_gust_10m.transpose("time", "y", "x").values
+    fm0 = result.fuel_moisture_p50.transpose("time", "y", "x").values
+    counters = {name: np.zeros(published.shape, dtype=np.uint16) for name in (
+        "matches", "rh", "gust", "both", "elevated", "critical",
+    )}
+    daily_counters = {name: np.zeros((len(published_days),) + published.shape[1:], dtype=np.uint16) for name in ("elevated", "critical")}
     for _ in range(scenario_count):
-        noise = xr.DataArray(rng.normal(size=published.shape), dims=result.relative_humidity_2m.dims, coords=result.relative_humidity_2m.coords)
-        rh = (result.relative_humidity_2m + noise * rh_scale).clip(0, 100)
-        gust = (result.wind_gust_10m + xr.DataArray(rng.normal(size=published.shape), dims=noise.dims, coords=noise.coords) * gust_scale).clip(min=0)
-        wind = (result.wind_speed_10m + xr.DataArray(rng.normal(size=published.shape), dims=noise.dims, coords=noise.coords) * wind_scale).clip(min=0)
-        fm = (result.fuel_moisture_p50 + xr.DataArray(rng.normal(size=published.shape), dims=noise.dims, coords=noise.coords) * fuel_scale).clip(1, 40)
-        scenario = _classify_arrays(fm, rh, wind).values
-        matches += scenario == published
-        low_rh = rh.values <= 25
-        high_gust = gust.values >= 13.4112
-        rh_hits += low_rh
-        gust_hits += high_gust
-        both_hits += low_rh & high_gust
+        z = rng.standard_normal((3, len(unique_dates)) + published.shape[1:]).astype(np.float32)
+        z_rh, z_wind, z_fuel = (z[index][day_of_hour] for index in range(3))
+        rh = np.clip(rh0 + rh_sigma * z_rh, 0, 100)
+        wind = np.clip(wind0 + wind_sigma * z_wind, 0, None)
+        gust = np.clip(gust0 + gust_sigma * z_wind, 0, None)
+        fm = np.clip(fm0 + sensitivity * (rh - rh0) + fuel_independent * z_fuel, 1, 40)
+        scenario = _classify_values(fm, rh, wind)
+        found = scenario != 255
+        elevated = found & (scenario >= CATEGORY_ELEVATED)
+        critical = found & (scenario >= CATEGORY_CRITICAL)
+        low_rh = rh <= 25
+        high_gust = gust >= 13.4112
+        counters["matches"] += scenario == published
+        counters["rh"] += low_rh
+        counters["gust"] += high_gust
+        counters["both"] += low_rh & high_gust
+        counters["elevated"] += elevated
+        counters["critical"] += critical
+        for day, (_, indexes) in enumerate(published_days):
+            daily_counters["elevated"][day] += elevated[indexes].any(axis=0)
+            daily_counters["critical"][day] += critical[indexes].any(axis=0)
+
+    valid_values = published != 255
+
     def probability(hits: np.ndarray) -> xr.DataArray:
         values = np.rint(hits * 100 / scenario_count).astype(np.uint8)
-        values[~valid.values] = 255
-        return xr.DataArray(values, dims=result.fire_danger.dims, coords=result.fire_danger.coords)
-    result["category_confidence"] = probability(matches)
+        values[~valid_values] = 255
+        return xr.DataArray(values, dims=template.dims, coords=template.coords)
+
+    result["category_confidence"] = probability(counters["matches"])
     coarse = (result.quality_mask & QUALITY_BITS["coarse_synoptic_fallback"]) != 0
     result["category_confidence"] = xr.where(
         coarse & (result.category_confidence != 255), result.category_confidence.clip(max=49), result.category_confidence
@@ -307,14 +363,27 @@ def add_risk_and_confidence(
     result["meteorological_confidence"] = xr.where(
         coarse & (result.meteorological_confidence != 255), result.meteorological_confidence.clip(max=49), result.meteorological_confidence
     ).astype("uint8")
-    result["probability_rh_le_25"] = probability(rh_hits)
-    result["probability_gust_ge_30mph"] = probability(gust_hits)
-    result["probability_concurrent"] = probability(both_hits)
+    result["probability_rh_le_25"] = probability(counters["rh"])
+    result["probability_gust_ge_30mph"] = probability(counters["gust"])
+    result["probability_concurrent"] = probability(counters["both"])
+    result["probability_elevated_plus"] = probability(counters["elevated"])
+    result["probability_critical_plus"] = probability(counters["critical"])
+    # Chance that any hour of each local day reaches the category; picked up
+    # by daily_aggregates.
+    day_valid = np.stack([valid_values[indexes].any(axis=0) for _, indexes in published_days])
+    spatial = {name: template.coords[name] for name in ("y", "x") if name in template.coords}
+    for name in ("elevated", "critical"):
+        values = np.rint(daily_counters[name] * 100 / scenario_count).astype(np.uint8)
+        values[~day_valid] = 255
+        result[f"daily_probability_{name}_plus"] = xr.DataArray(values, dims=("local_day", "y", "x"), coords=spatial)
     return result
 
 
 def scenario_scales_from_sources(cubes: dict[str, SourceCube], dataset: xr.Dataset) -> dict[str, xr.DataArray]:
-    """Combine member spread, deterministic disagreement, and residual floors."""
+    """Ensemble member spread combined with HRRR/RRFS disagreement.
+
+    Error floors are applied in add_risk_and_confidence (_scenario_sigma), from
+    station verification when there is enough of it."""
     def source_spreads(variable: str, derived_speed: bool = False) -> list[xr.DataArray]:
         candidates = []
         for model in ("refs", "gefs"):
@@ -335,11 +404,11 @@ def scenario_scales_from_sources(cubes: dict[str, SourceCube], dataset: xr.Datas
 
     result = {}
     definitions = {
-        "relative_humidity_2m": (4.0, False),
-        "wind_gust_10m": (1.5, False),
-        "wind_speed_10m": (1.2, True),
+        "relative_humidity_2m": False,
+        "wind_gust_10m": False,
+        "wind_speed_10m": True,
     }
-    for variable, (residual_floor, derived_speed) in definitions.items():
+    for variable, derived_speed in definitions.items():
         candidates = source_spreads(variable, derived_speed)
         hrrr, rrfs = cubes.get("hrrr"), cubes.get("rrfs")
         if hrrr and rrfs:
@@ -350,7 +419,7 @@ def scenario_scales_from_sources(cubes: dict[str, SourceCube], dataset: xr.Datas
                 first, second = hrrr.ensemble_mean(variable), rrfs.ensemble_mean(variable)
             disagreement = abs(first - second) / 2.0
             candidates.append(disagreement.reindex(time=dataset.time).broadcast_like(dataset.temperature_2m))
-        combined = xr.full_like(dataset.temperature_2m, residual_floor)
+        combined = xr.zeros_like(dataset.temperature_2m)
         for candidate in candidates:
             combined = np.hypot(combined, candidate.fillna(0))
         result[variable] = combined.astype("float32")
@@ -358,13 +427,11 @@ def scenario_scales_from_sources(cubes: dict[str, SourceCube], dataset: xr.Datas
 
 
 def local_day_slices(times: xr.DataArray) -> list[tuple[str, np.ndarray]]:
-    local = [datetime.fromisoformat(np.datetime_as_string(value, unit="s")).replace(tzinfo=timezone.utc).astimezone(ZoneInfo(LOCAL_TIMEZONE)) for value in times.values]
-    dates: list[str] = []
-    for value in local:
-        key = value.date().isoformat()
-        if key not in dates:
-            dates.append(key)
-    return [(key, np.array([i for i, value in enumerate(local) if value.date().isoformat() == key], dtype=int)) for key in dates[:3]]
+    dates = _local_dates(times)
+    return [
+        (key, np.array([i for i, value in enumerate(dates) if value == key], dtype=int))
+        for key in list(dict.fromkeys(dates))[:3]
+    ]
 
 
 def daily_aggregates(dataset: xr.Dataset) -> xr.Dataset:
@@ -372,9 +439,9 @@ def daily_aggregates(dataset: xr.Dataset) -> xr.Dataset:
     outputs: dict[str, list[xr.DataArray]] = {name: [] for name in (
         "peak_fire_danger", "minimum_rh", "minimum_fuel_moisture_p50", "maximum_temperature",
         "maximum_wind", "maximum_gust", "total_precipitation", "category_confidence",
-        "maximum_snow_water_equivalent",
+        "maximum_snow_water_equivalent", "probability_elevated_plus", "probability_critical_plus",
     )}
-    for _, indexes in days:
+    for day, (_, indexes) in enumerate(days):
         subset = dataset.isel(time=indexes)
         peak = subset.fire_danger.where(subset.fire_danger != 255).max("time", skipna=True).fillna(255).astype("uint8")
         outputs["peak_fire_danger"].append(peak)
@@ -395,6 +462,12 @@ def daily_aggregates(dataset: xr.Dataset) -> xr.Dataset:
         afternoon_confidence = subset.category_confidence.where(afternoon & (subset.category_confidence != 255)).median("time", skipna=True)
         confidence = xr.where(peak <= 1, afternoon_confidence, peak_confidence)
         outputs["category_confidence"].append(confidence.fillna(255).astype("uint8"))
+        for name in ("elevated", "critical"):
+            source = dataset.get(f"daily_probability_{name}_plus")
+            outputs[f"probability_{name}_plus"].append(
+                source.isel(local_day=day, drop=True) if source is not None
+                else xr.full_like(peak, 255, dtype="uint8")
+            )
     result = xr.Dataset({name: xr.concat(values, dim="day") for name, values in outputs.items()})
     result = result.assign_coords(day=np.arange(1, len(days) + 1), local_date=("day", [key for key, _ in days]))
     return result
@@ -406,12 +479,13 @@ def build_forecast_cube(
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     confidence_components: dict[str, xr.DataArray | float] | None = None,
+    error_sigma: dict[str, xr.DataArray] | None = None,
 ) -> tuple[xr.Dataset, xr.Dataset]:
     blended = blend_sources(cubes)
     corrected = apply_corrections(blended, predicted_residuals).dataset
     fueled = evolve_fuel_moisture(corrected, initial_fuel_moisture, fuel_quantile_residuals)
     final = add_risk_and_confidence(
         fueled, confidence_components=confidence_components,
-        scenario_scales=scenario_scales_from_sources(cubes, fueled),
+        scenario_scales=scenario_scales_from_sources(cubes, fueled), error_sigma=error_sigma,
     )
     return final, daily_aggregates(final)

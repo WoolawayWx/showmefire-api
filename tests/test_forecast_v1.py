@@ -499,7 +499,12 @@ def test_synthetic_publication_writes_73_hour_three_day_contract(tmp_path, monke
         applied = connection.execute("SELECT COUNT(*), MIN(residual), MAX(residual) FROM forecast_bias_applied WHERE run_id=? AND variable='temperature_2m'", (manifest["runId"],)).fetchone()
     assert applied == (73, -1.5, -1.5)
     assert manifest["timeCount"] == 73
-    assert len(manifest["staticAssets"]) == 32
+    assert len(manifest["staticAssets"]) == 36  # 9 Day 2/3 maps x PNG/WebP
+    graphic_variables = {asset["variable"] for asset in manifest["staticAssets"]}
+    assert {"probability_elevated_plus", "probability_critical_plus"} <= graphic_variables
+    assert "category_confidence" not in graphic_variables
+    daily_layers = {layer["variable"] for layer in manifest["layers"] if layer["aggregation"] == "daily"}
+    assert {"probability_elevated_plus", "probability_critical_plus", "category_confidence"} <= daily_layers
     assert {asset["day"] for asset in manifest["staticAssets"]} == {2, 3}
     assert manifest["legacyAliases"] == {}
     assert manifest["sourceDiagnostics"] == []

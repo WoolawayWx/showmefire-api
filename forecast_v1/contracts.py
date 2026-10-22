@@ -93,6 +93,8 @@ VARIABLE_UNITS: Final = {
     "probability_rh_le_25": "%",
     "probability_gust_ge_30mph": "%",
     "probability_concurrent": "%",
+    "probability_elevated_plus": "%",
+    "probability_critical_plus": "%",
 }
 
 
@@ -127,6 +129,8 @@ ARCHIVE_ENCODINGS: Final = {
     "probability_rh_le_25": ArchiveEncoding("uint8", None, 255),
     "probability_gust_ge_30mph": ArchiveEncoding("uint8", None, 255),
     "probability_concurrent": ArchiveEncoding("uint8", None, 255),
+    "probability_elevated_plus": ArchiveEncoding("uint8", None, 255),
+    "probability_critical_plus": ArchiveEncoding("uint8", None, 255),
     "source_mask": ArchiveEncoding("uint16", None, 65535),
     "quality_mask": ArchiveEncoding("uint16", None, 65535),
 }
@@ -180,6 +184,20 @@ PUBLIC_LAYER_STYLES: Final = {
     "probability_rh_le_25": {"colormap": "magma", "rescale": [0.0, 100.0]},
     "probability_gust_ge_30mph": {"colormap": "magma", "rescale": [0.0, 100.0]},
     "probability_concurrent": {"colormap": "magma", "rescale": [0.0, 100.0]},
+    "probability_elevated_plus": {"colormap": "magma", "rescale": [0.0, 100.0]},
+    "probability_critical_plus": {"colormap": "magma", "rescale": [0.0, 100.0]},
+}
+
+# Forecast error standard deviations (lead 0, lead 72; linear between) used for
+# the fire-danger scenarios until 30 days of station verification give a
+# measured spread (bias.rolling_bias_correction). Rough typical convection-
+# allowing-model 2 m RH / 10 m wind and 10-hour fuel errors, not fitted; the
+# old fixed 4% RH and 0.75% fuel spreads made every category look certain.
+SCENARIO_SIGMA_FLOORS: Final = {
+    "relative_humidity_2m": (6.0, 10.0),
+    "wind_speed_10m": (1.2, 2.0),
+    "wind_gust_10m": (1.8, 3.0),
+    "fuel_moisture_p50": (1.0, 2.0),
 }
 
 

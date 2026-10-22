@@ -80,6 +80,19 @@ sanitized full acquisition error. FV3-HIRES is a zero-weight shadow source;
 its missing fields remain informational and do not raise the global degraded
 banner.
 
+Fire-danger probabilities come from 51 scenarios run through the canonical
+rule (`services/rule_uncertainty.category_vectorized`). Each scenario holds its
+RH, wind/gust and fuel errors for a whole local day, so the daily "any hour at
+or above Elevated" chance is not inflated by hour-to-hour noise, and fuel
+moisture moves with the RH error through the equilibrium-moisture slope. Error
+spreads are the 30-day station verification spread per lead bucket
+(`bias.py`, including RAWS fuel sticks) or, until there is enough of it, the
+lead-growing floors in `contracts.SCENARIO_SIGMA_FLOORS`; model spread raises
+them where the models disagree more. Hourly and daily
+`probability_elevated_plus` / `probability_critical_plus` are published, and
+the Day 2/3 graphics show these instead of `category_confidence` (the share of
+scenarios matching the category, which is highest where there is no danger).
+
 Meteorological confidence uses available model agreement, GEFS ensemble
 spread, previous-cycle consistency at matching valid times, 30-day station
 verification, and lead time. It renormalizes the configured weights over

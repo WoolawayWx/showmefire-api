@@ -43,7 +43,12 @@ PUBLIC_RASTER_VARIABLES = (
     "precipitation_increment", "precipitation_accumulated", "fuel_moisture_p10",
     "fuel_moisture_p50", "fuel_moisture_p90", "fire_danger", "meteorological_confidence",
     "category_confidence", "probability_rh_le_25", "probability_gust_ge_30mph", "probability_concurrent",
+    "probability_elevated_plus", "probability_critical_plus",
 )
+PERCENT_VARIABLES = frozenset({
+    "meteorological_confidence", "category_confidence", "probability_rh_le_25", "probability_gust_ge_30mph",
+    "probability_concurrent", "probability_elevated_plus", "probability_critical_plus",
+})
 DAILY_RASTER_MAP = {
     "peak_fire_danger": "fire_danger",
     "minimum_rh": "relative_humidity_2m",
@@ -53,12 +58,20 @@ DAILY_RASTER_MAP = {
     "maximum_gust": "wind_gust_10m",
     "total_precipitation": "precipitation_increment",
     "category_confidence": "category_confidence",
+    "probability_elevated_plus": "probability_elevated_plus",
+    "probability_critical_plus": "probability_critical_plus",
 }
+# Kept as a raster for the API, but the "share of scenarios matching the
+# category" is highest where there is no danger at all; the Day 2/3 graphics
+# show the chance of Elevated/Critical or worse instead.
+DAILY_GRAPHIC_EXCLUDED = frozenset({"category_confidence"})
 STATIC_TITLES = {
     "peak_fire_danger": "Peak Fire Danger", "minimum_rh": "Minimum Relative Humidity",
     "minimum_fuel_moisture_p50": "Minimum 10-Hour Fuel Moisture (P50)", "maximum_temperature": "Maximum Temperature",
     "maximum_wind": "Maximum Sustained Wind", "maximum_gust": "Maximum Wind Gust",
     "total_precipitation": "Total Precipitation", "category_confidence": "Fire-Danger Category Confidence",
+    "probability_elevated_plus": "Chance of Elevated or Worse Fire Danger",
+    "probability_critical_plus": "Chance of Critical or Worse Fire Danger",
     "maximum_snow_water_equivalent": "Maximum Snow-Water Equivalent",
 }
 
@@ -412,6 +425,7 @@ def _publish_run_impl(
     source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     bias_summary: dict | None = None,
+    error_sigma: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
@@ -441,6 +455,7 @@ def _publish_run_impl(
     forecast, daily = build_forecast_cube(
         cubes, initial_values, predicted_residuals=predicted_residuals,
         fuel_quantile_residuals=fuel_quantile_residuals, confidence_components=confidence_components,
+        error_sigma=error_sigma,
     )
     if isinstance(initialization, FuelInitialization):
         forecast["quality_mask"] = forecast.quality_mask | initialization.quality_mask.broadcast_like(forecast.quality_mask)
@@ -485,7 +500,7 @@ def _publish_run_impl(
                 "current": variable_index, "total": len(PUBLIC_RASTER_VARIABLES), "item": variable,
             })
         categorical = variable == "fire_danger"
-        byte_data = variable in {"meteorological_confidence", "category_confidence", "probability_rh_le_25", "probability_gust_ge_30mph", "probability_concurrent"}
+        byte_data = variable in PERCENT_VARIABLES
         path = write_cog(forecast[variable], staging / "rasters" / "hourly" / f"{variable}.tif", variable=variable, band_times=valid_times, categorical=categorical, byte_data=byte_data)
         assets.append(artifact_record(path, run_id=run_id, kind="raster", variable=variable, aggregation="hourly", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/rasters/hourly/{variable}.tif", dtype="uint8" if categorical or byte_data else "float32", unit=VARIABLE_UNITS.get(variable), valid_start=valid_times[0], valid_end=valid_times[-1]))
     daily_dates = [str(value) for value in daily.local_date.values]
@@ -500,24 +515,22 @@ def _publish_run_impl(
                 "current": daily_index, "total": len(daily_raster_map), "item": public_name,
             })
         categorical = daily_name == "peak_fire_danger"
-        byte_data = daily_name == "category_confidence"
+        byte_data = public_name in PERCENT_VARIABLES
         path = write_cog(daily[daily_name], staging / "rasters" / "daily" / f"{public_name}.tif", variable=public_name, band_times=daily_dates, categorical=categorical, byte_data=byte_data)
         assets.append(artifact_record(path, run_id=run_id, kind="raster", variable=public_name, aggregation="daily", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/rasters/daily/{public_name}.tif", dtype="uint8" if categorical or byte_data else "float32", unit=VARIABLE_UNITS.get(public_name)))
         for day_index, local_date in enumerate(daily_dates, 1):
-            if day_index not in EXTENDED_DAILY_INDICES:
+            if day_index not in EXTENDED_DAILY_INDICES or daily_name in DAILY_GRAPHIC_EXCLUDED:
                 continue
             graphic_root = staging / "graphics" / f"day-{day_index}"
-            day_confidence = daily.category_confidence.isel(day=day_index - 1).where(daily.category_confidence.isel(day=day_index - 1) != 255)
-            median_confidence = _value(day_confidence.median(skipna=True).values)
-            confidence_label = "Unavailable" if median_confidence is None else "High" if median_confidence >= 80 else "Moderate" if median_confidence >= 50 else "Low"
             graphic_data = daily[daily_name].isel(day=day_index - 1)
             if categorical or byte_data:
                 graphic_data = graphic_data.where(graphic_data != 255)
             png, webp = write_static_graphic(
                 graphic_data, graphic_root / f"{public_name}.png", graphic_root / f"{public_name}.webp",
                 title=f"Day {day_index} {STATIC_TITLES[daily_name]}", valid_period=f"{local_date} America/Chicago",
-                run_time=utc_rfc3339(cycle), status=f"{confidence_label} category confidence • " + ("Degraded inputs" if warnings else "All configured sources available"),
+                run_time=utc_rfc3339(cycle), status="Degraded inputs" if warnings else "All configured sources available",
                 categorical=daily_name == "peak_fire_danger",
+                value_range=(0, 100) if byte_data else None,
                 boundary_geojson=GIS_DIR / "state_missouri.geojson",
             )
             for graphic in (png, webp):
@@ -546,6 +559,7 @@ def _publish_run_impl(
         "confidenceMethod": {
             "meteorological": {"modelAgreement": 0.30, "ensembleSpread": 0.25, "cycleConsistency": 0.20, "rollingVerification": 0.15, "leadTime": 0.10},
             "category": "percentage of calibrated forecast scenarios matching the deterministic category",
+            "probabilities": "probability_elevated_plus / probability_critical_plus: share of the scenarios at or above that category; daily layers count a scenario when any hour of the local day is. Scenario errors are held for each local day, fuel moisture follows the RH error, and spreads come from 30-day station verification (else lead-growing floors) or model spread, whichever is larger",
             "labels": {"High": [80, 100], "Moderate": [50, 79], "Low": [0, 49]},
         },
         "stationFeedUrl": f"/api/forecast/v1/stations?run_id={run_id}",
@@ -633,6 +647,7 @@ def publish_run(
     source_diagnostics: tuple[dict, ...] | list[dict] = (),
     predicted_residuals: dict[str, xr.DataArray] | None = None,
     bias_summary: dict | None = None,
+    error_sigma: dict[str, xr.DataArray] | None = None,
     fuel_quantile_residuals: dict[str, xr.DataArray] | None = None,
     source_member_rows: list[dict] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
@@ -663,7 +678,7 @@ def publish_run(
             cubes, stations, initial_fuel_moisture=initial_fuel_moisture, publish_root=publish_root,
             config_version=config_version, model_version=model_version, make_public=make_public, db_path=database,
             r2_store=r2_store, confidence_components=confidence_components, predicted_residuals=predicted_residuals,
-            bias_summary=bias_summary, run_warnings=run_warnings, source_diagnostics=source_diagnostics,
+            bias_summary=bias_summary, error_sigma=error_sigma, run_warnings=run_warnings, source_diagnostics=source_diagnostics,
             fuel_quantile_residuals=fuel_quantile_residuals, source_member_rows=source_member_rows,
             progress_callback=progress_callback,
         )

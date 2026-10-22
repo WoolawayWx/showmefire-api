@@ -28,6 +28,8 @@ VERIFICATION_FIELDS = {
     "wind_speed_10m": ("wind_speed_ms", "wind_speed_ms"),
     "wind_gust_10m": ("wind_gust_ms", "wind_gust_ms"),
     "shortwave_down": ("solar_wm2", "solar_wm2"),
+    # RAWS 10-hour fuel sticks; sizes the fuel spread in the danger scenarios.
+    "fuel_moisture_p50": ("fuel_moisture_p50", "fuel_moisture"),
 }
 
 
