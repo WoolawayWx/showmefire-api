@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from core.database import (
     claim_newsletter_delivery,
     complete_newsletter_delivery,
-    list_forecast_graphic_recipients,
+    list_graphic_only_recipients,
     list_matching_newsletter_forecasts,
 )
 from services.graphics_email import send_daily_forecast_email
@@ -98,11 +98,11 @@ def run_daily_forecast_delivery(forecast_date: str | None = None) -> dict:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         grouped.setdefault(row["email"], []).append(row)
-    # Graphic-list subscribers get the email every day a forecast exists; if
-    # their counties also matched they already have the fuller digest above.
+    # Forecast-list subscribers with no counties selected get the statewide graphic
+    # every day a forecast exists (counties selected = the county digest above only).
     graphic_only = {
         item["email"]: item["manage_token"] or ""
-        for item in list_forecast_graphic_recipients(target_date) if item["email"] not in grouped
+        for item in list_graphic_only_recipients(target_date) if item["email"] not in grouped
     }
     for email in graphic_only:
         grouped[email] = []

@@ -1348,6 +1348,16 @@ def init_database():
     subscriber_columns = {row[1] for row in cursor.execute("PRAGMA table_info(newsletter_subscribers)").fetchall()}
     if "name" not in subscriber_columns:
         cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN name TEXT NOT NULL DEFAULT ''")
+    # The short-lived 'forecast-graphic' list was folded into 'fire-weather-forecasts' (no counties = daily graphic).
+    for email, types_json in cursor.execute(
+        "SELECT email, subscription_types_json FROM newsletter_subscribers WHERE subscription_types_json LIKE '%forecast-graphic%'"
+    ).fetchall():
+        try:
+            types = json.loads(types_json)
+        except json.JSONDecodeError:
+            continue
+        merged = list(dict.fromkeys("fire-weather-forecasts" if t == "forecast-graphic" else t for t in types))
+        cursor.execute("UPDATE newsletter_subscribers SET subscription_types_json = ? WHERE email = ?", (json.dumps(merged), email))
     if "affiliation" not in subscriber_columns:
         cursor.execute("ALTER TABLE newsletter_subscribers ADD COLUMN affiliation TEXT NOT NULL DEFAULT ''")
     if "manage_token" not in subscriber_columns:
@@ -6690,9 +6700,9 @@ def list_matching_newsletter_forecasts(forecast_date: str) -> List[Dict]:
         conn.close()
 
 
-def list_forecast_graphic_recipients(forecast_date: str) -> List[Dict]:
-    """Subscribers on the 'forecast-graphic' list (no counties needed), once a
-    forecast exists for the date. Counties and danger level are irrelevant here."""
+def list_graphic_only_recipients(forecast_date: str) -> List[Dict]:
+    """Forecast-list subscribers who selected no counties: they get the statewide
+    forecast graphic every day, once a forecast exists for the date."""
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
@@ -6707,8 +6717,9 @@ def list_forecast_graphic_recipients(forecast_date: str) -> List[Dict]:
                        CASE WHEN json_valid(s.subscription_types_json)
                             THEN s.subscription_types_json ELSE '[]' END
                    )
-                   WHERE value = 'forecast-graphic'
+                   WHERE value = 'fire-weather-forecasts'
                )
+                 AND NOT EXISTS (SELECT 1 FROM newsletter_preferences p WHERE p.email = s.email)
                  AND s.unsubscribed_at IS NULL
                ORDER BY s.email''',
         ).fetchall()]

@@ -46,9 +46,11 @@ LEVEL_LABELS = {
 LIST_OPTIONS = {
     "show-me-fire-newsletter": "Show Me Fire Newsletter",
     "fire-weather-forecasts": "Fire Weather Forecasts",
-    "forecast-graphic": "Daily Forecast Graphic",
     "show-me-fire-briefing-packet": "Operations Briefing Packet",
 }
+# The graphic-only list was folded into Fire Weather Forecasts (no counties selected = daily graphic).
+# Old pages/clients may still send it; treat it as the forecast list.
+LEGACY_LIST_ALIASES = {"forecast-graphic": "fire-weather-forecasts"}
 
 
 class CountyPreference(BaseModel):
@@ -87,7 +89,7 @@ class NewsletterSignup(BaseModel):
     @field_validator("lists")
     @classmethod
     def validate_lists(cls, values: List[str]) -> List[str]:
-        normalized = list(dict.fromkeys(str(value).strip() for value in values))
+        normalized = list(dict.fromkeys(LEGACY_LIST_ALIASES.get(str(value).strip(), str(value).strip()) for value in values))
         invalid = [value for value in normalized if value not in LIST_OPTIONS]
         if invalid:
             raise ValueError(f"Unknown email list: {invalid[0]}")
@@ -130,8 +132,6 @@ def _manage_url(token: str) -> str:
 
 @router.post("/api/newsletter/signup")
 def signup_newsletter(payload: NewsletterSignup):
-    if "fire-weather-forecasts" in payload.lists and not payload.counties:
-        raise HTTPException(status_code=422, detail="Select at least one county for Fire Weather Forecasts")
     preferences = _validate_preferences(payload.counties)
     email = str(payload.email).strip().lower()
     try:
@@ -177,8 +177,6 @@ def update_newsletter_preferences(payload: NewsletterSignup):
 
 
 def _validated_newsletter_payload(payload: NewsletterSignup) -> List[dict]:
-    if "fire-weather-forecasts" in payload.lists and not payload.counties:
-        raise HTTPException(status_code=422, detail="Select at least one county for Fire Weather Forecasts")
     return _validate_preferences(payload.counties)
 
 

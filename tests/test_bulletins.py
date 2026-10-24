@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -5,6 +6,8 @@ from unittest.mock import patch
 from core.database import (
     claim_newsletter_delivery,
     complete_newsletter_delivery,
+    get_db_path,
+    get_newsletter_account_by_token,
     get_newsletter_preferences,
     init_database,
     list_matching_newsletter_forecasts,
@@ -76,16 +79,32 @@ class BulletinTests(unittest.TestCase):
         self.assertEqual(result["counties"][0]["level"], 4)
         self.assertEqual(result["counties"][0]["level_name"], "Critical")
 
-    def test_graphic_list_signup_needs_no_counties(self):
-        payload = bulletins.NewsletterSignup(email="g@example.com", name="Graphic Fan", lists=["forecast-graphic"])
+    def test_forecast_signup_without_counties_is_allowed(self):
+        payload = bulletins.NewsletterSignup(email="g@example.com", name="Graphic Fan", lists=["fire-weather-forecasts"])
         with patch.object(bulletins, "upsert_audience_contact", return_value="contact-id"),              patch.object(bulletins, "set_audience_contact_unsubscribed"),              patch.object(bulletins, "set_audience_contact_properties"):
             result = bulletins.signup_newsletter(payload)
         self.assertEqual(result["counties"], [])
-        self.assertEqual(result["lists"][0]["id"], "forecast-graphic")
+        self.assertEqual(result["lists"][0]["id"], "fire-weather-forecasts")
 
-    def test_graphic_only_subscriber_gets_email_without_county_table(self):
-        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic"])
-        upsert_county_forecast_day("2026-09-21", "29001", 0)  # a forecast exists; no one picked a county
+    def test_old_graphic_list_name_is_treated_as_the_forecast_list(self):
+        payload = bulletins.NewsletterSignup(
+            email="g@example.com", name="Old Page", lists=["forecast-graphic", "fire-weather-forecasts"])
+        self.assertEqual(payload.lists, ["fire-weather-forecasts"])
+
+    def test_existing_graphic_subscribers_are_migrated(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic", "show-me-fire-newsletter"])
+        init_database()
+        conn = sqlite3.connect(get_db_path())
+        try:
+            token = conn.execute("SELECT manage_token FROM newsletter_subscribers").fetchone()[0]
+        finally:
+            conn.close()
+        account = get_newsletter_account_by_token(token)
+        self.assertEqual(account["subscription_types"], ["fire-weather-forecasts", "show-me-fire-newsletter"])
+
+    def test_no_counties_means_daily_graphic_email_without_county_table(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["fire-weather-forecasts"])
+        upsert_county_forecast_day("2026-09-21", "29001", 0)  # a forecast exists; this subscriber picked no county
         with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
             result = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
             again = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
@@ -94,23 +113,29 @@ class BulletinTests(unittest.TestCase):
         html_body, text_body = send.call_args.args[2], send.call_args.args[3]
         self.assertIn("mo-forecastfiredanger.png", html_body)
         self.assertNotIn("<table align", html_body)
-        self.assertIn("statewide forecast graphic", html_body)
         self.assertNotIn("{{", html_body + text_body)
 
     def test_no_graphic_email_without_a_forecast(self):
-        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic"])
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["fire-weather-forecasts"])
         with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
             self.assertEqual(newsletter_delivery.run_daily_forecast_delivery("2026-09-21")["sent"], 0)
         send.assert_not_called()
 
-    def test_graphic_plus_matching_county_gets_one_county_email(self):
-        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic", "fire-weather-forecasts"])
-        replace_newsletter_preferences("g@example.com", [{"county_fips": "29001", "min_danger_level": 0}])
-        upsert_county_forecast_day("2026-09-21", "29001", 2)
+    def test_subscriber_with_counties_that_do_not_qualify_gets_no_graphic(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["fire-weather-forecasts"])
+        replace_newsletter_preferences("g@example.com", [{"county_fips": "29001", "min_danger_level": 4}])
+        upsert_county_forecast_day("2026-09-21", "29001", 1)
         with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
             result = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
-        self.assertEqual((result["sent"], result["graphic_only_recipients"]), (1, 0))
-        self.assertIn("<table align", send.call_args.args[2])
+        self.assertEqual((result["sent"], result["graphic_only_recipients"]), (0, 0))
+        send.assert_not_called()
+
+    def test_newsletter_only_subscriber_gets_no_forecast_email(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["show-me-fire-newsletter"])
+        upsert_county_forecast_day("2026-09-21", "29001", 1)
+        with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
+            self.assertEqual(newsletter_delivery.run_daily_forecast_delivery("2026-09-21")["sent"], 0)
+        send.assert_not_called()
 
     def test_daily_delivery_uses_provider_and_records_success(self):
         upsert_newsletter_subscriber("user@example.com")
