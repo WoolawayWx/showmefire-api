@@ -1,0 +1,149 @@
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from core import database
+from services import incident_area_review as review
+
+
+class IncidentAreaReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temporary.name) / "showmefire.db"
+        self.patches = [
+            patch.object(database, "get_db_path", return_value=self.db_path),
+            patch.object(review, "get_db_path", return_value=self.db_path),
+        ]
+        for p in self.patches:
+            p.start()
+        database.init_database()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        try:
+            self.temporary.cleanup()
+        except PermissionError:
+            pass
+
+    def _incident(self, lat, lon, when="2026-10-01T12:00:00Z", county="29207", members=1, source="viirs"):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        incident_id = database.find_or_create_incident_for_detection(
+            cursor, lat, lon, when, county, "Stoddard", radius_km=0.01,
+        )
+        ids = []
+        for i in range(members):
+            cursor.execute(
+                """INSERT INTO fire_events (source, external_id, status, latitude, longitude, occurred_at, incident_id)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?)""",
+                (source, f"{lat}:{lon}:{when}:{i}", lat, lon, when, incident_id),
+            )
+            ids.append(cursor.lastrowid)
+        conn.commit()
+        conn.close()
+        return incident_id, ids
+
+    def test_labels_follow_ingest_order(self):
+        incident_id, ids = self._incident(36.90, -90.00, members=3)
+        area = review.build_area(incident_id)
+        labels = [m["label"] for m in area["incidents"][0]["members"]]
+        self.assertEqual(labels, [f"{incident_id}_001", f"{incident_id}_002", f"{incident_id}_003"])
+        self.assertEqual(review.resolve_seed_incident(ids[1]), incident_id)
+
+    def test_nearby_recent_incident_is_related_and_far_one_is_not(self):
+        seed, _ = self._incident(36.90, -90.00)
+        near, _ = self._incident(36.93, -90.00, "2026-10-01T18:00:00Z")   # ~3.3 km
+        far, _ = self._incident(37.40, -90.00, "2026-10-01T18:00:00Z")    # ~55 km
+        area = review.build_area(seed)
+        found = {entry["incident_id"] for entry in area["incidents"]}
+        self.assertIn(near, found)
+        self.assertNotIn(far, found)
+        self.assertEqual(area["incidents"][0]["incident_id"], seed)
+
+    def test_stale_incident_outside_window_is_excluded(self):
+        seed, _ = self._incident(36.90, -90.00, "2026-10-01T12:00:00Z")
+        old, _ = self._incident(36.91, -90.00, "2026-09-01T12:00:00Z")
+        area = review.build_area(seed)
+        self.assertNotIn(old, {entry["incident_id"] for entry in area["incidents"]})
+
+    def test_unattached_recent_report_is_listed(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        seed, _ = self._incident(36.90, -90.00, now)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO fire_events (source, external_id, status, latitude, longitude, occurred_at) "
+            "VALUES ('user_submission', 'u1', 'pending', 36.91, -90.00, ?)", (now,),
+        )
+        conn.commit()
+        conn.close()
+        area = review.build_area(seed)
+        self.assertEqual(area["summary"]["unassigned_count"], 1)
+        self.assertEqual(area["unassigned_reports"][0]["source"], "user_submission")
+
+    def test_label_supports_three_digits(self):
+        self.assertEqual(review.sub_incident_label(7, 1), "7_001")
+        self.assertEqual(review.sub_incident_label(7, 123), "7_123")
+        self.assertEqual(review.sub_incident_label(7, 1234), "7_1234")
+
+    def test_settings_persist_validate_and_reset(self):
+        self.assertEqual(review.get_settings()["radius_km"], review.SETTING_SPECS["radius_km"][0])
+        saved = review.save_settings({"radius_km": 5, "threshold": 0.7}, updated_by="tester")
+        self.assertEqual((saved["radius_km"], saved["threshold"]), (5.0, 0.7))
+        with self.assertRaises(ValueError):
+            review.save_settings({"radius_km": 999})
+        with self.assertRaises(ValueError):
+            review.save_settings({"nope": 1})
+        self.assertEqual(review.get_settings()["radius_km"], 5.0)  # bad update changed nothing
+        self.assertEqual(review.reset_settings()["radius_km"], review.SETTING_SPECS["radius_km"][0])
+
+    def test_radius_setting_drives_default_area(self):
+        seed, _ = self._incident(36.90, -90.00)
+        near, _ = self._incident(36.93, -90.00, "2026-10-01T18:00:00Z")  # ~3.3 km
+        review.save_settings({"radius_km": 1})
+        self.assertNotIn(near, {e["incident_id"] for e in review.build_area(seed)["incidents"]})
+        review.reset_settings()
+        self.assertIn(near, {e["incident_id"] for e in review.build_area(seed)["incidents"]})
+
+    def test_pair_labels_show_in_area_and_can_be_cleared(self):
+        seed, _ = self._incident(36.90, -90.00)
+        near, _ = self._incident(36.93, -90.00, "2026-10-01T18:00:00Z")
+        saved = review.record_pair_label(near, seed, "same", decided_by="tester")  # order must not matter
+        self.assertEqual(saved["label"], "same")
+        entry = [e for e in review.build_area(seed)["incidents"] if e["incident_id"] == near][0]
+        self.assertEqual(entry["pair_label"], "same")
+        review.record_pair_label(seed, near, "different")
+        entry = [e for e in review.build_area(seed)["incidents"] if e["incident_id"] == near][0]
+        self.assertEqual(entry["pair_label"], "different")
+        review.record_pair_label(seed, near, "clear")
+        entry = [e for e in review.build_area(seed)["incidents"] if e["incident_id"] == near][0]
+        self.assertIsNone(entry["pair_label"])
+        with self.assertRaises(ValueError):
+            review.record_pair_label(seed, seed, "same")
+        with self.assertRaises(ValueError):
+            review.record_pair_label(seed, near, "maybe")
+        self.assertIsNone(review.record_pair_label(seed, 99999, "same"))
+
+    def test_fit_needs_enough_labels_then_learns_distance(self):
+        import json
+        self.assertFalse(review.fit_weights()["ready"])
+        conn = review._pairs_conn()
+        for i in range(15):  # close pairs the admin calls the same fire
+            conn.execute("INSERT INTO area_review_pair_labels VALUES (?, ?, 'same', 0.8, ?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                         (i, 100 + i, json.dumps({"nearest_member_km": 2.0, "time_gap_hours": 5, "same_county": True, "join_areas_touch": False})))
+        for i in range(15):  # far pairs the admin calls different fires
+            conn.execute("INSERT INTO area_review_pair_labels VALUES (?, ?, 'different', 0.4, ?, 't', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                         (200 + i, 300 + i, json.dumps({"nearest_member_km": 11.0, "time_gap_hours": 5, "same_county": True, "join_areas_touch": False})))
+        conn.commit()
+        conn.close()
+        fit = review.fit_weights()
+        self.assertTrue(fit["ready"])
+        self.assertGreaterEqual(fit["accuracy_suggested"], fit["accuracy_current"])
+        self.assertGreater(fit["suggested"]["w_distance"], review.SETTING_SPECS["w_distance"][0])
+
+
+if __name__ == "__main__":
+    unittest.main()

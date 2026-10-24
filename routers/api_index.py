@@ -69,6 +69,11 @@ _ROUTES: List[tuple] = [
      "burn permit or a guarantee; Show Me Fire is not responsible for any outcome. 20/min.", "lat + lon, or address", "public"),
     ("GET", "/v1/burn-check/geocode", "Burn check",
      "Missouri candidates for an address, place or 'lat, lon' (12/min).", "q", "public"),
+    ("GET", "/v1/spot-forecast", "Spot forecast",
+     "UNOFFICIAL spot-style forecast for a Missouri point: hourly HRRR temperature, humidity, wind (with direction arrows) and gusts, mixing "
+     "height, transport wind, ventilation, Haines, Hot-Dry-Windy and smoke, in Morning/Afternoon/Evening text. Every answer includes how to "
+     "request an OFFICIAL NWS spot forecast (office, request page, who is eligible). Not a spot forecast and not for planning a fire. 15/min.",
+     "lat + lon, or address; window=today|tomorrow", "public"),
 ]
 
 

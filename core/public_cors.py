@@ -20,7 +20,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Map tiles, and the public burn check (other agencies call it from their own pages, with no credentials).
-DEFAULT_PREFIXES = ("/tiles/", "/v1/burn-check")
+DEFAULT_PREFIXES = ("/tiles/", "/v1/burn-check", "/v1/spot-forecast")
 # Tiles always answer "*". Everything else here (the burn check) is not shared by caches, so a caller whose origin the API
 # already trusts is left to CORSMiddleware: our own sites send every API request with credentials, and a browser rejects
 # "*" on a credentialed request.

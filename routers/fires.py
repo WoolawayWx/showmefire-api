@@ -1131,7 +1131,115 @@ def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
         event["latitude"], event["longitude"], radius_km=2.0, hours=6.0,
         occurred_at=event["occurred_at"], exclude_event_id=event_id,
     )
+    event["incident_label"] = _incident_label_for_event(event_id)
     return {"success": True, "report": event}
+
+
+def _incident_label_for_event(event_id: int) -> Optional[str]:
+    """`{incident_id}_{NN}` for a report, or None if it has no incident yet."""
+    from services.incident_area_review import build_area, resolve_seed_incident
+
+    incident_id = resolve_seed_incident(event_id)
+    if incident_id is None:
+        return None
+    area = build_area(incident_id, radius_km=0.0)
+    for member in (area["incidents"][0]["members"] if area else []):
+        if member["id"] == event_id:
+            return member["label"]
+    return None
+
+
+class AreaReviewSettings(BaseModel):
+    values: Dict[str, float]
+
+
+def _area_settings_payload(values: Dict[str, float]) -> Dict:
+    from services.incident_area_review import SETTING_SPECS
+    return {
+        "success": True,
+        "settings": [
+            {"key": key, "label": spec[3], "value": values[key], "default": spec[0], "min": spec[1], "max": spec[2]}
+            for key, spec in SETTING_SPECS.items()
+        ],
+    }
+
+
+@router.get("/api/admin/fires/areas/settings")
+def admin_get_area_settings(_admin: str = Depends(require_admin)):
+    """Current area-review controls with defaults and allowed ranges (admin only)."""
+    from services.incident_area_review import get_settings
+    return _area_settings_payload(get_settings())
+
+
+@router.put("/api/admin/fires/areas/settings")
+def admin_update_area_settings(payload: AreaReviewSettings, actor: str = Depends(require_admin)):
+    """Change area-review controls; takes effect immediately, no restart (admin only)."""
+    from services.incident_area_review import save_settings
+    try:
+        return _area_settings_payload(save_settings(payload.values, updated_by=actor))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.delete("/api/admin/fires/areas/settings")
+def admin_reset_area_settings(_actor: str = Depends(require_admin)):
+    """Restore every area-review control to its default (admin only)."""
+    from services.incident_area_review import reset_settings
+    return _area_settings_payload(reset_settings())
+
+
+class AreaPairLabel(BaseModel):
+    incident_id: int
+    other_incident_id: int
+    label: Literal["same", "different", "clear"]
+
+
+@router.post("/api/admin/fires/areas/pairs")
+def admin_label_incident_pair(payload: AreaPairLabel, actor: str = Depends(require_admin)):
+    """Record "these two incidents are the same fire / different fires" - the
+    training signal for the area-review weights (admin only). Does not merge anything."""
+    from services.incident_area_review import record_pair_label
+    try:
+        result = record_pair_label(payload.incident_id, payload.other_incident_id, payload.label, decided_by=actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    return {"success": True, **result}
+
+
+@router.get("/api/admin/fires/areas/fit")
+def admin_fit_area_weights(_admin: str = Depends(require_admin)):
+    """Suggest settings fitted to the labelled pairs; saves nothing (admin only)."""
+    from services.incident_area_review import fit_weights
+    return {"success": True, **fit_weights()}
+
+
+@router.get("/api/admin/fires/areas/event/{event_id}")
+def admin_get_area_for_event(event_id: int, radius_km: Optional[float] = None, _admin: str = Depends(require_admin)):
+    """Every incident around the one this report belongs to, each member
+    labelled {incident_id}_{NN}, plus nearby reports with no incident yet
+    (admin only)."""
+    from services.incident_area_review import build_area, resolve_seed_incident
+
+    incident_id = resolve_seed_incident(event_id)
+    if incident_id is None:
+        raise HTTPException(status_code=404, detail="This report is not attached to an incident yet")
+    area = build_area(incident_id, radius_km=None if radius_km is None else min(max(radius_km, 1.0), 50.0))
+    if not area:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    return {"success": True, "area": area, "focus_event_id": event_id}
+
+
+@router.get("/api/admin/fires/areas/incident/{incident_id}")
+def admin_get_area_for_incident(incident_id: int, radius_km: Optional[float] = None, _admin: str = Depends(require_admin)):
+    """Same as the event form, seeded from an incident (admin only)."""
+    from services.incident_area_review import build_area
+
+    area = build_area(incident_id, radius_km=None if radius_km is None else min(max(radius_km, 1.0), 50.0))
+    if not area:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    return {"success": True, "area": area}
 
 
 @router.post("/api/admin/fires/reports/{event_id}/approve")
@@ -1399,6 +1507,9 @@ def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admi
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
     members = list_fire_incident_members(incident_id)
+    from services.incident_area_review import sub_incident_label
+    for seq, member in enumerate(sorted(members, key=lambda m: m["id"]), start=1):
+        member["label"] = sub_incident_label(incident_id, seq)
     incident["detections"] = members
     # Public reports and OSINT leads (e.g. Muse) are not satellite pixels: they
     # carry narrative (description/source link/reporter), so return their full

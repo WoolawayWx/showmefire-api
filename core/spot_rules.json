@@ -1,0 +1,37 @@
+{
+  "version": "2026-10-24.3",
+  "note": "Settings for the unofficial spot-style forecast. It reports model values and makes no judgment about whether conditions are good or bad. Ventilation categories are the NWS Springfield ones from services/fire_weather/indices.py. Edit here; the version is returned with every answer.",
+  "wind_shift_degrees_at_least": 60,
+  "windows": {
+    "day_starts_local_hour": 6,
+    "day_ends_local_hour": 21
+  },
+  "periods": [
+    [
+      "Morning",
+      6,
+      12
+    ],
+    [
+      "Afternoon",
+      12,
+      18
+    ],
+    [
+      "Evening",
+      18,
+      22
+    ]
+  ],
+  "max_age_hours": {
+    "outlook": 8,
+    "alerts_minutes": 30
+  },
+  "nws_offices": [
+    "EAX",
+    "SGF",
+    "LSX",
+    "PAH",
+    "DVN"
+  ]
+}
