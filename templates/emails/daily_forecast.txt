@@ -2,6 +2,8 @@ Show Me Fire daily fire-weather forecast
 
 Forecast date: {{forecast_date}}
 
+{{graphic_only_note_text}}
+
 {{county_rows_text}}
 
 Manage email preferences or unsubscribe:

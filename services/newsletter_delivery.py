@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from core.database import (
     claim_newsletter_delivery,
     complete_newsletter_delivery,
+    list_forecast_graphic_recipients,
     list_matching_newsletter_forecasts,
 )
 from services.graphics_email import send_daily_forecast_email
@@ -21,11 +22,22 @@ DANGER_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
 CENTRAL = ZoneInfo("America/Chicago")
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "emails"
 SUBJECT_FORECAST_DATE = datetime.now(CENTRAL).date().strftime("%B %d, %Y")
+GRAPHIC_ONLY_NOTE_HTML = (
+    '<p class="email-muted" style="margin:0 0 20px;color:#536174;text-align:center;">'
+    "Here is today's statewide forecast graphic. Want danger levels for specific counties? "
+    "Add counties in your email preferences."
+    "</p>"
+)
+GRAPHIC_ONLY_NOTE_TEXT = (
+    "Here is today's statewide forecast graphic (see the link below). "
+    "Add counties in your email preferences to get danger levels for them."
+)
 
 
-def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
+def _render_email(rows: list[dict], forecast_date: str, manage_token: str = "") -> tuple[str, str, str]:
+    """rows empty = graphic-only email (subscriber chose the forecast graphic and no counties)."""
     manage_base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
-    manage_token = rows[0].get("manage_token") or ""
+    manage_token = manage_token or (rows[0].get("manage_token") if rows else "") or ""
     manage_url = f"{manage_base}/comms/emails/manage?token={manage_token}"
     county_names = {item["fips"]: item["name"] for item in county_catalog()}
     labels = [
@@ -41,7 +53,7 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
         for row in rows
     ]
     subject = f"Fire Weather Forecast for {SUBJECT_FORECAST_DATE}"
-    county_rows = (
+    county_rows = "" if not rows else (
         "<table align=\"center\" border=\"1\" cellpadding=\"6\" cellspacing=\"0\">"
         "<thead><tr><th align=\"center\">County</th><th align=\"center\">Fire Danger</th></tr></thead>"
         "<tbody>"
@@ -64,6 +76,8 @@ def _render_email(rows: list[dict], forecast_date: str) -> tuple[str, str, str]:
         "{{forecast_date}}": html.escape(SUBJECT_FORECAST_DATE),
         "{{county_rows_html}}": county_rows,
         "{{county_rows_text}}": county_rows_text,
+        "{{graphic_only_note_html}}": "" if rows else GRAPHIC_ONLY_NOTE_HTML,
+        "{{graphic_only_note_text}}": "" if rows else GRAPHIC_ONLY_NOTE_TEXT,
         "{{manage_url}}": html.escape(manage_url, quote=True),
         "{{manage_link_html}}": manage_url_html,
     }
@@ -84,6 +98,14 @@ def run_daily_forecast_delivery(forecast_date: str | None = None) -> dict:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         grouped.setdefault(row["email"], []).append(row)
+    # Graphic-list subscribers get the email every day a forecast exists; if
+    # their counties also matched they already have the fuller digest above.
+    graphic_only = {
+        item["email"]: item["manage_token"] or ""
+        for item in list_forecast_graphic_recipients(target_date) if item["email"] not in grouped
+    }
+    for email in graphic_only:
+        grouped[email] = []
     sent = 0
     failed = 0
     skipped = 0
@@ -94,7 +116,7 @@ def run_daily_forecast_delivery(forecast_date: str | None = None) -> dict:
             skipped += 1
             continue
         try:
-            subject, html_body, text_body = _render_email(subscriber_rows, target_date)
+            subject, html_body, text_body = _render_email(subscriber_rows, target_date, graphic_only.get(email, ""))
             provider_id = send_daily_forecast_email(email, subject, html_body, text_body)
             complete_newsletter_delivery(
                 email, "__daily__", target_date,
@@ -112,6 +134,7 @@ def run_daily_forecast_delivery(forecast_date: str | None = None) -> dict:
         "forecast_date": target_date,
         "matched": len(rows),
         "recipients": len(grouped),
+        "graphic_only_recipients": len(graphic_only),
         "sent": sent,
         "failed": failed,
         "skipped": skipped,

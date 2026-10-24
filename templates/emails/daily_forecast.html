@@ -3,7 +3,8 @@
 
   Editable placeholders:
     {{forecast_date}}
-    {{county_rows_html}}
+    {{county_rows_html}}   (empty for graphic-only subscribers)
+    {{graphic_only_note_html}}   (only filled for graphic-only subscribers)
     {{manage_url}}
     {{manage_link_html}}
 
@@ -77,6 +78,8 @@
             Forecast date:
             <strong style="color:#172033;">{{forecast_date}}</strong>
           </p>
+
+          {{graphic_only_note_html}}
 
           {{county_rows_html}}
 

@@ -76,6 +76,42 @@ class BulletinTests(unittest.TestCase):
         self.assertEqual(result["counties"][0]["level"], 4)
         self.assertEqual(result["counties"][0]["level_name"], "Critical")
 
+    def test_graphic_list_signup_needs_no_counties(self):
+        payload = bulletins.NewsletterSignup(email="g@example.com", name="Graphic Fan", lists=["forecast-graphic"])
+        with patch.object(bulletins, "upsert_audience_contact", return_value="contact-id"),              patch.object(bulletins, "set_audience_contact_unsubscribed"),              patch.object(bulletins, "set_audience_contact_properties"):
+            result = bulletins.signup_newsletter(payload)
+        self.assertEqual(result["counties"], [])
+        self.assertEqual(result["lists"][0]["id"], "forecast-graphic")
+
+    def test_graphic_only_subscriber_gets_email_without_county_table(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic"])
+        upsert_county_forecast_day("2026-09-21", "29001", 0)  # a forecast exists; no one picked a county
+        with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
+            result = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
+            again = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
+        self.assertEqual((result["sent"], result["graphic_only_recipients"]), (1, 1))
+        self.assertEqual(again["sent"], 0)  # one per day
+        html_body, text_body = send.call_args.args[2], send.call_args.args[3]
+        self.assertIn("mo-forecastfiredanger.png", html_body)
+        self.assertNotIn("<table align", html_body)
+        self.assertIn("statewide forecast graphic", html_body)
+        self.assertNotIn("{{", html_body + text_body)
+
+    def test_no_graphic_email_without_a_forecast(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic"])
+        with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
+            self.assertEqual(newsletter_delivery.run_daily_forecast_delivery("2026-09-21")["sent"], 0)
+        send.assert_not_called()
+
+    def test_graphic_plus_matching_county_gets_one_county_email(self):
+        upsert_newsletter_subscriber("g@example.com", subscription_types=["forecast-graphic", "fire-weather-forecasts"])
+        replace_newsletter_preferences("g@example.com", [{"county_fips": "29001", "min_danger_level": 0}])
+        upsert_county_forecast_day("2026-09-21", "29001", 2)
+        with patch.object(newsletter_delivery, "send_daily_forecast_email", return_value="id") as send:
+            result = newsletter_delivery.run_daily_forecast_delivery("2026-09-21")
+        self.assertEqual((result["sent"], result["graphic_only_recipients"]), (1, 0))
+        self.assertIn("<table align", send.call_args.args[2])
+
     def test_daily_delivery_uses_provider_and_records_success(self):
         upsert_newsletter_subscriber("user@example.com")
         replace_newsletter_preferences("user@example.com", [{

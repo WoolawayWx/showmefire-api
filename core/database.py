@@ -6690,6 +6690,32 @@ def list_matching_newsletter_forecasts(forecast_date: str) -> List[Dict]:
         conn.close()
 
 
+def list_forecast_graphic_recipients(forecast_date: str) -> List[Dict]:
+    """Subscribers on the 'forecast-graphic' list (no counties needed), once a
+    forecast exists for the date. Counties and danger level are irrelevant here."""
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not conn.execute("SELECT 1 FROM county_forecast_days WHERE forecast_date = ? LIMIT 1", (forecast_date,)).fetchone():
+            return []
+        return [dict(row) for row in conn.execute(
+            '''SELECT s.email, s.manage_token
+               FROM newsletter_subscribers s
+               WHERE EXISTS (
+                   SELECT 1
+                   FROM json_each(
+                       CASE WHEN json_valid(s.subscription_types_json)
+                            THEN s.subscription_types_json ELSE '[]' END
+                   )
+                   WHERE value = 'forecast-graphic'
+               )
+                 AND s.unsubscribed_at IS NULL
+               ORDER BY s.email''',
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
 def claim_newsletter_delivery(email: str, county_fips: str, forecast_date: str) -> bool:
     conn = sqlite3.connect(get_db_path(), isolation_level=None)
     try:

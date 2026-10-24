@@ -46,6 +46,7 @@ LEVEL_LABELS = {
 LIST_OPTIONS = {
     "show-me-fire-newsletter": "Show Me Fire Newsletter",
     "fire-weather-forecasts": "Fire Weather Forecasts",
+    "forecast-graphic": "Daily Forecast Graphic",
     "show-me-fire-briefing-packet": "Operations Briefing Packet",
 }
 
