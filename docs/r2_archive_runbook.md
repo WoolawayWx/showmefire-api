@@ -184,5 +184,20 @@ the API container doesn't mount, use a one-off container (no `--env-file`: the a
       showmefire-api:latest -m services.storage_cleanup archive-folder /legacy \
       --r2-prefix legacy-archive/data_archive_day --delete
 
+### Automatic: mount the folder and leave it
+
+The scheduler job `legacy_archive` (hourly at :05, shown on `/admin/logs`) does the same thing without a command. It moves
+whatever is in `SMF_LEGACY_ARCHIVE_DIR` (default `/app/legacy-archive`) to `SMF_LEGACY_ARCHIVE_PREFIX` (default
+`legacy-archive/data_archive_day`), deleting each local file only after its R2 copy is read back and its sha256 matches.
+Each run stops starting new files after 50 minutes and the next hour carries on; once the folder is empty it does nothing.
+It only runs in the container with `run_sch=true`. Failures keep the local file and log an error.
+
+The only setup is mounting the folder in that container (add to its `volumes:` in the production compose file, then recreate it):
+
+    - /mnt/adrive/showmefire-data/data_archive_day:/app/legacy-archive
+
+`SMF_LEGACY_ARCHIVE_DELETE=false` uploads without deleting. Before leaving it unattended, check `manifest.json` and the first
+log lines (`Legacy archive: uploaded=... deleted=...`), and that the bucket path is not publicly readable (see the bucket note above).
+
 `/mnt/adrive/showmefire-data/data_archive_day` (163 daily HRRR zips, 2026-01-25..07-11, ~74 GB, made by
 hand on 2026-07-11) was not in R2 as of 2026-10-22.

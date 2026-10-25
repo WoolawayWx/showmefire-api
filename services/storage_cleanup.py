@@ -195,8 +195,11 @@ def report(base: Optional[Path] = None) -> dict:
 
 # --- archive a folder to R2, then (optionally) delete it locally -------------------------------------
 
-def archive_folder(folder: Path, r2_prefix: str, delete: bool = False, s3=None, log=print) -> dict:
-    """Upload every file under ``folder`` to ``r2_prefix/<relative path>``, verify by reading it back."""
+def archive_folder(folder: Path, r2_prefix: str, delete: bool = False, s3=None, log=print,
+                   max_seconds: Optional[float] = None) -> dict:
+    """Upload every file under ``folder`` to ``r2_prefix/<relative path>``, verify by reading it back.
+
+    ``max_seconds`` stops starting new files after that long (a later run carries on), so a scheduled run ends."""
     from services import day_archive
 
     if s3 is None:
@@ -207,8 +210,12 @@ def archive_folder(folder: Path, r2_prefix: str, delete: bool = False, s3=None, 
     manifest_key = f"{prefix}/manifest.json"
     manifest = day_archive._get_json(s3, manifest_key) or {"source": str(folder), "files": {}}
     files = sorted(p for p in folder.rglob("*") if p.is_file())
-    summary = {"files": len(files), "uploaded": 0, "already_verified": 0, "deleted": 0, "failed": []}
+    summary = {"files": len(files), "uploaded": 0, "already_verified": 0, "deleted": 0, "failed": [], "stopped_early": False}
+    started = time.monotonic()
     for index, path in enumerate(files, 1):
+        if max_seconds is not None and time.monotonic() - started > max_seconds:
+            summary["stopped_early"] = True
+            break
         rel = path.relative_to(folder).as_posix()
         key = f"{prefix}/{rel}"
         size = path.stat().st_size
@@ -254,6 +261,44 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(summary, indent=2))
         return 1 if summary["failed"] else 0
     return 0
+
+
+# --- the legacy zips, moved to R2 automatically ----------------------------------------------------
+
+LEGACY_DIR_DEFAULT = "/app/legacy-archive"
+LEGACY_PREFIX_DEFAULT = "legacy-archive/data_archive_day"
+LEGACY_MAX_SECONDS = 50 * 60
+
+
+def run_legacy_archive(s3=None, log=logger.info) -> Optional[dict]:
+    """Move the hand-made legacy zips to R2, deleting each local file once its copy is read back and verified.
+
+    Does nothing unless the folder is mounted in the container (``SMF_LEGACY_ARCHIVE_DIR``, default /app/legacy-archive)
+    and R2 is configured, and nothing once the folder is empty. Set ``SMF_LEGACY_ARCHIVE_DELETE=false`` to only upload."""
+    folder = Path(os.getenv("SMF_LEGACY_ARCHIVE_DIR", LEGACY_DIR_DEFAULT))
+    if not folder.is_dir() or not any(path.is_file() for path in folder.rglob("*")):
+        return None
+    if s3 is None:
+        from services import cdn_datasets
+        if not cdn_datasets.configured():
+            logger.warning("Legacy archive: R2 is not configured, %s left alone", folder)
+            return None
+    delete = os.getenv("SMF_LEGACY_ARCHIVE_DELETE", "true").lower() != "false"
+    prefix = os.getenv("SMF_LEGACY_ARCHIVE_PREFIX", LEGACY_PREFIX_DEFAULT)
+    summary = archive_folder(folder, prefix, delete=delete, s3=s3, log=log, max_seconds=LEGACY_MAX_SECONDS)
+    if summary["failed"]:
+        logger.error("Legacy archive: %d file(s) failed and were kept locally, e.g. %s", len(summary["failed"]), summary["failed"][0])
+    return summary
+
+
+async def run_legacy_archive_scheduled() -> None:
+    import asyncio
+
+    summary = await asyncio.to_thread(run_legacy_archive)
+    if summary:
+        logger.info("Legacy archive: uploaded=%d, already verified=%d, deleted=%d, failed=%d%s", summary["uploaded"],
+                    summary["already_verified"], summary["deleted"], len(summary["failed"]),
+                    ", more to do next run" if summary["stopped_early"] else "")
 
 
 async def run_scheduled() -> None:

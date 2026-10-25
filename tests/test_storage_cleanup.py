@@ -134,3 +134,48 @@ def test_archive_folder_keeps_file_when_read_back_differs(tmp_path, monkeypatch)
 
     assert summary["deleted"] == 0 and len(summary["failed"]) == 1
     assert (folder / "20260125.zip").exists()
+
+
+def _legacy(tmp_path, monkeypatch, files=2):
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    folder = tmp_path / "legacy"
+    folder.mkdir()
+    for index in range(files):
+        (folder / f"2026012{index}.zip").write_bytes(b"z" * (index + 1))
+    monkeypatch.setenv("SMF_LEGACY_ARCHIVE_DIR", str(folder))
+    return folder
+
+
+def test_legacy_archive_moves_files_then_does_nothing(tmp_path, monkeypatch):
+    folder = _legacy(tmp_path, monkeypatch)
+    s3 = FakeS3()
+
+    first = sc.run_legacy_archive(s3=s3, log=lambda _: None)
+    assert first["uploaded"] == 2 and first["deleted"] == 2 and not first["failed"]
+    assert not any(path.is_file() for path in folder.rglob("*"))
+    assert "legacy-archive/data_archive_day/20260121.zip" in s3.objects
+
+    assert sc.run_legacy_archive(s3=s3, log=lambda _: None) is None   # empty folder: nothing to do
+
+
+def test_legacy_archive_is_skipped_when_folder_not_mounted_or_r2_unset(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMF_LEGACY_ARCHIVE_DIR", str(tmp_path / "missing"))
+    assert sc.run_legacy_archive(s3=FakeS3()) is None
+
+    folder = _legacy(tmp_path, monkeypatch)
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    assert sc.run_legacy_archive() is None and len(list(folder.iterdir())) == 2
+
+
+def test_legacy_archive_can_upload_without_deleting(tmp_path, monkeypatch):
+    folder = _legacy(tmp_path, monkeypatch, files=1)
+    monkeypatch.setenv("SMF_LEGACY_ARCHIVE_DELETE", "false")
+    summary = sc.run_legacy_archive(s3=FakeS3(), log=lambda _: None)
+    assert summary["uploaded"] == 1 and summary["deleted"] == 0 and (folder / "20260120.zip").exists()
+
+
+def test_archive_folder_stops_starting_files_after_its_time_budget(tmp_path, monkeypatch):
+    folder = _legacy(tmp_path, monkeypatch, files=3)
+    summary = sc.archive_folder(folder, "p", s3=FakeS3(), log=lambda _: None, max_seconds=-1)
+    assert summary["stopped_early"] and summary["uploaded"] == 0

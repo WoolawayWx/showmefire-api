@@ -906,6 +906,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
 
+    # Moves the legacy zips to R2 (verified, then deleted locally) while the folder is mounted; a no-op once it is empty.
+    scheduler.add_job(
+        storage_cleanup.run_legacy_archive_scheduled,
+        'cron',
+        minute=5,
+        id='legacy_archive',
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.add_job(
         run_drift_check_job,
         'cron',
