@@ -219,6 +219,7 @@ def send_mobile_event(
         return 0
 
     subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
+    unregistered = 0
     channel = {
         "forecast": "forecast",
         "sitrep": "sitrep",
@@ -254,7 +255,41 @@ def send_mobile_event(
                     sent += 1
                 elif (ticket.get("details") or {}).get("error") == "DeviceNotRegistered":
                     _delete_subscription_rows(connection, subscription["installation_id"])
+                    unregistered += 1
+    _record_send_result(event_key, recipients=len(subscriptions), sent=sent, unregistered=unregistered)
     return sent
+
+
+def _record_send_result(event_key: str, *, recipients: int, sent: int, unregistered: int) -> None:
+    """Keep the outcome of one alert on its event row. A tracking failure must never fail the alert itself."""
+    try:
+        with _connect() as connection:
+            connection.execute(
+                """UPDATE mobile_push_events SET recipients = ?, sent = ?, unregistered = ?, failed = ?,
+                       delivered = 0, receipt_errors = 0 WHERE event_key = ?""",
+                (recipients, sent, unregistered, max(0, recipients - sent - unregistered), event_key),
+            )
+    except sqlite3.Error:
+        logger.warning("Could not record push result for %s", event_key, exc_info=True)
+
+
+def _tally_receipts(connection: sqlite3.Connection, tallies: dict[str, dict[str, Any]]) -> None:
+    """Add Expo's delivery receipts to their alerts: `tallies` is {event_key: {"delivered": n, "errors": {kind: n}}}."""
+    for event_key, tally in tallies.items():
+        row = connection.execute("SELECT error_counts_json FROM mobile_push_events WHERE event_key = ?", (event_key,)).fetchone()
+        if row is None:  # the ticket outlived its event row (or never had one)
+            continue
+        try:
+            counts = json.loads(row["error_counts_json"] or "{}")
+        except json.JSONDecodeError:
+            counts = {}
+        for kind, number in tally["errors"].items():
+            counts[kind] = counts.get(kind, 0) + number
+        connection.execute(
+            """UPDATE mobile_push_events SET delivered = COALESCE(delivered, 0) + ?,
+                   receipt_errors = COALESCE(receipt_errors, 0) + ?, error_counts_json = ? WHERE event_key = ?""",
+            (tally["delivered"], sum(tally["errors"].values()), json.dumps(counts, sort_keys=True), event_key),
+        )
 
 
 def notify_forecast(forecast: dict[str, Any], image_url: str | None = None) -> int:
@@ -347,7 +382,7 @@ def check_push_receipts() -> int:
     with _connect() as connection:
         rows = connection.execute(
             '''
-            SELECT t.ticket_id, s.expo_push_token
+            SELECT t.ticket_id, t.event_key, s.expo_push_token
             FROM mobile_push_tickets t
             JOIN mobile_push_subscriptions s ON s.installation_id = t.installation_id
             LEFT JOIN mobile_push_receipts r ON r.ticket_id = t.ticket_id
@@ -360,6 +395,8 @@ def check_push_receipts() -> int:
         return 0
 
     ticket_to_token = {row["ticket_id"]: row["expo_push_token"] for row in rows}
+    ticket_to_event = {row["ticket_id"]: row["event_key"] for row in rows}
+    tallies: dict[str, dict[str, Any]] = {}
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.post(EXPO_RECEIPTS_URL, headers=_headers(), json={"ids": list(ticket_to_token)})
@@ -374,6 +411,14 @@ def check_push_receipts() -> int:
         for ticket_id, receipt in receipts.items():
             status = str(receipt.get("status") or "error")
             error = str((receipt.get("details") or {}).get("error") or receipt.get("message") or "") or None
+            event_key = ticket_to_event.get(ticket_id)
+            if event_key:
+                tally = tallies.setdefault(event_key, {"delivered": 0, "errors": {}})
+                if status == "ok":
+                    tally["delivered"] += 1
+                else:
+                    kind = (error or "unknown")[:80]
+                    tally["errors"][kind] = tally["errors"].get(kind, 0) + 1
             if error == "DeviceNotRegistered" and ticket_id in ticket_to_token:
                 installation = connection.execute(
                     "SELECT installation_id FROM mobile_push_subscriptions WHERE expo_push_token = ?",
@@ -392,4 +437,80 @@ def check_push_receipts() -> int:
                         (ticket_id, status, error),
                     )
             checked += 1
+        _tally_receipts(connection, tallies)
     return checked
+
+
+def push_stats(days: int = 30, recent: int = 25) -> dict[str, Any]:
+    """How the app's alerts are doing: who can receive them, and what became of each one that was sent.
+
+    `sent` is what Expo accepted; `delivered` is Expo's receipt that it reached Apple/Google (not that it was seen or
+    opened, which the app does not report). Alerts with no counts were never sent through this pipeline (the baseline
+    rows seeded on first run, or alerts from before this was tracked) and are left out."""
+    days = max(1, min(int(days), 365))
+    window = f"-{days} days"
+
+    def pct(part: int, whole: int) -> float | None:
+        return round(100 * part / whole, 1) if whole else None
+
+    with _connect() as connection:
+        audience_row = connection.execute(
+            """SELECT COUNT(*) AS devices,
+                      SUM(forecast_enabled) AS forecast, SUM(sitrep_enabled) AS sitrep,
+                      SUM(fire_weather_enabled) AS fire_weather, SUM(fire_detection_enabled) AS fire_detection,
+                      SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS new_7d,
+                      SUM(CASE WHEN created_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_in_period,
+                      SUM(CASE WHEN last_seen_at >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS active_30d
+               FROM mobile_push_subscriptions WHERE enabled = 1""", (window,)).fetchone()
+        platforms = {row["platform"]: row["devices"] for row in connection.execute(
+            "SELECT platform, COUNT(*) AS devices FROM mobile_push_subscriptions WHERE enabled = 1 GROUP BY platform")}
+        awaiting = connection.execute(
+            """SELECT COUNT(*) FROM mobile_push_tickets t LEFT JOIN mobile_push_receipts r ON r.ticket_id = t.ticket_id
+               WHERE r.ticket_id IS NULL""").fetchone()[0]
+        by_type = []
+        for row in connection.execute(
+            """SELECT event_type, CASE WHEN event_key LIKE 'manual:%' THEN 1 ELSE 0 END AS manual, COUNT(*) AS alerts,
+                      SUM(recipients) AS recipients, SUM(sent) AS sent, SUM(failed) AS failed,
+                      SUM(unregistered) AS unregistered, SUM(delivered) AS delivered, SUM(receipt_errors) AS receipt_errors,
+                      SUM(CASE WHEN recipients = 0 THEN 1 ELSE 0 END) AS reached_nobody
+               FROM mobile_push_events
+               WHERE recipients IS NOT NULL AND created_at >= datetime('now', ?)
+               GROUP BY event_type, manual ORDER BY event_type, manual""", (window,)):
+            item = dict(row)
+            item["manual"] = bool(item["manual"])
+            item["accepted_pct"] = pct(item["sent"], item["recipients"])
+            item["delivered_pct"] = pct(item["delivered"], item["sent"])
+            item["awaiting_receipt"] = max(0, item["sent"] - item["delivered"] - item["receipt_errors"])
+            by_type.append(item)
+        daily = [dict(row) for row in connection.execute(
+            """SELECT date(created_at) AS day, event_type, COUNT(*) AS alerts, SUM(recipients) AS recipients,
+                      SUM(sent) AS sent, SUM(delivered) AS delivered
+               FROM mobile_push_events WHERE recipients IS NOT NULL AND created_at >= datetime('now', ?)
+               GROUP BY day, event_type ORDER BY day DESC, event_type""", (window,))]
+        recent_alerts = []
+        for row in connection.execute(
+            """SELECT event_key, event_type, payload_json, created_at, recipients, sent, failed, unregistered, delivered,
+                      receipt_errors, error_counts_json
+               FROM mobile_push_events WHERE recipients IS NOT NULL
+               ORDER BY created_at DESC, rowid DESC LIMIT ?""", (max(1, min(recent, 200)),)):
+            item = dict(row)
+            try:
+                payload = json.loads(item.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            try:
+                item["error_counts"] = json.loads(item.pop("error_counts_json") or "{}")
+            except json.JSONDecodeError:
+                item["error_counts"] = {}
+            item["title"] = str(payload.get("title") or "")
+            item["manual"] = item["event_key"].startswith("manual:")
+            item["delivered_pct"] = pct(item["delivered"], item["sent"])
+            item["awaiting_receipt"] = max(0, item["sent"] - item["delivered"] - item["receipt_errors"])
+            recent_alerts.append(item)
+
+    audience = {key: int(audience_row[key] or 0) for key in audience_row.keys()}
+    totals = {key: sum(item[key] or 0 for item in by_type) for key in ("alerts", "recipients", "sent", "failed", "unregistered", "delivered", "receipt_errors", "reached_nobody")}
+    totals["accepted_pct"] = pct(totals["sent"], totals["recipients"])
+    totals["delivered_pct"] = pct(totals["delivered"], totals["sent"])
+    return {"period_days": days, "audience": {**audience, "platforms": platforms, "awaiting_receipt": awaiting},
+            "totals": totals, "by_type": by_type, "daily": daily, "recent": recent_alerts}

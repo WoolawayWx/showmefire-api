@@ -176,6 +176,7 @@ def write_static_graphic(
     categorical: bool = False,
     boundary_geojson: str | Path | None = None,
     value_range: tuple[float, float] | None = None,
+    variable: str | None = None,
 ) -> tuple[Path, Path]:
     """Render one archival PNG/WebP in the same branded style (projection,
     county/state boundaries, title block, logo) as every other map the site
@@ -187,6 +188,9 @@ def write_static_graphic(
     container path, so the file was never actually found and masking/the
     boundary line silently never ran. State/county boundaries now come from
     maps/shapefiles/, which is plain repo content and always present.
+
+    `variable` selects the house color table (forecast/map_palettes.py, the same levels and colors as the Day 1 maps);
+    a variable without one falls back to a plain viridis scale over `value_range`.
     """
     import cartopy.crs as ccrs
     import geopandas as gpd
@@ -204,9 +208,16 @@ def write_static_graphic(
     png.parent.mkdir(parents=True, exist_ok=True)
     webp.parent.mkdir(parents=True, exist_ok=True)
 
+    from forecast.map_palettes import style_for
+
+    style = None if categorical or variable is None else style_for(variable)
     values = np.asarray(data.values, dtype=float)
     if categorical:
         values[values == 255] = np.nan
+    if style is not None:
+        values = style.convert(values)
+        if style.min_shown is not None:
+            values = np.where(values >= style.min_shown, values, np.nan)
     lon, lat = _grid_lonlat()
     have_boundaries = _COUNTY_SHAPEFILE.is_file() and _STATE_SHAPEFILE.is_file()
     state = gpd.read_file(_STATE_SHAPEFILE).to_crs(epsg=4326) if have_boundaries else None
@@ -231,6 +242,17 @@ def write_static_graphic(
         norm = BoundaryNorm(bins, len(colors))
         image = axis.contourf(lon, lat, values, transform=data_crs, levels=bins, cmap=cmap, norm=norm, alpha=0.85, zorder=7)
         axis.contour(lon, lat, values, transform=data_crs, levels=bins[1:-1], colors="black", linewidths=0.3, alpha=0.2, zorder=8)
+    elif style is not None:
+        cmap, norm = style.build()
+        fill = dict(levels=style.levels, cmap=cmap, alpha=style.alpha, zorder=7, antialiased=True, extend=style.extend)
+        if norm is not None:
+            fill["norm"] = norm
+        image = axis.contourf(lon, lat, values, transform=data_crs, **fill)
+        if style.line_levels:
+            axis.contour(lon, lat, values, transform=data_crs, levels=style.line_levels, colors="black", linewidths=0.3, alpha=0.2, zorder=8)
+        if style.kind == "fuel_moisture" and np.nanmin(values) < 9 < np.nanmax(values):
+            nine = axis.contour(lon, lat, values, transform=data_crs, levels=[9], colors="black", linestyles="dotted", linewidths=2, alpha=0.7, zorder=8)
+            axis.clabel(nine, inline=True, fontsize=9, fmt="%g%%", inline_spacing=10)
     else:
         vmin, vmax = value_range or (None, None)
         image = axis.pcolormesh(lon, lat, values, transform=data_crs, cmap="viridis", shading="nearest", alpha=0.85, zorder=7, vmin=vmin, vmax=vmax)
@@ -245,6 +267,15 @@ def write_static_graphic(
         colorbar = figure.colorbar(image, cax=cax)
         colorbar.set_ticks([0, 1, 2, 3, 4])
         colorbar.set_ticklabels(["Low", "Moderate \nHigh", "Elevated \nHigh", "Critical \n Very High", "Extreme"])
+    elif style is not None:
+        colorbar = figure.colorbar(image, cax=cax, label=style.label)
+        if style.ticks is not None:
+            colorbar.set_ticks(list(style.ticks))
+        if style.tick_labels is not None:
+            # As on the Day 1 maps: long band labels on the right, the title on the left so they do not overlap.
+            colorbar.ax.yaxis.set_label_position("left")
+            colorbar.ax.tick_params(labelleft=False, labelright=True)
+            colorbar.set_ticklabels(list(style.tick_labels))
     else:
         figure.colorbar(image, cax=cax, label=str(data.attrs.get("units", "")))
     axis.set_anchor("W")
@@ -261,7 +292,7 @@ def write_static_graphic(
         run_label = run_time
     subtitle = f"Model Run: {run_label} | Valid: {valid_date}"
     description = (
-        (_FIRE_DANGER_CRITERIA + "\n\n") if categorical else ""
+        (_FIRE_DANGER_CRITERIA + "\n\n") if categorical else (style.legend + "\n\n") if style and style.legend else ""
     ) + f"{status}\nData Source: HRRR/RRFS/GEFS Blend | ShowMeFire Forecast-V1\nFor More Info, Visit ShowMeFire.org"
     figure.text(0.99, 0.97, title, fontsize=26, fontweight="bold", ha="right", va="top", fontname="Plus Jakarta Sans")
     figure.text(0.99, 0.90, subtitle, fontsize=16, ha="right", va="top", fontname="Montserrat")

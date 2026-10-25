@@ -415,6 +415,46 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_moderation_event ON fire_event_moderation(event_id, created_at)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_moderation_actor ON fire_event_moderation(actor, created_at)')
 
+    # Where every event came from: one row per event, written when it first arrives and bumped on each re-sighting.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_event_origins (
+            event_id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            feed TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL DEFAULT '',
+            provider_ref TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            run_id INTEGER,
+            client_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '',
+            first_received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            receive_count INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (event_id) REFERENCES fire_events(id)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_kind_feed ON fire_event_origins(kind, feed)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_received ON fire_event_origins(last_received_at)')
+    # One row per batch ingest (a feed file read, an official import): what was read and what happened to each record.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_ingest_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job TEXT NOT NULL,
+            feed TEXT NOT NULL DEFAULT '',
+            input TEXT NOT NULL DEFAULT '',
+            input_modified_at TEXT,
+            input_records INTEGER,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP,
+            inserted INTEGER NOT NULL DEFAULT 0,
+            updated INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            skipped_json TEXT NOT NULL DEFAULT '{}',
+            errors_json TEXT NOT NULL DEFAULT '[]'
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_ingest_runs_started ON fire_ingest_runs(job, started_at DESC)')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_event_media (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -484,6 +524,9 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("review_decided_by", "TEXT"),
         ("review_decided_at", "TIMESTAMP"),
         ("review_decision_reason", "TEXT"),  # why/how: e.g. 'incident_feedback:12', 'admin_bulk_action'
+        # What the reviewer labelled the approved incident as (a cause_category: 'wildfire' | 'prescribed'), so
+        # detections that join later get the same label. NULL = approved without a label.
+        ("review_label", "TEXT"),
         # Buffered outline new detections can join by shape (services/incident_area.py),
         # plus its bounding box for a cheap SQL prefilter. NULL until first built.
         ("join_area_geojson", "TEXT"),
@@ -1132,6 +1175,22 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # What became of each alert, filled in as it is sent and as Expo's delivery receipts come back. NULL means the alert
+    # was never sent through send_mobile_event (a baseline row, or one from before this was tracked).
+    cursor.execute("PRAGMA table_info(mobile_push_events)")
+    push_event_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, column_type in (
+        ("recipients", "INTEGER"),          # devices that were eligible
+        ("sent", "INTEGER"),                # accepted by Expo
+        ("failed", "INTEGER"),              # eligible but not accepted (Expo down, rejected)
+        ("unregistered", "INTEGER"),        # Expo said the device is gone at send time
+        ("delivered", "INTEGER"),           # Expo's receipt: handed to Apple/Google
+        ("receipt_errors", "INTEGER"),      # Expo's receipt: error
+        ("error_counts_json", "TEXT"),      # receipt errors by kind
+    ):
+        if column_name not in push_event_columns:
+            cursor.execute(f"ALTER TABLE mobile_push_events ADD COLUMN {column_name} {column_type}")
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mobile_push_events_created ON mobile_push_events(created_at)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_tickets (
             ticket_id TEXT PRIMARY KEY,
@@ -2552,6 +2611,130 @@ def record_fire_moderation(
           _json.dumps(changed_fields or {})))
 
 
+# What each fire_events.source is when the caller says nothing more about it.
+_ORIGIN_DEFAULTS = {
+    "modis": ("satellite_feed", "NASA FIRMS (MODIS)"),
+    "viirs": ("satellite_feed", "NASA FIRMS (VIIRS)"),
+    "ngfs": ("satellite_feed", "NOAA NESDIS NGFS"),
+    "goes": ("satellite_feed", "GOES"),
+    "official": ("official_import", "Official dataset"),
+    "user_submission": ("public_form", "Public fire report form"),
+}
+_RAW_ORIGIN_LIMIT = 8000
+
+
+def build_origin(source: str, external_id: str = "", origin: Optional[Dict] = None) -> Dict:
+    """The origin record for an arriving event: the caller's details over the defaults for its source.
+
+    Keys: kind (satellite_feed | public_form | osint_api | official_import), feed (provider or integration name),
+    channel (file or endpoint it came through), provider_ref (the id the provider uses), source_url, run_id,
+    client (dict: user agent, referring site, coarse location - never a raw IP), raw (the provider's own record)."""
+    origin = dict(origin or {})
+    kind, feed = _ORIGIN_DEFAULTS.get(source, ("osint_api", source))
+    origin.setdefault("kind", kind)
+    origin.setdefault("feed", feed)
+    origin.setdefault("provider_ref", external_id or "")
+    return origin
+
+
+def origin_brief(origin: Dict) -> Dict:
+    """The small, human-readable part of an origin that goes on the moderation audit row."""
+    return {key: origin[key] for key in ("kind", "feed", "channel", "provider_ref", "source_url", "run_id") if origin.get(key)}
+
+
+def record_event_origin(cursor: sqlite3.Cursor, event_id: int, origin: Dict) -> None:
+    """Log where an event came from. The first arrival writes the row; every later arrival of the same event (a feed
+    re-sighting it, a repeated post) only bumps last_received_at and receive_count, so the original source is kept."""
+    import json as _json
+
+    raw = origin.get("raw")
+    raw_json = ""
+    if raw is not None:
+        raw_json = _json.dumps(raw, default=str, separators=(",", ":"), sort_keys=True)
+        if len(raw_json) > _RAW_ORIGIN_LIMIT:
+            raw_json = _json.dumps({"truncated": True, "keys": sorted(raw)[:60] if isinstance(raw, dict) else []})
+    cursor.execute(
+        """INSERT INTO fire_event_origins
+               (event_id, kind, feed, channel, provider_ref, source_url, run_id, client_json, raw_json, first_received_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT first_seen_at FROM fire_events WHERE id = ?), CURRENT_TIMESTAMP))
+           ON CONFLICT(event_id) DO UPDATE SET
+               last_received_at = CURRENT_TIMESTAMP, receive_count = receive_count + 1""",
+        (event_id, origin.get("kind") or "unknown", str(origin.get("feed") or "")[:200], str(origin.get("channel") or "")[:300],
+         str(origin.get("provider_ref") or "")[:300], str(origin.get("source_url") or "")[:2000], origin.get("run_id"),
+         _json.dumps(origin.get("client") or {}, default=str, separators=(",", ":")), raw_json, event_id),
+    )
+
+
+def get_event_origin(cursor: sqlite3.Cursor, event_id: int) -> Optional[Dict]:
+    import json as _json
+
+    row = cursor.execute("SELECT * FROM fire_event_origins WHERE event_id = ?", (event_id,)).fetchone()
+    if not row:
+        return None
+    origin = dict(row)
+    for key, fallback in (("client_json", {}), ("raw_json", None)):
+        try:
+            origin[key[:-5]] = _json.loads(origin.pop(key)) if origin.get(key) else fallback
+        except ValueError:
+            origin[key[:-5]] = fallback
+    return origin
+
+
+def start_ingest_run(job: str, feed: str = "", input_name: str = "", input_modified_at: Optional[str] = None,
+                     input_records: Optional[int] = None) -> int:
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO fire_ingest_runs (job, feed, input, input_modified_at, input_records) VALUES (?, ?, ?, ?, ?)",
+            (job, feed, input_name, input_modified_at, input_records),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def finish_ingest_run(run_id: int, inserted: int, updated: int, skipped: int,
+                      skipped_reasons: Optional[Dict[str, int]] = None, errors: Optional[List[str]] = None) -> None:
+    import json as _json
+
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    try:
+        conn.execute(
+            """UPDATE fire_ingest_runs SET finished_at = CURRENT_TIMESTAMP, inserted = ?, updated = ?, skipped = ?,
+                   skipped_json = ?, errors_json = ? WHERE id = ?""",
+            (inserted, updated, skipped, _json.dumps(skipped_reasons or {}), _json.dumps((errors or [])[:50]), run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def fire_origin_summary(days: int = 7, run_limit: int = 20) -> Dict:
+    """What has come in, by kind and feed, plus the latest batch runs (for the admin source log)."""
+    import json as _json
+
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    try:
+        conn.row_factory = sqlite3.Row
+        sources = [dict(row) for row in conn.execute(
+            """SELECT kind, feed, COUNT(*) AS events, SUM(receive_count) AS arrivals,
+                      MIN(first_received_at) AS first_received_at, MAX(last_received_at) AS last_received_at,
+                      SUM(CASE WHEN first_received_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_in_period
+               FROM fire_event_origins GROUP BY kind, feed ORDER BY last_received_at DESC""",
+            (f"-{max(1, int(days))} days",),
+        ).fetchall()]
+        runs = []
+        for row in conn.execute("SELECT * FROM fire_ingest_runs ORDER BY id DESC LIMIT ?", (max(1, min(run_limit, 200)),)).fetchall():
+            run = dict(row)
+            run["skipped_reasons"] = _json.loads(run.pop("skipped_json") or "{}")
+            run["errors"] = _json.loads(run.pop("errors_json") or "[]")
+            runs.append(run)
+        return {"period_days": days, "sources": sources, "runs": runs}
+    finally:
+        conn.close()
+
+
 def carry_forward_incident_label(cursor: sqlite3.Cursor, event_id: int, incident_id: int) -> bool:
     """A detection just joined `incident_id`: if an admin already approved a
     labelling public classification for that incident (confirmed_fire /
@@ -2613,6 +2796,7 @@ def create_fire_report(
     county_fips: Optional[str] = None,
     county_name: Optional[str] = None,
     occurred_at_tz_offset_minutes: Optional[int] = None,
+    origin: Optional[Dict] = None,
 ) -> Dict:
     """Insert a public, anonymous fire report as status='pending'."""
     db_path = get_db_path()
@@ -2638,7 +2822,11 @@ def create_fire_report(
         ))
         event_id = cursor.lastrowid
         _set_fire_event_fuels(cursor, event_id, fuel_types)
-        record_fire_moderation(cursor, event_id, action="submitted", to_status="pending", to_tier="unverified")
+        origin_info = build_origin("user_submission", str(event_id), {"channel": "POST /api/fires/reports", **(origin or {})})
+        record_fire_moderation(cursor, event_id, action="submitted", to_status="pending", to_tier="unverified",
+                                reason=f"submitted via {origin_info['feed']}",
+                                changed_fields={"origin": origin_brief(origin_info)})
+        record_event_origin(cursor, event_id, origin_info)
         conn.commit()
         return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
     finally:
@@ -2673,6 +2861,7 @@ def upsert_detection_event(
     footprint_geojson: Optional[str] = None,
     fuel_model_fbfm40: Optional[int] = None,
     canopy_cover_pct: Optional[float] = None,
+    origin: Optional[Dict] = None,
 ) -> Dict:
     """
     Idempotent upsert for a non-submission fire record (satellite/NGFS
@@ -2690,6 +2879,7 @@ def upsert_detection_event(
     overwritten - same guarantee the satellite/NGFS callers already rely on.
     """
     initial_status = "pending" if source in ("modis", "viirs", "ngfs") else "approved"
+    origin_info = build_origin(source, external_id, origin)
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -2698,6 +2888,7 @@ def upsert_detection_event(
         cursor.execute('SELECT id FROM fire_events WHERE source = ? AND external_id = ?', (source, external_id))
         existing = cursor.fetchone()
         is_new = existing is None
+        exclusion_zone = recurring_source = incident_id = None  # only satellite detections are clustered below
 
         cursor.execute('''
             INSERT INTO fire_events (
@@ -2764,9 +2955,12 @@ def upsert_detection_event(
                     )
                     cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
-                                    to_status=initial_status, to_tier=verification_tier)
-            if not (exclusion_zone is not None or recurring_source is not None):
+                                    to_status=initial_status, to_tier=verification_tier,
+                                    reason=f"ingested from {origin_info['feed']}",
+                                    changed_fields={"origin": origin_brief(origin_info)})
+            if incident_id is not None:
                 apply_incident_review_to_new_event(cursor, event_id, incident_id)
+        record_event_origin(cursor, event_id, origin_info)
         conn.commit()
         return {"event_id": event_id, "inserted": is_new, "updated": not is_new}
     finally:
@@ -2891,6 +3085,7 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
                 FROM fire_event_moderation WHERE event_id = ? ORDER BY created_at ASC
             ''', (event_id,))
             event["moderation"] = [dict(row) for row in cursor.fetchall()]
+            event["origin"] = get_event_origin(cursor, event_id)
         return event
     finally:
         conn.close()
@@ -3033,8 +3228,10 @@ def list_fire_events(
             clauses.append("incident_id IS NULL")
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        # Admin lists also say which feed each event came in through (the source log, fire_event_origins).
+        origin_column = ", (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed" if admin else ""
         cursor.execute(f'''
-            SELECT {", ".join(columns)} FROM fire_events
+            SELECT {", ".join(columns)}{origin_column} FROM fire_events
             {where}
             ORDER BY occurred_at DESC
             LIMIT ? OFFSET ?
@@ -3713,7 +3910,8 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
     try:
         cursor.execute('''
             SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source, status,
-                   bright_t7, land_cover, detection_confidence_pct, footprint_geojson
+                   bright_t7, land_cover, detection_confidence_pct, footprint_geojson, cause_category,
+                   (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed
             FROM fire_events
             WHERE incident_id = ?
             ORDER BY occurred_at ASC
@@ -3923,8 +4121,11 @@ def set_fire_event_status(
     to_tier: Optional[str] = None,
     official_source_ref: Optional[str] = None,
     reason: str = "",
+    cause_category: Optional[str] = None,
 ) -> Optional[Dict]:
-    """Approve/reject a pending report. Refuses (returns a sentinel) if not currently pending."""
+    """Approve/reject a pending report. Refuses (returns a sentinel) if not currently pending.
+
+    `cause_category` is the reviewer's label (wildfire / prescribed); it is only written when approving."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -3945,10 +4146,18 @@ def set_fire_event_status(
                 moderated_by = ?, moderated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (to_status, new_tier, official_source_ref, actor, event_id))
+        label = cause_category if to_status == "approved" else None
+        if label:
+            cursor.execute(
+                """UPDATE fire_events SET cause_category = ?, revised_at = CURRENT_TIMESTAMP,
+                       label_revision = label_revision + 1 WHERE id = ?""",
+                (label, event_id),
+            )
         action = "approved" if to_status == "approved" else "rejected"
         record_fire_moderation(cursor, event_id, action=action, actor=actor,
                                 from_status=from_status, to_status=to_status,
-                                from_tier=from_tier, to_tier=new_tier, reason=reason)
+                                from_tier=from_tier, to_tier=new_tier, reason=reason,
+                                changed_fields={"cause_category": label} if label else None)
         conn.commit()
         return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
     finally:
@@ -4124,7 +4333,8 @@ def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
             incident = dict(row)
             members = cursor.execute('''
                 SELECT id, source, status, verification_tier, latitude, longitude, occurred_at,
-                       satellite, confidence, frp, acres, description, county_name
+                       satellite, confidence, frp, acres, description, county_name, cause_category,
+                       (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed
                 FROM fire_events WHERE incident_id = ? AND status != 'deleted'
                 ORDER BY occurred_at ASC
             ''', (incident["id"],)).fetchall()
@@ -4146,6 +4356,7 @@ def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
 def bulk_set_incident_event_status(
     incident_id: int, to_status: str, actor: str,
     to_tier: Optional[str] = None, official_source_ref: Optional[str] = None, reason: str = "",
+    cause_category: Optional[str] = None,
 ) -> Dict:
     """Approve or reject every currently-pending member of one incident in a
     single action, reusing set_fire_event_status per event (same validation/
@@ -4165,7 +4376,7 @@ def bulk_set_incident_event_status(
     for event_id in event_ids:
         result = set_fire_event_status(
             event_id, to_status=to_status, actor=actor,
-            to_tier=to_tier, official_source_ref=official_source_ref, reason=reason,
+            to_tier=to_tier, official_source_ref=official_source_ref, reason=reason, cause_category=cause_category,
         )
         if result and not result.get("already_moderated"):
             updated_event_ids.append(event_id)
@@ -4175,28 +4386,34 @@ def bulk_set_incident_event_status(
 def set_incident_review_decision(
     incident_id: int, decision: str, actor: str, reason: str = "admin_bulk_action",
     to_tier: Optional[str] = None, official_source_ref: Optional[str] = None, note: str = "",
+    cause_category: Optional[str] = None,
 ) -> Dict:
     """One-click incident decision: record it on the incident (so detections
     that join later inherit it, see apply_incident_review_to_new_event) and
     apply it to every member still pending right now. Members an admin already
     moderated individually are left alone. `reason` is the identifier of why
-    the decision was made, e.g. 'incident_feedback:12' or 'admin_bulk_action'."""
+    the decision was made, e.g. 'incident_feedback:12' or 'admin_bulk_action'.
+    `cause_category` is the reviewer's label for an approval (wildfire / prescribed); it is stored on the
+    incident and given to every member approved now and to every detection that joins later."""
     if decision not in ("approved", "rejected"):
         raise ValueError(f"invalid incident decision: {decision}")
     with sqlite3.connect(get_db_path(), timeout=15) as conn:
         conn.execute(
             """UPDATE fire_incidents
                SET review_decision = ?, review_decided_by = ?, review_decided_at = CURRENT_TIMESTAMP,
-                   review_decision_reason = ?, updated_at = CURRENT_TIMESTAMP
+                   review_decision_reason = ?, review_label = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            (decision, actor, reason, incident_id),
+            (decision, actor, reason, cause_category if decision == "approved" else None, incident_id),
         )
         conn.commit()
     result = bulk_set_incident_event_status(
         incident_id, to_status=decision, actor=actor, to_tier=to_tier,
         official_source_ref=official_source_ref, reason=note or reason,
+        cause_category=cause_category if decision == "approved" else None,
     )
     result["decision"] = decision
+    if cause_category and decision == "approved":
+        result["cause_category"] = cause_category
     return result
 
 
@@ -4206,7 +4423,7 @@ def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, in
     label (carry_forward_incident_label), and extend the incident's join area to
     cover it (grow_incident_area). Uses the caller's cursor/transaction."""
     row = cursor.execute(
-        "SELECT review_decision, review_decided_by, review_decision_reason FROM fire_incidents WHERE id = ?",
+        "SELECT review_decision, review_decided_by, review_decision_reason, review_label FROM fire_incidents WHERE id = ?",
         (incident_id,),
     ).fetchone()
     if row and row[0] in ("approved", "rejected"):
@@ -4224,6 +4441,20 @@ def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, in
                 reason=f"inherited incident decision ({why or 'incident review'})",
             )
     carry_forward_incident_label(cursor, event_id, incident_id)
+    if row and row[0] == "approved" and row[3]:
+        # The reviewer's own label on the approval wins over a public classification carried forward above.
+        current = cursor.execute("SELECT status, verification_tier, cause_category FROM fire_events WHERE id = ?", (event_id,)).fetchone()
+        if current and current[0] == "approved" and current[2] != row[3]:
+            tier = current[1] if current[1] != "unverified" else "admin_reviewed"
+            cursor.execute(
+                """UPDATE fire_events SET cause_category = ?, verification_tier = ?, revised_at = CURRENT_TIMESTAMP,
+                       label_revision = label_revision + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (row[3], tier, event_id),
+            )
+            record_fire_moderation(
+                cursor, event_id, action="edited", actor=row[1] or "system:incident_decision", from_tier=current[1], to_tier=tier,
+                reason="inherited the label from the incident's approval", changed_fields={"cause_category": row[3]},
+            )
     grow_incident_area(cursor, event_id, incident_id)  # after the decision, so a rejected detection doesn't extend the area
 
 
@@ -5368,6 +5599,7 @@ def upsert_ingest_report(
     acres: Optional[float],
     county_fips: Optional[str],
     county_name: Optional[str],
+    origin: Optional[Dict] = None,
 ) -> tuple:
     """Idempotent upsert for an OSINT/social-monitoring fire lead, keyed on
     the same (source, external_id) unique index upsert_detection_event uses.
@@ -5396,6 +5628,8 @@ def upsert_ingest_report(
     """
     full_description = f"{title}\n\n{description}".strip() if description else title
     full_description = f"{full_description}\n\nSource: {source_url}"
+    origin_info = build_origin(source, external_id, {"feed": source_name or source, "source_url": source_url,
+                                                     "channel": "POST /fires/ingest/reports", **(origin or {})})
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -5429,8 +5663,11 @@ def upsert_ingest_report(
             )
             cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
-                                    to_status="pending", to_tier="unverified")
+                                    to_status="pending", to_tier="unverified",
+                                    reason=f"ingested from {origin_info['feed']}",
+                                    changed_fields={"origin": origin_brief(origin_info)})
             apply_incident_review_to_new_event(cursor, event_id, incident_id)
+        record_event_origin(cursor, event_id, origin_info)
         conn.commit()
         event = _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
         return event, is_new

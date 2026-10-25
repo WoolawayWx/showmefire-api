@@ -531,7 +531,7 @@ def _publish_run_impl(
                 run_time=utc_rfc3339(cycle), status="Degraded inputs" if warnings else "All configured sources available",
                 categorical=daily_name == "peak_fire_danger",
                 value_range=(0, 100) if byte_data else None,
-                boundary_geojson=GIS_DIR / "state_missouri.geojson",
+                boundary_geojson=GIS_DIR / "state_missouri.geojson", variable=public_name,
             )
             for graphic in (png, webp):
                 assets.append(artifact_record(graphic, run_id=run_id, kind="graphic", variable=public_name, aggregation=f"day-{day_index}-{graphic.suffix[1:]}", object_key=f"forecast-v1/runs/{cycle:%Y/%m/%d}/{run_id}/graphics/day-{day_index}/{graphic.name}", dtype=graphic.suffix[1:].upper(), unit=VARIABLE_UNITS.get(public_name)))

@@ -113,6 +113,20 @@ MAX_DOCUMENT_COUNT = 1
 MEDIA_DIR = Path(os.getenv("FIRE_MEDIA_DIR", str(Path(os.getenv("DATA_DIR", ".")) / "fire-media")))
 
 
+def _request_client(request: Request) -> Dict:
+    """What can be said about who sent a request, without keeping their address: browser/app string, the site
+    that sent it, and (only behind a trusted proxy) the coarse country/region Cloudflare reports."""
+    headers = request.headers
+    client = {
+        "user_agent": (headers.get("user-agent") or "").strip()[:200],
+        "origin": (headers.get("origin") or headers.get("referer") or "").strip()[:200],
+    }
+    if TRUST_PROXY_HEADERS:
+        client["country"] = (headers.get("cf-ipcountry") or "").strip()[:8]
+        client["region"] = (headers.get("cf-region-code") or "").strip()[:16]
+    return {key: value for key, value in client.items() if value}
+
+
 def _client_ip(request: Request) -> str:
     """Resolve the visitor IP from Cloudflare/proxy headers."""
     if TRUST_PROXY_HEADERS:
@@ -340,6 +354,10 @@ class FireReportModeration(BaseModel):
     verification_tier: Literal["admin_reviewed", "official_source_confirmed"] = "admin_reviewed"
     official_source_ref: str = Field(default="", max_length=500)
     moderator_note: str = Field(default="", max_length=2000)
+    # What the reviewer says this is: an unplanned fire or a controlled (planned) burn. Optional; left out, the
+    # detection is approved without a label. On an incident approval it applies to every member approved now and to
+    # detections that join the incident later.
+    label: Optional[Literal["fire", "controlled_burn"]] = None
 
     @model_validator(mode="after")
     def _require_ref_for_official(self):
@@ -651,6 +669,7 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         captcha_verdict=verdict,
         county_fips=county_fips,
         county_name=county_name,
+        origin={"client": _request_client(request)},
     )
     notify_staff_alert(
         alert_type="fire_report",
@@ -1043,6 +1062,17 @@ def admin_list_pending_incident_feedback(_admin: str = Depends(require_admin), l
     return {"success": True, "feedback": feedback, "count": len(feedback)}
 
 
+def _review_cause(label: Optional[str]) -> Optional[str]:
+    """The cause_category a reviewer's label stands for (fire -> wildfire, controlled_burn -> prescribed)."""
+    from services.fire_labeling import REVIEW_LABEL_TO_CAUSE
+
+    return REVIEW_LABEL_TO_CAUSE.get(label) if label else None
+
+
+def _review_label_text(label: Optional[str]) -> str:
+    return {"fire": "Fire (unplanned)", "controlled_burn": "Controlled burn"}.get(label or "", "")
+
+
 def _notify_approval(alert_type: str, title: str, actor: str, source: str, incident_id=None, fields=None, description: str = ""):
     """Tell staff on Discord that an admin approved something, and what the
     approval was based on (the 'source' - e.g. the public feedback or
@@ -1248,7 +1278,7 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, acto
     result = set_fire_event_status(
         event_id, to_status="approved", actor=actor,
         to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref,
-        reason=payload.moderator_note,
+        reason=payload.moderator_note, cause_category=_review_cause(payload.label),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Fire event not found")
@@ -1259,7 +1289,8 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, acto
         "fire_report", "Fire report approved", actor,
         source=f"Report #{event_id} ({result.get('source') or 'unknown source'})",
         incident_id=result["incident_id"],
-        fields=[{"name": "Tier", "value": str(payload.verification_tier), "inline": True}],
+        fields=[{"name": "Tier", "value": str(payload.verification_tier), "inline": True}]
+               + ([{"name": "Label", "value": _review_label_text(payload.label), "inline": True}] if payload.label else []),
         description=result.get("description") or "",
     )
     return {"success": True, "report": result}
@@ -1307,6 +1338,15 @@ def admin_export_fire_labels(_admin: str = Depends(require_admin), min_tier: str
             "admin_reviewed": FIRE_LABEL_ADMIN_REVIEWED_WEIGHT,
         }.get(row["verification_tier"], 0.0)
     return {"success": True, "labels": rows, "count": len(rows)}
+
+
+@router.get("/api/admin/fires/origins")
+def admin_fire_origin_log(_admin: str = Depends(require_admin), days: int = 7, runs: int = 20):
+    """Where detections and reports come from: counts per kind and feed (events, arrivals, newest arrival), plus
+    the latest batch ingest runs with what was read, kept and skipped and why (admin only)."""
+    from core.database import fire_origin_summary
+
+    return {"success": True, **fire_origin_summary(days=max(1, min(days, 365)), run_limit=runs)}
 
 
 @router.post("/api/admin/fires/blocklist")
@@ -1473,11 +1513,14 @@ def admin_approve_all_incident_reports(incident_id: int, payload: FireReportMode
     result = set_incident_review_decision(
         incident_id, "approved", actor, reason="admin_bulk_action",
         to_tier=payload.verification_tier, official_source_ref=payload.official_source_ref, note=payload.moderator_note,
+        cause_category=_review_cause(payload.label),
     )
+    result["label"] = payload.label
     _notify_approval(
         "fire_report", "Incident approved", actor,
         source="Admin review of the incident's pending detections/reports",
         incident_id=incident_id, description=payload.moderator_note or "",
+        fields=[{"name": "Label", "value": _review_label_text(payload.label), "inline": True}] if payload.label else None,
     )
     return {"success": True, **result}
 

@@ -123,6 +123,17 @@ def ingest_fire_report(payload: IngestReportCreate, response: Response, ingest_s
         acres=payload.size_acres,
         county_fips=county_fips,
         county_name=county_name,
+        origin={
+            "kind": "osint_api",
+            "feed": ingest_source["source_name"],
+            "channel": "POST /fires/ingest/reports",
+            "source_url": payload.source_url,
+            "client": {key: value for key, value in {
+                "ingest_source_id": ingest_source.get("source_id"), "api_key_id": ingest_source.get("api_key_id"),
+                "post_source": payload.source_name, "reported_at": payload.reported_at,
+            }.items() if value},
+            "raw": payload.model_dump(),
+        },
     )
     if payload.media_urls:
         add_ingest_media_links(event["id"], payload.media_urls)

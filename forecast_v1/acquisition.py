@@ -50,6 +50,7 @@ APCP_RUN_TOTAL_SEARCH = r":APCP:surface:0-\d+ (?:hour|day) acc fcst"
 # hypercube"). DSWRF has the same pair. Keep the instantaneous message.
 TCDC_INSTANT_SEARCH = r":TCDC:entire atmosphere(?: \(considered as a single layer\))?:(?!\d+-\d+ hour ave fcst)"
 DSWRF_INSTANT_SEARCH = r":DSWRF:surface:(?!\d+-\d+ hour ave fcst)"
+PBL_SEARCH = r":(?:HGT:planetary boundary layer|HPBL|MIXHT):"
 SURFACE_SEARCHES = (
     # Keep critical fields separate so a cfgrib/read failure for one message
     # cannot discard temperature, humidity, and dewpoint together.
@@ -60,7 +61,7 @@ SURFACE_SEARCHES = (
     r":VGRD:10 m above ground:",
     TCDC_INSTANT_SEARCH,
     r":(?:SOILW|MSTAV):",
-    r":(?:HGT:planetary boundary layer|HPBL|MIXHT):",
+    PBL_SEARCH,
     r":GUST:(?:surface|10 m above ground):",
     APCP_RUN_TOTAL_SEARCH,
     DSWRF_INSTANT_SEARCH,
@@ -77,7 +78,8 @@ _GEFS_SEARCH_OVERRIDES = {
     TCDC_INSTANT_SEARCH: r":TCDC:entire atmosphere:",
     DSWRF_INSTANT_SEARCH: r":DSWRF:surface:",
 }
-GEFS_SURFACE_SEARCHES = tuple(_GEFS_SEARCH_OVERRIDES.get(search, search) for search in SURFACE_SEARCHES)
+# The 0.25 degree GEFS "pgrb2s" files carry no PBL height, so it comes from the 0.5 degree pgrb2b files (see default_specs).
+GEFS_SURFACE_SEARCHES = tuple(_GEFS_SEARCH_OVERRIDES.get(search, search) for search in SURFACE_SEARCHES if search != PBL_SEARCH)
 GEFS_BUCKET_MEANS = ("dswrf", "tcc")
 # Kept as a public union for inventory diagnostics and compatibility.
 SURFACE_SEARCH = "|".join(SURFACE_SEARCHES)
@@ -97,6 +99,10 @@ class AcquisitionSpec:
     required: bool = False
     role: Literal["operational", "fallback", "shadow"] = "operational"
     searches: tuple[str, ...] = SURFACE_SEARCHES
+    # (product, search) pairs for fields the main product does not carry (RRFS 2dfld and GEFS pgrb2s have no pressure
+    # levels, GEFS has no PBL height). Fetched from the product that does and put on the main grid.
+    extras: tuple[tuple[str, str], ...] = ()
+    upper_air_on_main: bool = True
 
 
 @dataclass(frozen=True)
@@ -159,9 +165,13 @@ def default_specs() -> tuple[AcquisitionSpec, ...]:
     )
     rrfs_product = os.getenv("SMF_RRFS_PRODUCT", "2dfld.13km")
     rrfs_domain = os.getenv("SMF_RRFS_DOMAIN", "conus") or None
+    # 2dfld has no pressure levels; they are in prslev. Set SMF_RRFS_UPPER_PRODUCT= (empty) to skip them.
+    rrfs_upper = os.getenv("SMF_RRFS_UPPER_PRODUCT", "prslev.13km")
+    rrfs_extras = ((rrfs_upper, UPPER_AIR_SEARCH),) if rrfs_upper else ()
     specs = [
         AcquisitionSpec("hrrr", "hrrr", "sfc", tuple(range(49)), (None,), required=True),
-        AcquisitionSpec("rrfs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), ("control",), domain=rrfs_domain),
+        AcquisitionSpec("rrfs", "rrfs", rrfs_product, tuple(range(HORIZON_HOURS + 1)), ("control",), domain=rrfs_domain,
+                        extras=rrfs_extras, upper_air_on_main=not rrfs_extras),
     ]
     # REFS used to be delivered as raw per-member files in the same RRFS
     # feed. The operational bucket (which replaced the retired prototype
@@ -181,6 +191,7 @@ def default_specs() -> tuple[AcquisitionSpec, ...]:
     specs.append(AcquisitionSpec(
         "gefs", "gefs", "atmos.25", tuple(range(0, HORIZON_HOURS + 1, GEFS_STEP_HOURS)), gefs,
         role="fallback", searches=GEFS_SURFACE_SEARCHES,
+        extras=(("atmos.5", UPPER_AIR_SEARCH), ("atmos.5b", PBL_SEARCH)), upper_air_on_main=False,
     ))
     # Local import: registry.py imports AcquisitionSpec from this module, so a
     # module-level import here would be circular.
@@ -209,6 +220,9 @@ def _canonicalize_variables(dataset: xr.Dataset) -> xr.Dataset:
         "mstav": "soilw",
         "swvl1": "soilw", "weasd": "weasd", "sdwe": "weasd", "sde": "sde",
         "sd": "sde", "snod": "sde",
+        # Already-canonical upper-air names: _fetch_member canonicalizes the merged groups a second time, and without
+        # these the level fields (no longer on an isobaricInhPa dimension) were silently dropped on every source.
+        **{f"{prefix}{level}": f"{prefix}{level}" for prefix in "tuv" for level in (700, 850)},
     }
     output: dict[str, xr.DataArray] = {}
     for name, data in dataset.data_vars.items():
@@ -297,12 +311,17 @@ def _merge_herbie_result(value, cycle: datetime) -> xr.Dataset:
     return merged.sortby("time")
 
 
-def _load_clipped_herbie_result(value, cycle: datetime) -> xr.Dataset:
-    """Clip and eagerly load a query before releasing its GRIB-backed inputs."""
+def _load_clipped_herbie_result(value, cycle: datetime, unnamed: str | None = None) -> xr.Dataset:
+    """Clip and eagerly load a query before releasing its GRIB-backed inputs.
+
+    `unnamed` names a lone variable cfgrib could not name (some eccodes tables lack GEFS pgrb2b HPBL), which the
+    canonicalizer would otherwise drop, leaving an empty dataset."""
     items = value if isinstance(value, list) else [value]
     merged = None
     try:
         merged = _merge_herbie_result(items, cycle)
+        if unnamed and "unknown" in merged and len(merged.data_vars) == 1:
+            merged = merged.rename(unknown=unnamed)
         clipped = _clip_and_project_axes(_canonicalize_variables(merged))
         return clipped.load()
     finally:
@@ -388,6 +407,7 @@ def _query_leads(
     leads: tuple[int, ...],
     search: str,
     cycle: datetime,
+    unnamed: str | None = None,
 ) -> xr.Dataset:
     """Run one GRIB search over many lead hours without exhausting memory.
 
@@ -408,7 +428,10 @@ def _query_leads(
     last_missing: Exception | None = None
 
     def run(batch: tuple[int, ...]) -> xr.Dataset:
-        return _load_clipped_herbie_result(make_client(batch).xarray(search, remove_grib=False), cycle)
+        result = _load_clipped_herbie_result(make_client(batch).xarray(search, remove_grib=False), cycle, unnamed)
+        if not result.data_vars:
+            raise FileNotFoundError(f"{search} matched no usable fields")
+        return result
 
     for start in range(0, len(leads), chunk_size):
         batch = tuple(leads[start:start + chunk_size])
@@ -435,6 +458,26 @@ def _query_leads(
     return xr.concat(parts, dim="time", join="outer", compat="override", coords="minimal").sortby("time")
 
 
+def _brief(text: str, limit: int = 500) -> str:
+    """Query failures repeat per member and search (30 GEFS members x 2 searches); keep the diagnostic readable."""
+    text = text.strip()
+    return text if len(text) <= limit else f"{text[:limit].rstrip(';, ')} ... ({len(text) - limit} more characters, see the API log)"
+
+
+def _align_to_grid(other: xr.Dataset, grid: xr.Dataset) -> xr.Dataset:
+    """Put a dataset from another product on `grid`'s x/y so the two merge cell for cell.
+
+    GEFS upper-air and PBL files are 0.5 degree while its surface file is 0.25, and an outer merge of different
+    grids would leave NaN in every other cell. Products on the same grid are only relabelled."""
+    if "x" not in other.dims or "y" not in other.dims or "x" not in grid.dims or "y" not in grid.dims:
+        return other
+    other = other.drop_vars([name for name in ("latitude", "longitude") if name in other.coords])
+    if (other.sizes["x"] == grid.sizes["x"] and other.sizes["y"] == grid.sizes["y"]
+            and np.allclose(other.x.values, grid.x.values) and np.allclose(other.y.values, grid.y.values)):
+        return other.assign_coords(x=grid.x.values, y=grid.y.values)
+    return other.interp(x=grid.x.values, y=grid.y.values, kwargs={"fill_value": "extrapolate"})
+
+
 def _fetch_member(
     spec: AcquisitionSpec,
     cycle: datetime,
@@ -442,10 +485,10 @@ def _fetch_member(
     save_dir: Path,
     factory: Callable,
 ) -> xr.Dataset:
-    def make_client(leads):
+    def make_client(leads, product=None):
         kwargs = dict(
             DATES=[cycle.replace(tzinfo=None)], fxx=list(leads), model=spec.herbie_model,
-            product=spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "1")),
+            product=product or spec.product, save_dir=save_dir, max_threads=int(os.getenv("SMF_HERBIE_THREADS", "1")),
             verbose=False,
         )
         if member is not None:
@@ -480,12 +523,15 @@ def _fetch_member(
     surface = xr.merge(groups, compat="override", join="outer")
     if errors:
         surface.attrs["acquisition_warnings"] = ";".join(errors)
-    try:
-        upper = _query_leads(make_client, spec.leads, UPPER_AIR_SEARCH, cycle)
-        surface = xr.merge([surface, upper], compat="override", join="outer")
-    except Exception as error:
-        logger.info("%s optional upper-air fields unavailable for %s: %s", spec.public_name, member, error)
-        errors.append(f"{UPPER_AIR_SEARCH}:{type(error).__name__}: {_sanitized_error(error)}")
+    wanted = [(None, UPPER_AIR_SEARCH)] if spec.upper_air_on_main else []
+    for product, search in (*wanted, *spec.extras):
+        try:
+            extra = _query_leads(lambda leads, product=product: make_client(leads, product), spec.leads, search, cycle,
+                                 unnamed="hpbl" if search == PBL_SEARCH else None)
+            surface = xr.merge([surface, _align_to_grid(extra, surface)], compat="override", join="outer")
+        except Exception as error:
+            logger.info("%s %s fields unavailable for %s: %s", spec.public_name, search, member, error)
+            errors.append(f"{search}:{type(error).__name__}: {_sanitized_error(error)}")
     if errors:
         surface.attrs["acquisition_warnings"] = ";".join(errors)
     canonical = _canonicalize_variables(surface)
@@ -783,7 +829,7 @@ def acquire_cycle(
                     spec.public_name, spec.role, "degraded", "info" if spec.role == "shadow" else "warning",
                     "field_completeness",
                     f"{spec.public_name.upper()} is missing {len(missing_fields)} configured fields."
-                    + (f" Herbie query failures: {query_errors}" if query_errors else ""),
+                    + (f" Herbie query failures: {_brief(query_errors)}" if query_errors else ""),
                     missing_fields=missing_fields,
                 ))
             else:
@@ -791,7 +837,7 @@ def acquire_cycle(
                 diagnostics.append(SourceDiagnostic(
                     spec.public_name, spec.role, "available", "info", "source_available",
                     f"{spec.public_name.upper()} acquisition completed."
-                    + (f" Herbie query failures: {query_errors}" if query_errors else ""),
+                    + (f" Herbie query failures: {_brief(query_errors)}" if query_errors else ""),
                 ))
             if spec.public_name not in ("hrrr", "rrfs", "refs", "gefs"):
                 from .registry import mark_acquired

@@ -212,6 +212,14 @@ def ingest_fpa_fod(since_year: Optional[int] = None, until_year: Optional[int] =
     """
     inserted = updated = skipped = would_process = 0
     errors = []
+    run_id = None
+    if not dry_run:
+        try:
+            from core.database import start_ingest_run
+            years = f"{since_year or 'all'}-{until_year or 'all'}"
+            run_id = start_ingest_run("fpa_fod_ingest", "USFS FPA-FOD", f"ArcGIS REST, Missouri, years {years}")
+        except Exception as exc:  # the log must never stop the import
+            logger.warning("fpa_fod_ingest: could not start run record: %s", exc)
 
     for attributes in fetch_missouri_records(since_year, until_year, client=client):
         try:
@@ -222,6 +230,8 @@ def ingest_fpa_fod(since_year: Optional[int] = None, until_year: Optional[int] =
             if dry_run:
                 would_process += 1
                 continue
+            mapped["origin"] = {"kind": "official_import", "feed": "USFS FPA-FOD", "channel": "ArcGIS REST service",
+                                "provider_ref": str(attributes.get("fod_id")), "run_id": run_id, "raw": attributes}
             result = upsert_detection_event(**mapped)
             if result["inserted"]:
                 inserted += 1
@@ -229,6 +239,13 @@ def ingest_fpa_fod(since_year: Optional[int] = None, until_year: Optional[int] =
                 updated += 1
         except Exception as exc:
             errors.append(f"fod_id={attributes.get('fod_id')}: {exc}")
+
+    if run_id is not None:
+        try:
+            from core.database import finish_ingest_run
+            finish_ingest_run(run_id, inserted, updated, skipped, {"unmappable_record": skipped} if skipped else {}, errors)
+        except Exception as exc:
+            logger.warning("fpa_fod_ingest: could not finish run record: %s", exc)
 
     summary = {"inserted": inserted, "updated": updated, "skipped": skipped,
                "would_process": would_process, "errors": errors, "dry_run": dry_run}

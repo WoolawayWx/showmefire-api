@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from core.database import get_db_path
 from core.security import require_admin
 from services.mobile_content import county_catalog
-from services.mobile_push import _eligible_subscriptions, send_mobile_event
+from services.mobile_push import _eligible_subscriptions, push_stats, send_mobile_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin/notifications", tags=["admin-notifications"])
@@ -125,6 +125,13 @@ def send_notification(payload: ManualNotification, email: str = Depends(require_
         )
     logger.info("Manual notification by %s on %s: %d/%d accepted by Expo", email, payload.channel, sent, recipients)
     return {"success": True, "recipients": recipients, "sent": sent}
+
+
+@router.get("/stats")
+def notification_stats(days: int = 30, recent: int = 25, _admin: str = Depends(require_admin)):
+    """Is the app alerting working? Audience size, and per alert type how many were sent, accepted by Expo,
+    confirmed delivered to Apple/Google, failed, or reached nobody; plus a per-day series and the latest alerts."""
+    return {"success": True, **push_stats(days=days, recent=recent)}
 
 
 @router.get("/history")

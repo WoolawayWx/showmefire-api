@@ -25,7 +25,17 @@ enforce on its own.
 
 ## Daily moderation loop
 
-Open `/admin/fires` and work the pending queue (`GET /api/admin/fires/reports?status=pending`).
+Everything is reviewed in one place: **Fire Review** (`/admin/fires/workspace`, in the admin menu under Content;
+the old `/admin/fires` and `/admin/fires/incidents/{id}` addresses redirect there). The list on the left has
+**Needs review** (incidents with pending detections or feedback), **Single reports** (pending reports and
+detections not in any incident yet, with a pending / approved / rejected switch), and the All, Has feedback and
+Confirmed views. Pick an incident to approve, reject, delete or reanalyze it, review its public feedback
+and see every detection with the feed it came in through. Pick a single report to approve or reject it.
+The **Label** control next to every Approve button is the fire / controlled burn label described below; it clears
+after each approval. Fixed non-fire heat sources (mills, flares) are on **Non-fire sources**, and the full report
+page (`/admin/fires/{id}`: media, edits, moderation history, where it came from) and the area review page
+(`/admin/fires/area/{id}`: same fire / different fire) open from the workspace.
+
 For each report:
 
 1. Check the "N other reports within 2 km in the last 6 hours" hint on the
@@ -43,8 +53,20 @@ For each report:
      report, news report with an official quote). The `official_source_ref`
      field is required by the schema for this tier - use it to record the
      citation, not a restatement of the report.
-4. Reject with a specific, one-line reason. Rejected reports are retained
+4. Optionally **label** the approval: send `"label": "fire"` (an unplanned wildfire) or
+   `"label": "controlled_burn"` (a planned burn) with the approval. Approving means it is a real fire of
+   some kind; the label says which kind. They set `cause_category` to `wildfire` / `prescribed` (the same
+   categories an approved public classification writes), bump `label_revision`, and appear in the audit row
+   (`changed_fields_json`). Leave it out when you do not know: the report is approved with no label, which is
+   better than a guess in the training labels. Rejecting never labels.
+5. Reject with a specific, one-line reason. Rejected reports are retained
    (soft state, not deleted) so the audit trail explains why.
+
+`POST /api/admin/fires/incidents/{id}/approve-all` takes the same `label`. It labels every member approved in
+that action and is stored on the incident (`review_label`), so a detection that joins the incident later is
+approved and labelled the same way (audit reason "inherited the label from the incident's approval"). An
+explicit label on the incident wins over a label carried forward from public feedback. Approving the incident
+again without a label clears the standing label. Members you already moderated individually are left alone.
 
 **What counts as an official source:** a record from a fire department,
 MDC, MO DNR, USFS Mark Twain National Forest, or a NFIRS-linked incident
@@ -80,6 +102,30 @@ What's different about them:
 - Ingest sources and their API keys are managed via
   `POST /api/admin/fires/ingest-sources` (create, returns the raw key once)
   and `POST /api/admin/fires/ingest-sources/{id}/revoke`.
+
+## Where everything came from (source log)
+
+Every event that arrives gets one row in `fire_event_origins`, written the first time it is seen and kept
+(later arrivals of the same event only update `last_received_at` and `receive_count`, so the original source
+is never overwritten). It is returned as `origin` on `GET /api/admin/fires/reports/{id}`, and `origin_feed` is
+on the incident detail and pending-queue members. The first audit row (`ingested` / `submitted`) also says
+"ingested from <feed>" and carries the same facts.
+
+| `kind` | `feed` | what else is recorded |
+|---|---|---|
+| `satellite_feed` | NASA FIRMS (VIIRS/MODIS), NOAA NESDIS NGFS | the file it was read from (`channel`), the provider's own id (`provider_ref`), the ingest run, the provider's raw record (`raw`) |
+| `official_import` | USFS FPA-FOD | the service, the FPA-FOD id, the import run, the raw record |
+| `osint_api` | the registered integration (e.g. Muse) | `POST /fires/ingest/reports`, the post link, the page it was posted on, which API key and ingest source sent it, the lead as received |
+| `public_form` | Public fire report form | `POST /api/fires/reports`, browser/app string, the site that sent it, and country/region when the proxy headers are trusted (never an IP address; the IP hash stays on the event) |
+
+Batch ingests also write a row to `fire_ingest_runs` per feed file or import: the file name and its
+modified time, how many records it held, how many were inserted, updated and skipped, **why** each skipped
+record was skipped (`outside_missouri`, `no_coordinates`, `no_acquisition_time`, ...) and any errors.
+`GET /api/admin/fires/origins?days=7&runs=20` summarises both: events and arrivals per kind and feed, newest
+arrival, and the latest runs. A feed that has gone quiet shows up as an old `last_received_at`; a feed file
+that stopped refreshing shows up as an old `input_modified_at`.
+
+Events that arrived before this log existed have no origin until they are seen again.
 
 ## Abuse-spike playbook
 

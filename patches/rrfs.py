@@ -19,7 +19,7 @@ HELP = r"""
 Herbie(date, model='rrfs', ...)
 
 fxx     : int, forecast hour
-product : {"2dfld.13km", "natlev.13km"}
+product : {"2dfld.13km", "prslev.13km", "natlev.13km"}
 domain  : ignored, always "na" (North America)
 
 Example:
@@ -37,6 +37,7 @@ class rrfs:
 
         self.PRODUCTS = {
             "2dfld.13km": "2D surface diagnostics, 13km grid, North America",
+            "prslev.13km": "Pressure levels (700/850 mb winds and temperature), 13km grid, North America",
             "natlev.13km": "Native level, 13km grid, North America",
         }
 

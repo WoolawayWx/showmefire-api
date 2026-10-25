@@ -105,6 +105,7 @@ class MobilePushTests(unittest.TestCase):
             forecast=True,
             sitrep=True,
             fire_weather=True,
+            fire_detection=False,
             county_fips=["29019"],
         )
 
@@ -127,6 +128,7 @@ class MobilePushTests(unittest.TestCase):
             forecast=False,
             sitrep=False,
             fire_weather=False,
+            fire_detection=False,
             county_fips=["29019"],
         )
 

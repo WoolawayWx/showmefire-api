@@ -24,6 +24,13 @@ CLASSIFICATION_TO_CAUSE = {
     "not_a_fire": "not_a_fire",
 }
 
+# What a reviewer can label a detection or report as when approving it (approval means it is a real fire of some
+# kind): "fire" is an unplanned wildfire, "controlled_burn" a planned one. Same cause categories as above.
+REVIEW_LABEL_TO_CAUSE = {
+    "fire": CLASSIFICATION_TO_CAUSE["confirmed_fire"],
+    "controlled_burn": CLASSIFICATION_TO_CAUSE["controlled_burn"],
+}
+
 
 def apply_feedback_label(incident_id: int, classification: str, reviewed_by: str) -> List[Dict]:
     """Label every member detection of `incident_id` from an approved

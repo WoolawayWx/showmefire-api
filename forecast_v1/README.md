@@ -72,6 +72,14 @@ hours 49-72. Those hours carry `coarse_synoptic_fallback`, are disclosed in
 the run manifest, and have category/meteorological confidence capped at 49.
 If neither RRFS nor GEFS is complete, publication fails closed.
 
+The 700/850 mb temperature and wind fields and GEFS PBL height are not in each source's main product, so
+`AcquisitionSpec.extras` fetches them from the product that has them and puts them on the main grid: HRRR `sfc` has
+them itself, RRFS uses `prslev.13km` (`SMF_RRFS_UPPER_PRODUCT`, empty to skip; the product must also be listed in
+`patches/rrfs.py`, which the Docker build installs, so rebuild the image after changing it), and GEFS uses the 0.5 degree
+`atmos.5` (upper air) and `atmos.5b` (PBL height) files, interpolated to the 0.25 degree surface grid. The 0.25 degree
+`atmos.25` files carry neither. A "missing configured fields" diagnostic that names these fields means one of those
+products was unreachable; query failure text in a diagnostic is shortened, the API log has the full text.
+
 Run-level `warnings` retain their string-array API contract and contain only
 operational degradation: RRFS loss, GEFS fallback, or partial/unavailable
 meteorological confidence. `sourceDiagnostics` in the manifest and admin
