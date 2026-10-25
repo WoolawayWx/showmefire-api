@@ -14,6 +14,7 @@ APScheduler==3.11.1
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
 asgiref==3.11.0
+asn1crypto==1.5.1
 async-timeout==5.0.1
 attrs==25.4.0
 bcrypt==5.0.0
@@ -23,6 +24,7 @@ cachetools==6.2.4
 cairocffi==1.7.1
 CairoSVG==2.8.2
 Cartopy==0.25.0
+cbor2==6.1.5
 certifi==2025.11.12
 cffi==2.0.0
 cfgrib==0.9.15.1
@@ -72,6 +74,8 @@ jsonschema-specifications==2025.9.1
 kiwisolver==1.4.9
 lxml==6.0.2
 matplotlib==3.10.7
+pyOpenSSL==25.3.0
+pyotp==2.9.0
 qrcode==8.2
 MetPy==1.7.1
 morecantile==7.0.3
@@ -139,6 +143,7 @@ tzlocal==5.3.1
 urllib3==2.6.0
 uvicorn==0.38.0
 uvloop==0.23.0
+webauthn==2.7.0
 webencodings==0.5.1
 websockets==15.0.1
 wrapt==2.1.1

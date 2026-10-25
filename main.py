@@ -58,20 +58,9 @@ from core.database import (
 import sqlite3
 from core.rate_limit import is_admin, valid_api_key
 from core.security import (
-    verify_password,
-    create_access_token,
-    create_refresh_token,
-    verify_token,
     require_admin,
     set_request_token,
     reset_request_token,
-    ACCESS_TOKEN_EXPIRE_MINUTES,
-    REFRESH_TOKEN_EXPIRE_DAYS,
-    ACCESS_COOKIE_NAME,
-    REFRESH_COOKIE_NAME,
-    AUTH_COOKIE_SECURE,
-    AUTH_COOKIE_SAMESITE,
-    AUTH_COOKIE_DOMAIN,
     ADMIN_EMAIL,
     ADMIN_PASSWORD_HASH,
     ACCESS_TOKEN_EXPIRE_HOURS,
@@ -98,7 +87,7 @@ from core.config import (
     MISSOURI_FIRES_GEOJSON
 )
 from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, spot_forecast, api_keys, api_keys_admin, dev_access
+from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, spot_forecast, api_keys, api_keys_admin, dev_access, newsletter_admin, admin_auth
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
 from core.cors_origins import ORIGIN_REGEX, origin_allowed
@@ -298,6 +287,7 @@ OPSBRIEF_FALLBACK_FILE = "notactive.pdf"
 
 # Include tile router for GeoTIFF rendering
 app.include_router(health.router)
+app.include_router(admin_auth.router)
 app.include_router(admin_confirm.router)
 app.include_router(archive_admin.router)
 app.include_router(tiles.router)
@@ -348,6 +338,7 @@ app.include_router(forecast_models_admin.router)
 app.include_router(fuel_sensor_admin.router)
 app.include_router(graphics.router)
 app.include_router(bulletins.router)
+app.include_router(newsletter_admin.router)
 app.include_router(display_auth.router)
 app.include_router(field.router)
 app.include_router(fire_weather_data.router)
@@ -386,21 +377,7 @@ app.add_middleware(
 # "Access-Control-Allow-Origin: *" so a CDN cache can never hand out a copy that some site rejects.
 app.add_middleware(PublicTileCorsMiddleware, credentialed_origin=lambda origin: origin in origins or origin_allowed(origin))
 
-class LoginRequest(BaseModel):
-    email:str
-    password:str
-
-from core.admin_session import AdminCookieMiddleware, set_auth_cookie as _set_auth_cookie
-
-def _clear_auth_cookie(response: Response, name: str) -> None:
-    response.delete_cookie(
-        key=name,
-        httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite=AUTH_COOKIE_SAMESITE,
-        domain=AUTH_COOKIE_DOMAIN,
-        path="/",
-    )
+from core.admin_session import AdminCookieMiddleware
 
 app.add_middleware(AdminCookieMiddleware)
 
@@ -561,61 +538,6 @@ def list_gis():
         if os.path.isfile(fpath):
             files.append(fname)
     return JSONResponse(content={"files": files})
-
-@app.post("/api/admin/login")
-async def login(data: LoginRequest, response: Response):
-    logger.info(f"Login attempt from: {data.email}")
-    
-    # Verify email and password
-    if data.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    if not ADMIN_PASSWORD_HASH or not verify_password(data.password, ADMIN_PASSWORD_HASH):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    # Create JWT token
-    access_token = create_access_token(
-        data={"sub": data.email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    refresh_token = create_refresh_token(data={"sub": data.email})
-    _set_auth_cookie(response, ACCESS_COOKIE_NAME, access_token, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
-    _set_auth_cookie(response, REFRESH_COOKIE_NAME, refresh_token, REFRESH_TOKEN_EXPIRE_DAYS * 86400)
-
-    return {
-        "success": True,
-        "message": "Login successful"
-    }
-
-class TokenVerify(BaseModel):
-    token: str
-
-@app.post("/api/admin/verify")
-async def verify_admin_token(data: Optional[TokenVerify] = None):
-    """Session probe used by the public site. Unauthenticated callers get 200."""
-    email = verify_token(data.token if data else None)
-    if email:
-        return {"valid": True, "email": email}
-    return {"valid": False}
-
-@app.post("/api/admin/refresh")
-async def refresh_admin_token(request: Request, response: Response):
-    """Rotate the access cookie using a valid refresh cookie."""
-    email = verify_token(request.cookies.get(REFRESH_COOKIE_NAME), expected_type="refresh")
-    if not email:
-        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
-    access_token = create_access_token(
-        data={"sub": email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
-    _set_auth_cookie(response, ACCESS_COOKIE_NAME, access_token, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
-    return {"success": True, "message": "Token refreshed"}
-
-@app.post("/api/admin/logout")
-async def logout_admin(response: Response):
-    _clear_auth_cookie(response, ACCESS_COOKIE_NAME)
-    _clear_auth_cookie(response, REFRESH_COOKIE_NAME)
-    return {"success": True, "message": "Logged out"}
 
 @app.get("/api/banner")
 def get_banner_public():

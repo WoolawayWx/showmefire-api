@@ -24,7 +24,7 @@ from typing import Deque, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from core import security
+from core.admin_auth import mfa as admin_mfa, throttle as admin_throttle, users as admin_users
 from core.rate_limit import RateLimiter, client_ip
 from core.security import require_admin
 from services.dev_access import store, tokens
@@ -82,6 +82,7 @@ class RedeemBody(BaseModel):
 class AdminBody(BaseModel):
     email: str = Field(..., max_length=320)
     password: str = Field(..., max_length=500)
+    code: str = Field("", max_length=64)
 
 
 class TokenBody(BaseModel):
@@ -106,12 +107,25 @@ def admin_sign_in(body: AdminBody, request: Request):
     _require_configured()
     ip = client_ip(request)
     _guard(ip)
-    admin_email, password_hash = security.ADMIN_EMAIL, security.ADMIN_PASSWORD_HASH
-    if not admin_email or not password_hash or body.email.strip().lower() != admin_email.lower() \
-            or not security.verify_password(body.password, password_hash):
+    email = admin_users.normalize_email(body.email)
+    admin_throttle.check("pw", email, ip)
+    user = admin_users.authenticate(email, body.password)
+    if user is None:
         _failed(ip)
+        admin_throttle.fail("pw", email, ip)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
-    session = store.open_admin_session(admin_email, ip=ip, user_agent=request.headers.get("user-agent", ""))
+    if admin_mfa.enforcement_active() and admin_mfa.has_factor(user["id"]):
+        # Same bar as the admin sign-in: a password alone is not enough once second factors are enforced.
+        code = body.code.strip()
+        if not code:
+            raise HTTPException(status_code=401, detail="Enter the code from your authenticator app or a recovery code.")
+        admin_throttle.check("totp", str(user["id"]), ip)
+        if not (admin_mfa.totp_verify(user["id"], code) or admin_mfa.recovery_use(user["id"], code)):
+            _failed(ip)
+            admin_throttle.fail("totp", str(user["id"]), ip)
+            raise HTTPException(status_code=401, detail="That code is not right.")
+    admin_throttle.clear("pw", email)
+    session = store.open_admin_session(user["email"], ip=ip, user_agent=request.headers.get("user-agent", ""))
     return _issued(session)
 
 

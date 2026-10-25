@@ -1,7 +1,7 @@
 import os
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 from dotenv import load_dotenv
 from fastapi import HTTPException
 from jose import JWTError, jwt
@@ -113,6 +113,22 @@ def set_request_token(token: Optional[str]):
 def reset_request_token(token_context):
     _request_token.reset(token_context)
 
+# Set by core.admin_auth.sessions once it is imported: answers "is this session id still live (not revoked or expired, account enabled)".
+# Left unset in code paths that never load the admin auth routes (and in most tests), where a session id is simply trusted.
+_session_checker: Optional[Callable[[str], bool]] = None
+
+
+def register_session_checker(checker: Optional[Callable[[str], bool]]) -> None:
+    global _session_checker
+    _session_checker = checker
+
+
+def allow_legacy_tokens() -> bool:
+    """Access tokens issued before sessions existed carry no session id. They keep working (for at most their one-hour life)
+    until ADMIN_ALLOW_LEGACY_TOKENS=false; the test suite also mints them directly."""
+    return os.getenv("ADMIN_ALLOW_LEGACY_TOKENS", "true").strip().lower() not in {"0", "false", "no"}
+
+
 def verify_token(token: Optional[str] = None, expected_type: str = "access") -> Optional[str]:
     """Verify a JWT token and return the email"""
     token = token or _request_token.get()
@@ -122,8 +138,26 @@ def verify_token(token: Optional[str] = None, expected_type: str = "access") -> 
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type", "access") != expected_type:
             return None
+        if expected_type == "access":
+            session_id = payload.get("sid")
+            if session_id:
+                if _session_checker is not None and not _session_checker(str(session_id)):
+                    return None
+            elif not allow_legacy_tokens():
+                return None
         email: str = payload.get("sub")
         return email
+    except JWTError:
+        return None
+
+
+def current_session_id() -> Optional[str]:
+    """The session id inside the current request's admin token, if it has one."""
+    token = _request_token.get()
+    if not token:
+        return None
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]).get("sid")
     except JWTError:
         return None
 

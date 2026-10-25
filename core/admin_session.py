@@ -1,10 +1,16 @@
 """Renew expired admin access cookies before protected requests are handled."""
 from core import security
+from core.admin_auth import sessions
 from core.cookie_renewal import CookieRenewalMiddleware
 
 # These routes explicitly manage authentication and must not get an implicit
 # renewal (especially logout, which must be the last writer of its cookies).
-AUTH_ACTIONS = {'/api/admin/login', '/api/admin/logout', '/api/admin/refresh'}
+AUTH_ACTIONS = {'/api/admin/logout', '/api/admin/refresh'}
+
+
+def is_auth_action(path: str) -> bool:
+    path = path.rstrip('/')
+    return path in AUTH_ACTIONS or path.startswith('/api/admin/login')
 
 
 def set_auth_cookie(response, name, value, max_age):
@@ -21,14 +27,12 @@ class AdminCookieMiddleware(CookieRenewalMiddleware):
 
     def resolve(self, request):
         access = request.cookies.get(security.ACCESS_COOKIE_NAME)
-        if (request.url.path.rstrip('/') not in AUTH_ACTIONS
-                and not security.verify_token(access)
-                and request.cookies.get(security.REFRESH_COOKIE_NAME)):
-            email = security.verify_token(
-                request.cookies[security.REFRESH_COOKIE_NAME], expected_type='refresh',
-            )
-            if email:
-                return security.create_access_token({'sub': email}), True
+        refresh = request.cookies.get(security.REFRESH_COOKIE_NAME)
+        if not is_auth_action(request.url.path) and refresh and not security.verify_token(access):
+            renewed = sessions.renew(refresh)
+            if renewed:
+                email, session_id = renewed
+                return security.create_access_token({'sub': email, 'sid': session_id}), True
         return access, False
 
     def set_token(self, token):

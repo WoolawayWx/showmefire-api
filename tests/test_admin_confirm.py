@@ -46,7 +46,8 @@ def test_missing_or_garbage_token_rejected():
 # --- endpoint tests -----------------------------------------------------
 
 @pytest.fixture
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setattr(security, "ADMIN_PASSWORD_HASH", "irrelevant-hash")
     monkeypatch.setattr(admin_confirm, "verify_password", lambda plain, hashed: plain == "correct-password")
 
