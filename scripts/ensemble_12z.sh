@@ -44,7 +44,8 @@ echo "=== Starting 12z ensemble fire danger (beta) at $(date) ===" >> "$LOG_FILE
 echo "Running from: $PROJECT_DIR" >> "$LOG_FILE" 2>&1
 echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
 
-"$PYTHON" "$PROJECT_DIR/scripts/run_ensemble_fire_danger.py" >> "$LOG_FILE" 2>&1
+# One worker: the default 6 exceeds the worker container's 8g limit and gets OOM-killed (exit 137).
+"$PYTHON" "$PROJECT_DIR/scripts/run_ensemble_fire_danger.py" --workers 1 >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
     echo "WARNING: Ensemble fire danger (beta) generation failed at $(date) with exit code $EXIT_CODE" >> "$LOG_FILE" 2>&1
