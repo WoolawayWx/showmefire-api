@@ -252,6 +252,58 @@ class MobilePushTests(unittest.TestCase):
             self.assertEqual(mobile_push.process_fire_weather_alerts([existing, new]), 1)
         sender.assert_called_once()
 
+    def register_detection_subscriber(self, installation_id="22222222-2222-4222-8222-222222222222", app_version="1.2.0"):
+        return mobile_push.upsert_subscription(
+            installation_id=installation_id,
+            expo_push_token=f"ExpoPushToken[{installation_id.replace('-', '')}]",
+            platform="android",
+            app_version=app_version,
+            forecast=False,
+            sitrep=False,
+            fire_weather=False,
+            fire_detection=True,
+            county_fips=["29019"],
+        )
+
+    def test_feedback_prompts_hold_overnight_seed_baseline_and_cap_per_day(self):
+        self.register_detection_subscriber()
+        candidates = [
+            {"incident_id": 100 + index, "incident_slug": f"fire-{index}", "county_fips": "29019",
+             "county_name": "Boone", "confidence_label": "moderate"}
+            for index in range(5)
+        ]
+        night = datetime(2026, 10, 25, 3, 0, tzinfo=timezone.utc)  # 10 PM CDT
+        morning = datetime(2026, 10, 25, 13, 0, tzinfo=timezone.utc)  # 8 AM CDT
+        tickets = iter(range(100))
+        with patch.object(
+            mobile_push, "_send_batch",
+            side_effect=lambda messages: [{"status": "ok", "id": f"t{next(tickets)}"} for _ in messages],
+        ) as sender:
+            self.assertEqual(mobile_push.notify_feedback_candidates(candidates, now=night), 0)
+            with closing(sqlite3.connect(self.db_path)) as connection:
+                held = connection.execute(
+                    "SELECT COUNT(*) FROM mobile_push_events WHERE event_key LIKE 'fire_detection:%'"
+                ).fetchone()[0]
+            self.assertEqual(held, 0)  # nothing recorded, so the morning cycle can still send
+            self.assertEqual(mobile_push.notify_feedback_candidates(candidates[:1], now=morning), 0)  # baseline
+            self.assertEqual(mobile_push.notify_feedback_candidates(candidates, now=morning), mobile_push.FEEDBACK_PROMPT_DAILY_CAP)
+        message = sender.call_args_list[0].args[0][0]
+        self.assertEqual(message["priority"], "default")
+        self.assertEqual(message["channelId"], "fire-detection-feedback")
+        self.assertIn("near Boone County", message["body"])
+        self.assertEqual(message["data"]["url"], "/detections/fire-1/feedback")
+
+    def test_fire_detection_channel_depends_on_parsed_app_version(self):
+        for version, expected in {
+            "1.2.0": "fire-detection-feedback",
+            "1.10.0": "fire-detection-feedback",
+            "1.1.9": "fire-detection",
+            "": "fire-detection",
+            "1.2.0-beta": "fire-detection",
+        }.items():
+            self.assertEqual(mobile_push._channel_for("fire_detection", version), expected, version)
+        self.assertEqual(mobile_push._channel_for("fire_weather", "9.0.0"), "fire-weather")
+
     def test_device_not_registered_receipt_deletes_subscription_and_delivery_data(self):
         self.register()
         with closing(sqlite3.connect(self.db_path)) as connection, connection:

@@ -25,6 +25,11 @@ CHICAGO_TZ = ZoneInfo("America/Chicago")
 FEEDBACK_PROMPT_QUIET_START_HOUR = 21
 FEEDBACK_PROMPT_QUIET_END_HOUR = 7
 FEEDBACK_PROMPT_DAILY_CAP = 3
+# App versions from this one on create the quieter 'fire-detection-feedback'
+# Android channel (mobile/src/notifications/push.ts); older installs only have
+# the high-importance 'fire-detection' one, and a push to a channel the device
+# doesn't have can be dropped or misrouted.
+FEEDBACK_CHANNEL_MIN_APP_VERSION = (1, 2, 0)
 
 
 @contextmanager
@@ -171,7 +176,7 @@ def _eligible_subscriptions(
     capped: set[str] = set()
     with _connect() as connection:
         rows = connection.execute(
-            f"SELECT installation_id, expo_push_token, county_fips_json FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
+            f"SELECT installation_id, expo_push_token, county_fips_json, app_version FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
         ).fetchall()
         if event_type == "fire_detection":
             capped = {
@@ -196,8 +201,35 @@ def _eligible_subscriptions(
                 selected = set()
             if not county_set.intersection(selected):
                 continue
-        result.append({"installation_id": row["installation_id"], "expo_push_token": row["expo_push_token"]})
+        result.append({
+            "installation_id": row["installation_id"],
+            "expo_push_token": row["expo_push_token"],
+            "app_version": row["app_version"] or "",
+        })
     return result
+
+
+def _parse_app_version(value: str) -> tuple[int, ...] | None:
+    """'1.10.0' -> (1, 10, 0). None for empty/unparseable values, which callers
+    treat as old. Compared as numbers: as strings '1.10.0' < '1.9.0'."""
+    try:
+        parts = tuple(int(part) for part in value.strip().split("."))
+    except ValueError:
+        return None
+    return parts or None
+
+
+def _channel_for(event_type: str, app_version: str) -> str:
+    if event_type == "fire_detection":
+        parsed = _parse_app_version(app_version)
+        if parsed is not None and parsed >= FEEDBACK_CHANNEL_MIN_APP_VERSION:
+            return "fire-detection-feedback"
+    return {
+        "forecast": "forecast",
+        "sitrep": "sitrep",
+        "fire_weather": "fire-weather",
+        "fire_detection": "fire-detection",
+    }[event_type]
 
 
 def _headers() -> dict[str, str]:
@@ -245,12 +277,6 @@ def send_mobile_event(
 
     subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
     unregistered = 0
-    channel = {
-        "forecast": "forecast",
-        "sitrep": "sitrep",
-        "fire_weather": "fire-weather",
-        "fire_detection": "fire-detection",
-    }[event_type]
     sent = 0
     for start in range(0, len(subscriptions), 100):
         batch_subscriptions = subscriptions[start:start + 100]
@@ -262,7 +288,7 @@ def send_mobile_event(
                 "body": body[:500],
                 "sound": "default",
                 "priority": "high" if event_type == "fire_weather" else "default",
-                "channelId": channel,
+                "channelId": _channel_for(event_type, item["app_version"]),
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
             }
             if image_url:
