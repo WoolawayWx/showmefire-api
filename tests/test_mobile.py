@@ -414,3 +414,38 @@ class MobileWidgetTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             mobile_router.get_widget(Response(), county="29999")
         self.assertEqual(caught.exception.status_code, 404)
+
+
+class MobileMapCatalogTests(unittest.TestCase):
+    def setUp(self):
+        from services import mobile_maps
+
+        self.maps = mobile_maps
+        self.now = datetime(2026, 10, 25, 19, 7, tzinfo=timezone.utc)
+
+    def test_catalog_file_is_valid_and_complete(self):
+        catalog = self.maps.load_catalog()
+        counts = {g["id"]: sum(len(s["maps"]) for s in g["sections"]) for g in catalog["groups"]}
+        self.assertEqual(len(counts), 7)
+        self.assertEqual(sum(counts.values()), 137)
+        self.assertEqual(counts["rain-drought"], 46)
+        files = [m["file"] for g in catalog["groups"] for s in g["sections"] for m in s["maps"]]
+        self.assertEqual(len(files), len(set(files)))
+        self.assertTrue(all(f.startswith("mo-") and f.endswith(".png") for f in files))
+
+    def test_urls_use_thumbnails_when_enabled(self):
+        result = self.maps.build_catalog(self.now, cdn_base_url="https://cdn.example/latest/", use_thumbnails=True)
+        first = result["groups"][0]["sections"][0]["maps"][0]
+        self.assertEqual(first["url"], "https://cdn.example/latest/mo-realtimefiredanger.png?v=20261025-76")
+        self.assertEqual(first["thumbUrl"], "https://cdn.example/latest/mo-realtimefiredanger-sm.webp?v=20261025-76")
+        self.assertEqual(result["groups"][0]["mapCount"], 24)
+
+    def test_thumbnail_url_falls_back_to_the_png_when_thumbnails_are_off(self):
+        result = self.maps.build_catalog(self.now, cdn_base_url="https://cdn.example/latest", use_thumbnails=False)
+        first = result["groups"][0]["sections"][0]["maps"][0]
+        self.assertEqual(first["thumbUrl"], first["url"])
+
+    def test_version_changes_every_fifteen_minutes_only(self):
+        same = self.maps.version_token(datetime(2026, 10, 25, 19, 14, 59, tzinfo=timezone.utc))
+        self.assertEqual(self.maps.version_token(self.now), same)
+        self.assertNotEqual(self.maps.version_token(self.now), self.maps.version_token(datetime(2026, 10, 25, 19, 15, tzinfo=timezone.utc)))

@@ -9,11 +9,13 @@ from pydantic import BaseModel, Field, field_validator
 from core.rate_limit import RateLimiter
 from services.mobile_content import build_mobile_content, county_catalog
 from services.mobile_push import delete_subscription, upsert_subscription
+from services.mobile_maps import build_catalog
 from services.mobile_widget import county_points, widget_summary
 
 router = APIRouter(prefix="/api/mobile", tags=["mobile"])
 # Widgets refresh every 30+ min each, but rural carriers put many phones behind one IP, so keep this generous.
 widget_limiter = RateLimiter("mobile_widget", 120)
+maps_limiter = RateLimiter("mobile_maps", 120)
 EXPO_TOKEN_PATTERN = re.compile(r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
 
 
@@ -64,6 +66,13 @@ def get_widget(response: Response, county: str = Query(pattern=r"^29\d{3}$")):
         raise HTTPException(status_code=404, detail="Unknown Missouri county")
     response.headers["Cache-Control"] = "public, max-age=600"
     return widget_summary(county)
+
+
+@router.get("/maps", dependencies=[Depends(maps_limiter)])
+def get_maps(response: Response):
+    """The weather-map catalog (groups > sections > maps with CDN and thumbnail URLs) for the app's Weather maps screens."""
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return build_catalog()
 
 
 @router.put("/push-subscriptions/{installation_id}")

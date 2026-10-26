@@ -1,0 +1,977 @@
+{
+  "groups": [
+    {
+      "id": "fire",
+      "title": "Fire Danger & Forecasts",
+      "description": "Fire danger now and ahead, forecast graphics and fire weather parameters.",
+      "sections": [
+        {
+          "id": "fire-danger",
+          "title": "Fire Danger",
+          "maps": [
+            {
+              "key": "realtimefiredanger",
+              "title": "Real-Time Fire Danger",
+              "description": "Map of Missouri showing the current real-time fire danger rating.",
+              "file": "mo-realtimefiredanger.png"
+            },
+            {
+              "key": "rtma-fuelmoisture",
+              "title": "RTMA Fuel Moisture",
+              "description": "Map of Missouri showing estimated fuel moisture from the Real-Time Mesoscale Analysis (RTMA).",
+              "file": "mo-rtma-fuelmoisture.png"
+            },
+            {
+              "key": "rtma-observedpeakfiredanger",
+              "title": "RTMA Observed Peak Fire Danger",
+              "description": "Map of Missouri showing the observed peak fire danger from the Real-Time Mesoscale Analysis (RTMA).",
+              "file": "mo-rtma-observedpeakfiredanger.png"
+            },
+            {
+              "key": "rtma-rainfallimpact",
+              "title": "RTMA Rainfall Impact",
+              "description": "Map of Missouri showing the impact of recent rainfall on fuel conditions from the Real-Time Mesoscale Analysis (RTMA).",
+              "file": "mo-rtma-rainfallimpact.png"
+            },
+            {
+              "key": "fuelmoisture",
+              "title": "Current Fuel Moisture",
+              "description": "Map of Missouri showing current estimated fuel moisture.",
+              "file": "mo-fuelmoisture.png"
+            },
+            {
+              "key": "observedpeakfiredanger",
+              "title": "Observed Peak Fire Danger",
+              "description": "Map of Missouri showing the observed peak fire danger.",
+              "file": "mo-observedpeakfiredanger.png"
+            },
+            {
+              "key": "burnban",
+              "title": "Missouri Burn Bans",
+              "description": "Map of Missouri counties showing where burn bans are in effect.",
+              "file": "mo-burnban.png"
+            }
+          ]
+        },
+        {
+          "id": "forecast-plots",
+          "title": "Fire Weather Forecasts",
+          "maps": [
+            {
+              "key": "forecastfiredanger",
+              "title": "Forecast Fire Danger",
+              "description": "Map of Missouri showing the forecast fire danger.",
+              "file": "mo-forecastfiredanger.png"
+            },
+            {
+              "key": "forecastfiredangerbias",
+              "title": "Forecast Fire Danger Bias",
+              "description": "Map of Missouri showing the bias in the forecast fire danger.",
+              "file": "mo-forecastfiredangerbias.png"
+            },
+            {
+              "key": "forecastfuelmoisture",
+              "title": "Forecast Fuel Moisture",
+              "description": "Map of Missouri showing the forecast fuel moisture.",
+              "file": "mo-forecastfuelmoisture.png"
+            },
+            {
+              "key": "forecastmaxtemp",
+              "title": "Forecast Maximum Temperature",
+              "description": "Map of Missouri showing the forecast maximum temperature.",
+              "file": "mo-forecastmaxtemp.png"
+            },
+            {
+              "key": "forecastmaxwind",
+              "title": "Forecast Maximum Wind",
+              "description": "Map of Missouri showing the forecast maximum wind speed.",
+              "file": "mo-forecastmaxwind.png"
+            },
+            {
+              "key": "forecastminrh",
+              "title": "Forecast Minimum Relative Humidity",
+              "description": "Map of Missouri showing the forecast minimum relative humidity.",
+              "file": "mo-forecastminrh.png"
+            },
+            {
+              "key": "forecastrainfall",
+              "title": "Forecast Rainfall",
+              "description": "Map of Missouri showing the forecast rainfall.",
+              "file": "mo-forecastrainfall.png"
+            },
+            {
+              "key": "forecastswe",
+              "title": "Forecast Snow Water Equivalent",
+              "description": "Map of Missouri showing the forecast snow water equivalent.",
+              "file": "mo-forecastswe.png"
+            },
+            {
+              "key": "outlook-day2",
+              "title": "Day 2 Outlook",
+              "description": "Map of Missouri showing the day 2 outlook.",
+              "file": "mo-outlook-day2.png"
+            }
+          ]
+        },
+        {
+          "id": "fire-weather-params",
+          "title": "Fire Weather Parameters",
+          "maps": [
+            {
+              "key": "fw-mixing-height",
+              "title": "Mixing Height",
+              "description": "Map of Missouri showing mixing height.",
+              "file": "mo-fw-mixing-height.png"
+            },
+            {
+              "key": "fw-transport-wind",
+              "title": "Transport Wind",
+              "description": "Map of Missouri showing transport wind.",
+              "file": "mo-fw-transport-wind.png"
+            },
+            {
+              "key": "fw-ventilation",
+              "title": "Ventilation Rate",
+              "description": "Map of Missouri showing ventilation rate.",
+              "file": "mo-fw-ventilation.png"
+            },
+            {
+              "key": "fw-haines",
+              "title": "Haines Index",
+              "description": "Map of Missouri showing haines index.",
+              "file": "mo-fw-haines.png"
+            },
+            {
+              "key": "fw-hdw",
+              "title": "Hot-Dry-Windy Index",
+              "description": "Map of Missouri showing hot-dry-windy index.",
+              "file": "mo-fw-hdw.png"
+            },
+            {
+              "key": "fw-lapse-rate",
+              "title": "Lapse Rate",
+              "description": "Map of Missouri showing lapse rate.",
+              "file": "mo-fw-lapse-rate.png"
+            },
+            {
+              "key": "fw-inversion",
+              "title": "Inversion",
+              "description": "Map of Missouri showing inversion.",
+              "file": "mo-fw-inversion.png"
+            },
+            {
+              "key": "fw-trend",
+              "title": "Fire Weather Trend",
+              "description": "Map of Missouri showing fire weather trend.",
+              "file": "mo-fw-trend.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "advisories",
+      "title": "Weather Advisories",
+      "description": "Active National Weather Service fire, severe, winter, flood and other advisories.",
+      "sections": [
+        {
+          "id": "weather-alerts",
+          "title": "Weather Advisories",
+          "maps": [
+            {
+              "key": "advisory-fire",
+              "title": "Missouri Fire Weather Advisories",
+              "description": "Map of Missouri counties under active National Weather Service fire weather advisories, such as red flag warnings and fire weather watches",
+              "file": "mo-advisory-fire.png"
+            },
+            {
+              "key": "advisory-severe",
+              "title": "Missouri Severe Advisories",
+              "description": "Map of Missouri counties under active National Weather Service severe weather advisories, such as tornado and severe thunderstorm warnings and watches",
+              "file": "mo-advisory-severe.png"
+            },
+            {
+              "key": "advisory-winter",
+              "title": "Missouri Winter Advisories",
+              "description": "Map of Missouri counties under active National Weather Service winter weather advisories, such as winter storm, ice storm and blizzard warnings and watches",
+              "file": "mo-advisory-winter.png"
+            },
+            {
+              "key": "advisory-flood",
+              "title": "Missouri Flood Advisories",
+              "description": "Map of Missouri counties under active National Weather Service flood advisories, such as flood and flash flood warnings and watches",
+              "file": "mo-advisory-flood.png"
+            },
+            {
+              "key": "advisory-frostfreeze",
+              "title": "Missouri Frost and Freeze Advisories",
+              "description": "Map of Missouri counties under active National Weather Service frost and freeze advisories, warnings and watches",
+              "file": "mo-advisory-frostfreeze.png"
+            },
+            {
+              "key": "advisory-heat",
+              "title": "Missouri Heat Advisories",
+              "description": "Map of Missouri counties under active National Weather Service heat advisories and excessive heat warnings and watches",
+              "file": "mo-advisory-heat.png"
+            },
+            {
+              "key": "advisory-visibility",
+              "title": "Missouri Visibility Advisories",
+              "description": "Map of Missouri counties under active National Weather Service visibility advisories, such as dense fog and dense smoke advisories",
+              "file": "mo-advisory-visibility.png"
+            },
+            {
+              "key": "advisory-wind",
+              "title": "Missouri Wind Advisories",
+              "description": "Map of Missouri counties under active National Weather Service wind advisories, such as wind advisories and high wind warnings and watches",
+              "file": "mo-advisory-wind.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "radar-satellite",
+      "title": "Radar & Satellite",
+      "description": "Live radar, satellite imagery and station plots.",
+      "sections": [
+        {
+          "id": "radar",
+          "title": "Radar",
+          "maps": [
+            {
+              "key": "radar",
+              "title": "Missouri Radar",
+              "description": "Map of Missouri showing current weather radar.",
+              "file": "mo-radar.png"
+            },
+            {
+              "key": "radar-national",
+              "title": "National Radar",
+              "description": "Map of the United States showing current national weather radar.",
+              "file": "mo-radar-national.png"
+            }
+          ]
+        },
+        {
+          "id": "satellite",
+          "title": "Satellite",
+          "maps": [
+            {
+              "key": "sat-truecolor",
+              "title": "True Color",
+              "description": "Satellite image of Missouri showing true color.",
+              "file": "mo-sat-truecolor.png"
+            },
+            {
+              "key": "sat-visible",
+              "title": "Visible",
+              "description": "Satellite image of Missouri showing visible.",
+              "file": "mo-sat-visible.png"
+            },
+            {
+              "key": "sat-ir",
+              "title": "Infrared",
+              "description": "Satellite image of Missouri showing infrared.",
+              "file": "mo-sat-ir.png"
+            },
+            {
+              "key": "sat-swir",
+              "title": "Shortwave IR",
+              "description": "Satellite image of Missouri showing shortwave ir.",
+              "file": "mo-sat-swir.png"
+            },
+            {
+              "key": "sat-firetemp",
+              "title": "Fire Temperature",
+              "description": "Satellite image of Missouri showing fire temperature.",
+              "file": "mo-sat-firetemp.png"
+            },
+            {
+              "key": "sat-daylandcloudfire",
+              "title": "Day Land Cloud Fire",
+              "description": "Satellite image of Missouri showing day land cloud fire.",
+              "file": "mo-sat-daylandcloudfire.png"
+            },
+            {
+              "key": "sat-daycloudphase",
+              "title": "Day Cloud Phase",
+              "description": "Satellite image of Missouri showing day cloud phase.",
+              "file": "mo-sat-daycloudphase.png"
+            },
+            {
+              "key": "sat-veggie",
+              "title": "Vegetation",
+              "description": "Satellite image of Missouri showing vegetation.",
+              "file": "mo-sat-veggie.png"
+            },
+            {
+              "key": "sat-wv-low",
+              "title": "Water Vapor - Low",
+              "description": "Satellite image of Missouri showing water vapor - low.",
+              "file": "mo-sat-wv-low.png"
+            },
+            {
+              "key": "sat-wv-mid",
+              "title": "Water Vapor - Mid",
+              "description": "Satellite image of Missouri showing water vapor - mid.",
+              "file": "mo-sat-wv-mid.png"
+            },
+            {
+              "key": "sat-wv-upper",
+              "title": "Water Vapor - Upper",
+              "description": "Satellite image of Missouri showing water vapor - upper.",
+              "file": "mo-sat-wv-upper.png"
+            },
+            {
+              "key": "sat-fire-detections",
+              "title": "Satellite Fire Detections",
+              "description": "Satellite image of Missouri showing satellite fire detections.",
+              "file": "mo-sat-fire-detections.png"
+            },
+            {
+              "key": "sat-airmass",
+              "title": "Air Mass",
+              "description": "Satellite image of Missouri showing air mass.",
+              "file": "mo-sat-airmass.png"
+            },
+            {
+              "key": "sat-dust",
+              "title": "Dust",
+              "description": "Satellite image of Missouri showing dust.",
+              "file": "mo-sat-dust.png"
+            },
+            {
+              "key": "sat-nightmicro",
+              "title": "Night Microphysics",
+              "description": "Satellite image of Missouri showing night microphysics.",
+              "file": "mo-sat-nightmicro.png"
+            },
+            {
+              "key": "sat-splitwindow",
+              "title": "Split Window",
+              "description": "Satellite image of Missouri showing split window.",
+              "file": "mo-sat-splitwindow.png"
+            }
+          ]
+        },
+        {
+          "id": "station-plots",
+          "title": "Station Plots",
+          "maps": [
+            {
+              "key": "stationplot-current",
+              "title": "Current Station Plot",
+              "description": "Map of Missouri showing current weather observations plotted at each station.",
+              "file": "mo-stationplot-current.png"
+            },
+            {
+              "key": "stationplot-firewx",
+              "title": "Fire Weather Station Plot",
+              "description": "Map of Missouri showing fire weather observations plotted at each station.",
+              "file": "mo-stationplot-firewx.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "temperature-humidity",
+      "title": "Temperature & Humidity",
+      "description": "Air temperature, dewpoint and relative humidity.",
+      "sections": [
+        {
+          "id": "air-temps",
+          "title": "Air Temperature",
+          "maps": [
+            {
+              "key": "airtempmap",
+              "title": "Current Air Temperature",
+              "description": "Map of Missouri showing current air temperature",
+              "file": "mo-airtempmap.png"
+            },
+            {
+              "key": "airtempmax-today",
+              "title": "Maximum Air Temperature Today",
+              "description": "Map of Missouri showing maximum air temperature today",
+              "file": "mo-airtempmax-today.png"
+            },
+            {
+              "key": "airtempmin-today",
+              "title": "Minimum Air Temperature Today",
+              "description": "Map of Missouri showing minimum air temperature today",
+              "file": "mo-airtempmin-today.png"
+            },
+            {
+              "key": "airtempmaxmin-today",
+              "title": "Air Temperature Max and Min Today",
+              "description": "Map of Missouri showing air temperature max and min today",
+              "file": "mo-airtempmaxmin-today.png"
+            },
+            {
+              "key": "airtempchange-3hr",
+              "title": "Air Temperature Change Over Last 3 Hours",
+              "description": "Map of Missouri showing air temperature change over last 3 hours",
+              "file": "mo-airtempchange-3hr.png"
+            },
+            {
+              "key": "airtempchange-24hr",
+              "title": "Air Temperature Change Over Last 24 Hours",
+              "description": "Map of Missouri showing air temperature change over last 24 hours",
+              "file": "mo-airtempchange-24hr.png"
+            }
+          ]
+        },
+        {
+          "id": "dewpoints",
+          "title": "Dewpoint",
+          "maps": [
+            {
+              "key": "dewpointmap",
+              "title": "Current Dewpoint",
+              "description": "Map of Missouri showing current dewpoint",
+              "file": "mo-dewpointmap.png"
+            },
+            {
+              "key": "dewpoint-winds-combo",
+              "title": "Current Dewpoint and Winds",
+              "description": "Map of Missouri showing current dewpoint and winds",
+              "file": "mo-dewpoint-winds-combo.png"
+            },
+            {
+              "key": "dewpointdepression",
+              "title": "Dewpoint Depression",
+              "description": "Map of Missouri showing dewpoint depression",
+              "file": "mo-dewpointdepression.png"
+            },
+            {
+              "key": "dewpointchange-1hr",
+              "title": "Dewpoint Change Over Last 1 Hour",
+              "description": "Map of Missouri showing dewpoint change over last 1 hour",
+              "file": "mo-dewpointchange-1hr.png"
+            },
+            {
+              "key": "dewpointchange-3hr",
+              "title": "Dewpoint Change Over Last 3 Hours",
+              "description": "Map of Missouri showing dewpoint change over last 3 hours",
+              "file": "mo-dewpointchange-3hr.png"
+            },
+            {
+              "key": "dewpointchange-24hr",
+              "title": "Dewpoint Change Over Last 24 Hours",
+              "description": "Map of Missouri showing dewpoint change over last 24 hours",
+              "file": "mo-dewpointchange-24hr.png"
+            },
+            {
+              "key": "dewpointmax-24hr",
+              "title": "Maximum Dewpoint Last 24 Hours",
+              "description": "Map of Missouri showing the highest dewpoint temperature recorded over the last 24 hours.",
+              "file": "mo-dewpointmax-24hr.png"
+            }
+          ]
+        },
+        {
+          "id": "relative-humidity",
+          "title": "Relative Humidity",
+          "maps": [
+            {
+              "key": "rh",
+              "title": "Current Relative Humidity",
+              "description": "Map of Missouri showing the current relative humidity in percent.",
+              "file": "mo-rh.png"
+            },
+            {
+              "key": "rh-winds-combo",
+              "title": "Current Relative Humidity and Winds",
+              "description": "Map of Missouri showing the current relative humidity in percent with wind speed and direction.",
+              "file": "mo-rh-winds-combo.png"
+            },
+            {
+              "key": "rhchange-3hr",
+              "title": "Relative Humidity Change Over Last 3 Hours",
+              "description": "Map of Missouri showing how relative humidity has changed over the last 3 hours.",
+              "file": "mo-rhchange-3hr.png"
+            },
+            {
+              "key": "rhchange-24hr",
+              "title": "Relative Humidity Change Over Last 24 Hours",
+              "description": "Map of Missouri showing how relative humidity has changed over the last 24 hours.",
+              "file": "mo-rhchange-24hr.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "heat-comfort",
+      "title": "Heat & Comfort",
+      "description": "Heat index, wind chill and heat stress.",
+      "sections": [
+        {
+          "id": "feels-like",
+          "title": "Heat Index / Wind Chill",
+          "maps": [
+            {
+              "key": "feelslikemap",
+              "title": "Current Heat Index/Wind Chill",
+              "description": "Map of Missouri showing current heat index/wind chill",
+              "file": "mo-feelslikemap.png"
+            },
+            {
+              "key": "feelslikemax-today",
+              "title": "Maximum Heat Index/Wind Chill Today",
+              "description": "Map of Missouri showing maximum heat index/wind chill today",
+              "file": "mo-feelslikemax-today.png"
+            },
+            {
+              "key": "feelslikemin-today",
+              "title": "Minimum Heat Index/Wind Chill Today",
+              "description": "Map of Missouri showing minimum heat index/wind chill today",
+              "file": "mo-feelslikemin-today.png"
+            }
+          ]
+        },
+        {
+          "id": "heat-stress",
+          "title": "Heat Stress",
+          "maps": [
+            {
+              "key": "wbgtmap",
+              "title": "Current Wet Bulb Globe Temperature (WBGT)",
+              "description": "Map of Missouri showing the current wet bulb globe temperature (WBGT), a measure of heat stress.",
+              "file": "mo-wbgtmap.png"
+            },
+            {
+              "key": "wbgtmax-today",
+              "title": "Maximum WBGT Today",
+              "description": "Map of Missouri showing the highest wet bulb globe temperature (WBGT) reached so far today.",
+              "file": "mo-wbgtmax-today.png"
+            },
+            {
+              "key": "wetbulbmap",
+              "title": "Current Wet Bulb Temperature",
+              "description": "Map of Missouri showing the current wet bulb temperature.",
+              "file": "mo-wetbulbmap.png"
+            },
+            {
+              "key": "thetaemap",
+              "title": "Current Theta-E",
+              "description": "Map of Missouri showing the current equivalent potential temperature (theta-e).",
+              "file": "mo-thetaemap.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "wind-pressure",
+      "title": "Wind & Pressure",
+      "description": "Wind speed, gusts and direction, convergence and pressure.",
+      "sections": [
+        {
+          "id": "winds",
+          "title": "Wind",
+          "maps": [
+            {
+              "key": "windfilmap",
+              "title": "Current Winds",
+              "description": "Map of Missouri showing current wind speed and direction.",
+              "file": "mo-windfilmap.png"
+            },
+            {
+              "key": "windspeed-2m",
+              "title": "Current Wind Speed (2 m)",
+              "description": "Map of Missouri showing current wind speed measured 2 meters above the ground.",
+              "file": "mo-windspeed-2m.png"
+            },
+            {
+              "key": "windgust",
+              "title": "Current Wind Gusts",
+              "description": "Map of Missouri showing current wind gust speeds.",
+              "file": "mo-windgust.png"
+            },
+            {
+              "key": "wind-speed-gusts-arrows",
+              "title": "Wind Speed and Gusts (Arrows)",
+              "description": "Map of Missouri showing wind speed and gusts, with arrows for wind direction.",
+              "file": "mo-wind-speed-gusts-arrows.png"
+            },
+            {
+              "key": "wind-speed-gusts-barbs",
+              "title": "Wind Speed and Gusts (Barbs)",
+              "description": "Map of Missouri showing wind speed and gusts, with wind barbs for direction and speed.",
+              "file": "mo-wind-speed-gusts-barbs.png"
+            },
+            {
+              "key": "windgust-1hr-max",
+              "title": "Maximum Wind Gust Last 1 Hour",
+              "description": "Map of Missouri showing the highest wind gust recorded over the last hour.",
+              "file": "mo-windgust-1hr-max.png"
+            },
+            {
+              "key": "windgust-max-today",
+              "title": "Maximum Wind Gust Today",
+              "description": "Map of Missouri showing the highest wind gust recorded so far today.",
+              "file": "mo-windgust-max-today.png"
+            },
+            {
+              "key": "windgust-max-yesterday",
+              "title": "Maximum Wind Gust Yesterday",
+              "description": "Map of Missouri showing the highest wind gust recorded yesterday.",
+              "file": "mo-windgust-max-yesterday.png"
+            },
+            {
+              "key": "dispersion-winds",
+              "title": "Dispersion Winds",
+              "description": "Map of Missouri showing dispersion winds, which affect how smoke and other airborne material spreads.",
+              "file": "mo-dispersion-winds.png"
+            },
+            {
+              "key": "massconvergence",
+              "title": "Mass Convergence",
+              "description": "Map of Missouri showing areas of mass convergence, where surface winds come together.",
+              "file": "mo-massconvergence.png"
+            },
+            {
+              "key": "moistureconvergence",
+              "title": "Moisture Convergence",
+              "description": "Map of Missouri showing areas of moisture convergence, where winds are bringing moisture together.",
+              "file": "mo-moistureconvergence.png"
+            }
+          ]
+        },
+        {
+          "id": "pressure",
+          "title": "Pressure",
+          "maps": [
+            {
+              "key": "pressure-inhg",
+              "title": "Current Pressure (inHg)",
+              "description": "Map of Missouri showing current surface pressure in inches of mercury.",
+              "file": "mo-pressure-inhg.png"
+            },
+            {
+              "key": "pressure-mb",
+              "title": "Current Pressure (mb)",
+              "description": "Map of Missouri showing current surface pressure in millibars.",
+              "file": "mo-pressure-mb.png"
+            },
+            {
+              "key": "pressurechange-3hr-inhg",
+              "title": "Pressure Change Over Last 3 Hours (inHg)",
+              "description": "Map of Missouri showing how surface pressure has changed over the last 3 hours, in inches of mercury.",
+              "file": "mo-pressurechange-3hr-inhg.png"
+            },
+            {
+              "key": "pressurechange-3hr-mb",
+              "title": "Pressure Change Over Last 3 Hours (mb)",
+              "description": "Map of Missouri showing how surface pressure has changed over the last 3 hours, in millibars.",
+              "file": "mo-pressurechange-3hr-mb.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rain-drought",
+      "title": "Rain & Drought",
+      "description": "Precipitation totals, drought and evapotranspiration.",
+      "sections": [
+        {
+          "id": "precipitation",
+          "title": "Precipitation",
+          "maps": [
+            {
+              "key": "rainfall-today",
+              "title": "Rainfall Today",
+              "description": "Map of Missouri showing total rainfall so far today.",
+              "file": "mo-rainfall-today.png"
+            },
+            {
+              "key": "precip-1hr",
+              "title": "Precipitation Last 1 Hour",
+              "description": "Map of Missouri showing total precipitation over the last 1 hour.",
+              "file": "mo-precip-1hr.png"
+            },
+            {
+              "key": "precip-3hr",
+              "title": "Precipitation Last 3 Hours",
+              "description": "Map of Missouri showing total precipitation over the last 3 hours.",
+              "file": "mo-precip-3hr.png"
+            },
+            {
+              "key": "precip-6hr",
+              "title": "Precipitation Last 6 Hours",
+              "description": "Map of Missouri showing total precipitation over the last 6 hours.",
+              "file": "mo-precip-6hr.png"
+            },
+            {
+              "key": "precip-12hr",
+              "title": "Precipitation Last 12 Hours",
+              "description": "Map of Missouri showing total precipitation over the last 12 hours.",
+              "file": "mo-precip-12hr.png"
+            },
+            {
+              "key": "precip-24hr",
+              "title": "Precipitation Last 24 Hours",
+              "description": "Map of Missouri showing total precipitation over the last 24 hours.",
+              "file": "mo-precip-24hr.png"
+            },
+            {
+              "key": "stationprecip-1hr",
+              "title": "Station Precipitation Last Hour",
+              "description": "Map of Missouri showing precipitation measured at ASOS, AWOS and RAWS stations over the last hour, with dry stations shown as zero.",
+              "file": "mo-stationprecip-1hr.png"
+            },
+            {
+              "key": "stationprecip-24hr",
+              "title": "Station Precipitation Last 24 Hours",
+              "description": "Map of Missouri showing precipitation measured at ASOS, AWOS and RAWS stations over the last 24 hours.",
+              "file": "mo-stationprecip-24hr.png"
+            },
+            {
+              "key": "precip-2day",
+              "title": "Precipitation Last 2 Days",
+              "description": "Map of Missouri showing total precipitation over the last 2 days.",
+              "file": "mo-precip-2day.png"
+            },
+            {
+              "key": "precip-3day",
+              "title": "Precipitation Last 3 Days",
+              "description": "Map of Missouri showing total precipitation over the last 3 days.",
+              "file": "mo-precip-3day.png"
+            },
+            {
+              "key": "precip-4day",
+              "title": "Precipitation Last 4 Days",
+              "description": "Map of Missouri showing total precipitation over the last 4 days.",
+              "file": "mo-precip-4day.png"
+            },
+            {
+              "key": "precip-5day",
+              "title": "Precipitation Last 5 Days",
+              "description": "Map of Missouri showing total precipitation over the last 5 days.",
+              "file": "mo-precip-5day.png"
+            },
+            {
+              "key": "precip-7day",
+              "title": "Precipitation Last 7 Days",
+              "description": "Map of Missouri showing total precipitation over the last 7 days.",
+              "file": "mo-precip-7day.png"
+            },
+            {
+              "key": "precip-10day",
+              "title": "Precipitation Last 10 Days",
+              "description": "Map of Missouri showing total precipitation over the last 10 days.",
+              "file": "mo-precip-10day.png"
+            },
+            {
+              "key": "precip-14day",
+              "title": "Precipitation Last 14 Days",
+              "description": "Map of Missouri showing total precipitation over the last 14 days.",
+              "file": "mo-precip-14day.png"
+            },
+            {
+              "key": "precip-30day",
+              "title": "Precipitation Last 30 Days",
+              "description": "Map of Missouri showing total precipitation over the last 30 days.",
+              "file": "mo-precip-30day.png"
+            },
+            {
+              "key": "precip-60day",
+              "title": "Precipitation Last 60 Days",
+              "description": "Map of Missouri showing total precipitation over the last 60 days.",
+              "file": "mo-precip-60day.png"
+            },
+            {
+              "key": "precip-90day",
+              "title": "Precipitation Last 90 Days",
+              "description": "Map of Missouri showing total precipitation over the last 90 days.",
+              "file": "mo-precip-90day.png"
+            },
+            {
+              "key": "precip-120day",
+              "title": "Precipitation Last 120 Days",
+              "description": "Map of Missouri showing total precipitation over the last 120 days.",
+              "file": "mo-precip-120day.png"
+            },
+            {
+              "key": "precip-180day",
+              "title": "Precipitation Last 180 Days",
+              "description": "Map of Missouri showing total precipitation over the last 180 days.",
+              "file": "mo-precip-180day.png"
+            },
+            {
+              "key": "precip-365day",
+              "title": "Precipitation Last 365 Days",
+              "description": "Map of Missouri showing total precipitation over the last 365 days.",
+              "file": "mo-precip-365day.png"
+            },
+            {
+              "key": "precip-30day-percent-normal",
+              "title": "30-Day Precipitation Percent of Normal",
+              "description": "Map of Missouri showing the last 30 days of precipitation as a percent of normal.",
+              "file": "mo-precip-30day-percent-normal.png"
+            },
+            {
+              "key": "precip-60day-percent-normal",
+              "title": "60-Day Precipitation Percent of Normal",
+              "description": "Map of Missouri showing the last 60 days of precipitation as a percent of normal.",
+              "file": "mo-precip-60day-percent-normal.png"
+            },
+            {
+              "key": "precip-7day-departure",
+              "title": "7-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 7 days is above or below normal, in inches.",
+              "file": "mo-precip-7day-departure.png"
+            },
+            {
+              "key": "precip-14day-departure",
+              "title": "14-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 14 days is above or below normal, in inches.",
+              "file": "mo-precip-14day-departure.png"
+            },
+            {
+              "key": "precip-30day-departure",
+              "title": "30-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 30 days is above or below normal, in inches.",
+              "file": "mo-precip-30day-departure.png"
+            },
+            {
+              "key": "precip-60day-departure",
+              "title": "60-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 60 days is above or below normal, in inches.",
+              "file": "mo-precip-60day-departure.png"
+            },
+            {
+              "key": "precip-90day-departure",
+              "title": "90-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 90 days is above or below normal, in inches.",
+              "file": "mo-precip-90day-departure.png"
+            },
+            {
+              "key": "precip-180day-departure",
+              "title": "180-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 180 days is above or below normal, in inches.",
+              "file": "mo-precip-180day-departure.png"
+            },
+            {
+              "key": "precip-365day-departure",
+              "title": "365-Day Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation over the last 365 days is above or below normal, in inches.",
+              "file": "mo-precip-365day-departure.png"
+            },
+            {
+              "key": "precip-mtd-departure",
+              "title": "Month-to-Date Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation so far this month is above or below normal, in inches.",
+              "file": "mo-precip-mtd-departure.png"
+            },
+            {
+              "key": "precip-ytd-departure",
+              "title": "Year-to-Date Precipitation Departure from Normal",
+              "description": "Map of Missouri showing how much precipitation so far this year is above or below normal, in inches.",
+              "file": "mo-precip-ytd-departure.png"
+            },
+            {
+              "key": "dry-days-010",
+              "title": "Dry Days (0.10 in. Threshold)",
+              "description": "Map of Missouri showing the number of consecutive dry days, using a 0.10 inch rainfall threshold.",
+              "file": "mo-dry-days-010.png"
+            },
+            {
+              "key": "dry-days-025",
+              "title": "Dry Days (0.25 in. Threshold)",
+              "description": "Map of Missouri showing the number of consecutive dry days, using a 0.25 inch rainfall threshold.",
+              "file": "mo-dry-days-025.png"
+            }
+          ]
+        },
+        {
+          "id": "drought",
+          "title": "Drought",
+          "maps": [
+            {
+              "key": "drought",
+              "title": "Current Drought Conditions",
+              "description": "Map of Missouri showing current drought conditions from the U.S. Drought Monitor.",
+              "file": "mo-drought.png"
+            },
+            {
+              "key": "fordri",
+              "title": "Flash Onset Residual Drought Risk Index (FORDRI)",
+              "description": "Map of Missouri showing the fordri drought risk index.",
+              "file": "mo-fordri.png"
+            },
+            {
+              "key": "quickdri",
+              "title": "Quick Drought Response Index (QuickDRI)",
+              "description": "Map of Missouri showing the quickdri rapid drought response index.",
+              "file": "mo-quickdri.png"
+            },
+            {
+              "key": "vegdri",
+              "title": "Vegetation Drought Response Index (VegDRI)",
+              "description": "Map of Missouri showing the vegdri vegetation drought response index.",
+              "file": "mo-vegdri.png"
+            },
+            {
+              "key": "eddi-1wk",
+              "title": "EDDI - 1 Week",
+              "description": "Map of Missouri showing the evaporative demand drought index over the last week.",
+              "file": "mo-eddi-1wk.png"
+            },
+            {
+              "key": "eddi-2wk",
+              "title": "EDDI - 2 Weeks",
+              "description": "Map of Missouri showing the evaporative demand drought index over the last two weeks.",
+              "file": "mo-eddi-2wk.png"
+            },
+            {
+              "key": "eddi-1mo",
+              "title": "EDDI - 1 Month",
+              "description": "Map of Missouri showing the evaporative demand drought index over the last month.",
+              "file": "mo-eddi-1mo.png"
+            },
+            {
+              "key": "eddi-3mo",
+              "title": "EDDI - 3 Months",
+              "description": "Map of Missouri showing the evaporative demand drought index over the last three months.",
+              "file": "mo-eddi-3mo.png"
+            }
+          ]
+        },
+        {
+          "id": "evapotranspiration",
+          "title": "Evapotranspiration",
+          "maps": [
+            {
+              "key": "et-current",
+              "title": "Current Evapotranspiration Rate",
+              "description": "Map of Missouri showing the current hourly reference evapotranspiration rate in inches per hour.",
+              "file": "mo-et-current.png"
+            },
+            {
+              "key": "et-24hr",
+              "title": "Evapotranspiration Last 24 Hours",
+              "description": "Map of Missouri showing total reference evapotranspiration over the last 24 hours.",
+              "file": "mo-et-24hr.png"
+            },
+            {
+              "key": "et-peak-24hr",
+              "title": "Peak Evapotranspiration Rate (24 Hours)",
+              "description": "Map of Missouri showing the highest hourly reference evapotranspiration rate over the last 24 hours.",
+              "file": "mo-et-peak-24hr.png"
+            },
+            {
+              "key": "et-low-24hr",
+              "title": "Lowest Evapotranspiration Rate (24 Hours)",
+              "description": "Map of Missouri showing the lowest hourly reference evapotranspiration rate over the last 24 hours.",
+              "file": "mo-et-low-24hr.png"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
