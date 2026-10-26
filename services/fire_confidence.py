@@ -93,23 +93,47 @@ def build_confidence_geojson() -> dict:
     return {"type": "FeatureCollection", "features": features, "metadata": {"generated_at": datetime.now(timezone.utc).isoformat(), "model": "fire-confidence-v1"}}
 
 
-def list_high_confidence_incidents() -> list[dict]:
-    """Active incidents currently scoring 'high' confidence, shaped for mobile
-    push (incident_id/slug/county_fips/county_name). Reuses the same scoring
-    function as build_confidence_geojson/fires_v2, just filtered and flattened."""
+FEEDBACK_CANDIDATE_LABELS = {"moderate", "high"}
+FEEDBACK_CANDIDATE_MAX_AGE_HOURS = 12
+
+
+def list_feedback_candidate_incidents(now: datetime | None = None) -> list[dict]:
+    """Recent incidents worth asking the public about, shaped for mobile push
+    (incident_id/slug/county_fips/county_name). Moderate is where an answer
+    teaches the models the most; high still surfaces likely real fires. Only
+    incidents first seen in the last FEEDBACK_CANDIDATE_MAX_AGE_HOURS, so a
+    prompt held over quiet hours never goes out for a stale incident. Scores
+    with the same v1/v2 dispatch as build_confidence_geojson/fires_v2, so the
+    label matches what the app shows."""
+    from services.incident_confidence import score_incident, use_v2
+
+    now = now or datetime.now(timezone.utc)
     result = []
     for incident in list_fire_incidents(limit=500):
         if incident.get("status") == "deleted":
             continue
+        try:
+            first_detected = datetime.fromisoformat(str(incident.get("first_detected_at")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if first_detected.tzinfo is None:
+            first_detected = first_detected.replace(tzinfo=timezone.utc)
+        if (now - first_detected).total_seconds() > FEEDBACK_CANDIDATE_MAX_AGE_HOURS * 3600:
+            continue
         members = list_fire_incident_members(incident["id"])
-        score, label, _method = _score(_features(incident, members))
-        if label == "high":
+        if use_v2():
+            scored = score_incident(incident, members)
+            score, label = round(scored["score"] / 100, 3), scored["label"]
+        else:
+            score, label, _method = _score(_features(incident, members))
+        if label in FEEDBACK_CANDIDATE_LABELS:
             result.append({
                 "incident_id": incident["id"],
                 "incident_slug": incident.get("public_slug"),
                 "county_fips": incident.get("county_fips"),
                 "county_name": incident.get("county_name"),
                 "score": score,
+                "confidence_label": label,
             })
     return result
 

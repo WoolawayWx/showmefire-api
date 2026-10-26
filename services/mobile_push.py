@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
 EXPO_ACCESS_TOKEN = os.getenv("EXPO_ACCESS_TOKEN", "").strip()
+
+CHICAGO_TZ = ZoneInfo("America/Chicago")
+# Fire-detection pushes are feedback requests, not emergency alerts: held
+# overnight (Central) and capped per installation per rolling day.
+FEEDBACK_PROMPT_QUIET_START_HOUR = 21
+FEEDBACK_PROMPT_QUIET_END_HOUR = 7
+FEEDBACK_PROMPT_DAILY_CAP = 3
 
 
 @contextmanager
@@ -150,7 +158,9 @@ def _eligible_subscriptions(
     event_type: str, county_fips: Iterable[str] | None = None, *, all_counties: bool = False,
 ) -> list[dict[str, str]]:
     """Subscribers opted into `event_type`. County-scoped channels also need a
-    county match unless `all_counties` (manual statewide broadcast) is set."""
+    county match unless `all_counties` (manual statewide broadcast) is set.
+    fire_detection also skips installations that already got
+    FEEDBACK_PROMPT_DAILY_CAP of them in the last 24 h."""
     county_set = set(county_fips or [])
     column = {
         "forecast": "forecast_enabled",
@@ -158,12 +168,27 @@ def _eligible_subscriptions(
         "fire_weather": "fire_weather_enabled",
         "fire_detection": "fire_detection_enabled",
     }[event_type]
+    capped: set[str] = set()
     with _connect() as connection:
         rows = connection.execute(
             f"SELECT installation_id, expo_push_token, county_fips_json FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
         ).fetchall()
+        if event_type == "fire_detection":
+            capped = {
+                row["installation_id"]
+                for row in connection.execute(
+                    '''
+                    SELECT installation_id FROM mobile_push_tickets
+                    WHERE event_key LIKE 'fire_detection:%' AND created_at >= datetime('now', '-1 day')
+                    GROUP BY installation_id HAVING COUNT(*) >= ?
+                    ''',
+                    (FEEDBACK_PROMPT_DAILY_CAP,),
+                ).fetchall()
+            }
     result: list[dict[str, str]] = []
     for row in rows:
+        if row["installation_id"] in capped:
+            continue
         if event_type in {"fire_weather", "fire_detection"} and not (all_counties and not county_set):
             try:
                 selected = set(json.loads(row["county_fips_json"] or "[]"))
@@ -236,7 +261,7 @@ def send_mobile_event(
                 "title": title,
                 "body": body[:500],
                 "sound": "default",
-                "priority": "high" if event_type in {"fire_weather", "fire_detection"} else "default",
+                "priority": "high" if event_type == "fire_weather" else "default",
                 "channelId": channel,
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
             }
@@ -342,15 +367,27 @@ def process_fire_weather_alerts(alerts: list[dict[str, Any]]) -> int:
     return sent
 
 
-def notify_new_high_confidence_incidents(incidents: list[dict[str, Any]]) -> int:
-    """Push one alert per newly high-confidence fire incident.
+def _in_feedback_quiet_hours(now: datetime | None = None) -> bool:
+    hour = (now or datetime.now(timezone.utc)).astimezone(CHICAGO_TZ).hour
+    return hour >= FEEDBACK_PROMPT_QUIET_START_HOUR or hour < FEEDBACK_PROMPT_QUIET_END_HOUR
 
-    Idempotent per incident_id via mobile_push_events (event_key), so this can be
-    called every ingest cycle without re-notifying the same incident. Seeds a
-    baseline on first run so a fresh deploy doesn't blast every currently-active
-    high-confidence incident, mirroring process_fire_weather_alerts.
+
+def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | None = None) -> int:
+    """Push one feedback request per new candidate incident
+    (fire_confidence.list_feedback_candidate_incidents: moderate/high, recent).
+
+    The goal is a public label (confirmed fire / controlled burn / not a fire)
+    for the detection-confidence models; hearing about a nearby fire is a side
+    effect. Idempotent per incident_id via mobile_push_events (event_key), so
+    this can be called every ingest cycle. During quiet hours nothing is
+    recorded, so the first cycle after they end sends whatever is still a
+    candidate. Seeds a baseline on first run so a fresh deploy doesn't prompt
+    for every current candidate - v2 because widening from high-only to
+    moderate+high left the v1 baseline not covering active moderate incidents.
     """
-    baseline_key = "fire_detection:baseline:v1"
+    if _in_feedback_quiet_hours(now):
+        return 0
+    baseline_key = "fire_detection:baseline:v2"
     with _connect() as connection:
         baseline_exists = connection.execute(
             "SELECT 1 FROM mobile_push_events WHERE event_key = ?", (baseline_key,)
@@ -366,14 +403,19 @@ def notify_new_high_confidence_incidents(incidents: list[dict[str, Any]]) -> int
         incident_id = incident["incident_id"]
         slug = incident.get("incident_slug")
         county_fips = incident.get("county_fips")
+        county_name = incident.get("county_name")
+        where = f"near {county_name} County" if county_name else "near you"
+        extra_data = {"confidenceLabel": incident.get("confidence_label")}
+        if slug:
+            extra_data["incidentSlug"] = slug
         sent += send_mobile_event(
             event_type="fire_detection",
             event_key=f"fire_detection:{incident_id}",
-            title="New high-confidence fire detected",
-            body=f"A likely wildfire was detected near {incident.get('county_name') or 'your area'}.",
+            title="Help verify a satellite detection",
+            body=f"Satellite picked up heat {where}. Wildfire, controlled burn, or nothing? Tap to tell us.",
             url=f"/detections/{quote(slug, safe='')}/feedback" if slug else "/fires",
             county_fips=[county_fips] if county_fips else [],
-            extra_data={"incidentSlug": slug} if slug else {},
+            extra_data=extra_data,
         )
     return sent
 
