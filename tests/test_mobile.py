@@ -293,6 +293,16 @@ class MobilePushTests(unittest.TestCase):
         self.assertIn("near Boone County", message["body"])
         self.assertEqual(message["data"]["url"], "/detections/fire-1/feedback")
 
+    def test_feedback_prompt_without_a_slug_opens_the_map_tab(self):
+        self.register_detection_subscriber()
+        morning = datetime(2026, 10, 25, 13, 0, tzinfo=timezone.utc)
+        no_slug = {"incident_id": 300, "incident_slug": None, "county_fips": "29019", "county_name": "Boone", "confidence_label": "high"}
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "t-map"}]) as sender:
+            mobile_push.notify_feedback_candidates([], now=morning)  # seed the baseline
+            self.assertEqual(mobile_push.notify_feedback_candidates([no_slug], now=morning), 1)
+        # /fires was never a route in the app; the Map tab is where detections are.
+        self.assertEqual(sender.call_args.args[0][0]["data"]["url"], "/map")
+
     def test_fire_detection_channel_depends_on_parsed_app_version(self):
         for version, expected in {
             "1.2.0": "fire-detection-feedback",

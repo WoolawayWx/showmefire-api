@@ -439,7 +439,7 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
             event_key=f"fire_detection:{incident_id}",
             title="Help verify a satellite detection",
             body=f"Satellite picked up heat {where}. Wildfire, controlled burn, or nothing? Tap to tell us.",
-            url=f"/detections/{quote(slug, safe='')}/feedback" if slug else "/fires",
+            url=f"/detections/{quote(slug, safe='')}/feedback" if slug else "/map",
             county_fips=[county_fips] if county_fips else [],
             extra_data=extra_data,
         )
