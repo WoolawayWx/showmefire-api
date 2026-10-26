@@ -3,13 +3,17 @@ import re
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
+from core.rate_limit import RateLimiter
 from services.mobile_content import build_mobile_content, county_catalog
 from services.mobile_push import delete_subscription, upsert_subscription
+from services.mobile_widget import county_points, widget_summary
 
 router = APIRouter(prefix="/api/mobile", tags=["mobile"])
+# Widgets refresh every 30+ min each, but rural carriers put many phones behind one IP, so keep this generous.
+widget_limiter = RateLimiter("mobile_widget", 120)
 EXPO_TOKEN_PATTERN = re.compile(r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
 
 
@@ -51,6 +55,15 @@ def get_content(response: Response):
     api_base_url = os.getenv("PUBLIC_API_BASE_URL", "https://api.showmefire.org")
     cdn_base_url = os.getenv("PUBLIC_CDN_BASE_URL", "https://cdn.showmefire.org/latest")
     return build_mobile_content(api_base_url, cdn_base_url)
+
+
+@router.get("/widget", dependencies=[Depends(widget_limiter)])
+def get_widget(response: Response, county: str = Query(pattern=r"^29\d{3}$")):
+    """Compact county fire-danger summary for the home-screen widgets (services/mobile_widget.py)."""
+    if county not in county_points():
+        raise HTTPException(status_code=404, detail="Unknown Missouri county")
+    response.headers["Cache-Control"] = "public, max-age=600"
+    return widget_summary(county)
 
 
 @router.put("/push-subscriptions/{installation_id}")

@@ -338,3 +338,79 @@ class MobilePushTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MobileWidgetTests(unittest.TestCase):
+    def setUp(self):
+        from services import mobile_widget
+
+        self.widget = mobile_widget
+        mobile_widget.clear_cache()
+
+    def fake_assess(self, lat, lon):
+        hour = lambda stamp, label, danger: {"time_utc": stamp, "hour_label": label, "fire_danger": danger}
+        return {
+            "generated_at": "2026-10-25T19:00:00Z",
+            "current": {"temp_f": 71, "rh_pct": 24, "wind_mph": 14, "fire_danger": 2,
+                        "fuel_moisture_pct": 7.5, "observed_at": "2026-10-25T18:45:00Z"},
+            "today": {"hours": [
+                hour("2026-10-25T19:00:00Z", "2 PM", 2),
+                hour("2026-10-25T20:00:00Z", "3 PM", 3),
+                hour("2026-10-25T21:00:00Z", "4 PM", 3),
+                hour("2026-10-25T22:00:00Z", "5 PM", None),
+            ]},
+            "alerts": {"active": [{"event": "Red Flag Warning"}]},
+            "burn_ban": {"active": True},
+        }
+
+    def test_county_points_fall_inside_their_county(self):
+        from services.county_lookup import county_for_point
+
+        points = self.widget.county_points()
+        self.assertEqual(len(points), 115)  # 114 counties + the independent City of St. Louis
+        lat, lon, name = points["29019"]
+        self.assertEqual(name, "Boone")
+        self.assertEqual(county_for_point(lat, lon), ("29019", "Boone"))
+
+    def test_summary_condenses_the_burn_check(self):
+        summary = self.widget.build_summary("29019", assess=self.fake_assess)
+        self.assertEqual(summary["county"], {"fips": "29019", "name": "Boone"})
+        self.assertEqual(summary["peak"]["level"], 3)
+        self.assertEqual((summary["peak"]["start"], summary["peak"]["end"]), ("3 PM", "5 PM"))
+        self.assertEqual(summary["current"]["label"], "Elevated")
+        self.assertEqual(summary["current"]["rhPct"], 24)
+        self.assertEqual(summary["alerts"], [{"event": "Red Flag Warning"}])
+        self.assertTrue(summary["burnBan"])
+        self.assertTrue(summary["mapUrl"].startswith("https://cdn.showmefire.org/latest/mo-forecastfiredanger"))
+
+    def test_summary_without_forecast_or_current_conditions(self):
+        def sparse(lat, lon):
+            return {"generated_at": "2026-10-25T19:00:00Z", "current": None, "today": {"hours": []},
+                    "alerts": {"active": []}, "burn_ban": {"active": False}}
+
+        summary = self.widget.build_summary("29019", assess=sparse)
+        self.assertIsNone(summary["peak"])
+        self.assertIsNone(summary["current"])
+        self.assertEqual(summary["alerts"], [])
+
+    def test_summaries_are_cached_per_county(self):
+        calls = []
+        times = iter([0.0, 30.0, self.widget.CACHE_SECONDS + 1])
+
+        def build(fips):
+            calls.append(fips)
+            return {"fips": fips, "n": len(calls)}
+
+        clock = lambda: next(times)
+        self.widget.widget_summary("29019", clock=clock, build=build)
+        self.widget.widget_summary("29019", clock=clock, build=build)
+        self.assertEqual(len(calls), 1)
+        self.widget.widget_summary("29019", clock=clock, build=build)
+        self.assertEqual(len(calls), 2)
+
+    def test_unknown_county_is_rejected(self):
+        from fastapi import HTTPException, Response
+
+        with self.assertRaises(HTTPException) as caught:
+            mobile_router.get_widget(Response(), county="29999")
+        self.assertEqual(caught.exception.status_code, 404)

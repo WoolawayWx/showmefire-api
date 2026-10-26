@@ -53,9 +53,13 @@ def _hours_today(outlook: Optional[dict], now: datetime, rule_set: dict) -> list
         if not (start <= row["time_utc"] <= end_local.astimezone(timezone.utc)):
             continue
         state, _reasons = rules.assess_conditions(row, rule_set)
+        danger = row.get("fire_danger")
         hours.append({"time_utc": row["time_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"), "hour_label": hour_label(row["time_utc"]),
                       "temp_f": _number(row["temp_f"]), "rh_pct": _number(row["rh_pct"]), "wind_mph": _number(row["wind_mph"]),
-                      "gust_mph": _number(row["gust_mph"]), "state": state})
+                      "gust_mph": _number(row["gust_mph"]),
+                      # 0-4 class, read the way rules.assess_conditions reads it; the widgets show the day's peak from it.
+                      "fire_danger": None if _number(danger) is None else int(danger),
+                      "state": state})
     return hours
 
 
