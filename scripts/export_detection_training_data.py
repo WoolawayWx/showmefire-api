@@ -19,13 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from core.config import DATA_DIR
-from core.database import get_db_path
-
 SCHEMA_VERSION = "detection-training-v1"
-OUT_DIR = DATA_DIR / "fire_labels"
 DETECTION_SOURCES = ("viirs", "modis", "ngfs", "goes")
 
 DETECTION_COLUMNS = [
@@ -65,10 +59,10 @@ def _present(conn: sqlite3.Connection, table: str, wanted: list) -> list:
     return [c for c in wanted if c in have]
 
 
-def _dump(conn, name: str, table: str, wanted: list, where: str = "", params: tuple = ()) -> dict:
+def _dump(conn, out_dir: Path, name: str, table: str, wanted: list, where: str = "", params: tuple = ()) -> dict:
     cols = _present(conn, table, wanted)
     rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} {where}", params).fetchall()
-    path = OUT_DIR / name
+    path = out_dir / name
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(wanted)  # fixed header; absent columns come back blank
@@ -87,11 +81,23 @@ def _range(conn, where: str, params: tuple) -> dict:
     return out
 
 
-def export(since: str | None, db_path: Path | None = None) -> Path:
-    db_path = db_path or get_db_path()
+def default_db_path() -> Path:
+    """The API's own DB resolution, imported lazily so callers that pass db_path
+    (the training repo) don't need the API's dependencies installed."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from core.database import get_db_path
+    return get_db_path()
+
+
+def export(since: str | None = None, db_path: Path | None = None, out_dir: Path | None = None) -> Path:
+    """Stdlib-only and importable: `from export_detection_training_data import export`."""
+    db_path = Path(db_path) if db_path else default_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError(f"database not found: {db_path}")
+    out_dir = Path(out_dir) if out_dir else db_path.parent / "fire_labels"
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
         marks = ",".join("?" for _ in DETECTION_SOURCES)
         where = f"WHERE source IN ({marks})"
         params: tuple = DETECTION_SOURCES
@@ -100,21 +106,22 @@ def export(since: str | None, db_path: Path | None = None) -> Path:
             params = params + (since,)
 
         files = {
-            "detections": _dump(conn, "detections.csv", "fire_events", DETECTION_COLUMNS, where, params),
-            "incidents": _dump(conn, "incidents.csv", "fire_incidents", INCIDENT_COLUMNS),
-            "feedback": _dump(conn, "feedback.csv", "fire_incident_feedback", FEEDBACK_COLUMNS),
-            "user_reports": _dump(conn, "user_reports.csv", "fire_events", REPORT_COLUMNS, "WHERE source = 'user_submission'"),
+            "detections": _dump(conn, out_dir, "detections.csv", "fire_events", DETECTION_COLUMNS, where, params),
+            "incidents": _dump(conn, out_dir, "incidents.csv", "fire_incidents", INCIDENT_COLUMNS),
+            "feedback": _dump(conn, out_dir, "feedback.csv", "fire_incident_feedback", FEEDBACK_COLUMNS),
+            "user_reports": _dump(conn, out_dir, "user_reports.csv", "fire_events", REPORT_COLUMNS, "WHERE source = 'user_submission'"),
         }
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_db": str(db_path),
             "since": since,
             "files": files,
             "detection_ranges": _range(conn, where, params),
         }
     finally:
         conn.close()
-    manifest_path = OUT_DIR / "detection_training_manifest.json"
+    manifest_path = out_dir / "detection_training_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     return manifest_path
@@ -123,8 +130,10 @@ def export(since: str | None, db_path: Path | None = None) -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Export detections, incidents and feedback for detection-confidence training.")
     parser.add_argument("--since", default=None)
+    parser.add_argument("--db", default=None, help="SQLite DB to read (default: the API's own DB)")
+    parser.add_argument("--out-dir", default=None, help="where to write (default: <db dir>/fire_labels)")
     args = parser.parse_args()
-    print(f"Wrote {export(args.since)}")
+    print(f"Wrote {export(args.since, args.db, args.out_dir)}")
 
 
 if __name__ == "__main__":
