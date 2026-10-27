@@ -6,20 +6,41 @@ Training the detection-confidence dataset needs detections over the same dates a
 feedback, reports). Nothing in the API deletes old detections ("not a fire" incidents are soft-deleted and the export
 includes them), so history only grows from here; this fills in what came before and ships it to the training machine.
 
-## 1. Backfill VIIRS/MODIS from the FIRMS archive
+## 1. Backfill VIIRS/MODIS from the FIRMS archive: CSV first, database only for the overlap
 Needs `MODIS_KEY` (the FIRMS MAP_KEY the live poller already uses). NGFS has no archive and cannot be backfilled.
 
+**Step A, fetch to a CSV (writes nothing to the database):**
+
     python scripts/backfill_firms_history.py --start 2025-12-01 --end 2026-08-08 --dry-run   # count only
-    python scripts/backfill_firms_history.py --start 2025-12-01 --end 2026-08-08
+    python scripts/backfill_firms_history.py --start 2025-12-01 --end 2026-08-08             # -> data/firms_backfill/firms_history_<start>_<end>.csv
+
+**Step B, compare with NERIS (training machine; copy the CSV over first):**
+
+    python -m detection_dataset.overlap --history firms_history_2025-12-01_2026-08-08.csv   # -> firms_neris_overlap_<date>.csv
+
+Keeps the detections with a NERIS dispatch within 2 km and +-1 day (`--neris-radius-km`, `--day-window`) and prints match
+counts by source and month.
+
+**Step C, add only the overlapping ones to the database (server; back up `showmefire.db` first):**
+
+    python scripts/ingest_firms_history_csv.py --csv firms_neris_overlap_<date>.csv --dry-run
+    python scripts/ingest_firms_history_csv.py --csv firms_neris_overlap_<date>.csv
+
+Detections only: no incidents are created, so they never reach the review queue or the map (`--with-incidents` clusters
+them). They are still `pending`, so after a small first run check
+`GET /api/admin/fires/reports?status=pending&ungrouped_only=true` (it has no source filter). Re-running is safe: a
+detection already stored is updated, not duplicated.
+
+**Keep the full CSV for training.** The overlap file holds only NERIS matches, so on its own it makes every detection
+before the DB's start look like a fire. Pass the full file to the build, which uses the unmatched rows as weak negatives
+without putting them in the database: `python -m detection_dataset.build --history-csv firms_history_*.csv`.
 
 - Uses the Standard Processing products (`VIIRS_SNPP_SP`, `VIIRS_NOAA20_SP`, `VIIRS_NOAA21_SP`, `MODIS_SP`) plus the NRT
   ones for recent days, 5 days per request. FIRMS allows 5000 requests per 10 minutes per key.
-- An archive row gets the id its NRT twin would have, so a detection in both lands on one row (no duplicates);
-  re-running is safe.
-- Raw fetched features are kept in `data/firms_backfill/firms_history_<start>_<end>.geojson`.
+- An archive row gets the id its NRT twin would have, so a detection in both is one row and re-ingesting is safe.
 - Ingest does not score; the normal scoring pass picks the new rows up later, newest first.
 - The live ingest now also stores brightness (4 um / 11 um channels), pixel area and day/night for VIIRS/MODIS. Rows
-  already in the DB are filled in the next time the live feed (or a backfill) sees them.
+  already in the DB are filled in the next time the live feed (or an ingest) sees them.
 
 ## 2. Publish the training export to R2
 Needs `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`. Bucket is `R2_TRAINING_BUCKET`, else

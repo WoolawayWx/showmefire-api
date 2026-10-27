@@ -1,8 +1,10 @@
 """
-Backfill VIIRS/MODIS detections older than the live feed from NASA FIRMS' standard-processing archive.
+Fetch VIIRS/MODIS detections older than the live feed from NASA FIRMS' standard-processing archive into a CSV.
 
-Needs MODIS_KEY (the FIRMS MAP_KEY the live poller already uses). Re-runnable: detections already in fire_events are
-updated in place, never duplicated. NGFS has no archive, so it cannot be backfilled.
+Writes NOTHING to the database. Compare the CSV with NERIS (model-training: `python -m detection_dataset.overlap`),
+then add only the overlapping rows to the DB with scripts/ingest_firms_history_csv.py.
+
+Needs MODIS_KEY (the FIRMS MAP_KEY the live poller already uses). NGFS has no archive, so it cannot be backfilled.
 
 Usage:
     python scripts/backfill_firms_history.py --start 2025-12-01 --end 2026-08-08 --dry-run
@@ -21,21 +23,19 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # MODIS_KEY lives here; a one-off `docker exec` doesn't load it
 
-from core.database import init_database
 from services.firms_backfill import ARCHIVE_PRODUCTS, DEFAULT_PRODUCTS, NRT_PRODUCTS, FirmsError, backfill
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Backfill fire_events from the FIRMS archive.")
+    parser = argparse.ArgumentParser(description="Fetch FIRMS archive detections into a CSV (no database writes).")
     parser.add_argument("--start", required=True, type=date.fromisoformat, help="first day, YYYY-MM-DD")
     parser.add_argument("--end", type=date.fromisoformat, default=None, help="last day, YYYY-MM-DD (default: today)")
     parser.add_argument("--products", nargs="+", default=list(DEFAULT_PRODUCTS), choices=list(ARCHIVE_PRODUCTS) + list(NRT_PRODUCTS))
-    parser.add_argument("--dry-run", action="store_true", help="fetch and count, write nothing")
+    parser.add_argument("--dry-run", action="store_true", help="fetch and count, write no file")
     args = parser.parse_args()
 
     end = args.end or datetime.now(timezone.utc).date()
-    if not args.dry_run:
-        init_database()
+
     def progress(product, done, total, kept):
         print(f"  {product}: window {done}/{total}, {kept} Missouri detections so far", file=sys.stderr, flush=True)
 

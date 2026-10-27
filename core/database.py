@@ -2916,8 +2916,12 @@ def upsert_detection_event(
     fuel_model_fbfm40: Optional[int] = None,
     canopy_cover_pct: Optional[float] = None,
     origin: Optional[Dict] = None,
+    cluster_incidents: bool = True,
 ) -> Dict:
     """
+    `cluster_incidents=False` stores the detection alone: no fire_incidents row is created or joined (the
+    historical FIRMS backfill, which feeds model training and must not fill the review queue with old incidents).
+
     Idempotent upsert for a non-submission fire record (satellite/NGFS
     detections at verification_tier='unverified', or an already-vetted
     official dataset like USFS FPA-FOD at verification_tier=
@@ -3003,7 +3007,7 @@ def upsert_detection_event(
                         (recurring_source["id"], event_id),
                     )
                     _bump_recurring_source_detection(cursor, recurring_source["id"], occurred_at)
-                else:
+                elif cluster_incidents:
                     incident_id = find_or_create_incident_for_detection(
                         cursor, latitude, longitude, occurred_at, county_fips, county_name
                     )

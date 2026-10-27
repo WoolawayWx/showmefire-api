@@ -4,13 +4,13 @@ The live poller (tools/firedetections.py) only reads FIRMS' last day of near-rea
 exists from when ingest was switched on. FIRMS also serves the Standard Processing (SP) archive through the same
 area API, up to 5 days per request: .../api/area/csv/{MAP_KEY}/{PRODUCT}/{west,south,east,north}/{days}/{YYYY-MM-DD}.
 
-Detections are normalised by the live poller's own parser and ingested through fire_ingest, so a backfilled row is
-identical to one the poller would have written. An SP row is given the id its NRT twin would have had
-(`VIIRS_SNPP_NRT:...`), so a detection that exists in both lands on one fire_events row and the archive only fills in
-what the NRT row lacked (upsert_detection_event COALESCEs on conflict) instead of duplicating it.
+The backfill NEVER writes to the database. It fetches, normalises with the live poller's own parser, and writes a flat
+CSV (data/firms_backfill/firms_history_<start>_<end>.csv). That CSV is compared with NERIS on the training side
+(model-training: `python -m detection_dataset.overlap`), and only the overlapping rows come back to be added to
+fire_events with `ingest_csv` (scripts/ingest_firms_history_csv.py), detections only, no incidents.
 
-The raw fetched features are kept as a dated GeoJSON under data/firms_backfill/ (also the file fire_ingest reads), so a
-backfill can be re-ingested without calling FIRMS again.
+An SP row is given the id its NRT twin would have had (`VIIRS_SNPP_NRT:...`), so a detection that exists in both is one
+row, and an ingested row lands on (or fills in) the same fire_events row the live poller would have written.
 """
 from __future__ import annotations
 
@@ -136,6 +136,41 @@ def fetch_history(
     return features, stats
 
 
+# Column names match fire_events, so the same CSV reads naturally in the training repo and rebuilds a feed feature here.
+HISTORY_COLUMNS = ["external_id", "source", "product", "satellite", "occurred_at", "latitude", "longitude", "frp",
+                   "confidence", "bright_t7", "bright_t13", "pixel_area", "daynight"]
+
+
+def feature_to_row(feature: Dict[str, Any]) -> Dict[str, Any]:
+    props = feature.get("properties") or {}
+    lon, lat = feature["geometry"]["coordinates"][:2]
+    typename = str(props.get("TYPENAME") or "")
+    return {
+        "external_id": props.get("SOURCE_ID"), "source": "modis" if "MODIS" in typename.upper() else "viirs", "product": typename,
+        "satellite": props.get("SATELLITE"), "occurred_at": props.get("ACQ_DATE_TIME"), "latitude": lat, "longitude": lon,
+        "frp": props.get("FRP"), "confidence": props.get("CONFIDENCE"),
+        "bright_t7": props.get("BRIGHT_MID"), "bright_t13": props.get("BRIGHT_LONG"),  # the ~4 um / ~11 um channels
+        "pixel_area": props.get("PIXEL_AREA"), "daynight": props.get("DAYNIGHT"),
+    }
+
+
+def _num(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def row_to_feature(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Rebuild the feed feature fire_ingest._ingest_satdet_feature expects from a history-CSV row (extra columns ignored)."""
+    lat, lon = float(row["latitude"]), float(row["longitude"])
+    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": {
+        "SOURCE": "FIRMS", "SOURCE_ID": row["external_id"], "TYPENAME": row.get("product") or "", "SATELLITE": row.get("satellite") or None,
+        "ACQ_DATE_TIME": row["occurred_at"], "LATITUDE": lat, "LONGITUDE": lon, "FRP": _num(row.get("frp")),
+        "CONFIDENCE": row.get("confidence") or None, "BRIGHT_MID": _num(row.get("bright_t7")), "BRIGHT_LONG": _num(row.get("bright_t13")),
+        "PIXEL_AREA": _num(row.get("pixel_area")), "DAYNIGHT": row.get("daynight") or None}}
+
+
 def backfill(
     start: date,
     end: date,
@@ -148,7 +183,8 @@ def backfill(
     sleep: Callable = time.sleep,
     progress: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> Dict[str, Any]:
-    """Fetch [start, end] from FIRMS, keep the raw features on disk, and ingest them into fire_events."""
+    """Fetch [start, end] from FIRMS and write them to a history CSV. Never touches the database."""
+    import csv
     today = datetime.now(timezone.utc).date()
     end = min(end, today)
     features, stats = fetch_history(start, end, products, key=key, fetch=fetch, sleep=sleep, progress=progress)
@@ -156,14 +192,33 @@ def backfill(
     summary: Dict[str, Any] = {"start": start.isoformat(), "end": end.isoformat(), "fetched": len(features), "dry_run": dry_run, **stats}
     if dry_run or not features:
         return summary
-
     out_dir = out_dir or BACKFILL_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"firms_history_{start.isoformat()}_{end.isoformat()}.geojson"
-    path.write_text(json.dumps({"type": "FeatureCollection", "features": features,
-                                "metadata": {"products": list(products), "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                                             "start": start.isoformat(), "end": end.isoformat()}}), encoding="utf-8")
-    from services.fire_ingest import ingest_detection_files  # lazy: pulls in the DB layer
-    summary["geojson"] = str(path)
-    summary["ingest"] = ingest_detection_files(paths={"satdet": path, "ngfs": out_dir / "_none.geojson"})  # no NGFS file: that feed has no archive
+    path = out_dir / f"firms_history_{start.isoformat()}_{end.isoformat()}.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=HISTORY_COLUMNS)
+        writer.writeheader()
+        writer.writerows(feature_to_row(feature) for feature in features)
+    summary["csv"] = str(path)
     return summary
+
+
+def ingest_csv(csv_path: Path, *, cluster_incidents: bool = False, dry_run: bool = False) -> Dict[str, Any]:
+    """Add the detections in a history CSV (typically the NERIS-overlap subset) to fire_events.
+
+    Detections only by default: no incidents are created, so old history never reaches the review queue or the map.
+    Idempotent: a detection already stored is updated in place, not duplicated."""
+    import csv
+    import tempfile
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    features = [row_to_feature(row) for row in rows]
+    features.sort(key=lambda f: f["properties"]["ACQ_DATE_TIME"])
+    if dry_run:
+        return {"rows": len(rows), "dry_run": True}
+    from services.fire_ingest import ingest_detection_files  # lazy: pulls in the DB layer
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / f"{Path(csv_path).stem}.geojson"  # the file name is recorded as the detection's source channel
+        path.write_text(json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8")
+        result = ingest_detection_files(paths={"satdet": path, "ngfs": Path(tmp) / "_none.geojson"}, cluster_incidents=cluster_incidents)
+    return {"rows": len(rows), "dry_run": False, "clustered_into_incidents": cluster_incidents, "ingest": result}

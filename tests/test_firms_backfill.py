@@ -75,6 +75,30 @@ def test_missing_map_key_is_a_clear_error(monkeypatch):
         fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], fetch=_fetcher({}))
 
 
+def test_backfill_writes_a_csv_and_never_touches_the_database(tmp_path, monkeypatch):
+    import csv
+    from core import database
+    monkeypatch.setattr(database, "get_db_path", lambda: (_ for _ in ()).throw(AssertionError("backfill must not open the DB")))
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    out = fb.backfill(date(2026, 1, 5), date(2026, 1, 5), products=["VIIRS_SNPP_SP"], key="K",
+                      out_dir=tmp_path, fetch=fetch, sleep=lambda s: None)
+    assert out["csv"].endswith("firms_history_2026-01-05_2026-01-05.csv")
+    rows = list(csv.DictReader(open(out["csv"], newline="")))
+    assert list(rows[0].keys()) == fb.HISTORY_COLUMNS
+    assert rows[0]["source"] == "viirs" and rows[0]["external_id"].startswith("VIIRS_SNPP_NRT:") and rows[0]["daynight"] == "D"
+    assert float(rows[0]["bright_t7"]) == 335.2 and float(rows[0]["bright_t13"]) == 290.1
+
+
+def test_csv_row_rebuilds_the_feature_the_ingest_expects():
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    (feature,), _ = fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], key="K", fetch=fetch, sleep=lambda s: None)
+    row = {k: ("" if v is None else str(v)) for k, v in fb.feature_to_row(feature).items()}  # what a CSV round trip yields
+    rebuilt = fb.row_to_feature(row)["properties"]
+    original = feature["properties"]
+    for key in ("SOURCE_ID", "TYPENAME", "SATELLITE", "ACQ_DATE_TIME", "FRP", "CONFIDENCE", "BRIGHT_MID", "BRIGHT_LONG", "PIXEL_AREA", "DAYNIGHT"):
+        assert rebuilt[key] == original[key], key
+
+
 def test_dry_run_writes_nothing(tmp_path):
     fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
     out = fb.backfill(date(2026, 1, 5), date(2026, 1, 5), products=["VIIRS_SNPP_SP"], dry_run=True, key="K",
