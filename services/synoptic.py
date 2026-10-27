@@ -621,7 +621,7 @@ def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states
     return filepath
 
 
-async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=None):
+async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=None, max_age_hours=1):
     """
     Fetch fuel moisture observations at a specific time from RAWS stations.
     
@@ -630,7 +630,9 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
                     If None, defaults to 7 AM Central Time today.
         states: List of state abbreviations. If None, defaults to MO and surrounding states.
         networks: List of network IDs. If None, defaults to [2] (RAWS).
-    
+        max_age_hours: How far before target_time a station's newest observation may be. The default of 1
+                    is the normal "observed at the target time" request; the forecast widens it as a fallback.
+
     Returns: Dict with fuel moisture observations from stations near the target time
     """
     import pytz
@@ -649,8 +651,9 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
     if networks is None:
         networks = [2]  # RAWS network
     
-    # Fetch data for a 2-hour window around target time
-    start_time = target_time - timedelta(hours=1)
+    # Fetch data for the window ending just after the target time
+    max_age_seconds = float(max_age_hours) * 3600
+    start_time = target_time - timedelta(hours=max(1, max_age_hours))
     end_time = target_time + timedelta(hours=1)
     
     logger.info(f"Fetching fuel moisture data around {target_time} from {len(states)} states, networks: {networks}")
@@ -698,7 +701,7 @@ async def fetch_fuel_moisture_at_time(target_time=None, states=None, networks=No
                 try:
                     stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
                     age = (target_time - stamp).total_seconds()
-                    if 0 <= age <= 3600:
+                    if 0 <= age <= max_age_seconds:
                         candidates.append((age, index, stamp))
                 except (TypeError, ValueError): continue
             if candidates:

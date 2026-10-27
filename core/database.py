@@ -527,6 +527,8 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         # What the reviewer labelled the approved incident as (a cause_category: 'wildfire' | 'prescribed'), so
         # detections that join later get the same label. NULL = approved without a label.
         ("review_label", "TEXT"),
+        # When a "not a fire" incident is deleted for good (purge_due_fire_incidents). NULL = not scheduled.
+        ("delete_after", "TIMESTAMP"),
         # Buffered outline new detections can join by shape (services/incident_area.py),
         # plus its bounding box for a cheap SQL prefilter. NULL until first built.
         ("join_area_geojson", "TEXT"),
@@ -4456,6 +4458,29 @@ def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, in
                 reason="inherited the label from the incident's approval", changed_fields={"cause_category": row[3]},
             )
     grow_incident_area(cursor, event_id, incident_id)  # after the decision, so a rejected detection doesn't extend the area
+
+
+def schedule_incident_deletion(incident_id: int, days: int = 7) -> Optional[str]:
+    """Mark an incident to be deleted `days` from now (purge_due_fire_incidents does it). Returns the due time (UTC) or None if there is no such incident."""
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        due = conn.execute("SELECT datetime('now', ?)", (f"+{int(days)} days",)).fetchone()[0]
+        cursor = conn.execute(
+            "UPDATE fire_incidents SET delete_after = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'deleted'",
+            (due, incident_id),
+        )
+        conn.commit()
+        return due if cursor.rowcount else None
+
+
+def purge_due_fire_incidents(actor: str = "system:not_a_fire") -> int:
+    """Delete every incident whose delete_after has passed (the same soft delete as the admin Delete button). Returns how many."""
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        due = [row[0] for row in conn.execute(
+            "SELECT id FROM fire_incidents WHERE delete_after IS NOT NULL AND delete_after <= datetime('now') AND status != 'deleted'"
+        ).fetchall()]
+    for incident_id in due:
+        delete_fire_incident_and_members(incident_id, actor=actor, reason="marked not a fire; 7-day hold ended")
+    return len(due)
 
 
 def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str = "") -> Dict:

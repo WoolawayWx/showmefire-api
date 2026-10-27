@@ -204,6 +204,15 @@ def health_readiness(request: Request):
     return _run_readiness(request)
 
 
+@router.get("/health/forecast")
+def health_forecast():
+    """Latest 12z/09z forecast run: per-stage results (fuel-moisture observations, HRRR data, steps),
+    whether each run is overdue, and the last few runs' outcomes. Reads a local ledger, so it is cheap to poll."""
+    from services import forecast_health
+
+    return forecast_health.summary()
+
+
 @router.get("/health/products")
 def health_products():
     """Freshness of every automated product (maps, model and external data feeds):

@@ -37,6 +37,7 @@ from core.database import (
     add_ip_to_blocklist,
     add_fire_event_media,
     set_incident_review_decision,
+    schedule_incident_deletion,
     consume_fire_submission_quota,
     correlate_report_with_incident,
     count_fire_event_media,
@@ -1530,6 +1531,20 @@ def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejec
     """Reject every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
     result = set_incident_review_decision(incident_id, "rejected", actor, reason="admin_bulk_action", note=payload.reason)
     return {"success": True, **result}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/not-a-fire")
+def admin_mark_incident_not_a_fire(incident_id: int, actor: str = Depends(require_admin)):
+    """One-click 'not a fire': labels the detections as such (a negative example for the confidence models), rejects the
+    incident so it leaves the queue and the public map, and deletes it for good after 7 days (admin only)."""
+    from services.fire_labeling import apply_feedback_label
+
+    if not get_fire_incident(incident_id):
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    apply_feedback_label(incident_id, "not_a_fire", reviewed_by=actor)
+    decision = set_incident_review_decision(incident_id, "rejected", actor, reason="not_a_fire")
+    due = schedule_incident_deletion(incident_id, days=7)
+    return {"success": True, "incident_decision": decision, "delete_after": due}
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/delete")

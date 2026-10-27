@@ -30,7 +30,7 @@ from services.fire_ingest import ingest_detection_files
 from services.recurring_source_detector import run_recurring_source_scan
 from core.database import (
     expire_unmoderated_fire_reports, purge_fire_submission_pii, purge_fire_throttle_rows,
-    purge_feedback_throttle_rows,
+    purge_feedback_throttle_rows, purge_due_fire_incidents,
 )
 from services.spatial_fm_uncertainty_cache import purge_stale as purge_spatial_fm_uncertainty_cache
 from services.log_maintenance import purge_old_logs
@@ -430,6 +430,17 @@ async def purge_spatial_fm_uncertainty_cache_job():
         logger.error("Spatial FM uncertainty cache purge failed: %s", error, exc_info=True)
 
 
+async def forecast_watchdog_job():
+    """Alert staff when a scheduled forecast (12z / 09z) never started or is still unfinished past its deadline."""
+    try:
+        from services import forecast_health
+        reasons = await asyncio.to_thread(forecast_health.check_overdue)
+        if reasons:
+            logger.info("Forecast watchdog alerted: %s", "; ".join(reasons))
+    except Exception as error:
+        logger.error("Forecast watchdog failed: %s", error, exc_info=True)
+
+
 async def purge_old_logs_job():
     """Rotate log files over 10 MB, delete ones untouched for 30 days, and prune old job-run history."""
     try:
@@ -630,6 +641,14 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
+    scheduler.add_job(
+        purge_due_fire_incidents,
+        'interval',
+        hours=1,
+        id='purge_not_a_fire_incidents',
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(
         purge_delivery_records,
         'cron',
@@ -963,6 +982,17 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=7,
         minute=0,
         id='refresh_burn_ban_static_map_daily',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # The forecasts run as cron scripts outside this process; this only reads their health ledger
+    # (services/forecast_health.py), so a run that never started or hung still reaches Discord.
+    scheduler.add_job(
+        forecast_watchdog_job,
+        'interval',
+        minutes=15,
+        id='forecast_watchdog',
         max_instances=1,
         coalesce=True,
     )

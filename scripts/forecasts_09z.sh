@@ -40,6 +40,12 @@ export CDN_TEST_PREFIX=09z
 mkdir -p "$PROJECT_DIR/logs"
 LOG_FILE="$PROJECT_DIR/logs/forecast_09z_$(date +\%Y\%m\%d).log"
 
+# Health ledger (services/forecast_health.py); see forecasts.sh.
+export SMF_FORECAST_JOB=forecasts_09z
+health() { (cd "$PROJECT_DIR" && PYTHONPATH="$PROJECT_DIR" "$PYTHON" -m services.forecast_health "$@") >> "$LOG_FILE" 2>&1 || true; }
+health begin
+trap 'health finish' EXIT
+
 echo "=== Starting 9z fire danger forecast at $(date) ===" >> "$LOG_FILE" 2>&1
 echo "Running from: $PROJECT_DIR" >> "$LOG_FILE" 2>&1
 echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
@@ -47,12 +53,14 @@ echo "Using Python: $PYTHON" >> "$LOG_FILE" 2>&1
 run_step() {
     local step_name="$1"
     local script_path="$2"
+    local severity="${3:-failed}"   # "degraded" for steps the run carries on without
 
     echo "=== $step_name ===" >> "$LOG_FILE" 2>&1
     "$PYTHON" "$script_path" >> "$LOG_FILE" 2>&1
     local step_exit=$?
     if [ $step_exit -ne 0 ]; then
         echo "=== $step_name FAILED with exit code $step_exit at $(date) ===" >> "$LOG_FILE" 2>&1
+        health stage "$step_name" "$severity" "exited with code $step_exit" --log "$LOG_FILE"
         return $step_exit
     fi
     return 0
@@ -87,7 +95,7 @@ fi
 
 # Comparison is best-effort: a missing same-day 12z archive should not fail
 # an otherwise-successful 9z run (it exits 0 and logs when that happens).
-run_step "Comparing 9z run against same-day 12z run" "$PROJECT_DIR/scripts/compare_09z_12z.py"
+run_step "Comparing 9z run against same-day 12z run" "$PROJECT_DIR/scripts/compare_09z_12z.py" degraded
 
 echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
 exit 0

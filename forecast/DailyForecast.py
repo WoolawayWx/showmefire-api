@@ -38,7 +38,8 @@ import sqlite3
 import tarfile
 import gzip
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import io
 
 # Add project root to path
@@ -309,7 +310,7 @@ def estimate_fuel_moisture(relative_humidity, air_temp=None):
 from forecast.map_style import add_boundaries, add_title_and_branding, create_base_map  # noqa: E402
 
 
-def _fetch_morning_fuel_moisture_direct(target_date=None, target_hour_utc=None, max_attempts=3):
+def _fetch_morning_fuel_moisture_direct(target_date=None, target_hour_utc=None, max_attempts=3, max_age_hours=1):
     """Same payload as GET /api/fuel-moisture/morning, without going through the API.
 
     Returns {"success": True, "data": ...}, or None if it still fails after
@@ -321,7 +322,8 @@ def _fetch_morning_fuel_moisture_direct(target_date=None, target_hour_utc=None, 
     for attempt in range(1, max_attempts + 1):
         try:
             target_time = resolve_fuel_moisture_target_time(target_date, target_hour_utc)
-            data = asyncio.run(fetch_fuel_moisture_at_time(target_time=target_time, states=None, networks=None))
+            data = asyncio.run(fetch_fuel_moisture_at_time(target_time=target_time, states=None, networks=None,
+                                                           max_age_hours=max_age_hours))
             return {"success": True, "data": data}
         except Exception as e:
             logger.warning(f"Direct fuel moisture fetch attempt {attempt}/{max_attempts} failed: {e}")
@@ -330,7 +332,8 @@ def _fetch_morning_fuel_moisture_direct(target_date=None, target_hour_utc=None, 
     return None
 
 
-def get_current_fuel_moisture_field(port='8000',target_date=None, target_hour_utc=None, include_metadata=False):
+def _get_fuel_moisture_field_once(port='8000', target_date=None, target_hour_utc=None, include_metadata=False,
+                                  max_age_hours=1):
     target_label = f"{int(target_hour_utc):02d}z" if target_hour_utc is not None else "7 AM CT"
     logger.info(f"Getting current fuel moisture field from RAWS at {target_label} (port={port})")
     """
@@ -355,8 +358,12 @@ def get_current_fuel_moisture_field(port='8000',target_date=None, target_hour_ut
         
         # Fetch straight from Synoptic (what the API endpoint wraps) so the
         # forecast doesn't depend on the web server being responsive.
-        data = _fetch_morning_fuel_moisture_direct(params.get('date'), params.get('hour_utc'))
+        data = _fetch_morning_fuel_moisture_direct(params.get('date'), params.get('hour_utc'),
+                                                   max_age_hours=max_age_hours)
 
+        if data is None and max_age_hours > 1:
+            # The API endpoint can't widen the window, so a fallback attempt that fails directly just fails.
+            return None
         if data is None:
             # Fall back to the API. It shares a single worker with the
             # map/scheduler jobs, so it can be briefly unresponsive; allow a
@@ -422,6 +429,77 @@ def get_current_fuel_moisture_field(port='8000',target_date=None, target_hour_ut
     except Exception as e:
         logger.error(f"Unexpected error fetching RAWS data: {e}")
         return None
+
+
+def _fuel_fallback_windows():
+    """How far back (hours) each fallback attempt may reach for a station's newest observation."""
+    raw = os.getenv('FORECAST_FUEL_FALLBACK_HOURS', '3,6,12,24')
+    windows = []
+    for part in raw.split(','):
+        try:
+            hours = float(part)
+        except ValueError:
+            continue
+        if hours > 1:
+            windows.append(hours)
+    return sorted(set(windows))
+
+
+def _oldest_observation_age_hours(station_records, target_time):
+    ages = []
+    for record in station_records or []:
+        try:
+            stamp = datetime.fromisoformat(str(record.get('observation_time')).replace('Z', '+00:00'))
+        except (TypeError, ValueError):
+            continue
+        ages.append((target_time - stamp).total_seconds() / 3600)
+    return max(ages) if ages else None
+
+
+def get_current_fuel_moisture_field(port='8000', target_date=None, target_hour_utc=None, include_metadata=False):
+    """Observed RAWS fuel moisture to start the forecast from, going back in time if the target hour is thin.
+
+    Tries the normal target-hour window first. If that yields fewer than 3 stations, retries with each wider
+    window in FORECAST_FUEL_FALLBACK_HOURS (default 3,6,12,24 h), using every station's newest observation inside
+    it, and reports the substitution to staff through services.forecast_health. Returns what
+    _get_fuel_moisture_field_once returns; None only if even the widest window finds fewer than 3 stations.
+    """
+    from services import forecast_health
+    from services.synoptic import resolve_fuel_moisture_target_time
+
+    kwargs = dict(port=port, target_date=target_date, target_hour_utc=target_hour_utc, include_metadata=True)
+    result = _get_fuel_moisture_field_once(**kwargs)
+    used_hours = 1
+    if result is None:
+        for hours in _fuel_fallback_windows():
+            logger.warning(f"Fuel moisture observations too thin at the target time; retrying with the newest "
+                           f"observation from the last {hours:g} h")
+            result = _get_fuel_moisture_field_once(**kwargs, max_age_hours=hours)
+            if result is not None:
+                used_hours = hours
+                break
+
+    if result is None:
+        forecast_health.record(
+            'fuel_moisture_observations', 'failed',
+            'fewer than 3 RAWS stations with fuel moisture, even looking back '
+            f'{max([1] + _fuel_fallback_windows()):g} h; the forecast cannot start')
+        return None
+
+    fuel_points, station_records = result
+    if used_hours > 1:
+        target_time = resolve_fuel_moisture_target_time(target_date, target_hour_utc)
+        if target_time is None:  # the default request: 7 AM Central today, as fetch_fuel_moisture_at_time resolves it
+            central_now = datetime.now(ZoneInfo('America/Chicago'))
+            target_time = central_now.replace(hour=7, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        oldest = _oldest_observation_age_hours(station_records, target_time)
+        forecast_health.record(
+            'fuel_moisture_observations', 'degraded',
+            f'RAWS fuel moisture was not current: used the newest observation within {used_hours:g} h of the '
+            f'target time ({len(fuel_points)} stations' + (f', oldest {oldest:.1f} h old' if oldest is not None else '') + ')')
+    else:
+        forecast_health.record('fuel_moisture_observations', 'ok', f'{len(fuel_points)} RAWS stations at the target time')
+    return result if include_metadata else fuel_points
 
 
 def interpolate_current_fm_to_grid(fuel_points, grid_lon_mesh, grid_lat_mesh):
@@ -675,6 +753,10 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
 
     # Spatial ONNX is optional and self-validating. None means keep XGBoost.
     spatial_prediction = try_predict_spatial_fm(ds_full, fuel_points, run_date)
+    # Informational (status "ok"): the XGBoost fallback is by design, so it is not worth a Discord alert.
+    from services import forecast_health
+    forecast_health.record('fuel_moisture_model', 'ok',
+                           'spatial model' if spatial_prediction is not None else 'XGBoost (spatial model not used)')
 
     # Read-only side effect: cache the p10/p90/confidence quantiles this run
     # already computed but the public path discards. Never touches
@@ -1494,6 +1576,10 @@ def generate_complete_forecast():
             logger.warning(f"Could not download precipitation data: {e}")
             if env_bool('REQUIRE_COMPLETE_HRRR', False):
                 raise RuntimeError("Required HRRR precipitation data is unavailable") from e
+            from services import forecast_health
+            forecast_health.record('hrrr_precipitation', 'degraded',
+                                   'HRRR precipitation could not be downloaded; the forecast ran without rainfall',
+                                   detail=str(e))
             ds_full = ds_rh_temp.merge(ds_wind, compat='override')
 
         # Wind gust: additive-only, best-effort. Not required and not used
