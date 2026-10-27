@@ -127,13 +127,29 @@ def export(since: str | None = None, db_path: Path | None = None, out_dir: Path 
     return manifest_path
 
 
+def bundle(manifest_path: Path) -> Path:
+    """Zip the manifest and the files it lists into one portable file (no DB, no PII columns)."""
+    import zipfile
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    zip_path = manifest_path.parent / "detection_training_export.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(manifest_path, manifest_path.name)
+        for info in manifest["files"].values():
+            z.write(manifest_path.parent / info["filename"], info["filename"])
+    return zip_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export detections, incidents and feedback for detection-confidence training.")
     parser.add_argument("--since", default=None)
     parser.add_argument("--db", default=None, help="SQLite DB to read (default: the API's own DB)")
     parser.add_argument("--out-dir", default=None, help="where to write (default: <db dir>/fire_labels)")
+    parser.add_argument("--zip", action="store_true", help="also write one detection_training_export.zip to move to the training machine")
     args = parser.parse_args()
-    print(f"Wrote {export(args.since, args.db, args.out_dir)}")
+    manifest_path = export(args.since, args.db, args.out_dir)
+    print(f"Wrote {manifest_path}")
+    if args.zip:
+        print(f"Wrote {bundle(manifest_path)}")
 
 
 if __name__ == "__main__":
