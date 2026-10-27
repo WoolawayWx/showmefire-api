@@ -4368,6 +4368,51 @@ def delete_fire_incident(incident_id: int, reason: str = "") -> bool:
         conn.close()
 
 
+def list_incident_review_state(limit: int = 500) -> List[Dict]:
+    """The parts of every listed incident that change while people review: decision, label, live pending counts
+    and public-feedback counts. Deliberately light (a few queries, no confidence/weather/land-cover work), so the
+    admin review page can poll it every few seconds and refresh right after each click, while the full incident
+    list (which recomputes all of that) is fetched far less often."""
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        pending = dict(cursor.execute(
+            "SELECT incident_id, COUNT(*) FROM fire_events WHERE status = 'pending' AND incident_id IS NOT NULL "
+            "GROUP BY incident_id").fetchall())
+        rows = cursor.execute(
+            """SELECT id, public_slug, status, review_decision, review_label, review_decided_by, review_decided_at,
+                      detection_count, first_detected_at, last_detected_at, updated_at
+               FROM fire_incidents WHERE status NOT IN ('merged', 'deleted')
+               ORDER BY last_detected_at DESC LIMIT ?""", (max(1, min(limit, 1000)),)).fetchall()
+        states = []
+        for row in rows:
+            feedback = _fire_incident_feedback_summary(cursor, row["id"])
+            states.append({
+                "incident_id": row["id"],
+                "incident_slug": row["public_slug"],
+                "status": row["status"],
+                "review_decision": row["review_decision"],
+                "review_label": row["review_label"],
+                "review_decided_by": row["review_decided_by"],
+                "review_decided_at": row["review_decided_at"],
+                "detection_count": row["detection_count"],
+                "first_detected_at": row["first_detected_at"],
+                "last_detected_at": row["last_detected_at"],
+                "updated_at": row["updated_at"],
+                "pending_count": pending.get(row["id"], 0),
+                "sources": _fire_incident_sources(cursor, row["id"]),
+                "feedback_summary": {
+                    "count": feedback["feedback_count"],
+                    "pending_count": feedback["pending_feedback_count"],
+                    "confirmed": feedback["confirmed"],
+                },
+            })
+        return states
+    finally:
+        conn.close()
+
+
 def list_incidents_with_pending_members(limit: int = 100) -> List[Dict]:
     """Incidents that currently have at least one pending (unreviewed) member
     event - the data source for the admin queue's grouped-by-incident view,

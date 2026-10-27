@@ -178,3 +178,54 @@ class RescanEndpointTests(StoreTests):
         body = self.client.post(f"/api/admin/fires/incidents/{incident}/features/rescan").json()
         self.assertEqual((body["scanned"], body["results"]), (1, {"stored": 1}))
         self.assertEqual(self.client.post("/api/admin/fires/incidents/999/features/rescan").status_code, 404)
+
+
+class ReviewActionsDoNotPingDiscordTests(StoreTests):
+    """Approving things in the review workspace posts nothing to Discord (new public submissions still do)."""
+
+    def test_approving_a_report_and_an_incident_sends_no_staff_alert(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from core.security import require_admin
+        from routers import fires
+
+        app = FastAPI()
+        app.include_router(fires.router)
+        app.dependency_overrides[require_admin] = lambda: "admin"
+        http = TestClient(app)
+        with sqlite3.connect(self.db) as conn:
+            incident = conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "
+                                    "last_detected_at, detection_count) VALUES (37, -92, 'a', 'b', 1)").lastrowid
+            conn.execute("UPDATE fire_events SET incident_id = ?", (incident,))
+        with patch.object(fires, "notify_staff_alert") as alert, patch("services.discord_notifier.notify_staff_alert") as alert2:
+            self.assertEqual(http.post(f"/api/admin/fires/incidents/{incident}/approve-all", json={"verification_tier": "admin_reviewed"}).status_code, 200)
+            self.assertEqual(http.post(f"/api/admin/fires/reports/{self.event_id}/approve", json={"verification_tier": "admin_reviewed"}).status_code in (200, 409), True)
+        alert.assert_not_called()
+        alert2.assert_not_called()
+
+
+class ReviewStateEndpointTests(StoreTests):
+    def test_state_changes_the_moment_an_incident_is_flagged_and_is_never_cached(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from core.security import require_admin
+        from routers import fires
+
+        app = FastAPI()
+        app.include_router(fires.router)
+        app.dependency_overrides[require_admin] = lambda: "admin"
+        http = TestClient(app)
+        with sqlite3.connect(self.db) as conn:
+            incident = conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "
+                                    "last_detected_at, detection_count) VALUES (37, -92, 'a', 'b', 1)").lastrowid
+            conn.execute("UPDATE fire_events SET incident_id = ?", (incident,))
+        first = http.get("/api/admin/fires/incidents/review-state")
+        self.assertEqual(first.headers["cache-control"], "no-store")
+        before = first.json()["incidents"][0]
+        self.assertEqual((before["pending_count"], before["review_decision"]), (1, None))
+        http.post(f"/api/admin/fires/incidents/{incident}/approve-all", json={"verification_tier": "admin_reviewed", "label": "fire"})
+        after = http.get("/api/admin/fires/incidents/review-state").json()["incidents"][0]
+        self.assertEqual((after["pending_count"], after["review_decision"], after["review_label"]), (0, "approved", "wildfire"))
+        self.assertEqual(after["review_decided_by"], "admin")

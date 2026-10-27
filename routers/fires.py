@@ -61,6 +61,7 @@ from core.database import (
     set_recurring_source_status,
     set_fire_exclusion_zone_status,
     list_fire_incident_members,
+    list_incident_review_state,
     list_fire_incident_feedback,
     list_fire_incidents,
     list_incidents_with_pending_members,
@@ -1079,33 +1080,6 @@ def _review_cause(label: Optional[str]) -> Optional[str]:
     return REVIEW_LABEL_TO_CAUSE.get(label) if label else None
 
 
-def _review_label_text(label: Optional[str]) -> str:
-    return {"fire": "Fire (unplanned)", "controlled_burn": "Controlled burn"}.get(label or "", "")
-
-
-def _notify_approval(alert_type: str, title: str, actor: str, source: str, incident_id=None, fields=None, description: str = ""):
-    """Tell staff on Discord that an admin approved something, and what the
-    approval was based on (the 'source' - e.g. the public feedback or
-    detection it came from). Never raises."""
-    try:
-        alert_fields = [
-            {"name": "Approved by", "value": actor or "unknown", "inline": True},
-            {"name": "Source", "value": source, "inline": False},
-        ]
-        if incident_id:
-            alert_fields.insert(1, {"name": "Incident", "value": f"#{incident_id}", "inline": True})
-        alert_fields.extend(fields or [])
-        notify_staff_alert(
-            alert_type=alert_type,
-            title=title,
-            description=description,
-            fields=alert_fields,
-            admin_path=f"/admin/fires/workspace?incident={incident_id}" if incident_id else "/admin/fires",
-        )
-    except Exception:
-        logger.warning("Failed to send approval alert", exc_info=True)
-
-
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/approve")
 def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(require_admin)):
     """Approve a feedback submission - if it's 'confirmed_fire', the incident
@@ -1119,12 +1093,6 @@ def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(requi
     # approved now and later ones inherit the decision as they arrive.
     decision = set_incident_review_decision(
         feedback["incident_id"], "approved", actor, reason=f"incident_feedback:{feedback_id}",
-    )
-    _notify_approval(
-        "incident_feedback", "Incident approved from public feedback", actor,
-        source=f"Public feedback #{feedback_id} ({str(feedback.get('classification') or '').replace('_', ' ')}"
-               f", via {feedback.get('submission_source') or 'website'})",
-        incident_id=feedback["incident_id"], description=feedback.get("note") or "",
     )
     return {"success": True, "feedback": feedback, "labeled_event_count": len(labeled), "incident_decision": decision}
 
@@ -1349,14 +1317,6 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, acto
     if result.get("already_moderated"):
         raise HTTPException(status_code=409, detail="Report already moderated")
     result["incident_id"] = correlate_report_with_incident(event_id)
-    _notify_approval(
-        "fire_report", "Fire report approved", actor,
-        source=f"Report #{event_id} ({result.get('source') or 'unknown source'})",
-        incident_id=result["incident_id"],
-        fields=[{"name": "Tier", "value": str(payload.verification_tier), "inline": True}]
-               + ([{"name": "Label", "value": _review_label_text(payload.label), "inline": True}] if payload.label else []),
-        description=result.get("description") or "",
-    )
     return {"success": True, "report": result}
 
 
@@ -1540,6 +1500,15 @@ def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: st
     return {"success": True, "graphics": graphic_result, "confidence": confidence_result}
 
 
+@router.get("/api/admin/fires/incidents/review-state")
+def admin_incident_review_state(response: Response, limit: int = 500, _admin: str = Depends(require_admin)):
+    """Live review state of every listed incident (decision, label, pending and feedback counts), never cached.
+    The review workspace merges this over its incident list so a click shows up at once (admin only)."""
+    response.headers["Cache-Control"] = "no-store"
+    states = list_incident_review_state(limit=limit)
+    return {"success": True, "incidents": states, "count": len(states)}
+
+
 @router.get("/api/admin/fires/incidents/pending-queue")
 def admin_list_pending_incident_queue(_admin: str = Depends(require_admin), limit: int = 100, has_additional_info: Optional[bool] = None):
     """Grouped moderation queue: every incident with at least one pending
@@ -1580,12 +1549,6 @@ def admin_approve_all_incident_reports(incident_id: int, payload: FireReportMode
         cause_category=_review_cause(payload.label),
     )
     result["label"] = payload.label
-    _notify_approval(
-        "fire_report", "Incident approved", actor,
-        source="Admin review of the incident's pending detections/reports",
-        incident_id=incident_id, description=payload.moderator_note or "",
-        fields=[{"name": "Label", "value": _review_label_text(payload.label), "inline": True}] if payload.label else None,
-    )
     return {"success": True, **result}
 
 
