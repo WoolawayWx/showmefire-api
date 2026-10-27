@@ -15,6 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # a one-off `docker exec` doesn't get main.py's .env load
+
 from services.cdn_datasets import configured
 from services.detection_r2 import DEFAULT_KEEP, publish
 

@@ -17,6 +17,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # MODIS_KEY lives here; a one-off `docker exec` doesn't load it
+
 from core.database import init_database
 from services.firms_backfill import ARCHIVE_PRODUCTS, DEFAULT_PRODUCTS, NRT_PRODUCTS, FirmsError, backfill
 
