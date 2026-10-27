@@ -147,3 +147,58 @@ class IncidentAreaReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicReportIncidentTests(unittest.TestCase):
+    """A public report joins an incident when it arrives, and stays pending for review."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temporary.name) / "showmefire.db"
+        self.patch = patch.object(database, "get_db_path", return_value=self.db_path)
+        self.patch.start()
+        database.init_database()
+
+    def tearDown(self):
+        self.patch.stop()
+        try:
+            self.temporary.cleanup()
+        except PermissionError:
+            pass
+
+    def _report(self, lat, lon, when="2026-10-01T12:00:00Z"):
+        return database.create_fire_report(
+            latitude=lat, longitude=lon, occurred_at=when, occurred_at_precision="minute", acres=1.0,
+            acres_is_estimate=True, fuel_types=[], description="smoke", out_of_ordinary="", reporter_contact="",
+            submitter_ip_hash="h", consent_version="1", captcha_verdict="ok", county_fips="29207", county_name="Stoddard")
+
+    def _detection_incident(self, lat, lon, when="2026-10-01T12:00:00Z"):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        incident_id = database.find_or_create_incident_for_detection(conn.cursor(), lat, lon, when, "29207", "Stoddard")
+        conn.execute("INSERT INTO fire_events (source, external_id, status, latitude, longitude, occurred_at, incident_id) "
+                     "VALUES ('viirs', 'd1', 'pending', ?, ?, ?, ?)", (lat, lon, when, incident_id))
+        conn.commit()
+        conn.close()
+        return incident_id
+
+    def test_report_near_a_detection_joins_its_incident_and_stays_pending(self):
+        incident_id = self._detection_incident(36.90, -90.00)
+        report = self._report(36.9005, -90.0005)
+        self.assertEqual(report["incident_id"], incident_id)
+        self.assertEqual(report["status"], "pending")
+
+    def test_lone_report_starts_its_own_incident(self):
+        report = self._report(37.50, -92.00)
+        self.assertIsNotNone(report["incident_id"])
+        self.assertEqual(report["status"], "pending")
+
+    def test_backfill_helper_is_idempotent(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO fire_events (source, status, latitude, longitude, occurred_at) "
+                     "VALUES ('user_submission', 'pending', 36.9, -90.0, '2026-10-01T12:00:00Z')")
+        event_id = conn.execute("SELECT max(id) FROM fire_events").fetchone()[0]
+        conn.commit()
+        conn.close()
+        first = database.correlate_report_with_incident(event_id)
+        self.assertEqual(database.correlate_report_with_incident(event_id), first)

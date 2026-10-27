@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from core.database import (
@@ -76,7 +76,8 @@ class IngestReportCreate(BaseModel):
 
 
 @router.post("/fires/ingest/reports")
-def ingest_fire_report(payload: IngestReportCreate, response: Response, ingest_source: Dict = Depends(_ingest_source)):
+def ingest_fire_report(payload: IngestReportCreate, response: Response, background_tasks: BackgroundTasks,
+                       ingest_source: Dict = Depends(_ingest_source)):
     """Upsert an OSINT fire lead, keyed on (source slug, external_id). A
     repost of the same external_id updates the description/acres but never
     silently moves the pin, occurred_at, or moderation status - matching the
@@ -137,6 +138,8 @@ def ingest_fire_report(payload: IngestReportCreate, response: Response, ingest_s
     )
     if payload.media_urls:
         add_ingest_media_links(event["id"], payload.media_urls)
+    from ai.report_features import extract_and_store
+    background_tasks.add_task(extract_and_store, event["id"])  # skips unchanged text; never raises
 
     response.status_code = 201 if created else 200
     return {"success": True, "event_id": event["id"], "status": event["status"], "created": created}

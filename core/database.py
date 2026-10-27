@@ -435,6 +435,17 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_kind_feed ON fire_event_origins(kind, feed)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_received ON fire_event_origins(last_received_at)')
+    # Structured facts pulled from a report's free text (ai/report_features.py). The raw text stays on fire_events.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_event_features (
+            event_id INTEGER PRIMARY KEY,
+            text_hash TEXT NOT NULL,
+            features_json TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            extracted_at TEXT NOT NULL,
+            FOREIGN KEY (event_id) REFERENCES fire_events(id)
+        )
+    ''')
     # One row per batch ingest (a feed file read, an official import): what was read and what happened to each record.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_ingest_runs (
@@ -2829,6 +2840,14 @@ def create_fire_report(
                                 reason=f"submitted via {origin_info['feed']}",
                                 changed_fields={"origin": origin_brief(origin_info)})
         record_event_origin(cursor, event_id, origin_info)
+        # Join (or start) an incident right away, like an ingested OSINT lead: the report stays pending for
+        # review, but it groups with nearby detections and shows in the review queue under that incident
+        # instead of floating on its own. correlate_report_with_incident() at approval is then a no-op.
+        incident_id = find_or_create_incident_for_detection(
+            cursor, latitude, longitude, occurred_at, county_fips, county_name
+        )
+        cursor.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
+        apply_incident_review_to_new_event(cursor, event_id, incident_id)
         conn.commit()
         return _fetch_fire_event_row(cursor, event_id, _ADMIN_EVENT_COLUMNS)
     finally:
@@ -3088,6 +3107,8 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
             ''', (event_id,))
             event["moderation"] = [dict(row) for row in cursor.fetchall()]
             event["origin"] = get_event_origin(cursor, event_id)
+            from ai.report_features import get_features
+            event["extracted_features"] = get_features(event_id, conn)
         return event
     finally:
         conn.close()

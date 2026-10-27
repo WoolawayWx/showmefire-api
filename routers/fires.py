@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -613,7 +613,7 @@ def geocode_fire_report_address(payload: AddressGeocodeRequest, request: Request
 # --- Public: submit ---
 
 @router.post("/api/fires/reports", status_code=201)
-def submit_fire_report(payload: FireReportCreate, request: Request):
+def submit_fire_report(payload: FireReportCreate, request: Request, background_tasks: BackgroundTasks):
     """Submit an anonymous fire report for moderation (public endpoint)"""
     client_ip = _client_ip(request)
     ip_hash = _ip_bucket_key(client_ip)
@@ -672,6 +672,8 @@ def submit_fire_report(payload: FireReportCreate, request: Request):
         county_name=county_name,
         origin={"client": _request_client(request)},
     )
+    from ai.report_features import extract_and_store
+    background_tasks.add_task(extract_and_store, event["id"])  # after the response; never raises
     notify_staff_alert(
         alert_type="fire_report",
         title=f"New fire report: {county_name + ' County' if county_name else 'Missouri'}",
