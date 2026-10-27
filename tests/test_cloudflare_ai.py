@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import httpx
@@ -27,6 +28,18 @@ class FakeHttpClient:
 
 
 class CloudflareAIClientTests(unittest.TestCase):
+    def _client(self, result):
+        return CloudflareAIClient(api_key="k", account_id="a", model="m",
+                                  http_client=FakeHttpClient(FakeResponse({"success": True, "result": result})))
+
+    def test_an_already_parsed_json_response_comes_back_as_json_text(self):
+        text = self._client({"response": {"event_type": "grass_fire", "fuels": ["grass"]}}).generate_text("p")
+        self.assertEqual(json.loads(text), {"event_type": "grass_fire", "fuels": ["grass"]})
+
+    def test_missing_response_error_says_what_came_back(self):
+        with self.assertRaisesRegex(CloudflareAIError, r"response is NoneType.*usage"):
+            self._client({"usage": {}}).generate_text("p")
+
     def test_posts_chat_messages_and_returns_workers_ai_response(self):
         http_client = FakeHttpClient(FakeResponse({
             "success": True,

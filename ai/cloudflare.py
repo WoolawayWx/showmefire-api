@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Mapping
 
@@ -105,8 +106,16 @@ class CloudflareAIClient:
 
         result = payload.get("result")
         text = result.get("response") if isinstance(result, Mapping) else None
+        # When the model's whole reply is valid JSON, Workers AI can return it already parsed (an object/array)
+        # instead of a string. Hand callers the JSON text either way.
+        if isinstance(text, (dict, list)):
+            text = json.dumps(text)
         if not isinstance(text, str) or not text.strip():
-            raise CloudflareAIError("Workers AI response did not contain result.response")
+            keys = sorted(result) if isinstance(result, Mapping) else type(result).__name__
+            raise CloudflareAIError(
+                f"Workers AI response did not contain result.response (response is {type(text).__name__}; "
+                f"result: {keys})"
+            )
         return text.strip()
 
 
