@@ -95,6 +95,11 @@ def _ingest_satdet_feature(feature: Dict[str, Any], run_id: Optional[int] = None
         frp=props.get("FRP"),
         confidence=props.get("CONFIDENCE"),
         satellite=props.get("SATELLITE"),
+        # Older feed files predate these properties; None leaves what is already stored (COALESCE on conflict).
+        bright_t7=props.get("BRIGHT_MID"),
+        bright_t13=props.get("BRIGHT_LONG"),
+        pixel_area=props.get("PIXEL_AREA"),
+        daynight=props.get("DAYNIGHT"),
         fuel_model_fbfm40=fuel_model_fbfm40,
         canopy_cover_pct=canopy_cover_pct,
         origin=_origin(SATDET_FEED, path, run_id, str(external_id), props),

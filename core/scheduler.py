@@ -641,6 +641,18 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
+    # Off by default: uploads a no-PII training export to R2 (services/detection_r2.py) for the training machine to pull.
+    if os.getenv("SMF_DETECTION_R2_PUBLISH", "false").lower() == "true":
+        from services.detection_r2 import publish_job as publish_detection_training_export
+        scheduler.add_job(
+            publish_detection_training_export,
+            'cron',
+            hour=int(os.getenv("SMF_DETECTION_R2_PUBLISH_HOUR", "3")),
+            minute=20,
+            id='publish_detection_training_export',
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(
         purge_due_fire_incidents,
         'interval',

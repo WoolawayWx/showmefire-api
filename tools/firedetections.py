@@ -242,6 +242,14 @@ def _normalize_csv_row(row: Dict[str, Any], source: str) -> Optional[Dict[str, A
         )
     )
 
+    # Band-specific brightness for the training features: the ~4 um channel (VIIRS I-4 / MODIS T21) and the
+    # ~11 um channel (VIIRS I-5 / MODIS T31). BRIGHT_T7 above keeps its older meaning for existing consumers.
+    bright_mid = _parse_float(_get_csv_value(row, 'bright_ti4', 'BRIGHT_TI4', 'brightness', 'BRIGHTNESS', 'bright_t7', 'BRIGHT_T7'))
+    bright_long = _parse_float(_get_csv_value(row, 'bright_ti5', 'BRIGHT_TI5', 'bright_t31', 'BRIGHT_T31', 'bright_t13', 'BRIGHT_T13'))
+    scan = _parse_float(_get_csv_value(row, 'scan', 'SCAN'))
+    track = _parse_float(_get_csv_value(row, 'track', 'TRACK'))
+    pixel_area = round(scan * track, 4) if scan and track else None  # km^2 footprint of the pixel
+
     source_id = (
         _get_csv_value(row, 'id', 'ID')
         or f"{source}:{satellite}:{acq_dt}:{lat:.3f}:{lon:.3f}"
@@ -264,6 +272,9 @@ def _normalize_csv_row(row: Dict[str, Any], source: str) -> Optional[Dict[str, A
             'COUNTRY': _get_csv_value(row, 'country', 'COUNTRY') or 'United States',
             'FRP': frp,
             'BRIGHT_T7': bright_t7,
+            'BRIGHT_MID': bright_mid,
+            'BRIGHT_LONG': bright_long,
+            'PIXEL_AREA': pixel_area,
             'CONFIDENCE': confidence,
             'CONFIDENCE_RAW': confidence_raw,
             'ACQ_DATE_TIME': acq_dt,
