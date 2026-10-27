@@ -36,8 +36,11 @@ def main():
     end = args.end or datetime.now(timezone.utc).date()
     if not args.dry_run:
         init_database()
+    def progress(product, done, total, kept):
+        print(f"  {product}: window {done}/{total}, {kept} Missouri detections so far", file=sys.stderr, flush=True)
+
     try:
-        print(json.dumps(backfill(args.start, end, products=args.products, dry_run=args.dry_run), indent=2, default=str))
+        print(json.dumps(backfill(args.start, end, products=args.products, dry_run=args.dry_run, progress=progress), indent=2, default=str))
     except FirmsError as exc:
         sys.exit(f"FIRMS backfill failed: {exc}")
 

@@ -102,6 +102,7 @@ def fetch_history(
     sleep: Callable = time.sleep,
     pause_s: float = 0.25,
     attempts: int = 3,
+    progress: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Fetch every product over [start, end]. Returns (deduplicated Missouri features, per-product stats)."""
     key = key or _map_key()
@@ -111,7 +112,8 @@ def fetch_history(
     for product in products:
         nrt_name = ARCHIVE_PRODUCTS.get(product, product)
         kept = 0
-        for first_day, days in day_windows(start, end):
+        windows = day_windows(start, end)
+        for index, (first_day, days) in enumerate(windows, 1):
             url = FIRMS_AREA_URL.format(key=key, product=product, bbox=bbox, days=days, day=first_day.isoformat())
             rows = _rows_from_response(_get(url, key, fetch, attempts, sleep), product)
             stats["requests"] += 1
@@ -126,6 +128,8 @@ def fetch_history(
                 seen.add(dedup)
                 features.append(feature)
                 kept += 1
+            if progress:
+                progress(product, index, len(windows), kept)
             sleep(pause_s)
         stats["per_product"][product] = kept
         logger.info("firms_backfill: %s %s..%s kept %d", product, start, end, kept)
@@ -142,11 +146,12 @@ def backfill(
     out_dir: Optional[Path] = None,
     fetch: Callable = requests.get,
     sleep: Callable = time.sleep,
+    progress: Optional[Callable[[str, int, int, int], None]] = None,
 ) -> Dict[str, Any]:
     """Fetch [start, end] from FIRMS, keep the raw features on disk, and ingest them into fire_events."""
     today = datetime.now(timezone.utc).date()
     end = min(end, today)
-    features, stats = fetch_history(start, end, products, key=key, fetch=fetch, sleep=sleep)
+    features, stats = fetch_history(start, end, products, key=key, fetch=fetch, sleep=sleep, progress=progress)
     features.sort(key=lambda f: (f.get("properties") or {}).get("ACQ_DATE_TIME") or "")
     summary: Dict[str, Any] = {"start": start.isoformat(), "end": end.isoformat(), "fetched": len(features), "dry_run": dry_run, **stats}
     if dry_run or not features:
