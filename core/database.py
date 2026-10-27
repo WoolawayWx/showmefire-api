@@ -440,6 +440,15 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_kind_feed ON fire_event_origins(kind, feed)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_received ON fire_event_origins(last_received_at)')
+    # Which Workers AI model each task uses, set from the admin site (ai/models.py); beats the environment.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ai_model_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+    ''')
     # An admin-requested AI read of an incident's public feedback (ai/feedback_analysis.py).
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_incident_feedback_analysis (

@@ -22,13 +22,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ai.cloudflare import CloudflareAIClient
-from ai.report_features import parse_reply
+from ai.models import generate_json
 from core.database import get_db_path, list_fire_incident_feedback
 
 logger = logging.getLogger(__name__)
@@ -130,8 +129,8 @@ def analyze(incident_id: int, *, client: Optional[CloudflareAIClient] = None) ->
             return "skipped"
         listing = "\n".join(f"{n}. [{item['choice']}] {item['note'] or '(no note)'}" for n, item in enumerate(items, 1))
         prompt = PROMPT.format(classes=", ".join(CLASSIFICATIONS), trust=list(TRUST), items=listing)
-        model = os.getenv("CLOUDFLARE_AI_FEATURE_MODEL", "").strip() or None
-        analysis = sanitize(parse_reply(client.generate_text(prompt, SYSTEM, model=model, max_tokens=600)))
+        raw, model_used = generate_json(client, "feedback_analysis", prompt, SYSTEM, max_tokens=600)
+        analysis = sanitize(raw)
         analysis["counts"] = counts(items)
         analysis["items_read"] = len(items)
         with sqlite3.connect(get_db_path(), timeout=15) as conn:
@@ -140,7 +139,7 @@ def analyze(incident_id: int, *, client: Optional[CloudflareAIClient] = None) ->
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(incident_id) DO UPDATE SET fingerprint = excluded.fingerprint,
                        analysis_json = excluded.analysis_json, model = excluded.model, analyzed_at = excluded.analyzed_at""",
-                (incident_id, fingerprint(items), json.dumps(analysis), client.model,
+                (incident_id, fingerprint(items), json.dumps(analysis), model_used,
                  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
             )
         return "stored"

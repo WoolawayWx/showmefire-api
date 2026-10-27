@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ai import feedback_analysis as fa
+from ai import models
 from core import database
 
 
@@ -29,7 +30,7 @@ class FeedbackAnalysisTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "smf.db"
-        for target in (database, fa):
+        for target in (database, fa, models):
             patcher = patch.object(target, "get_db_path", return_value=self.db)
             patcher.start()
             self.addCleanup(patcher.stop)

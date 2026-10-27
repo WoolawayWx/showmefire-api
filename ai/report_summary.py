@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 from ai.cloudflare import CloudflareAIClient
+from ai.models import generate_prose
 from core.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def generate_report_summary(event: Dict[str, Any], *, strict: bool = False) -> D
         f"Report/detection data:\n{json.dumps(evidence, default=str)}"
     )
     try:
-        text = client.generate_text(prompt, max_tokens=220)
+        text, _model = generate_prose(client, "report_summary", prompt, max_tokens=220)
     except Exception:
         logger.exception("report_summary: Cloudflare generation failed for event %s", event.get("id"))
         if strict:
@@ -143,7 +144,7 @@ def generate_queue_overview(items: Iterable[Dict[str, Any]], *, strict: bool = F
         f"Pending queue:\n{json.dumps(evidence, default=str)}"
     )
     try:
-        text = client.generate_text(prompt, max_tokens=320)
+        text, _model = generate_prose(client, "report_summary", prompt, max_tokens=320)
     except Exception:
         logger.exception("report_summary: Cloudflare queue overview generation failed")
         if strict:

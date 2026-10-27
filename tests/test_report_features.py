@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from ai import models
 from ai import report_features as rf
 from core import database
 
@@ -65,7 +66,7 @@ class StoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "smf.db"
-        for target in (database, rf):
+        for target in (database, rf, models):
             patcher = patch.object(target, "get_db_path", return_value=self.db)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -87,7 +88,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(rf.extract_and_store(self.event_id, client=client), "stored")
         stored = rf.get_features(self.event_id)
         self.assertEqual(stored["features"]["event_type"], "grass_fire")
-        self.assertEqual(stored["model"], "fake-model")
+        self.assertEqual(stored["model"], models.DEFAULT_TEXT_MODEL)
         with sqlite3.connect(self.db) as conn:
             self.assertIn("barn off County Rd 12", conn.execute("SELECT description FROM fire_events").fetchone()[0])
         self.assertIn("Grass fire spreading", client.prompts[0][0])

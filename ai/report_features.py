@@ -11,6 +11,7 @@ every field is validated against a fixed vocabulary in `sanitize()`; anything of
 
   extract_and_store(event_id)   - one report, idempotent (skips if the text is unchanged); never raises
   python -m ai.report_features backfill [--limit N] [--redo]
+  python -m ai.report_features compare MODEL_A MODEL_B [--limit N]   (prints differences; stores nothing)
 """
 from __future__ import annotations
 
@@ -18,17 +19,17 @@ import argparse
 import hashlib
 import json
 import logging
-import os
 import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ai.cloudflare import CloudflareAIClient  # noqa: E402
+from ai.models import generate_json, model_for, parse_reply  # noqa: E402,F401  (parse_reply: re-exported)
 from core.database import get_db_path  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -143,23 +144,18 @@ def sanitize(raw: Any) -> Dict[str, Any]:
     return features
 
 
-def parse_reply(reply: str) -> Dict[str, Any]:
-    """The first JSON object in a model reply (tolerates code fences and chatter around it)."""
-    start, end = reply.find("{"), reply.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object in the model reply")
-    return json.loads(reply[start:end + 1])
-
-
-def extract_features(text: str, client: Optional[CloudflareAIClient] = None) -> Optional[Dict[str, Any]]:
-    """Features for one piece of report text, or None if AI is not configured. Raises on a model/parse failure."""
+def extract_features(text: str, client: Optional[CloudflareAIClient] = None, *,
+                     model: Optional[str] = None) -> Optional[Tuple[Dict[str, Any], str]]:
+    """(features, model used) for one piece of report text, or None if AI is not configured. Uses the
+    report_features model (see ai/models.py) and retries once on the escalation model; passing `model` pins one
+    model first. Raises if every attempt fails."""
     client = client or CloudflareAIClient()
     if not client.configured:
         return None
     prompt = PROMPT.format(event_types=list(EVENT_TYPES), spread=list(SPREAD), fuels=list(FUELS),
                            urgency=list(URGENCY), status=list(STATUS), roles=list(REPORTER_ROLES), text=text)
-    model = os.getenv("CLOUDFLARE_AI_FEATURE_MODEL", "").strip() or None
-    return sanitize(parse_reply(client.generate_text(prompt, SYSTEM, model=model, max_tokens=700)))
+    raw, used = generate_json(client, "report_features", prompt, SYSTEM, max_tokens=700, model=model)
+    return sanitize(raw), used
 
 
 def find_conflicts(event: Dict[str, Any], features: Dict[str, Any]) -> list[str]:
@@ -216,9 +212,10 @@ def extract_and_store(event_id: int, *, client: Optional[CloudflareAIClient] = N
             if current and current[0] == digest and not force:
                 return "unchanged"
         client = client or CloudflareAIClient()
-        features = extract_features(text, client)
-        if features is None:
+        extracted = extract_features(text, client)
+        if extracted is None:
             return "skipped"
+        features, model_used = extracted
         with sqlite3.connect(get_db_path(), timeout=15) as conn:
             conn.execute(
                 """INSERT INTO fire_event_features (event_id, text_hash, features_json, model, extracted_at)
@@ -226,7 +223,7 @@ def extract_and_store(event_id: int, *, client: Optional[CloudflareAIClient] = N
                    ON CONFLICT(event_id) DO UPDATE SET text_hash = excluded.text_hash,
                        features_json = excluded.features_json, model = excluded.model,
                        extracted_at = excluded.extracted_at""",
-                (event_id, digest, json.dumps(features), client.model,
+                (event_id, digest, json.dumps(features), model_used,
                  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
             )
         return "stored"
@@ -251,13 +248,49 @@ def backfill(limit: int = 200, redo: bool = False) -> Dict[str, int]:
     return counts
 
 
+def compare(model_a: str, model_b: str, limit: int = 10) -> None:
+    """Run the latest reports with text through two models and print only the fields where they differ, so a
+    cheaper model can be judged on real reports before it is switched on. Nothing is stored."""
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT id, description, out_of_ordinary FROM fire_events
+               WHERE source NOT IN ('modis', 'viirs', 'ngfs', 'goes') AND status != 'deleted'
+               ORDER BY id DESC LIMIT ?""", (limit * 3,)).fetchall()
+    client, shown = CloudflareAIClient(), 0
+    for row in rows:
+        text = report_text(dict(row))
+        if len(text) < MIN_TEXT_CHARS or shown >= limit:
+            continue
+        shown += 1
+        results = []
+        for model in (model_a, model_b):
+            try:
+                results.append(extract_features(text, client, model=model)[0])
+            except Exception as exc:  # noqa: BLE001
+                results.append({"error": str(exc)[:120]})
+        print(f"\n=== report #{row['id']}: {text[:100]!r}")
+        keys = sorted(set(results[0]) | set(results[1]))
+        differing = [key for key in keys if results[0].get(key) != results[1].get(key)]
+        for key in differing:
+            print(f"  {key}:\n    {model_a}: {results[0].get(key)}\n    {model_b}: {results[1].get(key)}")
+        print(f"  ({len(keys) - len(differing)} of {len(keys)} fields identical)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("backfill")
     run.add_argument("--limit", type=int, default=200)
     run.add_argument("--redo", action="store_true", help="re-extract reports that already have features")
+    cmp = sub.add_parser("compare")
+    cmp.add_argument("model_a")
+    cmp.add_argument("model_b")
+    cmp.add_argument("--limit", type=int, default=10)
     args = parser.parse_args()
+    if args.command == "compare":
+        compare(args.model_a, args.model_b, args.limit)
+        return
     print(backfill(args.limit, args.redo))
 
 

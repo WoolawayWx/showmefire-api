@@ -87,7 +87,7 @@ from core.config import (
     MISSOURI_FIRES_GEOJSON
 )
 from routers import fire_weather_data, map_archive as map_archive_router, soundings as soundings_router
-from routers import archive_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, spot_forecast, api_keys, api_keys_admin, forms, forms_admin, dev_access, newsletter_admin, admin_auth
+from routers import archive_admin, ai_admin, tiles, outlook, discord_admin, afds, spatial_model, mobile, posts, post_media, fires, fires_v2, fires_ingest, verification, feedback, model_admin, verification_admin, forecast_discussions, rtma_peak_admin, burn_bans, testbed, forecast_admin, forecast_admin_09z, forecast_09z_metrics, spread_rate_admin, fire_weather_alerts, forecast_v1, forecast_v1_admin, forecast_models_admin, fuel_sensor_admin, graphics, admin_confirm, admin_notifications, home_video, conditions, bulletins, arcgis_feature_service, display_auth, health, field, api_index, day_archive_admin, hrrr_hourly, hrrr_hourly_admin, hrrr_fire_danger_peak, rtma_analysis, burn_check, spot_forecast, api_keys, api_keys_admin, forms, forms_admin, dev_access, newsletter_admin, admin_auth
 from forecast_v1.repository import ensure_schema as ensure_forecast_v1_schema
 from core.field_store import ensure_field_schema
 from core.cors_origins import ORIGIN_REGEX, origin_allowed
@@ -294,6 +294,7 @@ app.include_router(tiles.router)
 app.include_router(conditions.router)
 app.include_router(outlook.router)
 app.include_router(discord_admin.router)
+app.include_router(ai_admin.router)
 app.include_router(afds.router)
 app.include_router(spatial_model.router)
 app.include_router(model_admin.router)
