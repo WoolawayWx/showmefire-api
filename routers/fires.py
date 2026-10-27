@@ -253,6 +253,10 @@ class FireReportCreate(BaseModel):
     reporter_org: str = Field(default="", max_length=120)
     address_text: str = Field(default="", max_length=500)
     reporter_relationship: Optional[Literal["on_scene", "nearby", "reported_to_me", "other"]] = None
+    # Optional "what is it doing now" questions; null = not answered. Older app versions never send them.
+    fire_status: Optional[Literal["active", "contained", "out"]] = None
+    structures_threatened: Optional[bool] = None
+    responders_on_scene: Optional[bool] = None
     consent_acknowledged: bool
     turnstile_token: str = Field(min_length=1, max_length=4096)
     website: str = Field(default="", max_length=200)  # honeypot; must stay empty
@@ -664,6 +668,9 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
         reporter_org=payload.reporter_org,
         address_text=address_text,
         reporter_relationship=payload.reporter_relationship,
+        reported_fire_status=payload.fire_status,
+        reported_structures_threatened=payload.structures_threatened,
+        reported_responders_on_scene=payload.responders_on_scene,
         submitter_ip_hash=ip_hash,
         upload_token_hash=hashlib.sha256(upload_token.encode()).hexdigest(),
         consent_version=CONSENT_VERSION,
@@ -1168,6 +1175,60 @@ def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
     return {"success": True, "report": event}
 
 
+@router.post("/api/admin/fires/incidents/{incident_id}/feedback/analyze")
+def admin_analyze_incident_feedback(incident_id: int, _admin: str = Depends(require_admin)):
+    """Have the AI read this incident's public feedback now (or again), replacing any earlier analysis. A reading
+    aid only: feedback and the incident are not changed (admin only)."""
+    from ai.feedback_analysis import analyze, get_analysis
+
+    if not get_fire_incident(incident_id):
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    result = analyze(incident_id)
+    if result == "skipped":
+        raise HTTPException(status_code=409, detail="Nothing to analyze: no feedback notes to read, or AI is not configured on the server")
+    if result == "failed":
+        raise HTTPException(status_code=502, detail="The AI model did not return usable results; try again in a moment")
+    return {"success": True, "analysis": get_analysis(incident_id, list_fire_incident_feedback(incident_id))}
+
+
+_RESCAN_ERRORS = {
+    "skipped": (409, "Nothing to scan: this report has too little text, or AI is not configured on the server"),
+    "failed": (502, "The AI model did not return usable results; try again in a moment"),
+}
+
+
+@router.post("/api/admin/fires/reports/{event_id}/features/rescan")
+def admin_rescan_report_features(event_id: int, _admin: str = Depends(require_admin)):
+    """Re-run the AI text extraction on one report now, replacing its stored features (admin only). The report's
+    own text and moderation state are never touched."""
+    from ai.report_features import extract_and_store
+
+    event = get_fire_event(event_id, admin=True)
+    if not event:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    result = extract_and_store(event_id, force=True)
+    if result in _RESCAN_ERRORS:
+        code, detail = _RESCAN_ERRORS[result]
+        raise HTTPException(status_code=code, detail=detail)
+    return {"success": True, "result": result, "report": get_fire_event(event_id, admin=True)}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/features/rescan")
+def admin_rescan_incident_features(incident_id: int, _admin: str = Depends(require_admin)):
+    """Re-run the AI text extraction on every report and OSINT lead in an incident (not satellite pixels, which
+    have no text). Returns how many of each outcome, so the UI can say what happened (admin only)."""
+    from ai.report_features import extract_and_store
+
+    if not get_fire_incident(incident_id):
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    ids = [m["id"] for m in list_fire_incident_members(incident_id) if m.get("source") not in SATELLITE_EVENT_SOURCES]
+    counts: Dict[str, int] = {}
+    for event_id in ids[:25]:  # an incident has a handful of reports; the cap only guards a runaway cluster
+        result = extract_and_store(event_id, force=True)
+        counts[result] = counts.get(result, 0) + 1
+    return {"success": True, "scanned": min(len(ids), 25), "results": counts}
+
+
 def _incident_label_for_event(event_id: int) -> Optional[str]:
     """`{incident_id}_{NN}` for a report, or None if it has no incident yet."""
     from services.incident_area_review import build_area, resolve_seed_incident
@@ -1582,6 +1643,8 @@ def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admi
         ) if event
     ]
     incident["feedback"] = list_fire_incident_feedback(incident_id)
+    from ai.feedback_analysis import get_analysis
+    incident["feedback_analysis"] = get_analysis(incident_id, incident["feedback"])
     return {"success": True, "incident": incident}
 
 

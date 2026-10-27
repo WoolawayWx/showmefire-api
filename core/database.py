@@ -373,6 +373,11 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         ("weather_danger_category", "TEXT"),
         ("weather_danger_prob", "REAL"),
         ("reporter_relationship", "TEXT"),
+        # What the reporter said about the fire's state (optional form questions; see ai/report_features.py for the
+        # text-derived equivalents, which only fill in what these leave blank).
+        ("reported_fire_status", "TEXT"),
+        ("reported_structures_threatened", "INTEGER"),
+        ("reported_responders_on_scene", "INTEGER"),
     ):
         if column_name not in fire_events_columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {column_name} {column_type}")
@@ -435,6 +440,17 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
     ''')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_kind_feed ON fire_event_origins(kind, feed)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_origins_received ON fire_event_origins(last_received_at)')
+    # An admin-requested AI read of an incident's public feedback (ai/feedback_analysis.py).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incident_feedback_analysis (
+            incident_id INTEGER PRIMARY KEY,
+            fingerprint TEXT NOT NULL,
+            analysis_json TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            analyzed_at TEXT NOT NULL,
+            FOREIGN KEY (incident_id) REFERENCES fire_incidents(id)
+        )
+    ''')
     # Structured facts pulled from a report's free text (ai/report_features.py). The raw text stays on fire_events.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_event_features (
@@ -2572,6 +2588,7 @@ _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
     "label_revision", "revised_at", "parent_event_id",
     "reporter_contact", "submitter_ip_hash",
     "reporter_name", "reporter_org", "address_text", "reporter_relationship",
+    "reported_fire_status", "reported_structures_threatened", "reported_responders_on_scene",
     "consent_version", "captcha_verdict",
     "moderated_by", "moderated_at", "pii_purged_at",
     "first_seen_at", "last_seen_at",
@@ -2810,6 +2827,9 @@ def create_fire_report(
     county_name: Optional[str] = None,
     occurred_at_tz_offset_minutes: Optional[int] = None,
     origin: Optional[Dict] = None,
+    reported_fire_status: Optional[str] = None,
+    reported_structures_threatened: Optional[bool] = None,
+    reported_responders_on_scene: Optional[bool] = None,
 ) -> Dict:
     """Insert a public, anonymous fire report as status='pending'."""
     db_path = get_db_path()
@@ -2824,14 +2844,18 @@ def create_fire_report(
                 occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
                 acres, acres_is_estimate, description, out_of_ordinary,
                 reporter_contact, reporter_name, reporter_org, address_text, reporter_relationship,
-                submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict
-            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict,
+                reported_fire_status, reported_structures_threatened, reported_responders_on_scene
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
             acres, 1 if acres_is_estimate else 0, description, out_of_ordinary,
             reporter_contact, reporter_name, reporter_org, address_text, reporter_relationship,
             submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict,
+            reported_fire_status,
+            None if reported_structures_threatened is None else int(reported_structures_threatened),
+            None if reported_responders_on_scene is None else int(reported_responders_on_scene),
         ))
         event_id = cursor.lastrowid
         _set_fire_event_fuels(cursor, event_id, fuel_types)
@@ -3107,8 +3131,11 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
             ''', (event_id,))
             event["moderation"] = [dict(row) for row in cursor.fetchall()]
             event["origin"] = get_event_origin(cursor, event_id)
-            from ai.report_features import get_features
-            event["extracted_features"] = get_features(event_id, conn)
+            from ai.report_features import find_conflicts, get_features
+            extracted = get_features(event_id, conn)
+            if extracted:
+                extracted["conflicts"] = find_conflicts(event, extracted["features"])
+            event["extracted_features"] = extracted
         return event
     finally:
         conn.close()
@@ -3252,7 +3279,10 @@ def list_fire_events(
 
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         # Admin lists also say which feed each event came in through (the source log, fire_event_origins).
-        origin_column = ", (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed" if admin else ""
+        origin_column = (
+            ", (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed"
+            ", (SELECT COUNT(*) FROM fire_event_media m WHERE m.event_id = fire_events.id AND m.kind = 'photo') AS photo_count"
+        ) if admin else ""
         cursor.execute(f'''
             SELECT {", ".join(columns)}{origin_column} FROM fire_events
             {where}

@@ -26,6 +26,7 @@ GOOD = json.dumps({
     "injuries_or_evacuations": None, "responders_on_scene": "yes", "spread": "rapid", "smoke": "thick black, drifting east",
     "fuels": ["grass", "Timber", "lava"], "location_hints": ["County Rd 12", " ", 5, "behind the co-op"],
     "urgency": "HIGH", "key_points": ["propane tank nearby"], "approve": True,
+    "status": "Contained", "timing": "past", "reporter_role": "Fire Department", "acres_low": 50, "acres_high": 40,
 })
 
 
@@ -38,6 +39,13 @@ class SanitizeTests(unittest.TestCase):
         self.assertIsNone(f["responders_on_scene"])                 # "yes" is not a bool
         self.assertEqual(f["location_hints"], ["County Rd 12", "behind the co-op"])
         self.assertNotIn("approve", f)                              # unknown keys never pass through
+        self.assertEqual((f["status"], f["timing"], f["reporter_role"]), ("contained", "past", "fire_department"))
+        self.assertEqual((f["acres_low"], f["acres_high"]), (40, 50))   # swapped range is put right
+
+    def test_single_acre_figure_fills_both_ends_and_junk_is_dropped(self):
+        self.assertEqual(rf.sanitize({"acres_low": 12})["acres_high"], 12)
+        f = rf.sanitize({"acres_low": "lots", "acres_high": -3})
+        self.assertEqual((f["acres_low"], f["acres_high"]), (None, None))
 
     def test_garbage_becomes_nulls_not_errors(self):
         f = rf.sanitize("not a dict")
@@ -108,6 +116,16 @@ class StoreTests(unittest.TestCase):
         rf.extract_and_store(self.event_id, client=FakeClient(GOOD))
         self.assertEqual(database.get_fire_event(self.event_id, admin=True)["extracted_features"]["features"]["urgency"], "high")
 
+    def test_conflicts_between_the_form_and_the_text(self):
+        features = rf.sanitize({"status": "out", "acres_low": 40, "acres_high": 50, "structures_threatened": False})
+        event = {"acres": 200, "reported_fire_status": "active", "reported_structures_threatened": 1,
+                 "reported_responders_on_scene": None}
+        conflicts = rf.find_conflicts(event, features)
+        self.assertEqual(len(conflicts), 3)
+        self.assertTrue(any("200 acres, text says 40-50" in c for c in conflicts))
+        self.assertEqual(rf.find_conflicts({"acres": 50, "reported_fire_status": "out"}, features), [])  # all agree
+        self.assertEqual(rf.find_conflicts({"acres": 50}, rf.sanitize({})), [])  # nothing to compare
+
     def test_backfill_only_does_reports_without_features(self):
         with patch.object(rf, "CloudflareAIClient", lambda: FakeClient(GOOD)):
             self.assertEqual(rf.backfill(), {"stored": 1})
@@ -116,3 +134,46 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RescanEndpointTests(StoreTests):
+    """POST .../features/rescan, through the real router with admin auth overridden."""
+
+    def setUp(self):
+        super().setUp()
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from core.security import require_admin
+        from routers import fires
+
+        app = FastAPI()
+        app.include_router(fires.router)
+        app.dependency_overrides[require_admin] = lambda: "admin"
+        self.client = TestClient(app)
+        patcher = patch.object(rf, "CloudflareAIClient", lambda: FakeClient(GOOD))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rescan_one_report_replaces_features_even_when_the_text_is_unchanged(self):
+        rf.extract_and_store(self.event_id, client=FakeClient(json.dumps({"urgency": "low"})))
+        self.assertEqual(rf.get_features(self.event_id)["features"]["urgency"], "low")
+        response = self.client.post(f"/api/admin/fires/reports/{self.event_id}/features/rescan")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["report"]["extracted_features"]["features"]["urgency"], "high")
+
+    def test_rescan_errors_are_explained(self):
+        self.assertEqual(self.client.post("/api/admin/fires/reports/999/features/rescan").status_code, 404)
+        with patch.object(rf, "CloudflareAIClient", lambda: FakeClient("not json")):
+            self.assertEqual(self.client.post(f"/api/admin/fires/reports/{self.event_id}/features/rescan").status_code, 502)
+
+    def test_rescan_incident_covers_reports_but_not_satellite_pixels(self):
+        with sqlite3.connect(self.db) as conn:
+            incident = conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "
+                                    "last_detected_at, detection_count) VALUES (37, -92, 'a', 'b', 2)").lastrowid
+            conn.execute("UPDATE fire_events SET incident_id = ?", (incident,))
+            conn.execute("INSERT INTO fire_events (source, status, latitude, longitude, occurred_at, description, incident_id) "
+                         "VALUES ('viirs', 'pending', 37, -92, 'a', 'satellite pixel with some descriptive text', ?)", (incident,))
+        body = self.client.post(f"/api/admin/fires/incidents/{incident}/features/rescan").json()
+        self.assertEqual((body["scanned"], body["results"]), (1, {"stored": 1}))
+        self.assertEqual(self.client.post("/api/admin/fires/incidents/999/features/rescan").status_code, 404)

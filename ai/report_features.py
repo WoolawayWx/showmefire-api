@@ -40,6 +40,9 @@ EVENT_TYPES = ("wildfire", "grass_fire", "brush_fire", "structure_fire", "vehicl
                "controlled_burn", "campfire", "other", "unclear")
 SPREAD = ("none", "slow", "moderate", "rapid", "unknown")
 URGENCY = ("low", "medium", "high")
+STATUS = ("active", "contained", "out", "unknown")
+TIMING = ("ongoing", "past", "unknown")
+REPORTER_ROLES = ("fire_department", "other_official", "landowner", "bystander", "unknown")
 FUELS = ("grass", "brush", "timber", "crop", "pasture", "debris_pile", "structure", "vehicle", "other")
 BOOLEAN_FIELDS = ("controlled_burn_indicators", "structures_threatened", "injuries_or_evacuations",
                   "responders_on_scene")
@@ -59,11 +62,15 @@ report does not say.
   "structures_threatened": true/false/null,
   "injuries_or_evacuations": true/false/null,
   "responders_on_scene": true/false/null,
+  "status": one of {status}: "active" while it is still burning, "contained" if a line is held / under control but not out, "out" if extinguished, "unknown" if not stated,
+  "timing": "past" if the report describes something that already happened or finished, "ongoing" if it is happening now, else "unknown",
+  "reporter_role": one of {roles}, judged from how the report is written (dispatch language, "my property", "I saw"),
+  "acres_low": number or null, "acres_high": number or null: the acreage the TEXT states (a single figure goes in both, "40-50 acres" is 40 and 50),
   "spread": one of {spread},
   "smoke": short description of smoke colour/height/direction, or null,
-  "fuels": list from {fuels},
+  "fuels": list from {fuels}, only vegetation or material the text actually names (an alarm type such as "Brush First Alarm" is not a fuel),
   "location_hints": up to 5 short strings: road names, landmarks, mile markers, "behind X",
-  "urgency": one of {urgency}, judged only from the text,
+  "urgency": one of {urgency}, judged only from the text; "low" when it is already contained/out or described in the past tense,
   "key_points": up to 5 short phrases for anything notable that the fields above do not capture
 }}
 
@@ -104,6 +111,12 @@ def _strings(value: Any, limit: int, length: int) -> list[str]:
     return cleaned
 
 
+def _acres(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), 2) if 0 < value <= 1_000_000 else None
+
+
 def sanitize(raw: Any) -> Dict[str, Any]:
     """Coerce a model reply into the fixed schema. Unknown/invalid values become null, never errors."""
     raw = raw if isinstance(raw, dict) else {}
@@ -113,6 +126,9 @@ def sanitize(raw: Any) -> Dict[str, Any]:
         "event_type": _enum(raw.get("event_type"), EVENT_TYPES, "unclear"),
         "spread": _enum(raw.get("spread"), SPREAD, "unknown"),
         "urgency": _enum(raw.get("urgency"), URGENCY),
+        "status": _enum(raw.get("status"), STATUS, "unknown"),
+        "timing": _enum(raw.get("timing"), TIMING, "unknown"),
+        "reporter_role": _enum(raw.get("reporter_role"), REPORTER_ROLES, "unknown"),
         "smoke": " ".join(smoke.split())[:120] if isinstance(smoke, str) and smoke.strip() else None,
         "fuels": list(dict.fromkeys(fuels)),
         "location_hints": _strings(raw.get("location_hints"), 5, 80),
@@ -120,6 +136,10 @@ def sanitize(raw: Any) -> Dict[str, Any]:
     }
     for field in BOOLEAN_FIELDS:
         features[field] = _flag(raw.get(field))
+    low, high = _acres(raw.get("acres_low")), _acres(raw.get("acres_high"))
+    if low is not None and high is not None and low > high:
+        low, high = high, low
+    features["acres_low"], features["acres_high"] = low if low is not None else high, high if high is not None else low
     return features
 
 
@@ -137,9 +157,28 @@ def extract_features(text: str, client: Optional[CloudflareAIClient] = None) -> 
     if not client.configured:
         return None
     prompt = PROMPT.format(event_types=list(EVENT_TYPES), spread=list(SPREAD), fuels=list(FUELS),
-                           urgency=list(URGENCY), text=text)
+                           urgency=list(URGENCY), status=list(STATUS), roles=list(REPORTER_ROLES), text=text)
     model = os.getenv("CLOUDFLARE_AI_FEATURE_MODEL", "").strip() or None
-    return sanitize(parse_reply(client.generate_text(prompt, SYSTEM, model=model, max_tokens=500)))
+    return sanitize(parse_reply(client.generate_text(prompt, SYSTEM, model=model, max_tokens=700)))
+
+
+def find_conflicts(event: Dict[str, Any], features: Dict[str, Any]) -> list[str]:
+    """Where what the reporter answered on the form disagrees with what their own text says. The form answer is
+    what counts; this only tells a reviewer to look. Unanswered form fields and unknown text values never conflict."""
+    conflicts = []
+    low, high = features.get("acres_low"), features.get("acres_high")
+    acres = event.get("acres")
+    if acres and low is not None and high is not None and not (low * 0.75 <= acres <= high * 1.25):
+        stated = f"{low:g}" if low == high else f"{low:g}-{high:g}"
+        conflicts.append(f"form says {acres:g} acres, text says {stated}")
+    reported = event.get("reported_fire_status")
+    if reported and features.get("status") not in (None, "unknown") and reported != features["status"]:
+        conflicts.append(f"form says the fire is {reported}, text says {features['status']}")
+    for field, label in (("structures_threatened", "structures threatened"), ("responders_on_scene", "responders on scene")):
+        answered, inferred = event.get(f"reported_{field}"), features.get(field)
+        if answered is not None and inferred is not None and bool(answered) != inferred:
+            conflicts.append(f"form says {label}: {'yes' if answered else 'no'}, text says {'yes' if inferred else 'no'}")
+    return conflicts
 
 
 def get_features(event_id: int, conn: Optional[sqlite3.Connection] = None) -> Optional[Dict[str, Any]]:

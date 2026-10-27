@@ -202,3 +202,23 @@ class PublicReportIncidentTests(unittest.TestCase):
         conn.close()
         first = database.correlate_report_with_incident(event_id)
         self.assertEqual(database.correlate_report_with_incident(event_id), first)
+
+    def test_form_answers_are_stored_and_optional(self):
+        answered = database.create_fire_report(
+            latitude=37.5, longitude=-92.0, occurred_at="2026-10-01T12:00:00Z", occurred_at_precision="minute",
+            acres=3.0, acres_is_estimate=True, fuel_types=[], description="smoke", out_of_ordinary="",
+            reporter_contact="", submitter_ip_hash="h", consent_version="1", captcha_verdict="ok",
+            reported_fire_status="contained", reported_structures_threatened=False, reported_responders_on_scene=True)
+        self.assertEqual((answered["reported_fire_status"], answered["reported_structures_threatened"],
+                          answered["reported_responders_on_scene"]), ("contained", 0, 1))
+        skipped = self._report(37.6, -92.1)
+        self.assertEqual((skipped["reported_fire_status"], skipped["reported_structures_threatened"]), (None, None))
+
+    def test_admin_report_list_counts_photos_but_not_documents(self):
+        report = self._report(37.5, -92.0)
+        database.add_fire_event_media(report["id"], "a.jpg", "a.jpg", "image/jpeg", 10, "h1")
+        database.add_fire_event_media(report["id"], "b.jpg", "b.jpg", "image/jpeg", 10, "h2")
+        database.add_fire_event_media(report["id"], "c.pdf", "c.pdf", "application/pdf", 10, "h3", kind="document")
+        listed = database.list_fire_events(status="pending", admin=True)
+        self.assertEqual(listed[0]["photo_count"], 2)
+        self.assertEqual(len(database.get_fire_event(report["id"], admin=True)["media"]), 3)
