@@ -672,6 +672,91 @@ def _ensure_fire_exclusion_zone_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_exclusion_zones_status ON fire_exclusion_zones(status)')
 
 
+def _ensure_fire_danger_tracking_tables(cursor: sqlite3.Cursor) -> None:
+    """County-day predictions from every fire-danger model (the shadows and the public rule), copied out of their
+    evidence files so performance can be tracked against what actually happened. Append-only: a re-ingest never
+    changes a row (services/fire_danger_tracking.py)."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_danger_model_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            valid_date TEXT NOT NULL,
+            county_fips TEXT NOT NULL,
+            score REAL,
+            category INTEGER,
+            probability REAL,
+            produced_at TEXT,
+            source TEXT NOT NULL DEFAULT '',
+            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (model, run_id, valid_date, county_fips)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_danger_scores_model_date ON fire_danger_model_scores(model, valid_date)')
+
+
+def _ensure_detection_ml_tables(cursor: sqlite3.Cursor) -> None:
+    """Review labels and score capture for the vegetation-fire confidence model.
+
+    All four tables are append-only: a correction is a new row, never an update, so what was known (and what a
+    model said) at a given time can always be replayed. Nothing here feeds back into detection_confidence_pct or any
+    public output; the shadow model only records."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detection_review_selection (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            stream TEXT NOT NULL,
+            bucket TEXT NOT NULL DEFAULT '',
+            sampling_version TEXT NOT NULL,
+            population_n INTEGER,
+            protected INTEGER NOT NULL DEFAULT 0,
+            selected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_detection_review_selection_event ON detection_review_selection(event_id)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detection_review_outcome (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            target_version TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT '',
+            reviewer TEXT NOT NULL,
+            adjudication_status TEXT NOT NULL DEFAULT 'single',
+            reviewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_detection_review_outcome_event ON detection_review_outcome(event_id, reviewed_at)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detection_feature_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'initial',
+            schema_version TEXT NOT NULL,
+            features_json TEXT NOT NULL,
+            availability_json TEXT NOT NULL DEFAULT '{}',
+            mask_json TEXT NOT NULL DEFAULT '{}',
+            scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_detection_feature_snapshot_event ON detection_feature_snapshot(event_id, mode)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS detection_score_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            model_name TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'initial',
+            score REAL NOT NULL,
+            calibrated INTEGER NOT NULL DEFAULT 0,
+            snapshot_id INTEGER,
+            scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_detection_score_history_event ON detection_score_history(event_id, model_name, mode)')
+
+
 def _ensure_fire_abuse_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_submission_throttle (
@@ -1377,6 +1462,8 @@ def init_database():
     _ensure_fire_incident_tables(cursor)
     _ensure_recurring_fire_source_tables(cursor)
     _ensure_fire_exclusion_zone_tables(cursor)
+    _ensure_detection_ml_tables(cursor)
+    _ensure_fire_danger_tracking_tables(cursor)
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)

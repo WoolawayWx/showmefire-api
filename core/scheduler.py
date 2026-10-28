@@ -329,6 +329,16 @@ async def run_drift_check_job():
         logger.error("Drift check failed: %s", error, exc_info=True)
 
 
+async def fire_danger_tracking_job():
+    """Nightly: copy each fire-danger model's new county-day scores into fire_danger_model_scores so their performance
+    can be tracked against confirmed fires (services/fire_danger_tracking.py). Read-only toward the models."""
+    try:
+        from services.fire_danger_tracking import tracking_job
+        await asyncio.to_thread(tracking_job)
+    except Exception as error:
+        logger.error("Fire danger tracking failed: %s", error, exc_info=True)
+
+
 async def recurring_source_detector_job():
     """Flag candidate recurring non-fire detection sources (mills, flares,
     kilns...) for admin review - never auto-confirms/suppresses anything."""
@@ -384,6 +394,10 @@ async def ingest_fire_detections_job():
         # confidence below, which scores a group of detections together.
         from services.detection_confidence import refresh_detection_confidence
         await asyncio.to_thread(refresh_detection_confidence)
+        # Shadow-only record of what the candidate vegetation-fire model would say (SMF_DETECTION_SHADOW=true).
+        # Never changes a live score or anything public, and never raises.
+        from services.detection_shadow import shadow_job
+        await asyncio.to_thread(shadow_job)
         await asyncio.to_thread(publish_fire_detections)
         from services.fire_incident_graphics import refresh_incident_graphics
         await _render_in_pool(refresh_incident_graphics)
@@ -562,6 +576,11 @@ MODEL_RELEVANT_JOBS = {
         "category": "maintenance",
         "description": "Prunes forecast_v1's hot-storage retention window (only registered when "
                        "SMF_FORECAST_V1_ENABLED=true).",
+    },
+    "fire_danger_tracking": {
+        "category": "verification",
+        "description": "Nightly copy of each fire-danger model's county-day scores into the tracking table, so their "
+                       "performance against confirmed fires can be compared (services/fire_danger_tracking.py).",
     },
     "drift_check": {
         "category": "monitoring",
@@ -953,6 +972,16 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         hour=4,
         minute=0,
         id='drift_check',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        fire_danger_tracking_job,
+        'cron',
+        hour=5,
+        minute=10,
+        id='fire_danger_tracking',
         max_instances=1,
         coalesce=True,
     )

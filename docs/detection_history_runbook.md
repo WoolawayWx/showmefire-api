@@ -32,7 +32,7 @@ them). They are still `pending`, so after a small first run check
 detection already stored is updated, not duplicated.
 
 **Keep the full CSV for training.** The overlap file holds only NERIS matches, so on its own it makes every detection
-before the DB's start look like a fire. Pass the full file to the build, which uses the unmatched rows as weak negatives
+before the DB's start look like a fire. Pass the full file to the build, which uses the unmatched rows as unlabeled comparison rows (never as negatives)
 without putting them in the database: `python -m detection_dataset.build --history-csv firms_history_*.csv`.
 
 - Uses the Standard Processing products (`VIIRS_SNPP_SP`, `VIIRS_NOAA20_SP`, `VIIRS_NOAA21_SP`, `MODIS_SP`) plus the NRT

@@ -262,6 +262,16 @@ def run(anchor: Optional[datetime] = None, *, now: Optional[datetime] = None, re
                 control_id = item.member_id
         except Exception as error:
             item.status, item.reason = "failed", item.reason + f"; regrid failed: {error}"
+    try:
+        # Beta/preview: the Fire Weather Severity Index scored on the HRRR + RRFS + FV3 blend, from fields already regridded
+        # here. Failure-isolated and gated by the fire_weather_index shadow switch; never affects this run.
+        from services.fire_weather_index_blend import run_for_ensemble as _fwsi_blend
+        blend_result = _fwsi_blend(plan, member_fields, wind_factors, dst_lat, dst_lon, anchor,
+                                   lead_start=int(window["valid_lead_start"]))
+        logger.info("fire_weather_index blend: %s", {k: v for k, v in blend_result.items() if k in ("ok", "reason", "image")})
+    except Exception as error:  # pragma: no cover - the helper already swallows its own errors
+        logger.warning("fire_weather_index blend step failed (non-fatal): %s", error)
+
     n_members = len(member_fields)
     if n_members >= int(config.get("abort_below_members", 3)):
         track = tracks.track_members(member_fields, weights, wind_factors, control_id, booster, feature_names,

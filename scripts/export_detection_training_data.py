@@ -19,7 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = "detection-training-v1"
+SCHEMA_VERSION = "detection-training-v2"
 DETECTION_SOURCES = ("viirs", "modis", "ngfs", "goes")
 
 DETECTION_COLUMNS = [
@@ -43,6 +43,21 @@ REPORT_COLUMNS = [
     "id", "latitude", "longitude", "county_fips", "occurred_at", "status", "verification_tier",
     "cause_category", "reported_fire_status", "reporter_relationship", "acres", "moderated_at",
 ]
+RECURRING_SOURCE_COLUMNS = [
+    "id", "label", "source_type", "latitude", "longitude", "radius_km", "status", "detection_count",
+    "distinct_day_count", "first_detected_at", "last_detected_at", "reviewed_at", "created_at",
+]
+EXCLUSION_ZONE_COLUMNS = ["id", "name", "geometry_geojson", "status", "created_at", "updated_at"]
+REVIEW_OUTCOME_COLUMNS = ["id", "event_id", "target_version", "outcome", "reason", "evidence", "reviewer",
+                          "adjudication_status", "reviewed_at"]
+REVIEW_SELECTION_COLUMNS = ["id", "event_id", "stream", "bucket", "sampling_version", "population_n", "protected", "selected_at"]
+SNAPSHOT_COLUMNS = ["id", "event_id", "mode", "schema_version", "features_json", "availability_json", "mask_json", "scored_at"]
+SCORE_HISTORY_COLUMNS = ["id", "event_id", "model_name", "model_version", "mode", "score", "calibrated", "snapshot_id", "scored_at"]
+
+
+def _pseudonym(value) -> str:
+    """Reviewers are staff accounts (emails); the training export gets a stable short id instead."""
+    return hashlib.sha256(f"detection-review:{value}".encode()).hexdigest()[:10] if value else ""
 
 
 def _sha256_file(path: Path) -> str:
@@ -59,16 +74,20 @@ def _present(conn: sqlite3.Connection, table: str, wanted: list) -> list:
     return [c for c in wanted if c in have]
 
 
-def _dump(conn, out_dir: Path, name: str, table: str, wanted: list, where: str = "", params: tuple = ()) -> dict:
-    cols = _present(conn, table, wanted)
-    rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} {where}", params).fetchall()
+def _dump(conn, out_dir: Path, name: str, table: str, wanted: list, where: str = "", params: tuple = (),
+          transform: dict | None = None) -> dict:
+    cols = _present(conn, table, wanted)  # a table an older DB copy lacks entirely gives a header-only file
+    rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} {where}", params).fetchall() if cols else []
     path = out_dir / name
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(wanted)  # fixed header; absent columns come back blank
         index = {c: i for i, c in enumerate(cols)}
         for row in rows:
-            writer.writerow([row[index[c]] if c in index else "" for c in wanted])
+            out = [row[index[c]] if c in index else "" for c in wanted]
+            for col, fn in (transform or {}).items():
+                out[wanted.index(col)] = fn(out[wanted.index(col)])
+            writer.writerow(out)
     return {"filename": name, "rows": len(rows), "sha256": _sha256_file(path), "missing_columns": [c for c in wanted if c not in cols]}
 
 
@@ -110,6 +129,15 @@ def export(since: str | None = None, db_path: Path | None = None, out_dir: Path 
             "incidents": _dump(conn, out_dir, "incidents.csv", "fire_incidents", INCIDENT_COLUMNS),
             "feedback": _dump(conn, out_dir, "feedback.csv", "fire_incident_feedback", FEEDBACK_COLUMNS),
             "user_reports": _dump(conn, out_dir, "user_reports.csv", "fire_events", REPORT_COLUMNS, "WHERE source = 'user_submission'"),
+            # Mask definitions (with their dates, so a replay can ignore masks that did not exist yet) and the
+            # vegetation-fire review / shadow-scoring records. Append-only tables, exported whole.
+            "recurring_sources": _dump(conn, out_dir, "recurring_sources.csv", "recurring_fire_sources", RECURRING_SOURCE_COLUMNS),
+            "exclusion_zones": _dump(conn, out_dir, "exclusion_zones.csv", "fire_exclusion_zones", EXCLUSION_ZONE_COLUMNS),
+            "review_outcomes": _dump(conn, out_dir, "review_outcomes.csv", "detection_review_outcome", REVIEW_OUTCOME_COLUMNS,
+                                     transform={"reviewer": _pseudonym}),
+            "review_selection": _dump(conn, out_dir, "review_selection.csv", "detection_review_selection", REVIEW_SELECTION_COLUMNS),
+            "feature_snapshots": _dump(conn, out_dir, "feature_snapshots.csv", "detection_feature_snapshot", SNAPSHOT_COLUMNS),
+            "score_history": _dump(conn, out_dir, "score_history.csv", "detection_score_history", SCORE_HISTORY_COLUMNS),
         }
         manifest = {
             "schema_version": SCHEMA_VERSION,

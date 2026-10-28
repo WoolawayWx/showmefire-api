@@ -62,10 +62,10 @@ ROS_CLASS_COLORS = ("#90EE90", "#ADFF2F", "#FFFF00", "#FFA500", "#FF4500", "#8B0
 # so "agricultural" doesn't read as "won't burn."
 AGRICULTURAL_FUEL_CODE = 93
 AGRICULTURAL_INDEX = len(ROS_CLASS_LABELS)
-AGRICULTURAL_LABEL = "Agricultural (not modeled)"
+AGRICULTURAL_LABEL = "Agricultural \n (not modeled)"
 AGRICULTURAL_COLOR = "#D9C66B"
 NON_BURNABLE_INDEX = AGRICULTURAL_INDEX + 1
-NON_BURNABLE_LABEL = "Non-burnable (water/urban/barren)"
+NON_BURNABLE_LABEL = "Non-burnable \n (water/urban/barren)"
 NON_BURNABLE_COLOR = "#C9C2B2"
 
 NODATA_CLASS = 255

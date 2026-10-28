@@ -408,8 +408,14 @@ def _query_leads(
     search: str,
     cycle: datetime,
     unnamed: str | None = None,
+    known_missing: set[int] | None = None,
 ) -> xr.Dataset:
     """Run one GRIB search over many lead hours without exhausting memory.
+
+    `known_missing` is a set shared by the callers of one search (the members of one source and cycle): hours already
+    found to have no such field are not asked for again, and hours found missing here are added to it. Without it,
+    every GEFS member re-discovered that APCP/DSWRF/TCDC do not exist at hour 0 by failing a whole chunk and then
+    retrying it hour by hour, about 20 s per member.
 
     Two failure modes used to sink an otherwise-good query:
     * one query over every lead loaded the full CONUS grid for all hours
@@ -423,6 +429,8 @@ def _query_leads(
     the error propagate.
     """
     chunk_size = max(1, int(os.getenv("SMF_HERBIE_LEAD_CHUNK", "8")))
+    if known_missing:
+        leads = tuple(lead for lead in leads if lead not in known_missing)
     parts: list[xr.Dataset] = []
     missing: list[int] = []
     last_missing: Exception | None = None
@@ -449,6 +457,8 @@ def _query_leads(
             except FileNotFoundError as error:
                 missing.append(lead)
                 last_missing = error
+    if known_missing is not None:
+        known_missing.update(missing)
     if not parts:
         raise last_missing if last_missing is not None else RuntimeError("no query results")
     if missing:
@@ -476,6 +486,16 @@ def _align_to_grid(other: xr.Dataset, grid: xr.Dataset) -> xr.Dataset:
             and np.allclose(other.x.values, grid.x.values) and np.allclose(other.y.values, grid.y.values)):
         return other.assign_coords(x=grid.x.values, y=grid.y.values)
     return other.interp(x=grid.x.values, y=grid.y.values, kwargs={"fill_value": "extrapolate"})
+
+
+# Hours a source has no field for, by (source, cycle, product, search), shared across that source's ensemble members.
+_MISSING_LEADS: dict[tuple, set[int]] = {}
+
+
+def _missing_leads(spec: AcquisitionSpec, cycle: datetime, product: str | None, search: str) -> set[int]:
+    if len(_MISSING_LEADS) > 256:
+        _MISSING_LEADS.clear()
+    return _MISSING_LEADS.setdefault((spec.public_name, cycle, product, search), set())
 
 
 def _fetch_member(
@@ -506,7 +526,12 @@ def _fetch_member(
                 # Herbie/cfgrib arrays are lazy. Removing the subset here used
                 # to leave later merge/load operations pointing at a deleted
                 # file. Cache retention removes these files after seven days.
-                groups.append(_query_leads(make_client, spec.leads, search, cycle))
+                groups.append(_query_leads(make_client, spec.leads, search, cycle,
+                                           known_missing=_missing_leads(spec, cycle, None, search)))
+                break
+            except FileNotFoundError as error:
+                # The field is not published (or its subset file is not there); asking again will not change that.
+                errors.append(f"{search}:{type(error).__name__}: {_sanitized_error(error)}")
                 break
             except Exception as error:
                 if attempt == attempts:
@@ -527,7 +552,8 @@ def _fetch_member(
     for product, search in (*wanted, *spec.extras):
         try:
             extra = _query_leads(lambda leads, product=product: make_client(leads, product), spec.leads, search, cycle,
-                                 unnamed="hpbl" if search == PBL_SEARCH else None)
+                                 unnamed="hpbl" if search == PBL_SEARCH else None,
+                                 known_missing=_missing_leads(spec, cycle, product, search))
             surface = xr.merge([surface, _align_to_grid(extra, surface)], compat="override", join="outer")
         except Exception as error:
             logger.info("%s %s fields unavailable for %s: %s", spec.public_name, search, member, error)
