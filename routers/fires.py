@@ -72,7 +72,12 @@ from core.database import (
     update_fire_event,
 )
 from core.fire_events import FUEL_TYPES, MO_LAT_MAX, MO_LAT_MIN, MO_LON_MAX, MO_LON_MIN, VERIFICATION_TIERS
+from core.admin_auth import permissions as staff_permissions
 from core.security import SECRET_KEY, require_admin
+
+# Who may look at, and who may act on, fire reports, incidents and feedback (core/admin_auth/permissions.py).
+REPORTS_VIEW = staff_permissions.require_permission(staff_permissions.REPORTS_VIEW)
+REPORTS_MODERATE = staff_permissions.require_permission(staff_permissions.REPORTS_MODERATE)
 from services.county_lookup import county_for_point
 from services.discord_notifier import notify_staff_alert
 from services.turnstile import verify_turnstile
@@ -822,7 +827,7 @@ async def upload_fire_report_document(
 
 
 @router.get("/api/admin/fires/reports/{event_id}/media/{media_id}")
-def admin_get_fire_report_media(event_id: int, media_id: int, _admin: str = Depends(require_admin)):
+def admin_get_fire_report_media(event_id: int, media_id: int, _admin: str = Depends(REPORTS_VIEW)):
     """Serve report media only to authenticated administrators."""
     event = get_fire_event(event_id, admin=True)
     item = next((row for row in (event or {}).get("media", []) if row["id"] == media_id), None)
@@ -1080,7 +1085,7 @@ def _format_confidence_factors(factors: dict) -> str:
 # map/popup shows anything as confirmed.
 
 @router.get("/api/admin/fires/incident-feedback")
-def admin_list_pending_incident_feedback(_admin: str = Depends(require_admin), limit: int = 100):
+def admin_list_pending_incident_feedback(_admin: str = Depends(REPORTS_VIEW), limit: int = 100):
     """Feedback awaiting review, most recent first, each with a heuristic
     confidence score to help triage (see services/feedback_confidence.py) -
     admin only. The score is advisory, not a decision."""
@@ -1100,7 +1105,7 @@ def _review_cause(label: Optional[str]) -> Optional[str]:
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/approve")
-def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(require_admin)):
+def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(REPORTS_MODERATE)):
     """Approve a feedback submission - if it's 'confirmed_fire', the incident
     becomes 'confirmed' on the public map immediately (admin only)."""
     feedback = set_fire_incident_feedback_status(feedback_id, "approved", reviewed_by=actor)
@@ -1117,7 +1122,7 @@ def admin_approve_incident_feedback(feedback_id: int, actor: str = Depends(requi
 
 
 @router.post("/api/admin/fires/incident-feedback/{feedback_id}/reject")
-def admin_reject_incident_feedback(feedback_id: int, actor: str = Depends(require_admin)):
+def admin_reject_incident_feedback(feedback_id: int, actor: str = Depends(REPORTS_MODERATE)):
     """Reject a feedback submission - excluded from 'confirmed' status and
     from the review queue, but kept for the audit trail (admin only)."""
     feedback = set_fire_incident_feedback_status(feedback_id, "rejected", reviewed_by=actor)
@@ -1133,7 +1138,7 @@ def admin_reject_incident_feedback(feedback_id: int, actor: str = Depends(requir
 
 @router.get("/api/admin/fires/reports")
 def admin_list_fire_reports(
-    _admin: str = Depends(require_admin),
+    _admin: str = Depends(REPORTS_VIEW),
     status: Optional[str] = "pending",
     source: Optional[str] = None,
     limit: int = 50,
@@ -1149,7 +1154,7 @@ def admin_list_fire_reports(
 
 
 @router.get("/api/admin/fires/reports/{event_id}")
-def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
+def admin_get_fire_report(event_id: int, _admin: str = Depends(REPORTS_VIEW)):
     """Fire report detail, including moderation history and contact info (admin only)"""
     event = get_fire_event(event_id, admin=True)
     if not event:
@@ -1163,7 +1168,7 @@ def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/feedback/analyze")
-def admin_analyze_incident_feedback(incident_id: int, _admin: str = Depends(require_admin)):
+def admin_analyze_incident_feedback(incident_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Have the AI read this incident's public feedback now (or again), replacing any earlier analysis. A reading
     aid only: feedback and the incident are not changed (admin only)."""
     from ai.feedback_analysis import analyze, get_analysis
@@ -1185,7 +1190,7 @@ _RESCAN_ERRORS = {
 
 
 @router.post("/api/admin/fires/reports/{event_id}/features/rescan")
-def admin_rescan_report_features(event_id: int, _admin: str = Depends(require_admin)):
+def admin_rescan_report_features(event_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Re-run the AI text extraction on one report now, replacing its stored features (admin only). The report's
     own text and moderation state are never touched."""
     from ai.report_features import extract_and_store
@@ -1201,7 +1206,7 @@ def admin_rescan_report_features(event_id: int, _admin: str = Depends(require_ad
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/features/rescan")
-def admin_rescan_incident_features(incident_id: int, _admin: str = Depends(require_admin)):
+def admin_rescan_incident_features(incident_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Re-run the AI text extraction on every report and OSINT lead in an incident (not satellite pixels, which
     have no text). Returns how many of each outcome, so the UI can say what happened (admin only)."""
     from ai.report_features import extract_and_store
@@ -1217,7 +1222,7 @@ def admin_rescan_incident_features(incident_id: int, _admin: str = Depends(requi
 
 
 @router.post("/api/admin/fires/reports/{event_id}/clef")
-def admin_ask_clef_about_report(event_id: int, _admin: str = Depends(require_admin)):
+def admin_ask_clef_about_report(event_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Ask Clef about one public report now (or again), replacing any earlier answers. Works even while the
     automatic assessments (CLEF_ENABLED) are off, as long as the server has AI credentials. Advisory: the report is
     not changed (admin only)."""
@@ -1234,7 +1239,7 @@ def admin_ask_clef_about_report(event_id: int, _admin: str = Depends(require_adm
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/clef")
-def admin_ask_clef_about_incident(incident_id: int, _admin: str = Depends(require_admin)):
+def admin_ask_clef_about_incident(incident_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Ask Clef about every public report in an incident (OSINT leads and satellite pixels are not assessed).
     Returns how many of each outcome so the UI can say what happened (admin only)."""
     from ai.clef_tasks import assess_fire_report, assess_incident
@@ -1294,14 +1299,14 @@ def _area_settings_payload(values: Dict[str, float]) -> Dict:
 
 
 @router.get("/api/admin/fires/areas/settings")
-def admin_get_area_settings(_admin: str = Depends(require_admin)):
+def admin_get_area_settings(_admin: str = Depends(REPORTS_VIEW)):
     """Current area-review controls with defaults and allowed ranges (admin only)."""
     from services.incident_area_review import get_settings
     return _area_settings_payload(get_settings())
 
 
 @router.put("/api/admin/fires/areas/settings")
-def admin_update_area_settings(payload: AreaReviewSettings, actor: str = Depends(require_admin)):
+def admin_update_area_settings(payload: AreaReviewSettings, actor: str = Depends(REPORTS_MODERATE)):
     """Change area-review controls; takes effect immediately, no restart (admin only)."""
     from services.incident_area_review import save_settings
     try:
@@ -1311,7 +1316,7 @@ def admin_update_area_settings(payload: AreaReviewSettings, actor: str = Depends
 
 
 @router.delete("/api/admin/fires/areas/settings")
-def admin_reset_area_settings(_actor: str = Depends(require_admin)):
+def admin_reset_area_settings(_actor: str = Depends(REPORTS_MODERATE)):
     """Restore every area-review control to its default (admin only)."""
     from services.incident_area_review import reset_settings
     return _area_settings_payload(reset_settings())
@@ -1324,7 +1329,7 @@ class AreaPairLabel(BaseModel):
 
 
 @router.post("/api/admin/fires/areas/pairs")
-def admin_label_incident_pair(payload: AreaPairLabel, actor: str = Depends(require_admin)):
+def admin_label_incident_pair(payload: AreaPairLabel, actor: str = Depends(REPORTS_MODERATE)):
     """Record "these two incidents are the same fire / different fires" - the
     training signal for the area-review weights (admin only). Does not merge anything."""
     from services.incident_area_review import record_pair_label
@@ -1338,14 +1343,14 @@ def admin_label_incident_pair(payload: AreaPairLabel, actor: str = Depends(requi
 
 
 @router.get("/api/admin/fires/areas/fit")
-def admin_fit_area_weights(_admin: str = Depends(require_admin)):
+def admin_fit_area_weights(_admin: str = Depends(REPORTS_VIEW)):
     """Suggest settings fitted to the labelled pairs; saves nothing (admin only)."""
     from services.incident_area_review import fit_weights
     return {"success": True, **fit_weights()}
 
 
 @router.get("/api/admin/fires/areas/event/{event_id}")
-def admin_get_area_for_event(event_id: int, radius_km: Optional[float] = None, _admin: str = Depends(require_admin)):
+def admin_get_area_for_event(event_id: int, radius_km: Optional[float] = None, _admin: str = Depends(REPORTS_VIEW)):
     """Every incident around the one this report belongs to, each member
     labelled {incident_id}_{NN}, plus nearby reports with no incident yet
     (admin only)."""
@@ -1361,7 +1366,7 @@ def admin_get_area_for_event(event_id: int, radius_km: Optional[float] = None, _
 
 
 @router.get("/api/admin/fires/areas/incident/{incident_id}")
-def admin_get_area_for_incident(incident_id: int, radius_km: Optional[float] = None, _admin: str = Depends(require_admin)):
+def admin_get_area_for_incident(incident_id: int, radius_km: Optional[float] = None, _admin: str = Depends(REPORTS_VIEW)):
     """Same as the event form, seeded from an incident (admin only)."""
     from services.incident_area_review import build_area
 
@@ -1372,7 +1377,7 @@ def admin_get_area_for_incident(incident_id: int, radius_km: Optional[float] = N
 
 
 @router.post("/api/admin/fires/reports/{event_id}/approve")
-def admin_approve_fire_report(event_id: int, payload: FireReportModeration, actor: str = Depends(require_admin)):
+def admin_approve_fire_report(event_id: int, payload: FireReportModeration, actor: str = Depends(REPORTS_MODERATE)):
     """Approve a pending fire report and assign its verification tier (admin only)"""
     result = set_fire_event_status(
         event_id, to_status="approved", actor=actor,
@@ -1388,7 +1393,7 @@ def admin_approve_fire_report(event_id: int, payload: FireReportModeration, acto
 
 
 @router.post("/api/admin/fires/reports/{event_id}/reject")
-def admin_reject_fire_report(event_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
+def admin_reject_fire_report(event_id: int, payload: FireReportRejection, actor: str = Depends(REPORTS_MODERATE)):
     """Reject a pending fire report (admin only)"""
     result = set_fire_event_status(event_id, to_status="rejected", actor=actor, reason=payload.reason)
     if result is None:
@@ -1399,7 +1404,7 @@ def admin_reject_fire_report(event_id: int, payload: FireReportRejection, actor:
 
 
 @router.put("/api/admin/fires/events/{event_id}")
-def admin_update_fire_event(event_id: int, payload: FireEventUpdate, actor: str = Depends(require_admin)):
+def admin_update_fire_event(event_id: int, payload: FireEventUpdate, actor: str = Depends(REPORTS_MODERATE)):
     """Edit a fire event; every edit requires a reason (admin only)"""
     fields = payload.model_dump(exclude={"edit_reason"}, exclude_none=True)
     event = update_fire_event(event_id, actor=actor, edit_reason=payload.edit_reason, **fields)
@@ -1409,7 +1414,7 @@ def admin_update_fire_event(event_id: int, payload: FireEventUpdate, actor: str 
 
 
 @router.delete("/api/admin/fires/events/{event_id}")
-def admin_delete_fire_event(event_id: int, actor: str = Depends(require_admin), reason: str = ""):
+def admin_delete_fire_event(event_id: int, actor: str = Depends(REPORTS_MODERATE), reason: str = ""):
     """Soft-delete a fire event; moderation history is retained (admin only)"""
     deleted = delete_fire_event(event_id, actor=actor, reason=reason)
     if not deleted:
@@ -1418,7 +1423,7 @@ def admin_delete_fire_event(event_id: int, actor: str = Depends(require_admin), 
 
 
 @router.get("/api/admin/fires/labels")
-def admin_export_fire_labels(_admin: str = Depends(require_admin), min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
+def admin_export_fire_labels(_admin: str = Depends(REPORTS_VIEW), min_tier: str = "admin_reviewed", since: Optional[str] = None, until: Optional[str] = None):
     """Fire events eligible as model training labels (admin only)"""
     if min_tier not in VERIFICATION_TIERS:
         raise HTTPException(status_code=400, detail=f"min_tier must be one of {VERIFICATION_TIERS}")
@@ -1432,7 +1437,7 @@ def admin_export_fire_labels(_admin: str = Depends(require_admin), min_tier: str
 
 
 @router.get("/api/admin/fires/origins")
-def admin_fire_origin_log(_admin: str = Depends(require_admin), days: int = 7, runs: int = 20):
+def admin_fire_origin_log(_admin: str = Depends(REPORTS_VIEW), days: int = 7, runs: int = 20):
     """Where detections and reports come from: counts per kind and feed (events, arrivals, newest arrival), plus
     the latest batch ingest runs with what was read, kept and skipped and why (admin only)."""
     from core.database import fire_origin_summary
@@ -1441,7 +1446,7 @@ def admin_fire_origin_log(_admin: str = Depends(require_admin), days: int = 7, r
 
 
 @router.post("/api/admin/fires/blocklist")
-def admin_add_to_blocklist(payload: BlocklistCreate, actor: str = Depends(require_admin)):
+def admin_add_to_blocklist(payload: BlocklistCreate, actor: str = Depends(REPORTS_MODERATE)):
     """Block an IP hash from submitting further reports (admin only)"""
     add_ip_to_blocklist(payload.ip_hash, payload.reason, actor)
     return {"success": True}
@@ -1484,7 +1489,7 @@ def list_public_fire_incident_shapes_geojson(response: Response, since: Optional
 
 @router.get("/api/admin/fires/detections.geojson")
 def admin_list_fire_detections_geojson(
-    _admin: str = Depends(require_admin),
+    _admin: str = Depends(REPORTS_VIEW),
     source: str = "modis,viirs,ngfs",
     since: Optional[str] = None,
     limit: int = 500,
@@ -1523,7 +1528,7 @@ def admin_list_fire_detections_geojson(
 
 @router.get("/api/admin/fires/incidents")
 def admin_list_fire_incidents(
-    _admin: str = Depends(require_admin),
+    _admin: str = Depends(REPORTS_VIEW),
     since: Optional[str] = None,
     until: Optional[str] = None,
     source: Optional[str] = None,
@@ -1547,7 +1552,7 @@ def admin_list_fire_incidents(
 def admin_refresh_fire_incident_graphics(
     incident_id: Optional[int] = None,
     force: bool = True,
-    _admin: str = Depends(require_admin),
+    _admin: str = Depends(REPORTS_MODERATE),
 ):
     """Regenerate incident PNG cards on demand (admin only)."""
     from services.fire_incident_graphics import refresh_incident_graphics
@@ -1558,7 +1563,7 @@ def admin_refresh_fire_incident_graphics(
 
 
 @router.post("/api/admin/fires/incidents/reanalyze")
-def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: str = Depends(require_admin)):
+def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: str = Depends(REPORTS_MODERATE)):
     """Re-run confidence scoring and regenerate graphics after data changes."""
     from services.fire_confidence import refresh_confidence_shapes
     from services.fire_incident_graphics import refresh_incident_graphics
@@ -1568,7 +1573,7 @@ def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: st
 
 
 @router.get("/api/admin/fires/incidents/review-state")
-def admin_incident_review_state(response: Response, limit: int = 500, _admin: str = Depends(require_admin)):
+def admin_incident_review_state(response: Response, limit: int = 500, _admin: str = Depends(REPORTS_VIEW)):
     """Live review state of every listed incident (decision, label, pending and feedback counts), never cached.
     The review workspace merges this over its incident list so a click shows up at once (admin only)."""
     response.headers["Cache-Control"] = "no-store"
@@ -1577,7 +1582,7 @@ def admin_incident_review_state(response: Response, limit: int = 500, _admin: st
 
 
 @router.get("/api/admin/fires/incidents/pending-queue")
-def admin_list_pending_incident_queue(_admin: str = Depends(require_admin), limit: int = 100, has_additional_info: Optional[bool] = None):
+def admin_list_pending_incident_queue(_admin: str = Depends(REPORTS_VIEW), limit: int = 100, has_additional_info: Optional[bool] = None):
     """Grouped moderation queue: every incident with at least one pending
     member, with a live per-status member breakdown and an incident_confidence
     reading (when FIRE_INCIDENT_CONFIDENCE_VERSION=v2) - lets a moderator
@@ -1608,7 +1613,7 @@ def admin_list_pending_incident_queue(_admin: str = Depends(require_admin), limi
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/approve-all")
-def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, actor: str = Depends(require_admin)):
+def admin_approve_all_incident_reports(incident_id: int, payload: FireReportModeration, actor: str = Depends(REPORTS_MODERATE)):
     """Approve every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
     result = set_incident_review_decision(
         incident_id, "approved", actor, reason="admin_bulk_action",
@@ -1620,14 +1625,14 @@ def admin_approve_all_incident_reports(incident_id: int, payload: FireReportMode
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/reject-all")
-def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
+def admin_reject_all_incident_reports(incident_id: int, payload: FireReportRejection, actor: str = Depends(REPORTS_MODERATE)):
     """Reject every currently-pending member of this incident at once, and every detection that joins it later (admin only)."""
     result = set_incident_review_decision(incident_id, "rejected", actor, reason="admin_bulk_action", note=payload.reason)
     return {"success": True, **result}
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/not-a-fire")
-def admin_mark_incident_not_a_fire(incident_id: int, actor: str = Depends(require_admin)):
+def admin_mark_incident_not_a_fire(incident_id: int, actor: str = Depends(REPORTS_MODERATE)):
     """One-click 'not a fire': labels the detections as such (a negative example for the confidence models), rejects the
     incident so it leaves the queue and the public map, and deletes it for good after 7 days (admin only)."""
     from services.fire_labeling import apply_feedback_label
@@ -1636,12 +1641,12 @@ def admin_mark_incident_not_a_fire(incident_id: int, actor: str = Depends(requir
         raise HTTPException(status_code=404, detail="Fire incident not found")
     apply_feedback_label(incident_id, "not_a_fire", reviewed_by=actor)
     decision = set_incident_review_decision(incident_id, "rejected", actor, reason="not_a_fire")
-    due = schedule_incident_deletion(incident_id, days=7)
+    due = schedule_incident_deletion(incident_id, days=7, actor=actor)
     return {"success": True, "incident_decision": decision, "delete_after": due}
 
 
 @router.post("/api/admin/fires/incidents/{incident_id}/delete")
-def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, actor: str = Depends(require_admin)):
+def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, actor: str = Depends(REPORTS_MODERATE)):
     """Delete this whole incident and every one of its member detections in
     one action (soft delete - audit trail retained on each event and on the
     incident) - the easy 'this cluster is bogus' button (admin only)."""
@@ -1652,7 +1657,7 @@ def admin_delete_fire_incident(incident_id: int, payload: FireReportRejection, a
 
 
 @router.get("/api/admin/fires/incidents/{incident_id}")
-def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admin)):
+def admin_get_fire_incident(incident_id: int, _admin: str = Depends(REPORTS_VIEW)):
     """Incident detail, including every member detection for map plotting (admin only)"""
     incident = get_fire_incident(incident_id)
     if not incident:
@@ -1687,14 +1692,14 @@ def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admi
 # upsert_detection_event) - never automatic.
 
 @router.get("/api/admin/fires/recurring-sources")
-def admin_list_recurring_sources(status: Optional[str] = None, _admin: str = Depends(require_admin)):
+def admin_list_recurring_sources(status: Optional[str] = None, _admin: str = Depends(REPORTS_VIEW)):
     """List recurring non-fire source candidates/confirmed/dismissed rows (admin only)"""
     sources = list_recurring_sources(status=status)
     return {"success": True, "sources": sources, "count": len(sources)}
 
 
 @router.post("/api/admin/fires/recurring-sources/{source_id}/confirm")
-def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfirmation, actor: str = Depends(require_admin)):
+def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfirmation, actor: str = Depends(REPORTS_MODERATE)):
     """Confirm a candidate as a real non-fire source - from this point new
     detections within its radius are suppressed from incident clustering,
     ML confidence scoring, and graphics regeneration (admin only)."""
@@ -1705,7 +1710,7 @@ def admin_confirm_recurring_source(source_id: int, payload: RecurringSourceConfi
 
 
 @router.post("/api/admin/fires/recurring-sources/{source_id}/dismiss")
-def admin_dismiss_recurring_source(source_id: int, actor: str = Depends(require_admin)):
+def admin_dismiss_recurring_source(source_id: int, actor: str = Depends(REPORTS_MODERATE)):
     """Dismiss a candidate - staff reviewed it and it's not actually a
     persistent non-fire source (e.g. a real recurring wildfire-prone area).
     The detector will keep refreshing its stats but won't change its status (admin only)."""
@@ -1723,26 +1728,26 @@ def admin_dismiss_recurring_source(source_id: int, actor: str = Depends(require_
 # (core.database.upsert_detection_event) the moment it's created.
 
 @router.get("/api/admin/fires/exclusion-zones")
-def admin_list_exclusion_zones(status: Optional[str] = "active", _admin: str = Depends(require_admin)):
+def admin_list_exclusion_zones(status: Optional[str] = "active", _admin: str = Depends(REPORTS_VIEW)):
     """List exclusion zones (admin only). Defaults to active zones; pass status=None (empty) for all."""
     zones = list_fire_exclusion_zones(status=status or None)
     return {"success": True, "zones": zones, "count": len(zones)}
 
 
 @router.post("/api/admin/fires/exclusion-zones")
-def admin_create_exclusion_zone(payload: ExclusionZoneCreate, actor: str = Depends(require_admin)):
+def admin_create_exclusion_zone(payload: ExclusionZoneCreate, actor: str = Depends(REPORTS_MODERATE)):
     """Create a new exclusion zone and immediately hide any existing active
     incidents whose centroid falls inside it (admin only)."""
     geometry_geojson = json.dumps(payload.geometry)
     zone = create_fire_exclusion_zone(payload.name, geometry_geojson, created_by=actor, notes=payload.notes)
     hidden_incidents = list_fire_incidents_in_geometry(geometry_geojson)
     for incident in hidden_incidents:
-        delete_fire_incident(incident["id"], reason=f"inside exclusion zone {zone['id']}")
+        delete_fire_incident(incident["id"], reason=f"inside exclusion zone {zone['id']}", actor=actor)
     return {"success": True, "zone": zone, "hidden_incident_count": len(hidden_incidents)}
 
 
 @router.delete("/api/admin/fires/exclusion-zones/{zone_id}")
-def admin_delete_exclusion_zone(zone_id: int, _admin: str = Depends(require_admin)):
+def admin_delete_exclusion_zone(zone_id: int, _admin: str = Depends(REPORTS_MODERATE)):
     """Soft-delete a zone - stops it suppressing new detections. Does not
     restore any incidents it previously hid (admin only)."""
     zone = set_fire_exclusion_zone_status(zone_id, "deleted")

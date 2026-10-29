@@ -151,6 +151,8 @@ class RescanEndpointTests(StoreTests):
         app = FastAPI()
         app.include_router(fires.router)
         app.dependency_overrides[require_admin] = lambda: "admin"
+        for dependency in (fires.REPORTS_VIEW, fires.REPORTS_MODERATE):  # the routes check these (permissions.py), not require_admin
+            app.dependency_overrides[dependency] = lambda: "admin"
         self.client = TestClient(app)
         patcher = patch.object(rf, "CloudflareAIClient", lambda: FakeClient(GOOD))
         patcher.start()
@@ -193,6 +195,8 @@ class ReviewActionsDoNotPingDiscordTests(StoreTests):
         app = FastAPI()
         app.include_router(fires.router)
         app.dependency_overrides[require_admin] = lambda: "admin"
+        for dependency in (fires.REPORTS_VIEW, fires.REPORTS_MODERATE):  # the routes check these (permissions.py), not require_admin
+            app.dependency_overrides[dependency] = lambda: "admin"
         http = TestClient(app)
         with sqlite3.connect(self.db) as conn:
             incident = conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "
@@ -216,6 +220,8 @@ class ReviewStateEndpointTests(StoreTests):
         app = FastAPI()
         app.include_router(fires.router)
         app.dependency_overrides[require_admin] = lambda: "admin"
+        for dependency in (fires.REPORTS_VIEW, fires.REPORTS_MODERATE):  # the routes check these (permissions.py), not require_admin
+            app.dependency_overrides[dependency] = lambda: "admin"
         http = TestClient(app)
         with sqlite3.connect(self.db) as conn:
             incident = conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "

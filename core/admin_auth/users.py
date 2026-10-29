@@ -13,13 +13,35 @@ from . import db
 
 # Every role signs in the same way. Today they all get the same access to the admin area; what each one may do beyond that is not
 # decided yet, and owners alone manage accounts. Use core.admin_auth.access.require_role to restrict an endpoint when that changes.
+# What each role may do is decided in core/admin_auth/permissions.py. The flags here describe the account itself:
+#   sandbox      the account only ever sees the synthetic reviewer sandbox, never real data (core/sandbox.py)
+#   mfa_exempt   may sign in without a second factor (only safe because sandbox accounts see nothing real)
+#   assignable   owners can pick it in the normal create-account form (reviewers have their own panel and an expiry)
 ROLE_INFO = {
     "owner": {"label": "Owner", "description": "Manages admin accounts."},
     "admin": {"label": "Admin", "description": "Staff who run the site."},
     "staff": {"label": "Staff", "description": "Show Me Fire staff."},
-    "partner": {"label": "Partner", "description": "Partner organizations."},
+    "partner": {"label": "Partner", "description": "Partner organizations: can look, not change."},
+    "reviewer": {"label": "App reviewer", "description": "App-store reviewer: demo data only.",
+                 "sandbox": True, "mfa_exempt": True, "assignable": False},
 }
 ROLES = tuple(ROLE_INFO)
+
+
+def role_flag(role: str, flag: str, default: bool = False) -> bool:
+    return bool(ROLE_INFO.get(role, {}).get(flag, default))
+
+
+def is_sandbox_role(role: str) -> bool:
+    return role_flag(role, "sandbox")
+
+
+def is_mfa_exempt(role: str) -> bool:
+    return role_flag(role, "mfa_exempt")
+
+
+def is_expired(user: dict) -> bool:
+    return bool(user.get("expires_at")) and user["expires_at"] <= time.time()
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _dummy_hash: Optional[str] = None
 
@@ -76,15 +98,22 @@ def list_users() -> list[dict]:
         return [_public(row) for row in conn.execute("SELECT * FROM admin_users ORDER BY id").fetchall()]
 
 
-def authenticate(email: str, password: str) -> Optional[dict]:
-    """The account for this email and password, or None. Always spends one password verification."""
+def authenticate(email: str, password: str, client: str = "web") -> Optional[dict]:
+    """The account for this email and password, or None. Always spends one password verification.
+
+    Sandbox accounts (app reviewers) only sign in through the app (client="mobile"): the website answers exactly as it
+    does for a wrong password. Expired accounts never sign in."""
     user = get_by_email(email)
     stored = user["password_hash"] if user else dummy_hash()
     try:
         matched = security.verify_password(password, stored)
     except Exception:  # a malformed stored hash must read as "wrong password", not a 500
         matched = False
-    return user if (user and matched and not user["disabled_at"]) else None
+    if not (user and matched and not user["disabled_at"]) or is_expired(user):
+        return None
+    if is_sandbox_role(user["role"]) and client != "mobile":
+        return None
+    return user
 
 
 def verify_password_for(user: dict, password: str) -> bool:
@@ -101,18 +130,34 @@ def _check_email(email: str) -> str:
     return cleaned
 
 
-def create_user(email: str, display_name: str, role: str, password: str, must_change: bool = True) -> dict:
+def create_user(email: str, display_name: str, role: str, password: str, must_change: bool = True,
+                *, expires_at: Optional[float] = None, note: str = "", created_by: str = "") -> dict:
     cleaned = _check_email(email)
     if role not in ROLES:
         raise AccountError("Unknown role.")
+    if is_sandbox_role(role) and not expires_at:
+        raise AccountError("Reviewer accounts need an expiry date.")
+    if expires_at and not is_sandbox_role(role):
+        raise AccountError("Only reviewer accounts can expire.")
     with db.tx() as conn:
         if conn.execute("SELECT 1 FROM admin_users WHERE email = ?", (cleaned,)).fetchone():
             raise AccountError("An account with that email already exists.")
         cursor = conn.execute(
-            "INSERT INTO admin_users (email, display_name, password_hash, role, must_change_password, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (cleaned, display_name.strip()[:80], security.hash_password(password), role, 1 if must_change else 0, time.time()),
+            """INSERT INTO admin_users (email, display_name, password_hash, role, must_change_password, created_at, expires_at, note, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cleaned, display_name.strip()[:80], security.hash_password(password), role, 1 if must_change else 0, time.time(),
+             expires_at, note.strip()[:300], created_by[:254]),
         )
         return _public(conn.execute("SELECT * FROM admin_users WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+def set_expiry(admin_id: int, expires_at: float) -> None:
+    """Change when a reviewer account stops working. Only reviewer accounts expire."""
+    with db.tx() as conn:
+        row = conn.execute("SELECT role FROM admin_users WHERE id = ?", (admin_id,)).fetchone()
+        if row is None or not is_sandbox_role(row["role"]):
+            raise AccountError("Only reviewer accounts can expire.")
+        conn.execute("UPDATE admin_users SET expires_at = ? WHERE id = ?", (expires_at, admin_id))
 
 
 def set_password(admin_id: int, password: str, must_change: bool = False) -> None:
@@ -149,6 +194,10 @@ def set_role(admin_id: int, role: str) -> None:
     if role not in ROLES:
         raise AccountError("Unknown role.")
     with db.tx() as conn:
+        current = conn.execute("SELECT role FROM admin_users WHERE id = ?", (admin_id,)).fetchone()
+        if is_sandbox_role(role) != (current is not None and is_sandbox_role(current["role"])):
+            # Turning a real account into a reviewer (or the reverse) would change what data it can see.
+            raise AccountError("Reviewer accounts are managed from the Reviewer accounts panel.")
         if role != "owner" and _active_owner_count(conn, excluding=admin_id) == 0:
             raise AccountError("There must always be at least one active owner.")
         conn.execute("UPDATE admin_users SET role = ? WHERE id = ?", (role, admin_id))
@@ -180,4 +229,7 @@ def public_view(user: dict) -> dict:
         "must_change_password": bool(user["must_change_password"]),
         "created_at": user["created_at"],
         "last_login_at": user["last_login_at"],
+        "sandbox": is_sandbox_role(user["role"]),
+        "expires_at": user.get("expires_at"),
+        "note": user.get("note") or "",
     }

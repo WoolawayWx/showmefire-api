@@ -113,6 +113,8 @@ class AnalyzeEndpointTests(FeedbackAnalysisTests):
         app = FastAPI()
         app.include_router(fires.router)
         app.dependency_overrides[require_admin] = lambda: "admin"
+        for dependency in (fires.REPORTS_VIEW, fires.REPORTS_MODERATE):  # the routes check these (permissions.py), not require_admin
+            app.dependency_overrides[dependency] = lambda: "admin"
         self.http = TestClient(app)
         patcher = patch.object(fa, "CloudflareAIClient", lambda: FakeClient(GOOD))
         patcher.start()

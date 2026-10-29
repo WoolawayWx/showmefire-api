@@ -25,6 +25,7 @@ import httpx
 
 from ai.cloudflare import CloudflareAIError
 from core.database import get_db_path
+from core.sandbox import is_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class ClefClient:
     def run(self, state: Any, questions: Mapping[str, Any], images: Sequence[Mapping[str, Any]] = ()) -> Dict[str, Any]:
         """The raw reply: {"model", "answers", "usage"}. Raises CloudflareAIError. `images` are
         {"content_type", "base64"} dicts, already checked by `prepare_images`."""
+        if is_sandbox():  # reviewer sandbox: no outside calls
+            raise CloudflareAIError("Clef is switched off in the reviewer sandbox")
         if not self.configured:
             raise CloudflareAIError("Clef is not configured (CLOUDFLARE_AI_API_KEY and an account id are needed)")
         body: Dict[str, Any] = {"model": self.model, "state": state, "questions": dict(questions)}

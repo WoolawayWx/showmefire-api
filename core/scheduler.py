@@ -656,6 +656,15 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
+    # Staff push (services/staff_push.py) and the reviewer sandbox (core/sandbox_data.py) have their own jobs, apart from
+    # the public push ones above. Each is a no-op while its feature is switched off.
+    from services import staff_push as staff_push_service
+    from core import sandbox_data
+    scheduler.add_job(staff_push_service.check_receipts, 'interval', minutes=15, id='check_staff_push_receipts', max_instances=1, coalesce=True)
+    scheduler.add_job(staff_push_service.purge, 'cron', hour=2, minute=45, id='purge_staff_push_records', max_instances=1, coalesce=True)
+    scheduler.add_job(sandbox_data.reset_if_idle, 'interval', minutes=10, id='reset_idle_reviewer_sandbox', max_instances=1, coalesce=True)
+    from core.admin_auth import events as admin_auth_events
+    scheduler.add_job(admin_auth_events.purge_old_records, 'cron', hour=3, minute=10, id='purge_admin_auth_records', max_instances=1, coalesce=True)
     # Off by default: uploads a no-PII training export to R2 (services/detection_r2.py) for the training machine to pull.
     if os.getenv("SMF_DETECTION_R2_PUBLISH", "false").lower() == "true":
         from services.detection_r2 import publish_job as publish_detection_training_export

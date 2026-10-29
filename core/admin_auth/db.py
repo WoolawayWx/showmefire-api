@@ -80,14 +80,32 @@ SCHEMA = [
        )""",
 ]
 
+# Columns added after the first release. The CREATE TABLE statements above are IF NOT EXISTS, so an existing database
+# gets these through ALTER TABLE the first time it is opened.
+MIGRATIONS = (
+    ("admin_users", "expires_at", "REAL"),                  # reviewer accounts stop working at this time
+    ("admin_users", "note", "TEXT NOT NULL DEFAULT ''"),    # who a reviewer account was made for
+    ("admin_users", "created_by", "TEXT"),
+    ("admin_sessions", "prev_refresh_hash", "TEXT"),        # mobile refresh rotation: the token just replaced
+    ("admin_sessions", "rotated_at", "REAL"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, declaration in MIGRATIONS:
+        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 _ready: set[str] = set()
 _ready_lock = threading.Lock()
 
 
 def _path() -> str:
-    from core.database import get_db_path
+    # Accounts and sessions describe real people: always the real database, even inside a sandbox scope.
+    from core.database import real_db_path
 
-    return str(get_db_path())
+    return str(real_db_path())
 
 
 @contextmanager
@@ -102,6 +120,7 @@ def tx() -> Iterator[sqlite3.Connection]:
                 if path not in _ready:
                     for statement in SCHEMA:
                         conn.execute(statement)
+                    _migrate(conn)
                     conn.commit()
                     _ready.add(path)
         yield conn
