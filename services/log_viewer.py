@@ -372,6 +372,10 @@ def _humanize(job_id: str) -> str:
 JOB_DESCRIPTIONS: Dict[str, str] = {
     "archive_stale_ngfs_detections": "Zips and uploads raw NGFS detection captures that have aged out of the 7-day window.",
     "check_mobile_push_receipts": "Checks Expo push receipts and removes tokens for uninstalled apps.",
+    "check_staff_push_receipts": "Checks Expo receipts for staff-app alerts and removes phones that no longer have the app.",
+    "purge_staff_push_records": "Deletes staff-app push send records older than a week.",
+    "purge_admin_auth_records": "Deletes ended admin sign-in sessions after 90 days and sign-in events after a year (they hold IP addresses).",
+    "reset_idle_reviewer_sandbox": "Resets the app-store reviewer sandbox to its demo data once nobody has used it for 30 minutes.",
     "daily_day_archive": "Builds and uploads the previous day's archive bundle.",
     "daily_map_archive": "Archives the previous day's published maps.",
     "end_of_day_archive": "Groups the day's HRRR cache, forecasts and raw data into dated archive zips.",

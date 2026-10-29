@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from core.database import get_db_path
+from core.sandbox import is_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,8 @@ def _headers() -> dict[str, str]:
 
 
 def _send_batch(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if is_sandbox():  # reviewer sandbox: no push leaves the server
+        return []
     for attempt in range(3):
         try:
             with httpx.Client(timeout=10.0) as client:
@@ -269,6 +272,8 @@ def send_mobile_event(
     image_url: str | None = None,
     all_counties: bool = False,
 ) -> int:
+    if is_sandbox():  # reviewer sandbox: nothing is recorded or sent
+        return 0
     payload = {"title": title, "body": body, "url": url, **(extra_data or {})}
     if image_url:
         payload["imageUrl"] = image_url

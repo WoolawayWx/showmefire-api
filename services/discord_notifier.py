@@ -11,6 +11,7 @@ from urllib import request, error
 from dotenv import load_dotenv
 
 from core.database import get_discord_admin_settings
+from core.sandbox import is_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ def _get_event_routing(event_type: str) -> dict[str, Any]:
 
 
 def _send_event(payload: Dict[str, Any]) -> bool:
+    if is_sandbox():  # reviewer sandbox: nothing a reviewer does may reach Discord
+        return False
     try:
         settings = get_discord_admin_settings()
     except Exception:
@@ -282,6 +285,16 @@ def build_staff_alert_payload(
 def notify_staff_alert(*, background: bool = True, **kwargs: Any) -> bool:
     """Ping staff on Discord. Never raises; by default sends off-thread so the
     public request that triggered it doesn't wait on the bot."""
+    if is_sandbox():  # checked here, in the calling thread: a new thread would not inherit the sandbox scope
+        return False
+    # Staff push goes first and on its own: it does not wait for Discord, does not depend on a Discord channel being set
+    # up, and nothing it does can stop the Discord alert below (its own try/except, its own thread).
+    try:
+        from services import staff_push
+
+        staff_push.dispatch(kwargs)
+    except Exception:  # noqa: BLE001
+        logger.warning("Staff push could not be started", exc_info=True)
     try:
         payload = build_staff_alert_payload(**kwargs)
     except Exception as exc:

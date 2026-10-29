@@ -50,6 +50,7 @@ from core.database import (
     set_burn_ban_proof_file,
     update_burn_ban_submission,
 )
+from core.admin_auth.permissions import authorize, requires
 from core.security import SECRET_KEY, require_admin
 from services.discord_notifier import notify_staff_alert
 from services.mobile_content import county_catalog
@@ -183,6 +184,10 @@ def _matches_file_signature(content_type: str, content: bytes) -> bool:
 
 
 def _maybe_regenerate_map() -> None:
+    from core.sandbox import is_sandbox
+
+    if is_sandbox():  # reviewer sandbox: the public map (and its CDN copy) must never change
+        return
     try:
         from services.burn_ban_map import generate_burn_ban_map
         generate_burn_ban_map()
@@ -807,13 +812,14 @@ async def upload_burn_ban_proof(
 
 
 @router.get("/api/admin/burn-bans")
+@requires("burnbans.view")
 def admin_list_burn_bans(
     token: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    require_admin(token)
+    authorize(token, "burnbans.view")
     if status and status not in STATUSES:
         raise HTTPException(status_code=400, detail=f"unknown status: {status!r}")
     items = list_burn_ban_submissions(status=status, limit=limit, offset=offset, admin=True)
@@ -821,8 +827,9 @@ def admin_list_burn_bans(
 
 
 @router.post("/api/admin/burn-bans", status_code=201)
+@requires("burnbans.moderate")
 def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = None):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     result = _publish_admin_ban(
         actor=actor,
         county_fips=payload.county_fips,
@@ -841,13 +848,14 @@ def admin_create_burn_ban(payload: BurnBanAdminCreate, token: Optional[str] = No
 
 
 @router.post("/api/admin/burn-bans/bulk")
+@requires("burnbans.moderate")
 def admin_bulk_burn_bans(payload: BurnBanBulkRequest, token: Optional[str] = None):
     """Apply several add/update/remove changes at once.
 
     Every row is checked before anything is written; if any row is invalid the
     whole batch is rejected with per-row errors so the admin can fix and resend.
     """
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     current = _current_bans_by_county()
     counties = _known_county_fips()
     now_iso = _now_iso()
@@ -930,9 +938,10 @@ def admin_bulk_burn_bans(payload: BurnBanBulkRequest, token: Optional[str] = Non
 
 
 @router.get("/api/admin/burn-bans/current")
+@requires("burnbans.view")
 def admin_current_burn_bans(token: Optional[str] = None):
     """Confirmed bans (in effect or scheduled), one per county, for the bulk editor."""
-    require_admin(token)
+    authorize(token, "burnbans.view")
     current = _current_bans_by_county()
     return {
         "success": True,
@@ -941,13 +950,14 @@ def admin_current_burn_bans(token: Optional[str] = None):
 
 
 @router.get("/api/admin/burn-bans/history")
+@requires("burnbans.view")
 def admin_burn_ban_history(
     token: Optional[str] = None,
     county_fips: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
 ):
-    require_admin(token)
+    authorize(token, "burnbans.view")
     events = list_burn_ban_county_events(
         county_fips=county_fips, limit=limit, offset=offset, admin=True,
     )
@@ -955,8 +965,9 @@ def admin_burn_ban_history(
 
 
 @router.get("/api/admin/burn-bans/map")
+@requires("burnbans.view")
 def admin_get_burn_ban_map(token: Optional[str] = None):
-    require_admin(token)
+    authorize(token, "burnbans.view")
     from services.burn_ban_map import burn_ban_map_public_meta
     meta = burn_ban_map_public_meta()
     active = list_active_burn_bans()
@@ -968,8 +979,9 @@ def admin_get_burn_ban_map(token: Optional[str] = None):
 
 
 @router.post("/api/admin/burn-bans/map/regenerate")
+@requires("burnbans.moderate")
 def admin_regenerate_burn_ban_map(token: Optional[str] = None):
-    require_admin(token)
+    authorize(token, "burnbans.moderate")
     from services.burn_ban_map import generate_burn_ban_map
     result = generate_burn_ban_map()
     return {
@@ -984,8 +996,9 @@ def admin_regenerate_burn_ban_map(token: Optional[str] = None):
 
 
 @router.get("/api/admin/burn-bans/{submission_id}")
+@requires("burnbans.view")
 def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
-    require_admin(token)
+    authorize(token, "burnbans.view")
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -995,8 +1008,9 @@ def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
 
 
 @router.get("/api/admin/burn-bans/{submission_id}/proof")
+@requires("burnbans.view")
 def admin_get_burn_ban_proof(submission_id: int, token: Optional[str] = None):
-    require_admin(token)
+    authorize(token, "burnbans.view")
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1014,12 +1028,13 @@ def admin_get_burn_ban_proof(submission_id: int, token: Optional[str] = None):
 
 
 @router.put("/api/admin/burn-bans/{submission_id}/notes")
+@requires("burnbans.moderate")
 def admin_set_burn_ban_notes(
     submission_id: int,
     payload: BurnBanNotes,
     token: Optional[str] = None,
 ):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     result = set_burn_ban_notes(
         submission_id,
         actor=actor,
@@ -1032,12 +1047,13 @@ def admin_set_burn_ban_notes(
 
 
 @router.post("/api/admin/burn-bans/{submission_id}/confirm")
+@requires("burnbans.moderate")
 def admin_confirm_burn_ban(
     submission_id: int,
     payload: BurnBanModeration,
     token: Optional[str] = None,
 ):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1091,12 +1107,13 @@ def admin_confirm_burn_ban(
 
 
 @router.post("/api/admin/burn-bans/{submission_id}/deny")
+@requires("burnbans.moderate")
 def admin_deny_burn_ban(
     submission_id: int,
     payload: BurnBanRejection,
     token: Optional[str] = None,
 ):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     result = moderate_burn_ban_submission(
         submission_id,
         to_status="denied",
@@ -1111,12 +1128,13 @@ def admin_deny_burn_ban(
 
 
 @router.put("/api/admin/burn-bans/{submission_id}")
+@requires("burnbans.moderate")
 def admin_update_burn_ban(
     submission_id: int,
     payload: BurnBanUpdate,
     token: Optional[str] = None,
 ):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     county_name = None
     if payload.county_fips:
         county_name = _known_county_fips()[payload.county_fips]
@@ -1138,12 +1156,13 @@ def admin_update_burn_ban(
 
 
 @router.delete("/api/admin/burn-bans/{submission_id}")
+@requires("burnbans.moderate")
 def admin_delete_burn_ban(
     submission_id: int,
     token: Optional[str] = None,
     reason: str = "",
 ):
-    actor = require_admin(token)
+    actor = authorize(token, "burnbans.moderate")
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")

@@ -14,6 +14,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
+from core.sandbox import active_override as _sandbox_override
+
 logger = logging.getLogger(__name__)
 
 
@@ -941,6 +943,14 @@ def list_shadow_model_settings() -> Dict[str, Dict]:
 
 
 def get_db_path():
+    """The database the current code should use: the reviewer sandbox while a sandbox_scope() is open (core/sandbox.py),
+    otherwise the real one."""
+    override = _sandbox_override()
+    return override if override is not None else real_db_path()
+
+
+def real_db_path():
+    """The real database, never the sandbox. Accounts, sessions, throttles and staff push devices use this."""
     # Honor the documented container/local override even before the database
     # file exists. This keeps first-start initialization on the mounted volume.
     configured_data_dir = os.getenv("DATA_DIR", "").strip()
@@ -1476,6 +1486,8 @@ def init_database():
     # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
     _ensure_fire_event_tables(cursor)
     _ensure_fire_incident_tables(cursor)
+    from services import audit
+    audit.ensure_table(cursor)  # the append-only moderation audit log (services/audit.py)
     _ensure_recurring_fire_source_tables(cursor)
     _ensure_fire_exclusion_zone_tables(cursor)
     _ensure_detection_ml_tables(cursor)
@@ -2751,6 +2763,15 @@ def record_fire_moderation(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (event_id, action, actor, from_status, to_status, from_tier, to_tier, reason,
           _json.dumps(changed_fields or {})))
+    # The same action goes into the unified audit log (services/audit.py), in the same transaction. Feed ingest and
+    # first submission are not moderation, so they stay out of it.
+    if action not in ("submitted", "ingested"):
+        from services import audit
+        audit.record(
+            cursor, action=f"fire_event.{action}", subject_type="fire_event", subject_id=event_id, reason=reason, actor=actor,
+            before={"status": from_status, "tier": from_tier}, after={"status": to_status, "tier": to_tier, "changes": changed_fields or {}},
+            system=reason.startswith("inherited"),  # a detection taking on its incident's standing decision: nobody's click
+        )
 
 
 # What each fire_events.source is when the caller says nothing more about it.
@@ -3788,6 +3809,7 @@ def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, l
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
+        prior = conn.execute('SELECT status FROM recurring_fire_sources WHERE id = ?', (source_id,)).fetchone()
         conn.execute(
             '''UPDATE recurring_fire_sources
                SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
@@ -3795,6 +3817,10 @@ def set_recurring_source_status(source_id: int, status: str, reviewed_by: str, l
                WHERE id = ?''',
             (status, reviewed_by, label, source_type, source_id),
         )
+        if prior:
+            from services import audit
+            audit.record(conn, action=f"recurring_source.{status}", subject_type="recurring_source", subject_id=source_id,
+                         actor=reviewed_by, before={"status": prior["status"]}, after={"status": status, "label": label})
         conn.commit()
         row = conn.execute('SELECT * FROM recurring_fire_sources WHERE id = ?', (source_id,)).fetchone()
         return dict(row) if row else None
@@ -4219,17 +4245,26 @@ def list_pending_fire_incident_feedback(limit: int = 100) -> List[Dict]:
         conn.close()
 
 
-def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by: str) -> Optional[Dict]:
+def set_fire_incident_feedback_status(feedback_id: int, status: str, reviewed_by: str, note: str = "") -> Optional[Dict]:
     if status not in ("pending", "approved", "rejected"):
         raise ValueError(f"invalid feedback status: {status}")
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
+        prior = conn.execute("SELECT status, incident_id, classification FROM fire_incident_feedback WHERE id = ?", (feedback_id,)).fetchone()
         conn.execute(
             "UPDATE fire_incident_feedback SET status = ?, status_reason = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, FEEDBACK_STATUS_REASONS[status], reviewed_by, feedback_id),
         )
+        if prior:
+            # The row keeps only the latest review; the audit log keeps every one, with who and why.
+            from services import audit
+            audit.record(
+                conn, action=f"incident_feedback.{status}", subject_type="incident_feedback", subject_id=feedback_id,
+                incident_id=prior["incident_id"], reason=note or FEEDBACK_STATUS_REASONS[status], actor=reviewed_by,
+                before={"status": prior["status"]}, after={"status": status, "classification": prior["classification"]},
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM fire_incident_feedback WHERE id = ?", (feedback_id,)).fetchone()
         return dict(row) if row else None
@@ -4457,21 +4492,24 @@ def delete_fire_event(event_id: int, actor: str, reason: str = "") -> bool:
         conn.close()
 
 
-def delete_fire_incident(incident_id: int, reason: str = "") -> bool:
+def delete_fire_incident(incident_id: int, reason: str = "", actor: str = "") -> bool:
     """Soft delete: status='deleted'. Member fire_events rows are left as-is
     (their incident_id reference becomes orphaned, same tolerated pattern as
     delete_fire_event/fire_event_moderation) - there is no FK enforcement in
-    SQLite here. reason is currently just documentation at the call site
-    (e.g. "inside exclusion zone <id>"); there's no incident-level moderation
-    log table the way fire_events has, so it isn't persisted."""
+    SQLite here. reason (e.g. "inside exclusion zone <id>") and who did it are
+    recorded in the moderation audit log (services/audit.py)."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     cursor = conn.cursor()
     try:
-        cursor.execute('SELECT id FROM fire_incidents WHERE id = ?', (incident_id,))
-        if not cursor.fetchone():
+        cursor.execute('SELECT id, status FROM fire_incidents WHERE id = ?', (incident_id,))
+        prior = cursor.fetchone()
+        if not prior:
             return False
         cursor.execute("UPDATE fire_incidents SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (incident_id,))
+        from services import audit
+        audit.record(cursor, action="incident.deleted", subject_type="fire_incident", subject_id=incident_id, incident_id=incident_id,
+                     reason=reason, actor=actor, before={"status": prior[1]}, after={"status": "deleted"})
         conn.commit()
         return True
     finally:
@@ -4615,12 +4653,20 @@ def set_incident_review_decision(
     if decision not in ("approved", "rejected"):
         raise ValueError(f"invalid incident decision: {decision}")
     with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        prior = conn.execute("SELECT review_decision, review_label FROM fire_incidents WHERE id = ?", (incident_id,)).fetchone()
         conn.execute(
             """UPDATE fire_incidents
                SET review_decision = ?, review_decided_by = ?, review_decided_at = CURRENT_TIMESTAMP,
                    review_decision_reason = ?, review_label = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
             (decision, actor, reason, cause_category if decision == "approved" else None, incident_id),
+        )
+        from services import audit
+        audit.record(
+            conn, action=f"incident.{decision}", subject_type="fire_incident", subject_id=incident_id, incident_id=incident_id,
+            reason=note or reason, actor=actor,
+            before={"decision": prior[0] if prior else None, "label": prior[1] if prior else None},
+            after={"decision": decision, "label": cause_category if decision == "approved" else None, "code": reason},
         )
         conn.commit()
     result = bulk_set_incident_event_status(
@@ -4679,7 +4725,7 @@ def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, in
     grow_incident_area(cursor, event_id, incident_id)  # after the decision, so a rejected detection doesn't extend the area
 
 
-def schedule_incident_deletion(incident_id: int, days: int = 7) -> Optional[str]:
+def schedule_incident_deletion(incident_id: int, days: int = 7, actor: str = "", reason: str = "marked not a fire") -> Optional[str]:
     """Mark an incident to be deleted `days` from now (purge_due_fire_incidents does it). Returns the due time (UTC) or None if there is no such incident."""
     with sqlite3.connect(get_db_path(), timeout=15) as conn:
         due = conn.execute("SELECT datetime('now', ?)", (f"+{int(days)} days",)).fetchone()[0]
@@ -4687,6 +4733,10 @@ def schedule_incident_deletion(incident_id: int, days: int = 7) -> Optional[str]
             "UPDATE fire_incidents SET delete_after = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'deleted'",
             (due, incident_id),
         )
+        if cursor.rowcount:
+            from services import audit
+            audit.record(conn, action="incident.deletion_scheduled", subject_type="fire_incident", subject_id=incident_id,
+                         incident_id=incident_id, reason=reason, actor=actor, after={"delete_after": due})
         conn.commit()
         return due if cursor.rowcount else None
 
@@ -4748,7 +4798,7 @@ def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str =
         conn.close()
 
     deleted_event_ids = [event_id for event_id in event_ids if delete_fire_event(event_id, actor=actor, reason=reason or "incident deleted")]
-    incident_deleted = delete_fire_incident(incident_id, reason=reason or f"deleted by {actor}")
+    incident_deleted = delete_fire_incident(incident_id, reason=reason or f"deleted by {actor}", actor=actor)
     return {"incident_id": incident_id, "deleted_event_ids": deleted_event_ids, "incident_deleted": incident_deleted}
 
 
@@ -5003,12 +5053,16 @@ def update_feedback_status(feedback_id: int, status: str) -> Optional[Dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
+        prior = cursor.execute('SELECT status FROM feedback WHERE id = ?', (feedback_id,)).fetchone()
         cursor.execute('''
             UPDATE feedback SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
         ''', (status, feedback_id))
         if cursor.rowcount == 0:
             conn.commit()
             return None
+        from services import audit
+        audit.record(cursor, action=f"site_feedback.{status}", subject_type="site_feedback", subject_id=feedback_id,
+                     before={"status": prior["status"] if prior else None}, after={"status": status})
         conn.commit()
         cursor.execute('SELECT * FROM feedback WHERE id = ?', (feedback_id,))
         row = cursor.fetchone()
@@ -6224,6 +6278,7 @@ def _record_burn_ban_moderation(
     to_status: str,
     reason: str = "",
     changed_fields: Optional[Dict] = None,
+    audit_before: Optional[Dict] = None,
 ) -> None:
     import json as _json
     cursor.execute('''
@@ -6234,6 +6289,14 @@ def _record_burn_ban_moderation(
         submission_id, action, actor, from_status, to_status, reason,
         _json.dumps(changed_fields or {}),
     ))
+    # Also into the unified audit log (services/audit.py), in the same transaction. `audit_before` is a full snapshot for
+    # an action that destroys the item (delete), so its history can still be read afterwards.
+    from services import audit
+    audit.record(
+        cursor, action=f"burn_ban.{action}", subject_type="burn_ban", subject_id=submission_id, reason=reason, actor=actor,
+        before={"status": from_status, **({"submission": audit_before} if audit_before else {})},
+        after={"status": to_status, "changes": changed_fields or {}},
+    )
 
 
 def _record_burn_ban_county_event(
@@ -6596,14 +6659,18 @@ def delete_burn_ban_submission(submission_id: int, *, actor: str, reason: str = 
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute('SELECT status FROM burn_ban_submissions WHERE id = ?', (submission_id,))
+        cursor.execute('SELECT * FROM burn_ban_submissions WHERE id = ?', (submission_id,))
         row = cursor.fetchone()
         if not row:
             return False
         from_status = row["status"]
+        # The row is about to be erased, so keep what it said (minus secrets) and its moderation history in the audit log.
+        snapshot = {key: row[key] for key in row.keys() if key not in ("upload_token_hash", "submitter_ip_hash", "captcha_verdict")}
+        snapshot["moderation_history"] = [dict(entry) for entry in cursor.execute(
+            "SELECT * FROM burn_ban_moderation WHERE submission_id = ? ORDER BY created_at, id", (submission_id,)).fetchall()]
         _record_burn_ban_moderation(
             cursor, submission_id, action="delete", actor=actor,
-            from_status=from_status, to_status="deleted", reason=reason,
+            from_status=from_status, to_status="deleted", reason=reason, audit_before=snapshot,
         )
         cursor.execute('DELETE FROM burn_ban_submissions WHERE id = ?', (submission_id,))
         deleted = cursor.rowcount > 0

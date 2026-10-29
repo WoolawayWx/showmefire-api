@@ -26,6 +26,13 @@ class AdminCookieMiddleware(CookieRenewalMiddleware):
     """Renews an expired admin access cookie from the refresh cookie and makes the token available to the request."""
 
     def resolve(self, request):
+        # The mobile app sends its access token as a Bearer header (it has no cookie jar to speak of). It is the same JWT with the
+        # same session check, so everything downstream (verify_token, require_admin, revocation) works unchanged. Only
+        # JWT-shaped values count, so the other Bearer schemes on this API (Field and ingest keys) are left alone, and
+        # a Bearer request never renews or sets a cookie.
+        scheme, _, value = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and value.strip().count(".") == 2:
+            return value.strip(), False
         access = request.cookies.get(security.ACCESS_COOKIE_NAME)
         refresh = request.cookies.get(security.REFRESH_COOKIE_NAME)
         if not is_auth_action(request.url.path) and refresh and not security.verify_token(access):

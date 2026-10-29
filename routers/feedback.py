@@ -24,6 +24,7 @@ from core.database import (
     list_feedback,
     update_feedback_status,
 )
+from core.admin_auth.permissions import authorize, requires
 from core.security import SECRET_KEY, require_admin
 from services.discord_notifier import notify_staff_alert
 
@@ -191,9 +192,10 @@ def submit_feedback(payload: FeedbackCreate, request: Request):
 
 
 @router.get("/api/admin/feedback")
+@requires("reports.view")
 def admin_list_feedback(token: Optional[str] = None, status: Optional[str] = None,
                         limit: int = 50, offset: int = 0):
-    require_admin(token)
+    authorize(token, "reports.view")
     if status and status not in STATUSES:
         raise HTTPException(status_code=400, detail=f"unknown status: {status!r}")
     try:
@@ -205,8 +207,9 @@ def admin_list_feedback(token: Optional[str] = None, status: Optional[str] = Non
 
 
 @router.patch("/api/admin/feedback/{feedback_id}")
+@requires("reports.moderate")
 def admin_update_feedback_status(feedback_id: int, payload: FeedbackStatusUpdate, token: Optional[str] = None):
-    require_admin(token)
+    authorize(token, "reports.moderate")
     try:
         updated = update_feedback_status(feedback_id, payload.status)
     except Exception as e:

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from core import security
-from core.admin_auth import events, mfa, sessions, throttle, users
+from core.admin_auth import events, mfa, permissions, sessions, throttle, users
 from core.admin_session import set_auth_cookie
 from core.rate_limit import RateLimiter, client_ip
 from core.security import require_admin
@@ -37,7 +37,7 @@ def _clear_cookies(response: Response) -> None:
 def _start_session(response: Response, request: Request, user: dict, method: str) -> None:
     ip = client_ip(request)
     session_id, refresh_token = sessions.create(user["id"], ip, request.headers.get("user-agent", ""), method)
-    access = security.create_access_token({"sub": user["email"], "sid": session_id})
+    access = permissions.access_token_for(user, session_id)
     set_auth_cookie(response, security.ACCESS_COOKIE_NAME, access, security.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
     set_auth_cookie(response, security.REFRESH_COOKIE_NAME, refresh_token, security.REFRESH_TOKEN_EXPIRE_DAYS * 86400)
     users.touch_login(user["id"])
@@ -180,7 +180,9 @@ def verify_session(data: Optional[TokenProbe] = None):
     if user is None or user["disabled_at"]:
         return {"valid": False}
     return {"valid": True, "email": user["email"], "display_name": user["display_name"], "role": user["role"],
-            "must_change_password": bool(user["must_change_password"])}
+            "must_change_password": bool(user["must_change_password"]),
+            # What this account may do, so the website can hide actions it would be refused. The server still checks every request.
+            "permissions": sorted(permissions.permissions_for(user["role"]))}
 
 
 @router.post("/refresh")
@@ -190,7 +192,7 @@ def refresh_session(request: Request, response: Response):
     if renewed is None:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
     email, session_id = renewed
-    access = security.create_access_token({"sub": email, "sid": session_id})
+    access = permissions.access_token_for(users.get_by_email(email), session_id)
     set_auth_cookie(response, security.ACCESS_COOKIE_NAME, access, security.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
     return {"success": True, "message": "Token refreshed"}
 
@@ -213,13 +215,15 @@ def logout_all(request: Request, response: Response, user: dict = Depends(_curre
 # ----------------------------------------------------------------------------- account
 
 @router.get("/roles")
-def list_roles(_user: dict = Depends(_current_user)):
-    return {"roles": [{"id": key, **info} for key, info in users.ROLE_INFO.items()]}
+def list_roles(all: bool = False, _user: dict = Depends(_current_user)):
+    """The roles an owner can pick when creating or editing an account. `?all=true` also lists roles with their own
+    management screen (reviewers), for showing a label."""
+    return {"roles": [{"id": key, **info} for key, info in users.ROLE_INFO.items() if all or info.get("assignable", True)]}
 
 
 @router.get("/me")
 def me(user: dict = Depends(_current_user)):
-    return {**users.public_view(user), "mfa": mfa.status(user["id"])}
+    return {**users.public_view(user), "mfa": mfa.status(user["id"]), "permissions": sorted(permissions.permissions_for(user["role"]))}
 
 
 class PasswordChange(BaseModel):
@@ -452,7 +456,9 @@ def list_users(_owner: dict = Depends(_owner)):
 def create_user(data: NewUser, request: Request, owner: dict = Depends(_owner)):
     temporary = users.temporary_password()
     try:
-        created = users.create_user(data.email, data.display_name, data.role, temporary)
+        if not users.role_flag(data.role, "assignable", True):
+            raise users.AccountError("Reviewer accounts are created from the Reviewer accounts panel.")
+        created = users.create_user(data.email, data.display_name, data.role, temporary, created_by=owner["email"])
     except users.AccountError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     events.record("user_created", owner["id"], client_ip(request), created["email"])
@@ -467,6 +473,10 @@ def update_user(admin_id: int, data: UserUpdate, request: Request, owner: dict =
             users.update_profile(admin_id, display_name=data.display_name)
         if data.role is not None and data.role != target["role"]:
             users.set_role(admin_id, data.role)
+            # A new role means new permissions: end the account's sessions (and so its staff push) so it signs in again
+            # under the new role instead of carrying on with the old one. Keep the owner's own current session.
+            sessions.revoke_all(admin_id, except_session=security.current_session_id() if admin_id == owner["id"] else None)
+            events.record("role_changed", owner["id"], client_ip(request), f"{target['email']}: {target['role']} -> {data.role}")
         if data.disabled is not None and data.disabled != bool(target["disabled_at"]):
             if admin_id == owner["id"]:
                 raise users.AccountError("You cannot disable your own account.")

@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 import httpx
 
+from core.sandbox import is_sandbox
+
 DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 WORKERS_AI_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
@@ -47,6 +49,8 @@ class CloudflareAIClient:
         model: str | None = None,
         max_tokens: int = 320,
     ) -> str:
+        if is_sandbox():  # reviewer sandbox: no outside calls
+            raise CloudflareAIError("AI is switched off in the reviewer sandbox")
         if not self.api_key:
             raise CloudflareAIError("CLOUDFLARE_AI_API_KEY is not configured")
         if not self.account_id:

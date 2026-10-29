@@ -9,6 +9,7 @@ from fastapi import BackgroundTasks
 from pydantic import ValidationError
 
 from core import database
+from core.admin_auth import users
 from core.security import create_access_token
 from routers import burn_bans as burn_bans_router
 
@@ -88,10 +89,16 @@ class BurnBanWorkflowTests(unittest.TestCase):
         self._db_path = Path(self._tmpdir.name) / "test.db"
         self._db_patcher = patch.object(database, "get_db_path", return_value=self._db_path)
         self._db_patcher.start()
+        # Admin accounts live in the real database path; keep them in this test's database and create the staff account
+        # the token below names, because moderation routes now check the account (core/admin_auth/permissions.py).
+        self._accounts_patcher = patch.object(database, "real_db_path", return_value=self._db_path)
+        self._accounts_patcher.start()
+        users.create_user("staff@showmefire.org", "Staff", "staff", "correct horse battery 9", must_change=False)
         database.init_database()
         self.token = create_access_token({"sub": "staff@showmefire.org"})
 
     def tearDown(self):
+        self._accounts_patcher.stop()
         self._db_patcher.stop()
         self._tmpdir.cleanup()
 
@@ -264,6 +271,11 @@ class BurnBanNotesBulkHistoryTests(unittest.TestCase):
         self._db_path = Path(self._tmpdir.name) / "test.db"
         self._db_patcher = patch.object(database, "get_db_path", return_value=self._db_path)
         self._db_patcher.start()
+        # Admin accounts live in the real database path; keep them in this test's database and create the staff account
+        # the token below names, because moderation routes now check the account (core/admin_auth/permissions.py).
+        self._accounts_patcher = patch.object(database, "real_db_path", return_value=self._db_path)
+        self._accounts_patcher.start()
+        users.create_user("staff@showmefire.org", "Staff", "staff", "correct horse battery 9", must_change=False)
         self._map_patcher = patch.object(burn_bans_router, "_maybe_regenerate_map")
         self._map_patcher.start()
         database.init_database()
@@ -272,6 +284,7 @@ class BurnBanNotesBulkHistoryTests(unittest.TestCase):
 
     def tearDown(self):
         self._map_patcher.stop()
+        self._accounts_patcher.stop()
         self._db_patcher.stop()
         self._tmpdir.cleanup()
 
