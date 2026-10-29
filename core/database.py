@@ -3253,6 +3253,8 @@ def get_fire_event(event_id: int, admin: bool = False) -> Optional[Dict]:
             if extracted:
                 extracted["conflicts"] = find_conflicts(event, extracted["features"])
             event["extracted_features"] = extracted
+            from ai.clef import get_assessment
+            event["clef"] = get_assessment("fire_event", event_id, "fire_report")  # advisory; None when not assessed
         return event
     finally:
         conn.close()

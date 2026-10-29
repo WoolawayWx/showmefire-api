@@ -146,10 +146,12 @@ def input_hash(state: Any, questions: Mapping[str, Any], images: Sequence[Mappin
 
 
 def assess(subject_type: str, subject_id: int, task: str, state: Any, questions: Mapping[str, Any],
-           images: Sequence[Mapping[str, Any]] = (), *, client: Optional[ClefClient] = None, force: bool = False) -> str:
+           images: Sequence[Mapping[str, Any]] = (), *, client: Optional[ClefClient] = None, force: bool = False,
+           manual: bool = False) -> str:
     """Ask Clef and store the answers for (subject_type, subject_id, task), replacing the earlier ones. Returns
-    "stored", "unchanged" (same input as the stored answers), "skipped" (off or not configured) or "failed"."""
-    if not enabled() and client is None:
+    "stored", "unchanged" (same input as the stored answers), "skipped" (off or not configured) or "failed". `manual`
+    means an admin asked: it runs even while CLEF_ENABLED is off (credentials are still needed)."""
+    if not manual and not enabled() and client is None:
         return "skipped"
     try:
         client = client or ClefClient()

@@ -1145,8 +1145,6 @@ def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
         occurred_at=event["occurred_at"], exclude_event_id=event_id,
     )
     event["incident_label"] = _incident_label_for_event(event_id)
-    from ai.clef import get_assessment
-    event["clef"] = get_assessment("fire_event", event_id, "fire_report")  # advisory; None when not assessed
     return {"success": True, "report": event}
 
 
@@ -1202,6 +1200,45 @@ def admin_rescan_incident_features(incident_id: int, _admin: str = Depends(requi
         result = extract_and_store(event_id, force=True)
         counts[result] = counts.get(result, 0) + 1
     return {"success": True, "scanned": min(len(ids), 25), "results": counts}
+
+
+@router.post("/api/admin/fires/reports/{event_id}/clef")
+def admin_ask_clef_about_report(event_id: int, _admin: str = Depends(require_admin)):
+    """Ask Clef about one public report now (or again), replacing any earlier answers. Works even while the
+    automatic assessments (CLEF_ENABLED) are off, as long as the server has AI credentials. Advisory: the report is
+    not changed (admin only)."""
+    from ai.clef_tasks import assess_fire_report
+
+    event = get_fire_event(event_id, admin=True)
+    if not event:
+        raise HTTPException(status_code=404, detail="Fire event not found")
+    result = assess_fire_report(event_id, manual=True)
+    if result in _CLEF_ERRORS:
+        code, detail = _CLEF_ERRORS[result]
+        raise HTTPException(status_code=code, detail=detail)
+    return {"success": True, "result": result, "report": get_fire_event(event_id, admin=True)}
+
+
+@router.post("/api/admin/fires/incidents/{incident_id}/clef")
+def admin_ask_clef_about_incident(incident_id: int, _admin: str = Depends(require_admin)):
+    """Ask Clef about every public report in an incident (OSINT leads and satellite pixels are not assessed).
+    Returns how many of each outcome so the UI can say what happened (admin only)."""
+    from ai.clef_tasks import assess_fire_report
+
+    if not get_fire_incident(incident_id):
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    ids = [m["id"] for m in list_fire_incident_members(incident_id) if m.get("source") == "user_submission"]
+    counts: Dict[str, int] = {}
+    for event_id in ids[:25]:  # same cap as the text rescan
+        result = assess_fire_report(event_id, manual=True)
+        counts[result] = counts.get(result, 0) + 1
+    return {"success": True, "assessed": min(len(ids), 25), "results": counts}
+
+
+_CLEF_ERRORS = {
+    "skipped": (409, "Clef was not asked: this is not a public report, or AI is not configured on the server"),
+    "failed": (502, "Clef did not return usable answers; try again in a moment"),
+}
 
 
 def _incident_label_for_event(event_id: int) -> Optional[str]:

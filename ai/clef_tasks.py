@@ -97,10 +97,11 @@ def _read_images(rows: List[sqlite3.Row], folder: Path) -> List[Dict[str, Any]]:
     return clef.prepare_images(files)
 
 
-def assess_fire_report(event_id: int, *, client: Optional[clef.ClefClient] = None) -> str:
+def assess_fire_report(event_id: int, *, client: Optional[clef.ClefClient] = None, manual: bool = False) -> str:
     """Assess one public fire report with its photos. Run after submit and again after each photo upload: the
-    stored answers are only replaced when the text or the photos changed."""
-    if not clef.enabled() and client is None:
+    stored answers are only replaced when the text or the photos changed. `manual` (an admin asked) skips the
+    CLEF_ENABLED switch and always asks again."""
+    if not manual and not clef.enabled() and client is None:
         return "skipped"
     try:
         with sqlite3.connect(get_db_path(), timeout=15) as conn:
@@ -128,16 +129,17 @@ def assess_fire_report(event_id: int, *, client: Optional[clef.ClefClient] = Non
             "reporter_says_responders_on_scene": event["reported_responders_on_scene"],
             "photos_attached": len(images),
         }
-        return clef.assess("fire_event", event_id, FIRE_REPORT, state, FIRE_REPORT_QUESTIONS, images, client=client)
+        return clef.assess("fire_event", event_id, FIRE_REPORT, state, FIRE_REPORT_QUESTIONS, images, client=client,
+                            force=manual, manual=manual)
     except Exception:  # noqa: BLE001
         logger.warning("Clef fire report assessment setup failed for %s", event_id, exc_info=True)
         return "failed"
 
 
-def assess_burn_ban(submission_id: int, *, client: Optional[clef.ClefClient] = None) -> str:
+def assess_burn_ban(submission_id: int, *, client: Optional[clef.ClefClient] = None, manual: bool = False) -> str:
     """Assess one burn-ban request with its proof. Run after submit and after the proof upload. A PDF proof is
-    noted but not read (Clef takes PNG, JPEG and WebP)."""
-    if not clef.enabled() and client is None:
+    noted but not read (Clef takes PNG, JPEG and WebP). `manual` as for assess_fire_report."""
+    if not manual and not clef.enabled() and client is None:
         return "skipped"
     try:
         submission = get_burn_ban_submission(submission_id, admin=True)
@@ -161,7 +163,8 @@ def assess_burn_ban(submission_id: int, *, client: Optional[clef.ClefClient] = N
             "proof_link": proof_link,
             "proof_file": ("image attached" if images else "PDF attached (not readable here)" if stored else "none"),
         }
-        return clef.assess("burn_ban", submission_id, BURN_BAN, state, _burn_ban_questions(has_proof), images, client=client)
+        return clef.assess("burn_ban", submission_id, BURN_BAN, state, _burn_ban_questions(has_proof), images, client=client,
+                            force=manual, manual=manual)
     except Exception:  # noqa: BLE001
         logger.warning("Clef burn-ban assessment setup failed for %s", submission_id, exc_info=True)
         return "failed"

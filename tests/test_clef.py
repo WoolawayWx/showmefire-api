@@ -221,5 +221,58 @@ class AssessTests(DbTestCase):
         self.assertEqual(clef.get_assessment("burn_ban", 1, "burn_ban")["answers"]["proof_supports_request"]["noul"], 0.6)
 
 
+class ManualTests(DbTestCase):
+    def test_manual_runs_while_clef_is_off_and_always_asks_again(self):
+        event = self.add_report()
+        fake = FakeClient()
+        with patch.dict("os.environ", {"CLEF_ENABLED": ""}), patch.object(clef, "ClefClient", return_value=fake):
+            self.assertEqual(clef_tasks.assess_fire_report(event), "skipped")          # automatic: off
+            self.assertEqual(clef_tasks.assess_fire_report(event, manual=True), "stored")
+            self.assertEqual(clef_tasks.assess_fire_report(event, manual=True), "stored")  # same input, asked again
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_admin_endpoints_ask_clef_and_return_the_answers(self):
+        from fastapi import HTTPException
+
+        from routers import fires as fires_router
+        event = self.add_report()
+        fake = FakeClient()
+        with patch.dict("os.environ", {"CLEF_ENABLED": ""}), patch.object(clef, "ClefClient", return_value=fake):
+            out = fires_router.admin_ask_clef_about_report(event, "admin")
+            self.assertEqual(out["report"]["clef"]["answers"]["shows_fire_or_smoke"]["noul"], 0.93)
+            with self.assertRaises(HTTPException) as missing:
+                fires_router.admin_ask_clef_about_report(999, "admin")
+            self.assertEqual(missing.exception.status_code, 404)
+            satellite = self.add_report(source="viirs")
+            with self.assertRaises(HTTPException) as skipped:
+                fires_router.admin_ask_clef_about_report(satellite, "admin")
+            self.assertEqual(skipped.exception.status_code, 409)
+
+    def test_a_clef_failure_is_a_502_not_a_crash(self):
+        from fastapi import HTTPException
+
+        from routers import fires as fires_router
+        event = self.add_report()
+        broken = FakeClient()
+        broken.run = lambda *a, **k: (_ for _ in ()).throw(CloudflareAIError("down"))
+        with patch.object(clef, "ClefClient", return_value=broken):
+            with self.assertRaises(HTTPException) as failed:
+                fires_router.admin_ask_clef_about_report(event, "admin")
+        self.assertEqual(failed.exception.status_code, 502)
+
+    def test_incident_endpoint_assesses_only_public_reports(self):
+        from routers import fires as fires_router
+        report, satellite = self.add_report(), self.add_report(source="viirs")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, last_detected_at) "
+                         "VALUES (37, -92, '2026-10-01T12:00:00Z', '2026-10-01T12:00:00Z')")
+            conn.execute("UPDATE fire_events SET incident_id = 1")
+        with patch.object(clef, "ClefClient", return_value=FakeClient()):
+            out = fires_router.admin_ask_clef_about_incident(1, "admin")
+        self.assertEqual((out["assessed"], out["results"]), (1, {"stored": 1}))
+        self.assertIsNotNone(clef.get_assessment("fire_event", report, "fire_report"))
+        self.assertIsNone(clef.get_assessment("fire_event", satellite, "fire_report"))
+
+
 if __name__ == "__main__":
     unittest.main()
