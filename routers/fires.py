@@ -680,11 +680,10 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
         county_name=county_name,
         origin={"client": _request_client(request)},
     )
+    from ai import clef
+    from ai.clef_tasks import send_staff_alert_with_clef
     from ai.report_features import extract_and_store
-    background_tasks.add_task(extract_and_store, event["id"])  # after the response; never raises
-    from ai.clef_tasks import assess_fire_report
-    background_tasks.add_task(assess_fire_report, event["id"])  # advisory only, off unless CLEF_ENABLED
-    notify_staff_alert(
+    alert = dict(
         alert_type="fire_report",
         title=f"New fire report: {county_name + ' County' if county_name else 'Missouri'}",
         description=payload.description,
@@ -698,6 +697,13 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
         ],
         admin_path=f"/admin/fires/{event['id']}",
     )
+    # Background tasks run in order, after the response. With Clef on, the alert goes first (it waits a few seconds
+    # for Clef's one-line read, then sends with or without it) so the slower text extraction never delays it.
+    if clef.enabled():
+        background_tasks.add_task(send_staff_alert_with_clef, alert, event_id=event["id"])
+    else:
+        notify_staff_alert(**alert)
+    background_tasks.add_task(extract_and_store, event["id"])  # after the response; never raises
 
     return {
         "success": True,
@@ -975,7 +981,8 @@ def get_public_fire_incident_detail(slug: str, response: Response):
 
 
 @router.post("/api/fires/incidents/{slug}/feedback", status_code=201)
-def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedback, request: Request):
+def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedback, request: Request,
+                                         background_tasks: BackgroundTasks):
     incident = get_public_fire_incident(slug)
     if not incident:
         raise HTTPException(status_code=404, detail="Fire incident not found")
@@ -1015,13 +1022,20 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
                 fields.append({"name": "Why", "value": why, "inline": False})
     except Exception:
         logger.warning("Failed to score incident feedback %s for staff alert", feedback_record.get("id"), exc_info=True)
-    notify_staff_alert(
+    alert = dict(
         alert_type="incident_feedback",
         title=f"Fire incident feedback: {incident.get('county_name') or slug}",
         description=note,
         fields=fields,
         admin_path="/admin/fires",
     )
+    from ai import clef
+    from ai.clef_tasks import send_staff_alert_with_clef
+    if clef.enabled():
+        # The alert waits a few seconds for Clef's read of the incident, then sends with or without it.
+        background_tasks.add_task(send_staff_alert_with_clef, alert, incident_id=incident["id"])
+    else:
+        notify_staff_alert(**alert)
     return {"success": True, "message": "Thanks—your fire information was received."}
 
 
@@ -1223,7 +1237,7 @@ def admin_ask_clef_about_report(event_id: int, _admin: str = Depends(require_adm
 def admin_ask_clef_about_incident(incident_id: int, _admin: str = Depends(require_admin)):
     """Ask Clef about every public report in an incident (OSINT leads and satellite pixels are not assessed).
     Returns how many of each outcome so the UI can say what happened (admin only)."""
-    from ai.clef_tasks import assess_fire_report
+    from ai.clef_tasks import assess_fire_report, assess_incident
 
     if not get_fire_incident(incident_id):
         raise HTTPException(status_code=404, detail="Fire incident not found")
@@ -1232,13 +1246,22 @@ def admin_ask_clef_about_incident(incident_id: int, _admin: str = Depends(requir
     for event_id in ids[:25]:  # same cap as the text rescan
         result = assess_fire_report(event_id, manual=True)
         counts[result] = counts.get(result, 0) + 1
-    return {"success": True, "assessed": min(len(ids), 25), "results": counts}
+    # The incident's own read (fire / controlled burn / no fire / unsure) from its reports, photos and feedback; this
+    # also covers an incident that only has feedback, which has no report to loop over.
+    incident_result = assess_incident(incident_id, manual=True)
+    return {"success": True, "assessed": min(len(ids), 25), "results": counts, "incident": incident_result,
+            "clef": get_assessment_for_incident(incident_id)}
 
 
 _CLEF_ERRORS = {
     "skipped": (409, "Clef was not asked: this is not a public report, or AI is not configured on the server"),
     "failed": (502, "Clef did not return usable answers; try again in a moment"),
 }
+
+
+def get_assessment_for_incident(incident_id: int):
+    from ai.clef import get_assessment
+    return get_assessment("fire_incident", incident_id, "incident_type")
 
 
 def _incident_label_for_event(event_id: int) -> Optional[str]:
@@ -1652,6 +1675,8 @@ def admin_get_fire_incident(incident_id: int, _admin: str = Depends(require_admi
     incident["feedback"] = list_fire_incident_feedback(incident_id)
     from ai.feedback_analysis import get_analysis
     incident["feedback_analysis"] = get_analysis(incident_id, incident["feedback"])
+    from ai.clef import get_assessment
+    incident["clef"] = get_assessment("fire_incident", incident_id, "incident_type")  # advisory; None when not assessed
     return {"success": True, "incident": incident}
 
 

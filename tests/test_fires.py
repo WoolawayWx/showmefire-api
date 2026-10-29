@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from fastapi import UploadFile
 from pydantic import ValidationError
 from starlette.datastructures import Headers
@@ -199,7 +199,7 @@ class FiresRouterTests(unittest.TestCase):
     def submit(self, ip="203.0.113.9", **overrides):
         payload = fires_router.FireReportCreate(**_valid_payload(**overrides))
         request = _FakeRequest(host=ip)
-        return fires_router.submit_fire_report(payload, request)
+        return fires_router.submit_fire_report(payload, request, BackgroundTasks())
 
     def geocode(self, address="123 Main St, Columbia, MO", ip="203.0.113.9"):
         payload = fires_router.AddressGeocodeRequest(address=address)
@@ -287,7 +287,7 @@ class FiresRouterTests(unittest.TestCase):
         bad = UploadFile(filename="not-image.png", file=BytesIO(b"not an image"))
         with self.assertRaises(HTTPException) as ctx:
             asyncio.run(fires_router.upload_fire_report_media(
-                report["id"], report["upload_token"], bad
+                report["id"], report["upload_token"], BackgroundTasks(), bad
             ))
         self.assertEqual(ctx.exception.status_code, 415)
 
@@ -297,7 +297,7 @@ class FiresRouterTests(unittest.TestCase):
             headers=Headers({"content-type": "image/png"}),
         )
         uploaded = asyncio.run(fires_router.upload_fire_report_media(
-            report["id"], report["upload_token"], png
+            report["id"], report["upload_token"], BackgroundTasks(), png
         ))
         self.assertEqual(uploaded["media"]["content_type"], "image/png")
         self.assertEqual(len(database.get_fire_event(report["id"], admin=True)["media"]), 1)
@@ -372,7 +372,7 @@ class FiresRouterTests(unittest.TestCase):
             headers=Headers({"content-type": "image/png"}),
         )
         uploaded = asyncio.run(fires_router.upload_fire_report_media(
-            report["id"], report["upload_token"], png
+            report["id"], report["upload_token"], BackgroundTasks(), png
         ))
         self.assertEqual(uploaded["media"]["kind"], "photo")
 

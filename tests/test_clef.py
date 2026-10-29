@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 
-from ai import clef, clef_tasks
+from ai import clef, clef_tasks, feedback_analysis
 from ai.cloudflare import CloudflareAIError
 from core import database
 
@@ -115,7 +115,7 @@ class DbTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.db = self.dir / "smf.db"
-        for target in (database, clef, clef_tasks):
+        for target in (database, clef, clef_tasks, feedback_analysis):
             patcher = patch.object(target, "get_db_path", return_value=self.db)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -270,8 +270,149 @@ class ManualTests(DbTestCase):
         with patch.object(clef, "ClefClient", return_value=FakeClient()):
             out = fires_router.admin_ask_clef_about_incident(1, "admin")
         self.assertEqual((out["assessed"], out["results"]), (1, {"stored": 1}))
+        self.assertEqual(out["incident"], "failed")  # this fake answers with report-shaped answers, none usable for an incident
         self.assertIsNotNone(clef.get_assessment("fire_event", report, "fire_report"))
         self.assertIsNone(clef.get_assessment("fire_event", satellite, "fire_report"))
+
+
+INCIDENT_REPLY = {
+    "model": "clef",
+    "answers": {"incident_type": {"type": "choice", "choice": "controlled_burn", "confidence": 0.7,
+                                  "probabilities": {"fire": 0.2, "controlled_burn": 0.7, "no_fire": 0.05, "unsure": 0.05}}},
+    "usage": {"input_tokens": 500, "output_tokens": 0},
+}
+
+
+class IncidentTests(DbTestCase):
+    def add_incident(self, report=True):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO fire_incidents (centroid_latitude, centroid_longitude, first_detected_at, "
+                         "last_detected_at, county_name, detection_count) VALUES (37, -92, '2026-10-01T12:00:00Z', "
+                         "'2026-10-01T13:00:00Z', 'Phelps', 4)")
+        if report:
+            event = self.add_report()
+            with sqlite3.connect(self.db) as conn:
+                conn.execute("UPDATE fire_events SET incident_id = 1 WHERE id = ?", (event,))
+            return event
+
+    def add_feedback(self, classification, note="", status="pending", contact="c@example.com"):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("INSERT INTO fire_incident_feedback (incident_id, classification, note, contact, "
+                         "submitter_ip_hash, status) VALUES (1, ?, ?, ?, 'iphash123', ?)", (classification, note, contact, status))
+
+    def test_reads_reports_photos_and_feedback_but_no_personal_details(self):
+        event = self.add_incident()
+        self.add_photo(event)
+        self.add_feedback("controlled_burn", "Landowner burning a pasture, saw the truck")
+        self.add_feedback("not_a_fire", "buy cheap pills http://spam.example", status="rejected")
+        fake = FakeClient(INCIDENT_REPLY)
+        self.assertEqual(clef_tasks.assess_incident(1, client=fake), "stored")
+        call = fake.calls[0]
+        self.assertEqual(len(call["images"]), 1)
+        state = call["state"]
+        self.assertEqual(state["feedback_votes"], {"confirmed_fire": 0, "controlled_burn": 1, "not_a_fire": 0, "unsure": 0})
+        self.assertEqual(len(state["public_reports"]), 1)
+        sent = str(state)
+        for private in ("Jane", "jane@example.com", "c@example.com", "iphash123", "spam.example"):
+            self.assertNotIn(private, sent)
+        self.assertEqual(list(call["questions"]["incident_type"]["criteria"]), ["fire", "controlled_burn", "no_fire", "unsure"])
+        stored = clef.get_assessment("fire_incident", 1, "incident_type")
+        self.assertEqual(stored["answers"]["incident_type"]["choice"], "controlled_burn")
+
+    def test_feedback_only_incident_is_read_and_an_empty_one_is_skipped(self):
+        self.add_incident(report=False)
+        self.assertEqual(clef_tasks.assess_incident(1, client=FakeClient(INCIDENT_REPLY)), "skipped")  # nothing to read
+        self.add_feedback("confirmed_fire", "big flames by the road")
+        self.assertEqual(clef_tasks.assess_incident(1, client=FakeClient(INCIDENT_REPLY)), "stored")
+
+    def test_asks_again_only_when_the_evidence_changes(self):
+        self.add_incident()
+        fake = FakeClient(INCIDENT_REPLY)
+        self.assertEqual(clef_tasks.assess_incident(1, client=fake), "stored")
+        self.assertEqual(clef_tasks.assess_incident(1, client=fake), "unchanged")
+        self.add_feedback("unsure", "not sure what it is")
+        self.assertEqual(clef_tasks.assess_incident(1, client=fake), "stored")
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_assessing_a_report_refreshes_its_incident(self):
+        event = self.add_incident()
+        replies = {"n": 0}
+
+        class Both(FakeClient):
+            def run(self_inner, state, questions, images=()):
+                replies["n"] += 1
+                self_inner.reply = INCIDENT_REPLY if "incident_type" in questions else REPORT_REPLY
+                return super().run(state, questions, images)
+
+        self.assertEqual(clef_tasks.assess_fire_report(event, client=Both()), "stored")
+        self.assertIsNotNone(clef.get_assessment("fire_incident", 1, "incident_type"))
+        self.assertEqual(replies["n"], 2)
+
+    def test_manual_endpoint_returns_the_incident_read_and_detail_carries_it(self):
+        from routers import fires as fires_router
+        self.add_incident(report=False)
+        self.add_feedback("controlled_burn", "pasture burn")
+        with patch.dict("os.environ", {"CLEF_ENABLED": ""}), patch.object(clef, "ClefClient", return_value=FakeClient(INCIDENT_REPLY)):
+            out = fires_router.admin_ask_clef_about_incident(1, "admin")
+        self.assertEqual((out["incident"], out["assessed"]), ("stored", 0))
+        self.assertEqual(out["clef"]["answers"]["incident_type"]["probabilities"]["controlled_burn"], 0.7)
+        self.assertEqual(fires_router.admin_get_fire_incident(1, "admin")["incident"]["clef"]["model"], "clef")
+
+
+class DiscordTests(IncidentTests):
+    ALERT = {"alert_type": "fire_report", "title": "New fire report", "description": "d",
+             "fields": [{"name": "Location", "value": "x"}], "admin_path": "/admin/fires/1"}
+
+    def send(self, fake, **kwargs):
+        sent = []
+        with patch.object(clef, "ClefClient", return_value=fake), \
+                patch("services.discord_notifier.notify_staff_alert", side_effect=lambda **kw: sent.append(kw) or True):
+            clef_tasks.send_staff_alert_with_clef(dict(self.ALERT), **kwargs)
+        return sent
+
+    def test_summaries_are_one_glanceable_line(self):
+        report = {"answers": clef.clean_answers(REPORT_REPLY["answers"], clef_tasks.FIRE_REPORT_QUESTIONS)}
+        self.assertEqual(clef_tasks.summarize_report(report),
+                         "⚠ fire or smoke 93% · wildfire 80% · urgency 2.4 of 3 · spam or prank 100%")
+        calm = {"answers": {"shows_fire_or_smoke": {"type": "noul", "noul": 0.95}, "likely_spam_or_prank": {"type": "noul", "noul": 0.05}}}
+        self.assertEqual(clef_tasks.summarize_report(calm), "fire or smoke 95% · spam or prank 5%")
+        self.assertIsNone(clef_tasks.summarize_report(None))
+        incident = {"answers": clef.clean_answers(INCIDENT_REPLY["answers"], clef_tasks.INCIDENT_QUESTIONS)}
+        self.assertEqual(clef_tasks.summarize_incident(incident), "controlled burn 70% · fire 20%")
+        unsure = {"answers": {"incident_type": {"type": "choice", "choice": "unsure",
+                                                "probabilities": {"unsure": 0.6, "fire": 0.4, "no_fire": 0.0, "controlled_burn": 0.0}}}}
+        self.assertTrue(clef_tasks.summarize_incident(unsure).startswith("⚠ unsure 60%"))
+
+    def test_report_alert_carries_the_clef_line(self):
+        event = self.add_incident()
+        sent = self.send(FakeClient(REPORT_REPLY), event_id=event)
+        self.assertEqual(len(sent), 1)
+        names = [f["name"] for f in sent[0]["fields"]]
+        self.assertEqual(names, ["Location", "Clef (advisory)"])
+        self.assertIn("fire or smoke 93%", sent[0]["fields"][1]["value"])
+
+    def test_report_alert_still_goes_out_when_clef_fails(self):
+        event = self.add_report()
+        broken = FakeClient()
+        broken.run = lambda *a, **k: (_ for _ in ()).throw(CloudflareAIError("down"))
+        sent = self.send(broken, event_id=event)
+        self.assertEqual([f["name"] for f in sent[0]["fields"]], ["Location"])
+
+    def test_feedback_alert_carries_the_incident_read(self):
+        self.add_incident()
+        self.add_feedback("controlled_burn", "pasture burn")
+        sent = self.send(FakeClient(INCIDENT_REPLY), incident_id=1)
+        self.assertEqual(sent[0]["fields"][-1], {"name": "Clef (advisory)", "value": "controlled burn 70% · fire 20%", "inline": False})
+
+    def test_a_stale_read_is_not_shown_when_the_new_ask_fails(self):
+        self.add_incident()
+        self.add_feedback("controlled_burn", "pasture burn")
+        self.assertEqual(clef_tasks.assess_incident(1, client=FakeClient(INCIDENT_REPLY)), "stored")  # an earlier read exists
+        self.add_feedback("confirmed_fire", "now it is spreading")
+        broken = FakeClient()
+        broken.run = lambda *a, **k: (_ for _ in ()).throw(CloudflareAIError("down"))
+        sent = self.send(broken, incident_id=1)
+        self.assertEqual([f["name"] for f in sent[0]["fields"]], ["Location"])
 
 
 if __name__ == "__main__":
