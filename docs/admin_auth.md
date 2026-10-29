@@ -22,7 +22,7 @@ still looks for them) but are only a seed.
 | Variable | Default | Meaning |
 |---|---|---|
 | `WEBAUTHN_RP_ID` | `localhost` outside production, **required in production** | Domain passkeys are bound to, e.g. `showmefire.org` (covers `api.` and the site). Changing it invalidates every enrolled passkey. |
-| `WEBAUTHN_ORIGINS` | with `WEBAUTHN_RP_ID` set: `https://<rp id>`, plus `www.`, `preview.` and `dev.` of it | Comma list of site origins allowed to use passkeys. Only set it to add or remove hosts. |
+| `WEBAUTHN_ORIGINS` | with `WEBAUTHN_RP_ID` set: `https://<rp id>`, plus `www.`, `preview.` and `dev.` of it | Comma list of origins allowed to use passkeys: the site's `https://` addresses and, for the Android app, `android:apk-key-hash:<…>` entries (see "Passkeys in the mobile app"). **Setting it REPLACES the default list, it does not add to it**, so list every website origin you still want (an explicit `https://showmefire.org` alone stops passkeys working on `dev.` and `www.`). |
 | `ADMIN_MFA_ENFORCE` | `false` | Require the second step for everyone. Only takes effect once an active owner has a passkey or authenticator app **and** unused recovery codes, so switching it on early cannot lock the owner out. |
 | `ADMIN_ALLOW_LEGACY_TOKENS` | `true` | Accept access tokens issued before sessions existed (no session id). Set `false` once everyone has signed in again. |
 | `ADMIN_MFA_KEY` | derived from `JWT_SECRET` | Fernet key that encrypts authenticator-app secrets. If unset, rotating `JWT_SECRET` invalidates enrolled authenticator apps (passkeys and recovery codes are unaffected). |
@@ -58,3 +58,24 @@ Setting `ADMIN_MFA_ENFORCE=false` and restarting also drops back to password-onl
 2. Sign in, open Account Security, add a passkey and/or authenticator app, and save the recovery codes.
 3. Sign out and back in to test each method.
 4. When ready: set `ADMIN_MFA_ENFORCE=true` and later `ADMIN_ALLOW_LEGACY_TOKENS=false`.
+
+## Passkeys in the mobile app
+The app (`mobile/`, staff section) signs in with a passkey through `POST /api/admin/mobile/login/passkey/options` and `/verify`
+(`routers/admin_mobile.py`, off unless `STAFF_API_ENABLED`). It is sign-in only: passkeys are still created on the website's Account
+Security page, and a passkey synced to the phone (iCloud Keychain / Google Password Manager) works in the app because the relying
+party is the same domain. A passkey replaces the password and the second step, as on the website. The mobile endpoint also applies
+the rules a password sign-in does (account enabled and not expired, reviewer accounts need `SANDBOX_ENABLED`, a temporary password
+must be changed on the website first); the website's passkey sign-in now refuses expired and reviewer accounts too.
+
+What the server must accept:
+- **iOS:** the origin is `https://<WEBAUTHN_RP_ID>` (already allowed). The app needs `webcredentials:showmefire.org` in its entitlements and
+  the website must serve `https://showmefire.org/.well-known/apple-app-site-association` (`webcredentials.apps` listing the app id). Apple's
+  CDN caches that file, so deploy it well before testing.
+- **Android:** the origin is `android:apk-key-hash:<base64url of the SHA-256 of the certificate that signed the installed build>`, which
+  is NOT an https address. List one for every key a build may carry: the Play App Signing key (store installs), the upload key (EAS
+  internal builds) and any debug/preview key. Turn the fingerprints (as shown in Play Console, colon-separated hex) into the setting with
+  `python scripts/android_origin.py --line "<fp>" "<fp>"`, which prints the whole `WEBAUTHN_ORIGINS` line including the website origins.
+  The same fingerprints go into the website's `NUXT_ANDROID_ASSET_LINKS_SHA256` (`/.well-known/assetlinks.json`).
+- A wrong Android hash fails as "That passkey could not be verified"; the reason (and the origins the server expected) is in the API log:
+  `docker logs show-me-fire-api 2>&1 | grep "Passkey"`.
+- Recreate the container after changing the setting (a plain restart does not re-read the env file).

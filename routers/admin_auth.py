@@ -159,8 +159,10 @@ def login_passkey_options():
 def login_passkey_verify(data: PasskeyVerify, request: Request, response: Response):
     admin_id = mfa.passkey_auth_verify(data.challenge_id, data.credential)
     user = users.get_by_id(admin_id) if admin_id is not None else None
-    if user is None or user["disabled_at"]:
-        events.record("passkey_fail", None, client_ip(request))
+    # The same account rules the password sign-in applies (users.authenticate): enabled, not expired, and reviewer
+    # (sandbox) accounts never get a website session.
+    if user is None or user["disabled_at"] or users.is_expired(user) or users.is_sandbox_role(user["role"]):
+        events.record("passkey_fail", admin_id, client_ip(request))
         raise HTTPException(status_code=401, detail="That passkey was not accepted.")
     _start_session(response, request, user, "passkey")
     return {"success": True, "role": user["role"], "must_change_password": bool(user["must_change_password"])}
