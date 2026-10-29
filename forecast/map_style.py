@@ -54,7 +54,8 @@ def add_boundaries(ax, data_crs, PROJECT_DIR, county_zorder=5, state_zorder=9):
                       facecolor='none', linewidth=1.5, zorder=state_zorder)
 
 
-def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_DIR):
+def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_DIR, subtitle_y=0.90):
+    """subtitle_y lowers the subtitle for a title wrapped onto a second line (every other caller keeps the default)."""
     logger.info(f"Adding title and branding: {title}")
     """Add title, description, and branding to figure."""
     font_paths = [
@@ -68,7 +69,7 @@ def add_title_and_branding(fig, title, subtitle, description, RUN_DATE, SCRIPT_D
     plt.rcParams['font.family'] = 'Montserrat'
 
     fig.text(0.99, 0.97, title, fontsize=26, fontweight='bold', ha='right', va='top', fontname='Plus Jakarta Sans')
-    fig.text(0.99, 0.90, subtitle, fontsize=16, ha='right', va='top', fontname='Montserrat')
+    fig.text(0.99, subtitle_y, subtitle, fontsize=16, ha='right', va='top', fontname='Montserrat')
     fig.text(0.99, 0.62, description, fontsize=10, ha='right', va='top', linespacing=1.6, fontname='Montserrat')
     fig.text(0.02, 0.01, "ShowMeFire.org", fontsize=20, fontweight='bold', ha='left', va='bottom', fontname='Montserrat')
 

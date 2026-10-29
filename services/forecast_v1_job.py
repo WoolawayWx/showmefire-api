@@ -121,6 +121,16 @@ def _report_progress(phase: str, message: str, percent: int, **details) -> dict:
     events = list(job.get("events") or [])
     if not events or any(events[-1].get(key) != event.get(key) for key in ("phase", "message", "percent")):
         events.append(event)
+    # Log how long each phase took, so a slow run can be traced to the stage that cost the time.
+    if job.get("phase") != phase:
+        previous, phase_started = job.get("phase"), job.get("phase_started_at")
+        if previous and phase_started:
+            try:
+                seconds = (datetime.fromisoformat(now.replace("Z", "+00:00")) - datetime.fromisoformat(phase_started.replace("Z", "+00:00"))).total_seconds()
+                logger.info("forecast-v1 phase %s took %d s", previous, seconds)
+            except ValueError:
+                pass
+        job["phase_started_at"] = now
     job.update(
         status="running", phase=phase, phase_label=event["label"], message=message,
         progress_percent=event["percent"], progress=details, updated_at=now, events=events[-30:],

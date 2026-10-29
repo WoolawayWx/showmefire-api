@@ -40,6 +40,7 @@ API_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = API_ROOT / "forecast"  # map_style resolves fonts/logo relative to this
 
 PIXEL_W, PIXEL_H, MAP_DPI = 2048, 1152, 144
+TWO_LINE_SUBTITLE_Y = 0.84  # a 26 pt title from y=0.97 takes two lines down to ~0.86, so the 0.90 default would collide
 EXTENT = (-95.8, -89.1, 35.8, 40.8)
 
 CATEGORICAL_COLORS = ["#90EE90", "#FFED4E", "#FFA500", "#FF0000", "#8B0000"]
@@ -105,7 +106,10 @@ class Renderer:
         add_boundaries(ax, data_crs, API_ROOT, county_zorder=county_zorder)
         ax.set_anchor("W")
         plt.subplots_adjust(left=0.05)
-        add_title_and_branding(fig, title, subtitle, description, run_date, SCRIPT_DIR)
+        # The title is right-aligned and the longer ones ran left over the state, so each is given as two lines
+        # ("\n") and the subtitle moves down to clear the second line.
+        add_title_and_branding(fig, title, subtitle, description, run_date, SCRIPT_DIR,
+                               subtitle_y=TWO_LINE_SUBTITLE_Y if "\n" in title else 0.90)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=f".{out_path.stem}.", suffix=".png", dir=out_path.parent)
         os.close(fd)
@@ -135,7 +139,7 @@ class Renderer:
         cbar = plt.colorbar(cs, cax=cax, label="Fire Danger Level")
         cbar.set_ticks([0, 1, 2, 3, 4])
         cbar.set_ticklabels(CATEGORICAL_LABELS)
-        return self._finish(fig, ax, data_crs, "Missouri Ensemble Fire Danger Forecast (Beta)", subtitle,
+        return self._finish(fig, ax, data_crs, "Missouri Ensemble Fire Danger\nForecast (Beta)", subtitle,
                             description, out_path, run_date)
 
     def probability(self, k: int, prob_fraction: np.ndarray, out_path: Path, *, subtitle: str, description: str,
@@ -173,7 +177,7 @@ class Renderer:
             fig.text(0.42, 0.5, f"Less than {PROB_OUTLINE_LEVEL}% chance statewide", ha="center", va="center",
                      fontsize=18, color="#555555", fontname="Montserrat",
                      bbox=dict(boxstyle="round,pad=0.6", facecolor="#E6E6E6", edgecolor="#9E9E9E"))
-        title = f"Chance of {CATEGORY_TITLES[k]} or Greater Fire Danger (Beta)"
+        title = f"Chance of {CATEGORY_TITLES[k]} or Greater\nFire Danger (Beta)"
         # Opaque fills (unlike the categorical map's alpha 0.7) would hide the
         # county lines, so they go above the fill here.
         return self._finish(fig, ax, data_crs, title, subtitle, description, out_path, run_date,

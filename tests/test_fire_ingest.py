@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,38 @@ class FireIngestTests(unittest.TestCase):
         # public, same as user-submitted reports; see upsert_detection_event.
         self.assertEqual(events[0]["status"], "pending")
         self.assertEqual(events[0]["verification_tier"], "unverified")
+
+    def test_detections_only_ingest_creates_no_incident(self):
+        self._write(self.satdet_path, [SATDET_FEATURE])
+        self._write(self.ngfs_path, [])
+        result = fire_ingest.ingest_detection_files(paths=self._paths(), cluster_incidents=False)
+        self.assertEqual(result["inserted"], 1)
+        self.assertIsNone(database.list_fire_events(admin=True)[0]["incident_id"])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fire_incidents").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_ingest_csv_adds_only_the_listed_detections_with_no_incident(self):
+        from services import firms_backfill
+        csv_path = Path(self.temporary.name) / "firms_neris_overlap.csv"
+        csv_path.write_text(
+            ",".join(firms_backfill.HISTORY_COLUMNS) + ",neris_matched\n"  # extra columns (the overlap's neris_*) are ignored
+            "VIIRS_SNPP_NRT:N:2026-08-01T10:00:00Z:39.000:-92.500,viirs,VIIRS_SNPP_NRT,N,2026-08-01T10:00:00Z,39.0,-92.5,5.2,nominal,335.2,290.1,0.14,D,True\n")
+        result = firms_backfill.ingest_csv(csv_path)
+        self.assertEqual(result["ingest"]["inserted"], 1)
+        event = database.list_fire_events(admin=True)[0]
+        self.assertEqual((event["source"], event["bright_t7"], event["bright_t13"], event["daynight"]), ("viirs", 335.2, 290.1, "D"))
+        self.assertIsNone(event["incident_id"])
+        self.assertEqual(firms_backfill.ingest_csv(csv_path)["ingest"]["inserted"], 0)  # re-running updates, never duplicates
+        self.assertEqual(len(database.list_fire_events(admin=True)), 1)
+
+    def test_default_ingest_still_clusters_into_an_incident(self):
+        self._write(self.satdet_path, [SATDET_FEATURE])
+        self._write(self.ngfs_path, [])
+        fire_ingest.ingest_detection_files(paths=self._paths())
+        self.assertIsNotNone(database.list_fire_events(admin=True)[0]["incident_id"])
 
     def test_reingesting_is_idempotent(self):
         self._write(self.satdet_path, [SATDET_FEATURE])

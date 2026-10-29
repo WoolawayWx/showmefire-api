@@ -1,0 +1,184 @@
+"""
+Write checksummed CSVs + a manifest of every satellite/NGFS detection, the
+incidents they belong to, and the raw public/admin feedback on those
+incidents, for model-training/detection_dataset to pull into SMF_DATA_ROOT.
+
+Read-only: opens the SQLite DB with mode=ro. Like export_fire_labels.py this
+hands the training side files, not a DB connection.
+
+Usage:
+    python scripts/export_detection_training_data.py
+    python scripts/export_detection_training_data.py --since 2025-12-01T00:00:00Z
+"""
+import argparse
+import csv
+import hashlib
+import json
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA_VERSION = "detection-training-v2"
+DETECTION_SOURCES = ("viirs", "modis", "ngfs", "goes")
+
+DETECTION_COLUMNS = [
+    "id", "source", "external_id", "satellite", "occurred_at", "latitude", "longitude",
+    "county_fips", "frp", "confidence", "bright_t7", "bright_t13", "pixel_area", "quality_flag",
+    "solar_zenith_angle", "satellite_zenith_angle", "daynight", "land_cover",
+    "detection_confidence_pct", "footprint_geojson", "recurring_source_id", "exclusion_zone_id",
+    "fuel_model_fbfm40", "canopy_cover_pct", "weather_danger_category", "weather_danger_prob",
+    "incident_id", "verification_tier", "cause_category", "status", "moderated_at", "first_seen_at",
+]
+INCIDENT_COLUMNS = [
+    "id", "centroid_latitude", "centroid_longitude", "first_detected_at", "last_detected_at",
+    "detection_count", "county_fips", "status", "merged_into_id", "review_decision", "review_label",
+    "review_decided_at", "created_at",
+]
+FEEDBACK_COLUMNS = [
+    "id", "incident_id", "classification", "status", "reviewed_by", "reviewed_at", "created_at",
+    "submission_source",
+]
+REPORT_COLUMNS = [
+    "id", "latitude", "longitude", "county_fips", "occurred_at", "status", "verification_tier",
+    "cause_category", "reported_fire_status", "reporter_relationship", "acres", "moderated_at",
+]
+RECURRING_SOURCE_COLUMNS = [
+    "id", "label", "source_type", "latitude", "longitude", "radius_km", "status", "detection_count",
+    "distinct_day_count", "first_detected_at", "last_detected_at", "reviewed_at", "created_at",
+]
+EXCLUSION_ZONE_COLUMNS = ["id", "name", "geometry_geojson", "status", "created_at", "updated_at"]
+REVIEW_OUTCOME_COLUMNS = ["id", "event_id", "target_version", "outcome", "reason", "evidence", "reviewer",
+                          "adjudication_status", "reviewed_at"]
+REVIEW_SELECTION_COLUMNS = ["id", "event_id", "stream", "bucket", "sampling_version", "population_n", "protected", "selected_at"]
+SNAPSHOT_COLUMNS = ["id", "event_id", "mode", "schema_version", "features_json", "availability_json", "mask_json", "scored_at"]
+SCORE_HISTORY_COLUMNS = ["id", "event_id", "model_name", "model_version", "mode", "score", "calibrated", "snapshot_id", "scored_at"]
+
+
+def _pseudonym(value) -> str:
+    """Reviewers are staff accounts (emails); the training export gets a stable short id instead."""
+    return hashlib.sha256(f"detection-review:{value}".encode()).hexdigest()[:10] if value else ""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _present(conn: sqlite3.Connection, table: str, wanted: list) -> list:
+    """Older DB copies lack newer columns - export only what exists."""
+    have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    return [c for c in wanted if c in have]
+
+
+def _dump(conn, out_dir: Path, name: str, table: str, wanted: list, where: str = "", params: tuple = (),
+          transform: dict | None = None) -> dict:
+    cols = _present(conn, table, wanted)  # a table an older DB copy lacks entirely gives a header-only file
+    rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} {where}", params).fetchall() if cols else []
+    path = out_dir / name
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(wanted)  # fixed header; absent columns come back blank
+        index = {c: i for i, c in enumerate(cols)}
+        for row in rows:
+            out = [row[index[c]] if c in index else "" for c in wanted]
+            for col, fn in (transform or {}).items():
+                out[wanted.index(col)] = fn(out[wanted.index(col)])
+            writer.writerow(out)
+    return {"filename": name, "rows": len(rows), "sha256": _sha256_file(path), "missing_columns": [c for c in wanted if c not in cols]}
+
+
+def _range(conn, where: str, params: tuple) -> dict:
+    out = {}
+    for source, lo, hi, n in conn.execute(
+        f"SELECT source, MIN(occurred_at), MAX(occurred_at), COUNT(*) FROM fire_events {where} GROUP BY source", params
+    ):
+        out[source] = {"min": lo, "max": hi, "count": n}
+    return out
+
+
+def default_db_path() -> Path:
+    """The API's own DB resolution, imported lazily so callers that pass db_path
+    (the training repo) don't need the API's dependencies installed."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from core.database import get_db_path
+    return get_db_path()
+
+
+def export(since: str | None = None, db_path: Path | None = None, out_dir: Path | None = None) -> Path:
+    """Stdlib-only and importable: `from export_detection_training_data import export`."""
+    db_path = Path(db_path) if db_path else default_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError(f"database not found: {db_path}")
+    out_dir = Path(out_dir) if out_dir else db_path.parent / "fire_labels"
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        marks = ",".join("?" for _ in DETECTION_SOURCES)
+        where = f"WHERE source IN ({marks})"
+        params: tuple = DETECTION_SOURCES
+        if since:
+            where += " AND occurred_at >= ?"
+            params = params + (since,)
+
+        files = {
+            "detections": _dump(conn, out_dir, "detections.csv", "fire_events", DETECTION_COLUMNS, where, params),
+            "incidents": _dump(conn, out_dir, "incidents.csv", "fire_incidents", INCIDENT_COLUMNS),
+            "feedback": _dump(conn, out_dir, "feedback.csv", "fire_incident_feedback", FEEDBACK_COLUMNS),
+            "user_reports": _dump(conn, out_dir, "user_reports.csv", "fire_events", REPORT_COLUMNS, "WHERE source = 'user_submission'"),
+            # Mask definitions (with their dates, so a replay can ignore masks that did not exist yet) and the
+            # vegetation-fire review / shadow-scoring records. Append-only tables, exported whole.
+            "recurring_sources": _dump(conn, out_dir, "recurring_sources.csv", "recurring_fire_sources", RECURRING_SOURCE_COLUMNS),
+            "exclusion_zones": _dump(conn, out_dir, "exclusion_zones.csv", "fire_exclusion_zones", EXCLUSION_ZONE_COLUMNS),
+            "review_outcomes": _dump(conn, out_dir, "review_outcomes.csv", "detection_review_outcome", REVIEW_OUTCOME_COLUMNS,
+                                     transform={"reviewer": _pseudonym}),
+            "review_selection": _dump(conn, out_dir, "review_selection.csv", "detection_review_selection", REVIEW_SELECTION_COLUMNS),
+            "feature_snapshots": _dump(conn, out_dir, "feature_snapshots.csv", "detection_feature_snapshot", SNAPSHOT_COLUMNS),
+            "score_history": _dump(conn, out_dir, "score_history.csv", "detection_score_history", SCORE_HISTORY_COLUMNS),
+        }
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_db": str(db_path),
+            "since": since,
+            "files": files,
+            "detection_ranges": _range(conn, where, params),
+        }
+    finally:
+        conn.close()
+    manifest_path = out_dir / "detection_training_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest_path
+
+
+def bundle(manifest_path: Path) -> Path:
+    """Zip the manifest and the files it lists into one portable file (no DB, no PII columns)."""
+    import zipfile
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    zip_path = manifest_path.parent / "detection_training_export.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(manifest_path, manifest_path.name)
+        for info in manifest["files"].values():
+            z.write(manifest_path.parent / info["filename"], info["filename"])
+    return zip_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Export detections, incidents and feedback for detection-confidence training.")
+    parser.add_argument("--since", default=None)
+    parser.add_argument("--db", default=None, help="SQLite DB to read (default: the API's own DB)")
+    parser.add_argument("--out-dir", default=None, help="where to write (default: <db dir>/fire_labels)")
+    parser.add_argument("--zip", action="store_true", help="also write one detection_training_export.zip to move to the training machine")
+    args = parser.parse_args()
+    manifest_path = export(args.since, args.db, args.out_dir)
+    print(f"Wrote {manifest_path}")
+    if args.zip:
+        print(f"Wrote {bundle(manifest_path)}")
+
+
+if __name__ == "__main__":
+    main()

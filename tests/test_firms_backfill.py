@@ -1,0 +1,106 @@
+from datetime import date
+
+import pytest
+
+from services import firms_backfill as fb
+
+HEADER = "latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_ti5,frp,daynight"
+ROW = "38.5,-92.3,335.2,0.39,0.36,2026-01-05,1912,N,VIIRS,n,2.0NRT,290.1,4.2,D"
+
+
+class _Response:
+    def __init__(self, text):
+        self.text = text
+
+    def raise_for_status(self):
+        pass
+
+
+def _fetcher(by_product):
+    calls = []
+
+    def fetch(url, timeout=None):
+        calls.append(url)
+        product = url.split("/csv/")[1].split("/")[1]
+        return _Response(by_product.get(product, ""))
+    fetch.calls = calls
+    return fetch
+
+
+def test_day_windows_cover_the_range_in_five_day_chunks():
+    assert fb.day_windows(date(2026, 1, 1), date(2026, 1, 12)) == [
+        (date(2026, 1, 1), 5), (date(2026, 1, 6), 5), (date(2026, 1, 11), 2)]
+    assert fb.day_windows(date(2026, 1, 1), date(2026, 1, 1)) == [(date(2026, 1, 1), 1)]
+    with pytest.raises(ValueError):
+        fb.day_windows(date(2026, 1, 2), date(2026, 1, 1))
+
+
+def test_archive_row_gets_the_nrt_id_and_keeps_band_fields():
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    features, stats = fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], key="K", fetch=fetch, sleep=lambda s: None)
+    assert len(features) == 1
+    props = features[0]["properties"]
+    assert props["SOURCE_ID"].startswith("VIIRS_SNPP_NRT:")  # same id the live poller writes -> one fire_events row
+    assert props["TYPENAME"] == "VIIRS_SNPP_NRT"
+    assert (props["BRIGHT_MID"], props["BRIGHT_LONG"], props["DAYNIGHT"]) == (335.2, 290.1, "D")
+    assert props["PIXEL_AREA"] == pytest.approx(0.39 * 0.36, abs=1e-4)
+    assert "/VIIRS_SNPP_SP/" in fetch.calls[0] and fetch.calls[0].endswith("/1/2026-01-05")
+
+
+def test_same_detection_from_archive_and_nrt_is_kept_once():
+    body = f"{HEADER}\n{ROW}\n"
+    fetch = _fetcher({"VIIRS_SNPP_SP": body, "VIIRS_SNPP_NRT": body})
+    features, stats = fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP", "VIIRS_SNPP_NRT"], key="K",
+                                       fetch=fetch, sleep=lambda s: None)
+    assert len(features) == 1 and stats["duplicates"] == 1
+    assert stats["per_product"] == {"VIIRS_SNPP_SP": 1, "VIIRS_SNPP_NRT": 0}
+
+
+def test_detections_outside_missouri_are_dropped():
+    far = ROW.replace("38.5,-92.3", "30.0,-92.3")
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{far}\n"})
+    features, _ = fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], key="K", fetch=fetch, sleep=lambda s: None)
+    assert features == []
+
+
+def test_firms_plain_text_errors_are_raised_not_parsed_as_data():
+    fetch = _fetcher({"VIIRS_SNPP_SP": "Invalid MAP_KEY."})
+    with pytest.raises(fb.FirmsError, match="Invalid MAP_KEY"):
+        fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], key="K", fetch=fetch, sleep=lambda s: None)
+
+
+def test_missing_map_key_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("MODIS_KEY", raising=False)
+    with pytest.raises(fb.FirmsError, match="MODIS_KEY"):
+        fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], fetch=_fetcher({}))
+
+
+def test_backfill_writes_a_csv_and_never_touches_the_database(tmp_path, monkeypatch):
+    import csv
+    from core import database
+    monkeypatch.setattr(database, "get_db_path", lambda: (_ for _ in ()).throw(AssertionError("backfill must not open the DB")))
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    out = fb.backfill(date(2026, 1, 5), date(2026, 1, 5), products=["VIIRS_SNPP_SP"], key="K",
+                      out_dir=tmp_path, fetch=fetch, sleep=lambda s: None)
+    assert out["csv"].endswith("firms_history_2026-01-05_2026-01-05.csv")
+    rows = list(csv.DictReader(open(out["csv"], newline="")))
+    assert list(rows[0].keys()) == fb.HISTORY_COLUMNS
+    assert rows[0]["source"] == "viirs" and rows[0]["external_id"].startswith("VIIRS_SNPP_NRT:") and rows[0]["daynight"] == "D"
+    assert float(rows[0]["bright_t7"]) == 335.2 and float(rows[0]["bright_t13"]) == 290.1
+
+
+def test_csv_row_rebuilds_the_feature_the_ingest_expects():
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    (feature,), _ = fb.fetch_history(date(2026, 1, 5), date(2026, 1, 5), ["VIIRS_SNPP_SP"], key="K", fetch=fetch, sleep=lambda s: None)
+    row = {k: ("" if v is None else str(v)) for k, v in fb.feature_to_row(feature).items()}  # what a CSV round trip yields
+    rebuilt = fb.row_to_feature(row)["properties"]
+    original = feature["properties"]
+    for key in ("SOURCE_ID", "TYPENAME", "SATELLITE", "ACQ_DATE_TIME", "FRP", "CONFIDENCE", "BRIGHT_MID", "BRIGHT_LONG", "PIXEL_AREA", "DAYNIGHT"):
+        assert rebuilt[key] == original[key], key
+
+
+def test_dry_run_writes_nothing(tmp_path):
+    fetch = _fetcher({"VIIRS_SNPP_SP": f"{HEADER}\n{ROW}\n"})
+    out = fb.backfill(date(2026, 1, 5), date(2026, 1, 5), products=["VIIRS_SNPP_SP"], dry_run=True, key="K",
+                      out_dir=tmp_path, fetch=fetch, sleep=lambda s: None)
+    assert out["fetched"] == 1 and out["dry_run"] and not list(tmp_path.iterdir())

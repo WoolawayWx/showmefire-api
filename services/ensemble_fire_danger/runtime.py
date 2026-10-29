@@ -58,8 +58,8 @@ PUBLIC_IMAGES_DIR = Path(os.getenv("SMF_ENSEMBLE_FD_IMAGES_DIR") or (API_ROOT / 
 STATUS_KEY = "ForecastEnsembleFireDanger"
 TRACKS = ("members", "ensprod")
 TRACK_LABELS = {
-    "members": "HRRR, NAM 3km, RRFS, HiResW (+ time-lagged runs)",
-    "ensprod": "REFS/HREF ensemble mean + spread",
+    "members": "HRRR, RRFS (+ time-lagged runs)",
+    "ensprod": "REFS ensemble mean + spread",
 }
 PRODUCT_FILES = {
     "categorical": "mo-forecast-ens-firedanger",
@@ -204,12 +204,32 @@ def _regridder_factory(dst_lat, dst_lon):
     return make
 
 
+# Sources dropped from the member lists whatever the loaded config says. NOAA retired NAM, SREF, HREF and HiResW together,
+# and the registered bundle carries its own member_config.json (it wins over the vendored default), so a bundle fitted with
+# them would keep asking for them until a retrained bundle is promoted. Comma-separated source keys; empty disables it.
+RETIRED_SOURCES = frozenset(s.strip() for s in os.getenv(
+    "SMF_ENSEMBLE_FD_RETIRED_SOURCES", "nam_nest,hiresw_arw,hiresw_fv3,hiresw_arw2,href").split(",") if s.strip())
+
+
+def without_retired_sources(config: dict, retired=RETIRED_SOURCES) -> dict:
+    """The config with members of retired sources removed from both tracks (the same object when none are present)."""
+    out = config
+    for key in ("members", "ensprod_members"):
+        items = config.get(key, [])
+        kept = [m for m in items if m.get("source") not in retired]
+        if len(kept) != len(items):
+            logger.info("ensemble fire danger: ignoring retired %s %s", key,
+                        ", ".join(m["id"] for m in items if m.get("source") in retired))
+            out = {**out, key: kept}
+    return out
+
+
 def run(anchor: Optional[datetime] = None, *, now: Optional[datetime] = None, render: bool = True,
         upload: Optional[bool] = None, workers: int = 4) -> dict:
     started = time.time()
     anchor = anchor or default_anchor(now)
     bundle = bundle_mod.load_bundle()
-    config = bundle.get("member_config") or members.load_config()
+    config = without_retired_sources(bundle.get("member_config") or members.load_config())
     window = config["window"]
     valid_times = [pd.Timestamp(anchor + timedelta(hours=lead), tz="UTC")
                    for lead in range(int(window["valid_lead_start"]), int(window["valid_lead_end"]) + 1)]
@@ -262,6 +282,16 @@ def run(anchor: Optional[datetime] = None, *, now: Optional[datetime] = None, re
                 control_id = item.member_id
         except Exception as error:
             item.status, item.reason = "failed", item.reason + f"; regrid failed: {error}"
+    try:
+        # Beta/preview: the Fire Weather Severity Index scored on the HRRR + RRFS blend, from fields already regridded
+        # here. Failure-isolated and gated by the fire_weather_index shadow switch; never affects this run.
+        from services.fire_weather_index_blend import run_for_ensemble as _fwsi_blend
+        blend_result = _fwsi_blend(plan, member_fields, wind_factors, dst_lat, dst_lon, anchor,
+                                   lead_start=int(window["valid_lead_start"]))
+        logger.info("fire_weather_index blend: %s", {k: v for k, v in blend_result.items() if k in ("ok", "reason", "image")})
+    except Exception as error:  # pragma: no cover - the helper already swallows its own errors
+        logger.warning("fire_weather_index blend step failed (non-fatal): %s", error)
+
     n_members = len(member_fields)
     if n_members >= int(config.get("abort_below_members", 3)):
         track = tracks.track_members(member_fields, weights, wind_factors, control_id, booster, feature_names,
@@ -327,12 +357,13 @@ def run(anchor: Optional[datetime] = None, *, now: Optional[datetime] = None, re
 
 # --- outputs -----------------------------------------------------------------
 
+# nam_nest stays labelled only so an older registered bundle that still carries it renders; the current config has no NAM.
 SOURCE_SHORT = {"hrrr": "HRRR", "nam_nest": "NAM 3km", "rrfs": "RRFS", "hiresw_arw": "HiResW ARW",
                 "hiresw_fv3": "HiResW FV3", "hiresw_arw2": "HiResW ARW2", "refs": "REFS", "href": "HREF"}
 
 
 def _members_text(plan: List[members.ResolvedMember], track: str, result: dict) -> str:
-    """Compact, wrapped member list, grouped by model: "HRRR 00/06/12Z, NAM 3km 06/12Z, ..."."""
+    """Compact, wrapped member list, grouped by model: "HRRR 00/06/12Z, RRFS 06/12Z, ..."."""
     if track == "members":
         used = [i for i in plan if i.kind == "member" and i.member_id in result["member_ids"]]
         cycles: Dict[str, List[str]] = {}

@@ -102,7 +102,7 @@
       "name": "ensemble_fire_danger_member_config",
       "api_path": "services/ensemble_fire_danger/member_config.json",
       "training_path": "ensemble_fire_danger/member_config.json",
-      "sha256": "46c1a6525020b4039b683654e654b073c31a352f7953984e4bf29849f1ce5ab8",
+      "sha256": "d598641aecdd9c0774c8662d85d1eef7ee378e4442676a5326abe212a6d15c3e",
       "invalidates": [
         "ensemble_fire_danger"
       ]

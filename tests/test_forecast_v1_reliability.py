@@ -339,6 +339,57 @@ def test_query_leads_chunks_and_skips_hours_without_the_field(monkeypatch):
     assert max(len(batch) for batch in requested) == 3  # never asked for all hours at once
 
 
+def test_query_leads_does_not_ask_again_for_hours_already_found_missing(monkeypatch):
+    # Each GEFS member used to rediscover that f000 has no APCP by failing a chunk and retrying it hour by hour.
+    from forecast_v1.acquisition import _query_leads
+
+    monkeypatch.setenv("SMF_HERBIE_LEAD_CHUNK", "3")
+    requested = []
+
+    def make_client(leads):
+        requested.append(tuple(leads))
+
+        class Client:
+            def xarray(self, search, **kwargs):
+                if 0 in leads:
+                    raise FileNotFoundError("subset_x__f000")
+                return _lead_dataset(leads)
+        return Client()
+
+    known_missing: set[int] = set()
+    _query_leads(make_client, tuple(range(7)), ":APCP:surface:", CYCLE, known_missing=known_missing)
+    assert known_missing == {0}
+
+    requested.clear()
+    second = _query_leads(make_client, tuple(range(7)), ":APCP:surface:", CYCLE, known_missing=known_missing)
+
+    assert second.sizes["time"] == 6
+    assert all(0 not in batch for batch in requested)
+    assert len(requested) == 2  # f001-f003 and f004-f006, no hour-by-hour retries
+
+
+def test_fetch_member_does_not_retry_a_field_that_is_not_published(monkeypatch):
+    from forecast_v1 import acquisition as aq
+
+    calls = []
+
+    def fake_query(make_client, leads, search, cycle, unnamed=None, known_missing=None):
+        calls.append(search)
+        raise FileNotFoundError(f"{search} matched no usable fields")
+
+    monkeypatch.setattr(aq, "_query_leads", fake_query)
+    monkeypatch.setattr(aq.time, "sleep", lambda seconds: None)
+    spec = aq.AcquisitionSpec("hrrr", "hrrr", "sfc", (0, 1), (None,), searches=(":ABC:",), required=True)
+
+    try:
+        aq._fetch_member(spec, CYCLE, None, Path("."), lambda **kwargs: None)
+    except RuntimeError as error:
+        assert "returned no forecast-v1 surface fields" in str(error)
+    else:
+        raise AssertionError("expected the member fetch to fail")
+    assert calls == [":ABC:"]  # one attempt, not three
+
+
 def test_query_leads_joins_a_single_lead_last_chunk(monkeypatch):
     # 49 HRRR leads in chunks of 8 leave f048 alone; that chunk used to make every run fail.
     from forecast_v1.acquisition import _query_leads

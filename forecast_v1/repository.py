@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS forecast_verification (
     FOREIGN KEY(run_id) REFERENCES forecast_runs(run_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_forecast_verification_valid ON forecast_verification(qc_eligible, valid_time_utc);
+
 CREATE TABLE IF NOT EXISTS forecast_bias_applied (
     run_id TEXT NOT NULL,
     valid_time_utc TEXT NOT NULL,
@@ -161,8 +163,14 @@ CREATE TABLE IF NOT EXISTS forecast_station_metadata (
 """
 
 
+_schema_ready: set[Path] = set()
+
+
 def ensure_schema(db_path: str | Path | None = None) -> None:
     path = Path(db_path or get_db_path())
+    # Each call used to rerun the whole schema script, which takes a write lock and stalls behind a running forecast.
+    if path in _schema_ready and path.exists():
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.executescript(SCHEMA_SQL)
@@ -171,6 +179,7 @@ def ensure_schema(db_path: str | Path | None = None) -> None:
             connection.execute(
                 "ALTER TABLE forecast_runs ADD COLUMN source_diagnostics_json TEXT NOT NULL DEFAULT '[]'"
             )
+    _schema_ready.add(path)
 
 
 @contextmanager

@@ -62,7 +62,7 @@ def _origin(feed: str, path: Path, run_id: Optional[int], provider_ref: str, pro
 
 
 def _ingest_satdet_feature(feature: Dict[str, Any], run_id: Optional[int] = None, skips: Optional[Dict[str, int]] = None,
-                           path: Path = SATDET_PATH) -> Optional[Dict]:
+                           path: Path = SATDET_PATH, cluster_incidents: bool = True) -> Optional[Dict]:
     coords = _extract_coordinates(feature)
     if coords is None:
         _skip(skips, "no_coordinates")
@@ -95,9 +95,15 @@ def _ingest_satdet_feature(feature: Dict[str, Any], run_id: Optional[int] = None
         frp=props.get("FRP"),
         confidence=props.get("CONFIDENCE"),
         satellite=props.get("SATELLITE"),
+        # Older feed files predate these properties; None leaves what is already stored (COALESCE on conflict).
+        bright_t7=props.get("BRIGHT_MID"),
+        bright_t13=props.get("BRIGHT_LONG"),
+        pixel_area=props.get("PIXEL_AREA"),
+        daynight=props.get("DAYNIGHT"),
         fuel_model_fbfm40=fuel_model_fbfm40,
         canopy_cover_pct=canopy_cover_pct,
         origin=_origin(SATDET_FEED, path, run_id, str(external_id), props),
+        cluster_incidents=cluster_incidents,
     )
 
 
@@ -171,7 +177,8 @@ def _ngfs_sort_key(feature: Dict[str, Any]) -> str:
     return (feature.get("properties") or {}).get("acq_date_time") or ""
 
 
-def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: bool = False) -> Dict[str, Any]:
+def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: bool = False,
+                           cluster_incidents: bool = True) -> Dict[str, Any]:
     """
     Ingest api/gis/satfiredetection.geojson and
     api/data/missouri_fires.geojson into fire_events.
@@ -234,7 +241,8 @@ def ingest_detection_files(paths: Optional[Dict[str, Path]] = None, dry_run: boo
         for reason, count in feed_skips.items():
             skip_reasons[f"{label}:{reason}"] = count
 
-    run_feed("satdet", SATDET_FEED, satdet_path, satdet_features, _ingest_satdet_feature)
+    run_feed("satdet", SATDET_FEED, satdet_path, satdet_features,
+             lambda feature, run_id, skips, path: _ingest_satdet_feature(feature, run_id, skips, path, cluster_incidents))
     run_feed("ngfs", NGFS_FEED, ngfs_path, ngfs_features, _ingest_ngfs_feature)
 
     summary = {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors, "dry_run": dry_run,

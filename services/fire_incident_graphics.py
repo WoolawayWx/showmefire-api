@@ -45,7 +45,7 @@ def _read_local_roads(path: str, bbox: tuple[float, float, float, float]):
 
 
 def _display_time(value) -> str:
-    """Show an incident timestamp in Central time and UTC/Zulu."""
+    """Show an incident timestamp in Central time."""
     if not value:
         return "Unknown"
     try:
@@ -53,8 +53,7 @@ def _display_time(value) -> str:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         local = parsed.astimezone(ZoneInfo("America/Chicago"))
-        utc = parsed.astimezone(timezone.utc)
-        return f"{local:%b} {local.day}, {local:%Y} {local:%I:%M %p} CT\n{utc:%Y-%m-%d %H:%MZ} UTC"
+        return f"{local:%b} {local.day}, {local:%Y} {local:%I:%M %p} CT"
     except (TypeError, ValueError):
         return str(value)
 

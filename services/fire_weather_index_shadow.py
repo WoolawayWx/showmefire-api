@@ -19,7 +19,7 @@ core/risk_fusion_features.py.
 
 Live scoring uses HRRR-derived grids only (the same hourly_rh/hourly_ws_kts/
 hourly_temp_c/hourly_precip_mm arrays risk_fusion_hook.py already builds
-from the live forecast run) - RRFS/FV3-HIRES blending only happens in the
+from the live forecast run) - RRFS blending only happens in the
 OFFLINE training panel (model-training/fire_weather_index/build_county_days.py),
 for accumulating history toward a future retrain, not for live scoring.
 KBDI and the seasonal cure/green-up factor need multi-day accumulated
@@ -55,6 +55,7 @@ MAX_FAILURES = int(os.getenv("FIRE_WEATHER_INDEX_SHADOW_MAX_FAILURES", "3"))
 STATE_PATH = EVIDENCE_ROOT / "shadow-state.json"
 
 MODEL_TYPE = "fire_weather_index"
+API_ROOT = Path(__file__).resolve().parent.parent  # map_style resolves shapefiles, fonts and the logo from here
 NOT_FOR_OPERATIONS_LABEL = "SHADOW ONLY — NOT FOR OPERATIONS"
 IMAGE_FILENAME = "fire_weather_index_shadow_latest.png"
 CATEGORY_LABELS = ("Low", "Moderate", "Elevated", "Critical", "Extreme")
@@ -387,22 +388,25 @@ def _render_county_fill(ax, data_crs, county_fips: List[str], scored: Dict[str, 
     no_data = counties[counties["category"].isna()]
     if not no_data.empty:
         ax.add_geometries(no_data.geometry, crs=data_crs, facecolor=NODATA_COLOR, edgecolor="none", zorder=6)
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#444444", facecolor="none", linewidth=0.7, zorder=9)
-
     from matplotlib.patches import Patch
     legend_handles = [Patch(facecolor=color, label=label) for color, label in zip(CATEGORY_COLORS, CATEGORY_LABELS)]
     legend_handles.append(Patch(facecolor=NODATA_COLOR, label="No data"))
-    ax.legend(handles=legend_handles, loc="lower left", bbox_to_anchor=(0.0, 0.0), fontsize=10, frameon=False)
+    # Under the description block on the right, same spot as maps/raster_maps.py::category_legend.
+    legend = ax.figure.legend(handles=legend_handles, title="Fire Danger Level", loc="upper right",
+                              bbox_to_anchor=(0.99, 0.38), bbox_transform=ax.figure.transFigure, fontsize=11,
+                              title_fontsize=12, frameon=False, labelspacing=0.55, handlelength=1.6, handleheight=1.1)
+    legend.set_zorder(20)
 
 
-def _render_pixel_fill(fig, ax, data_crs, bundle: Dict, weather_grids: Dict[str, np.ndarray],
+def _render_pixel_fill(ax, data_crs, bundle: Dict, weather_grids: Dict[str, np.ndarray],
                         lat: np.ndarray, lon: np.ndarray):
     """
-    Smooth, per-grid-cell fill matching the live operational Peak Fire
-    Danger Forecast map's exact visual identity - direct port of
-    model-training/scripts/score_fire_weather_index_today.py::render_pixel_map's
-    technique (proven and bug-fixed there for this exact model), adapted to
-    score from the live hook's in-memory grids instead of cached files.
+    Smooth, per-grid-cell fill, drawn exactly like the live operational Peak
+    Fire Danger Forecast map (same palette, bins, alpha, separator lines and
+    vector clip to Missouri). County/state lines, the colorbar and the title
+    block come from forecast/map_style.py in _render_png so this map shares
+    the house style of every other public graphic. Returns the filled
+    contour set (the colorbar is built from it).
     """
     from cartopy.mpl.path import shapely_to_path
     from matplotlib.colors import BoundaryNorm, ListedColormap
@@ -423,113 +427,111 @@ def _render_pixel_fill(fig, ax, data_crs, bundle: Dict, weather_grids: Dict[str,
     separators = ax.contour(lon, lat, category_index, transform=data_crs, levels=PRODUCTION_BINS[1:-1],
                              colors="black", linewidths=0.3, alpha=0.2, zorder=8)
 
-    state_shp = Path(__file__).resolve().parent.parent / "maps" / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
+    state_shp = API_ROOT / "maps" / "shapefiles" / "MO_State_Boundary" / "MO_State_Boundary.shp"
     if state_shp.exists():
         import geopandas as gpd
-        state = gpd.read_file(state_shp).to_crs("EPSG:4326")
         try:
-            # Vector clip to Missouri's exact boundary - a raster NaN mask
-            # produces a visibly jagged/notched edge at HRRR's grid
-            # resolution instead. Both artists need it - the fill and the
-            # separator lines are separate matplotlib artists.
-            state_geom = state.geometry.union_all()
-            projected_geom = ax.projection.project_geometry(state_geom, data_crs)
+            # Vector clip to Missouri's exact boundary - a raster NaN mask produces a visibly jagged/notched edge at
+            # HRRR's grid resolution instead. Both artists need it: the fill and the separator lines are separate.
+            state = gpd.read_file(state_shp).to_crs("EPSG:4326")
+            projected_geom = ax.projection.project_geometry(state.geometry.union_all(), data_crs)
             clip_path = PathPatch(shapely_to_path(projected_geom), transform=ax.transData)
             for artist_set in (contours, separators):
                 for collection in (getattr(artist_set, "collections", None) or [artist_set]):
                     collection.set_clip_path(clip_path)
         except Exception:
             pass  # clip is cosmetic only - the pixel data itself doesn't need it
+    return contours
 
-    counties = _county_geometries()
-    ax.add_geometries(counties.geometry, crs=data_crs, edgecolor="#B6B6B6", facecolor="none", linewidth=0.7, zorder=9)
-    if state_shp.exists():
-        ax.add_geometries(state.geometry, crs=data_crs, edgecolor="#111111", facecolor="none", linewidth=1.5, zorder=10)
 
-    cax = fig.add_axes([0.02, 0.12, 0.02, 0.58])
-    cbar = fig.colorbar(contours, cax=cax, ticks=[0, 1, 2, 3, 4])
-    cbar.ax.set_yticklabels(PRODUCTION_LABELS)
+DESCRIPTION_TEXT = (
+    "Fire Weather Severity Index: a continuous, weighted fire-weather\n"
+    "danger score (RH, wind, VPD, precipitation relief), mapped to\n"
+    "these 5 categories via calibrated score percentiles.\n\n"
+    "Not the same computation as the public if/then rule-based\n"
+    "Fire Danger category shown elsewhere on this site.\n\n"
+    "EXPERIMENTAL - shadow output for internal comparison only.\n"
+    "Not reviewed, validated or approved for any operational decision.\n\n"
+    "Data Source: HRRR Model Forecast | ShowMeFire fire_weather_index\n"
+    "For More Info, Visit ShowMeFire.org"
+)
 
 
 def _render_png(county_fips: List[str], scored: Dict[str, Dict], bundle: Dict, out_path: Path,
                  weather_grids: Optional[Dict[str, np.ndarray]] = None,
-                 lat: Optional[np.ndarray] = None, lon: Optional[np.ndarray] = None) -> None:
+                 lat: Optional[np.ndarray] = None, lon: Optional[np.ndarray] = None,
+                 valid_local_date: Optional[str] = None, title: str = "Missouri Fire Weather Severity Index (Shadow)",
+                 description: Optional[str] = None, subtitle_extra: str = "", subtitle: Optional[str] = None) -> None:
     """
-    Renders the shadow's live map. When weather_grids/lat/lon are provided
-    (the normal live-scoring path, see score_for_forecast), renders a
-    smooth pixel/raster map matching the operational Peak Fire Danger
-    Forecast map's exact palette/style (_render_pixel_fill). Falls back to
-    a county choropleth (_render_county_fill, the map style this used
-    unconditionally before) when they're not - keeps this function usable
-    without a live grid (e.g. from a test) rather than failing outright.
-    Explicitly labeled shadow/experimental either way, same convention as
-    fire_weather_ml_shadow.py's _render_png.
+    Renders the shadow's live map in the house style shared by every public
+    Missouri graphic (forecast/map_style.py: full-bleed Lambert map on the
+    light-gray background, county/state lines, vertical colorbar at the left,
+    right-aligned title/subtitle/description block, ShowMeFire logo). When
+    weather_grids/lat/lon are provided (the normal live-scoring path, see
+    score_for_forecast) the fill is the smooth pixel/raster map; otherwise a
+    county choropleth (_render_county_fill) keeps this usable without a live
+    grid (e.g. from a test). Explicitly labeled shadow/experimental either
+    way, same convention as fire_weather_ml_shadow.py.
     """
     import cartopy.crs as ccrs
     import matplotlib
     matplotlib.use("Agg")  # headless/non-interactive - see fire_weather_ml_shadow.py's _render_png for why
     import matplotlib.pyplot as plt
+    from forecast.map_style import add_boundaries, add_title_and_branding, create_base_map
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     pixel_width, pixel_height, dpi = 2048, 1152, 144
     data_crs = ccrs.PlateCarree()
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
-    fig = plt.figure(figsize=(pixel_width / dpi, pixel_height / dpi), dpi=dpi, facecolor="#E8E8E8")
-    ax = fig.add_axes([0.04, 0.04, 0.70, 0.92], projection=map_crs)
-    ax.set_extent((-95.8, -89.1, 35.8, 40.8), crs=data_crs)
-    ax.set_frame_on(False)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    fig, ax = create_base_map((-95.8, -89.1, 35.8, 40.8), map_crs, data_crs, pixel_width, pixel_height, dpi)
 
-    if weather_grids is not None and lat is not None and lon is not None:
-        _render_pixel_fill(fig, ax, data_crs, bundle, weather_grids, lat, lon)
-    else:
-        _render_county_fill(ax, data_crs, county_fips, scored)
-
-    fig.text(0.5, 0.965, NOT_FOR_OPERATIONS_LABEL, fontsize=22, fontweight="bold",
-             ha="center", va="top", color="#B00000")
-    fig.text(0.98, 0.92, "Fire Weather Severity Index (Shadow)", fontsize=22, fontweight="bold", ha="right", va="top")
-    fig.text(0.98, 0.865, f"Model: {MODEL_TYPE}  Version: {bundle.get('version') or 'unknown'}",
-             fontsize=14, ha="right", va="top")
-    fig.text(
-        0.77, 0.66,
-        "A continuous, numeric\n"
-        "fire-weather danger score,\n"
-        "mapped to these 5 categories\n"
-        "via calibrated score\n"
-        "percentiles - NOT the same\n"
-        "computation as the public\n"
-        "if/then rule-based Fire\n"
-        "Danger category shown\n"
-        "elsewhere on this site.\n\n"
-        "Experimental output, scored\n"
-        "for internal comparison only.\n"
-        "It is NOT reviewed, validated,\n"
-        "or approved for any\n"
-        "operational decision.",
-        fontsize=11, ha="left", va="top", linespacing=1.5, color="#444444",
-    )
-
-    fd, temporary = tempfile.mkstemp(prefix=".fire_weather_index_shadow.", suffix=".png", dir=out_path.parent)
-    os.close(fd)
-    temp_path = Path(temporary)
     try:
-        fig.savefig(temp_path, facecolor=fig.get_facecolor())
-        plt.close(fig)
-        temp_path.replace(out_path)
+        if weather_grids is not None and lat is not None and lon is not None:
+            contours = _render_pixel_fill(ax, data_crs, bundle, weather_grids, lat, lon)
+            cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+            cbar = plt.colorbar(contours, cax=cax, label="Fire Danger Level")
+            cbar.set_ticks([0, 1, 2, 3, 4])
+            cbar.set_ticklabels(PRODUCTION_LABELS)
+        else:
+            _render_county_fill(ax, data_crs, county_fips, scored)
+
+        add_boundaries(ax, data_crs, API_ROOT)
+        ax.set_anchor("W")
+        plt.subplots_adjust(left=0.05)
+
+        # Right-hand block under the subtitle: the top-left corner is Missouri's northwest edge.
+        fig.text(0.99, 0.835, NOT_FOR_OPERATIONS_LABEL, fontsize=18, fontweight="bold", ha="right", va="top",
+                 color="#B00000")
+        valid = f" | Valid: {valid_local_date}" if valid_local_date else ""
+        add_title_and_branding(
+            fig, title,
+            subtitle or f"Model: {MODEL_TYPE} | Version: {bundle.get('version') or 'unknown'}{valid}{subtitle_extra}",
+            description or DESCRIPTION_TEXT, None, API_ROOT / "forecast",
+        )
+
+        fd, temporary = tempfile.mkstemp(prefix=".fire_weather_index_shadow.", suffix=".png", dir=out_path.parent)
+        os.close(fd)
+        temp_path = Path(temporary)
+        try:
+            fig.savefig(temp_path, dpi=dpi, bbox_inches=None, pad_inches=0)
+            temp_path.replace(out_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
     finally:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+        plt.close(fig)
         plt.close("all")
 
 
-def _update_manifest(image_path: Path, bundle: Dict, category_counts: Dict, score_summary: Dict, generated_at: str) -> None:
+def _update_manifest(image_path: Path, bundle: Dict, category_counts: Dict, score_summary: Dict, generated_at: str,
+                     key: str = "fire_weather_index_shadow", extra: Optional[Dict] = None) -> None:
     """Mirrors fire_weather_ml_shadow.py::_update_manifest's shape, under a distinct product key."""
     from services.beta_products import BETA_ROOT, load_manifest, save_manifest
 
     manifest = load_manifest()
-    manifest.setdefault("products", {})["fire_weather_index_shadow"] = {
+    manifest.setdefault("products", {})[key] = {
+        **(extra or {}),
         "kind": "raster-preview",
         "preview": str(image_path.relative_to(BETA_ROOT)).replace("\\", "/"),
         "not_for_operations": True,
@@ -596,7 +598,8 @@ def score_for_forecast(
         image_path = None
         try:
             image_path = _image_path()
-            _render_png(county_fips, scored, bundle, image_path, weather_grids=weather_grids, lat=lat, lon=lon)
+            _render_png(county_fips, scored, bundle, image_path, weather_grids=weather_grids, lat=lat, lon=lon,
+                        valid_local_date=valid_local_date)
             _update_manifest(image_path, bundle, category_counts, score_summary, record["recorded_at"])
             print(f"fire_weather_index shadow map written to: {image_path.resolve()}")
         except Exception as render_error:
@@ -642,3 +645,92 @@ def record_skipped_run(reason: str) -> bool:
         _state["auto_disabled"] = True
     _persist_state()
     return True
+
+
+BLEND_MODEL_TAG = "fire_weather_index:blend"
+BLEND_IMAGE_FILENAME = "fire_weather_index_blend_shadow_latest.png"
+BLEND_MANIFEST_KEY = "fire_weather_index_blend_shadow"
+
+
+def score_blend_for_forecast(
+    run_id: str,
+    valid_local_date: str,
+    county_fips: List[str],
+    weather_rows: Dict[str, Dict],
+    weather_grids: Dict[str, np.ndarray],
+    lat: np.ndarray,
+    lon: np.ndarray,
+    sources: Dict,
+    bundle_dir: Optional[Path] = None,
+    evidence_root: Optional[Path] = None,
+    image_path: Optional[Path] = None,
+) -> Dict:
+    """Scores the HRRR + RRFS BLENDED weather the same way as the HRRR-only shadow (same bundle, same
+    scoring, same map style) so the two differ only in their weather input. Writes its own immutable evidence file
+    (`<run_id>.fire_weather_index_blend_score.json`), its own image and its own manifest entry.
+
+    Deliberately separate from score_for_forecast: a failure here must never count toward the HRRR-only shadow's
+    health or auto-disable it, so nothing here reads or writes that state. Gated by the same enabled switch as the
+    shadow. Never raises; returns {"ok": bool, ...}.
+    """
+    try:
+        if not diagnostics()["enabled"]:
+            return {"ok": False, "reason": "fire_weather_index shadow is not enabled"}
+        bundle = load_bundle(bundle_dir)
+        scored = {fips: score_county_day(bundle, weather_rows[fips]) for fips in county_fips}
+        scores = [scored[f]["score"] for f in county_fips if scored[f]["score"] is not None]
+        categories = [scored[f]["category"] for f in county_fips if scored[f]["category"] is not None]
+        category_counts = {label: categories.count(i) for i, label in enumerate(CATEGORY_LABELS)}
+        score_summary = ({"mean": float(np.mean(scores)), "min": float(np.min(scores)), "max": float(np.max(scores))}
+                         if scores else {})
+        recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        record = {
+            "run_id": str(run_id), "recorded_at": recorded_at, "valid_local_date": valid_local_date,
+            "bundle_checksum": bundle["bundle_checksum"], "model": BLEND_MODEL_TAG, "sources": sources,
+            "county_fips": list(county_fips),
+            "score": [scored[f]["score"] for f in county_fips], "category": [scored[f]["category"] for f in county_fips],
+        }
+        root = Path(evidence_root or EVIDENCE_ROOT)
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{run_id}.fire_weather_index_blend_score.json"
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(record, stream, indent=2)
+        except FileExistsError:
+            return {"ok": False, "reason": f"{path.name} already recorded for this run"}
+
+        image = None
+        try:
+            from services.beta_products import BETA_ROOT
+            image = Path(image_path) if image_path else BETA_ROOT / "images" / BLEND_IMAGE_FILENAME
+            used = ", ".join(sources.get("used", []))
+            coverage = sources.get("coverage_fraction", {})
+            cov_text = "; ".join(f"{k} covers {round(100 * v)}% of the grid" for k, v in coverage.items() if k != "HRRR")
+            description = (
+                "Fire Weather Severity Index scored on BLENDED weather: the equal-weight\n"
+                f"mean of {used} on HRRR's grid.\n\n"
+                "Same index, bundle and scoring as the HRRR-only shadow, so the only\n"
+                "difference between the two maps is the weather input.\n"
+                + (f"{cov_text}.\n" if cov_text else "")
+                + "\n"
+                "EXPERIMENTAL - shadow output for internal comparison only.\n"
+                "Not reviewed, validated or approved for any operational decision.\n\n"
+                "Data Source: HRRR, RRFS 13 km | ShowMeFire fire_weather_index\n"
+                "For More Info, Visit ShowMeFire.org"
+            )
+            _render_png(county_fips, scored, bundle, image, weather_grids=weather_grids, lat=lat, lon=lon,
+                        valid_local_date=valid_local_date, title="Missouri Fire Weather Severity Index (Blend)",
+                        description=description,
+                        subtitle=f"{'+'.join(sources.get('used_short', []))} blend | Valid: {valid_local_date}")
+            _update_manifest(image, bundle, category_counts, score_summary, recorded_at, key=BLEND_MANIFEST_KEY,
+                             extra={"blend_sources": sources})
+        except Exception as render_error:
+            import logging
+            logging.getLogger(__name__).warning("fire_weather_index blend graphic/manifest failed (non-fatal): %s", render_error)
+            image = None
+        return {"ok": True, "evidence": str(path), "image": str(image) if image else None,
+                "category_counts": category_counts, "score_summary": score_summary}
+    except Exception as error:
+        import logging
+        logging.getLogger(__name__).warning("fire_weather_index blend scoring failed (non-fatal): %s", error)
+        return {"ok": False, "reason": str(error)}
