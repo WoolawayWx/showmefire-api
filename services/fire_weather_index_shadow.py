@@ -19,7 +19,7 @@ core/risk_fusion_features.py.
 
 Live scoring uses HRRR-derived grids only (the same hourly_rh/hourly_ws_kts/
 hourly_temp_c/hourly_precip_mm arrays risk_fusion_hook.py already builds
-from the live forecast run) - RRFS/FV3-HIRES blending only happens in the
+from the live forecast run) - RRFS blending only happens in the
 OFFLINE training panel (model-training/fire_weather_index/build_county_days.py),
 for accumulating history toward a future retrain, not for live scoring.
 KBDI and the seasonal cure/green-up factor need multi-day accumulated
@@ -665,7 +665,7 @@ def score_blend_for_forecast(
     evidence_root: Optional[Path] = None,
     image_path: Optional[Path] = None,
 ) -> Dict:
-    """Scores the HRRR + RRFS + FV3-HIRES BLENDED weather the same way as the HRRR-only shadow (same bundle, same
+    """Scores the HRRR + RRFS BLENDED weather the same way as the HRRR-only shadow (same bundle, same
     scoring, same map style) so the two differ only in their weather input. Writes its own immutable evidence file
     (`<run_id>.fire_weather_index_blend_score.json`), its own image and its own manifest entry.
 
@@ -712,10 +712,10 @@ def score_blend_for_forecast(
                 "Same index, bundle and scoring as the HRRR-only shadow, so the only\n"
                 "difference between the two maps is the weather input.\n"
                 + (f"{cov_text}.\n" if cov_text else "")
-                + "FV3-HIRES temperature is a (max+min)/2 proxy, which biases VPD.\n\n"
+                + "\n"
                 "EXPERIMENTAL - shadow output for internal comparison only.\n"
                 "Not reviewed, validated or approved for any operational decision.\n\n"
-                "Data Source: HRRR, RRFS 13 km, HiResW FV3 | ShowMeFire fire_weather_index\n"
+                "Data Source: HRRR, RRFS 13 km | ShowMeFire fire_weather_index\n"
                 "For More Info, Visit ShowMeFire.org"
             )
             _render_png(county_fips, scored, bundle, image, weather_grids=weather_grids, lat=lat, lon=lon,

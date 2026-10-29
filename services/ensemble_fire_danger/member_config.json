@@ -7,7 +7,7 @@
     "valid_lead_end": 15,
     "label": "10:00–21:00 CT"
   },
-  "min_members": 5,
+  "min_members": 4,
   "abort_below_members": 3,
   "neighborhood_radius_km": 20.0,
   "smooth_sigma_cells": 1.5,
@@ -57,23 +57,6 @@
       "archived": true,
       "latency_hours": 1.5
     },
-    "nam_nest": {
-      "name": "NAM 3km",
-      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/nam/prod/nam.{date}/nam.t{hh}z.conusnest.hiresf{fxx:02d}.tm00.grib2",
-      "cycles": [
-        0,
-        6,
-        12,
-        18
-      ],
-      "max_lead": {
-        "default": 60
-      },
-      "wind_factor": 0.8,
-      "archived": true,
-      "latency_hours": 2.25,
-      "archive_url": "https://noaa-nam-pds.s3.amazonaws.com/nam.{date}/nam.t{hh}z.conusnest.hiresf{fxx:02d}.tm00.grib2"
-    },
     "rrfs": {
       "name": "RRFS",
       "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{hh}/rrfs.t{hh}z.2dfld.13km.f{fxx:03d}.na.grib2",
@@ -90,48 +73,6 @@
       "archived": true,
       "archive_start": "2026-08-12",
       "latency_hours": 2.75
-    },
-    "hiresw_arw": {
-      "name": "HiResW ARW",
-      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.arw_2p5km.f{fxx:02d}.conus.grib2",
-      "cycles": [
-        0,
-        12
-      ],
-      "max_lead": {
-        "default": 48
-      },
-      "wind_factor": 0.8,
-      "archived": false,
-      "latency_hours": 2.75
-    },
-    "hiresw_fv3": {
-      "name": "HiResW FV3",
-      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.fv3_2p5km.f{fxx:02d}.conus.grib2",
-      "cycles": [
-        0,
-        12
-      ],
-      "max_lead": {
-        "default": 48
-      },
-      "wind_factor": 0.8,
-      "archived": false,
-      "latency_hours": 2.25
-    },
-    "hiresw_arw2": {
-      "name": "HiResW ARW mem2",
-      "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hiresw/prod/hiresw.{date}/hiresw.t{hh}z.arw_5km.f{fxx:02d}.conusmem2.grib2",
-      "cycles": [
-        0,
-        12
-      ],
-      "max_lead": {
-        "default": 48
-      },
-      "wind_factor": 0.8,
-      "archived": false,
-      "latency_hours": 2.5
     }
   },
   "members": [
@@ -155,18 +96,6 @@
       "weight": 1.0
     },
     {
-      "id": "nam_0",
-      "source": "nam_nest",
-      "cycle_offset_hours": 0,
-      "weight": 1.0
-    },
-    {
-      "id": "nam_m6",
-      "source": "nam_nest",
-      "cycle_offset_hours": -6,
-      "weight": 1.0
-    },
-    {
       "id": "rrfs_0",
       "source": "rrfs",
       "cycle_offset_hours": 0,
@@ -177,27 +106,6 @@
       "source": "rrfs",
       "cycle_offset_hours": -6,
       "weight": 1.0
-    },
-    {
-      "id": "arw_0",
-      "source": "hiresw_arw",
-      "cycle_offset_hours": 0,
-      "weight": 1.0,
-      "optional": true
-    },
-    {
-      "id": "fv3_0",
-      "source": "hiresw_fv3",
-      "cycle_offset_hours": 0,
-      "weight": 1.0,
-      "optional": true
-    },
-    {
-      "id": "arw2_0",
-      "source": "hiresw_arw2",
-      "cycle_offset_hours": 0,
-      "weight": 1.0,
-      "optional": true
     }
   ],
   "ensprod_sources": {
@@ -226,29 +134,6 @@
         }
       },
       "latency_hours": 2.9
-    },
-    "href": {
-      "name": "HREF",
-      "cycles": [
-        0,
-        12
-      ],
-      "max_lead": {
-        "default": 48
-      },
-      "archived": false,
-      "products": {
-        "mean": {
-          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.mean.f{fxx:02d}.grib2"
-        },
-        "sprd": {
-          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.sprd.f{fxx:02d}.grib2"
-        },
-        "prob": {
-          "url": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/href/prod/href.{date}/ensprod/href.t{hh}z.conus.prob.f{fxx:02d}.grib2"
-        }
-      },
-      "latency_hours": 3.3
     }
   },
   "ensprod_members": [
@@ -257,13 +142,6 @@
       "source": "refs",
       "cycle_offset_hours": 0,
       "weight": 1.0
-    },
-    {
-      "id": "href",
-      "source": "href",
-      "cycle_offset_hours": 0,
-      "weight": 1.0,
-      "optional": true
     }
   ],
   "synthetic": {
@@ -276,8 +154,8 @@
   "max_cycle_age_hours": 30,
   "live_run_offset_hours": 3.0,
   "_notes": {
-    "latency_hours": "Typical hours after cycle time until the LAST lead the Day-1 window needs (f15 of the 12z) is published, measured from real Last-Modified headers on 2026-09-22 plus ~0.25h margin: HRRR 1.2h, NAM nest (NOMADS) 1.9h, RRFS 2.4h, HiResW ARW 2.4h / FV3 1.8h / ARW2 2.2h, REFS 2.6h, HREF 3.1h. Only used to EMULATE the live member mix during historical capture (members.resolve_plan emulate_live_at); live runs check the real .idx.",
-    "archive_url": "NAM nest on AWS (noaa-nam-pds) is uploaded ~12h late (Last-Modified 00:40Z next day, confirmed 2026-09-22), so live runs read NOMADS (url) and historical capture reads AWS (archive_url).",
+    "latency_hours": "Typical hours after cycle time until the LAST lead the Day-1 window needs (f15 of the 12z) is published, measured from real Last-Modified headers on 2026-09-22 plus ~0.25h margin: HRRR 1.2h, RRFS 2.4h, REFS 2.6h. Only used to EMULATE the live member mix during historical capture (members.resolve_plan emulate_live_at); live runs check the real .idx.",
+    "archive_url": "A source may set archive_url: live runs read url and historical capture reads archive_url (use it when the archive copy lags the live feed). No current source uses it. The NAM 3km nest, the one that did (AWS copy ~12h late), was removed in 2026-10 ahead of NOAA retiring NAM; its replacements are the RRFS members and the REFS ensprod track. HiResW (ARW, FV3, ARW-mem2) and HREF were removed in 2026-10 as well, when NOAA retired NAM, SREF, HREF and HiResW together; that also ended the forward-only NOMADS capture, so every remaining source (HRRR, RRFS, REFS) is archived and can be backfilled.",
     "live_run_offset_hours": "The ensemble step runs from scripts/ensemble_12z.sh (cron 15:00Z) - about anchor+3h, the same effective time it had when it ran after DailyForecast in scripts/forecasts.sh (then cron 14:30Z). The daily forecast now starts about 13:15Z, so the ensemble is a separate job."
   }
 }

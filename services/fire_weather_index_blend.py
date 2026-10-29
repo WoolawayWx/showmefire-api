@@ -1,7 +1,7 @@
-"""Beta/preview graphic for the Fire Weather Severity Index scored on BLENDED weather (HRRR + RRFS + HiResW FV3).
+"""Beta/preview graphic for the Fire Weather Severity Index scored on BLENDED weather (HRRR + RRFS).
 
 The live HRRR-only shadow (fire_weather_index_hook.py) is untouched. This runs inside the ensemble fire-danger run, which
-has already fetched RRFS and FV3-HIRES and regridded them onto the forecast grid for the same valid hours, so nothing new
+has already fetched RRFS and regridded it onto the forecast grid for the same valid hours, so nothing new
 is downloaded. It reduces each source's hourly fields with exactly the HRRR-only hook's four reductions, averages the
 reduced grids (equal weight over the sources that have a value in a cell - the offline blend's rule,
 model-training/fire_weather_index/grid_score.py), and scores the result with the same bundle and scoring as the shadow, so
@@ -27,7 +27,6 @@ MPS_TO_KNOTS = 1.9438444924406
 FAMILIES = (
     ("HRRR", "HRRR", ("hrrr_0",)),
     ("RRFS", "RRFS", ("rrfs_0", "rrfs_m6")),
-    ("FV3-HIRES", "FV3", ("fv3_0",)),
 )
 GRID_KEYS = ("rh_min_afternoon", "wind_kts_max", "vpd_kpa_max", "precip_24h_mm")
 
@@ -133,7 +132,6 @@ def run_for_ensemble(plan: Sequence, member_fields: Dict[str, dict], wind_factor
             "used_short": [info["short"] for info in chosen.values()],
             "members": {family: info for family, info in chosen.items()},
             "coverage_fraction": coverage,
-            "fv3_t2m_is_tmax_tmin_proxy": "FV3-HIRES" in chosen,
             "anchor_cycle_utc": anchor.strftime("%Y-%m-%dT%H:%MZ"),
         }
         return fwis.score_blend_for_forecast(

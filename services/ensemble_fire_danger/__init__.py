@@ -6,12 +6,12 @@ ensemble forecast, from short-range convection-allowing guidance.
 Two tracks, run side by side (see model-training/docs/ensemble_fire_danger.md
 for the full design and why there are two):
 
-- Track M "members": an HREF-style ensemble of REAL members - HRRR, NAM
-  3km nest, RRFS, HiResW ARW/FV3/ARW-mem2 plus time-lagged runs - each
+- Track M "members": an HREF-style ensemble of REAL members - HRRR
+  and RRFS, each also as time-lagged runs - each
   pushed through the operational fuel-moisture model and fire danger rule.
-- Track E "ensprod": synthetic members drawn from the HREF/REFS published
-  ensemble mean + spread (neither HREF nor REFS publishes per-member
-  surface grids - confirmed live 2026-09-22).
+- Track E "ensprod": synthetic members drawn from the REFS published
+  ensemble mean + spread (REFS publishes no per-member surface grids -
+  confirmed live 2026-09-22). HREF was a second input until NOAA retired it.
 
 Modules marked "contract mirror" in their docstring (core, grib_idx,
 members, regrid, tracks, fm_features, member_config.json) are byte-

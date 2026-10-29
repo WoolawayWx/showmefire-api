@@ -105,6 +105,42 @@ class TrackingTests(unittest.TestCase):
         self.assertNotIn("2026-08-31", stored)
         self.assertGreater(out["added"]["fire_weather_index"], 0)
 
+    # ---- freshness
+    def _freshness(self, today):
+        return {r["model"]: r for r in ft.freshness(today, self.db_path, self.dirs)}
+
+    def test_freshness_flags_never_stale_gaps_and_ok(self):
+        self._write_world()
+        for p in self.dirs["risk_fusion_glm"].glob("*.json"):
+            p.unlink()                                          # the GLM never produced anything
+        gap_day = self.dates[20].replace("-", "") + "_12"
+        (self.dirs["fire_weather_index"] / f"{gap_day}.fire_weather_index_score.json").unlink()  # one missed day mid-run
+        ft.ingest_scores(self.db_path, self.dirs)
+        last = date.fromisoformat(self.dates[-1])
+
+        fresh = self._freshness((last + timedelta(days=1)).strftime("%Y-%m-%d"))
+        self.assertEqual(fresh["risk_fusion_glm"]["status"], "never")
+        self.assertEqual(fresh["risk_fusion_glm"]["evidence_files"], 0)
+        self.assertEqual(fresh["fire_weather_index"]["status"], "gaps")
+        self.assertEqual(fresh["fire_weather_index"]["missing_dates"], [self.dates[20]])
+        self.assertEqual(fresh["ensemble:members"]["status"], "ok")
+        self.assertEqual(fresh["ensemble:members"]["days_since"], 1)
+        self.assertEqual(fresh["ensemble:ensprod"]["status"], "never")     # that track was never written
+
+        stale = self._freshness((last + timedelta(days=ft.STALE_AFTER_DAYS + 1)).strftime("%Y-%m-%d"))
+        self.assertEqual(stale["ensemble:members"]["status"], "stale")
+        self.assertEqual(stale["public_rule"]["status"], "stale")
+
+    def test_freshness_ignores_days_before_a_model_started(self):
+        self._write_world()
+        for d in self.dates[:30]:                               # ensemble only exists for the last 10 days
+            (self.dirs["ensemble"] / f"{d.replace('-', '')}_12.ensemble_fire_danger.json").unlink()
+        ft.ingest_scores(self.db_path, self.dirs)
+        last = date.fromisoformat(self.dates[-1])
+        fresh = self._freshness((last + timedelta(days=1)).strftime("%Y-%m-%d"))
+        self.assertEqual(fresh["ensemble:members"]["status"], "ok")
+        self.assertEqual(fresh["ensemble:members"]["dates_scored"], 10)
+
     # ---- outcomes
     def test_outcome_filters_tier_status_cause_and_uses_chicago_date(self):
         self._fire_event("29001", "2026-09-10")                                       # counts

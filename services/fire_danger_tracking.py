@@ -54,7 +54,7 @@ ELEVATED = 2  # category index at/above which a model is "alerting" (0 Low .. 4 
 MIN_EVENTS_TO_CONCLUDE = 10
 MIN_DATES_FOR_CI = 10
 LABELS = {"fire_weather_index": "Fire Weather Severity Index (shadow, HRRR only)",
-          "fire_weather_index:blend": "Fire Weather Severity Index (shadow, HRRR+RRFS+FV3 blend)", "risk_fusion_glm": "Risk fusion GLM (shadow)",
+          "fire_weather_index:blend": "Fire Weather Severity Index (shadow, HRRR+RRFS blend)", "risk_fusion_glm": "Risk fusion GLM (shadow)",
           "public_rule": "Public rule-based Peak Fire Danger"}
 BLEND_MODEL = "fire_weather_index:blend"  # same family as fire_weather_index, so the consensus counts it once
 PROBABILITY_OF_FIRE = {"risk_fusion_glm"}  # models whose probability column means P(>= 1 fire in the county that day)
@@ -402,6 +402,7 @@ def evaluate(window_days: int = 90, lag_days: int = 3, min_tier: str = "admin_re
             "notes": ["Models were not all running over the same dates; compare them on the 'same_rows' block, not the totals.",
                       "There is no production blend of these models; 'consensus' is an analysis of the mean category."],
         }
+        result["freshness"] = freshness(today, db_path)
         if runs.empty:
             result.update(status="no_scores", message="No model scores are stored yet. Run the ingest once forecasts have written evidence.",
                           windows={})
@@ -456,6 +457,78 @@ def evaluate(window_days: int = 90, lag_days: int = 3, min_tier: str = "admin_re
         result["windows"] = windows
         result["status"] = "ok"
         return result
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ freshness
+
+# Models that should be producing county scores. A model with no rows simply never shows up in the metrics, so without
+# this a model that stopped (or never started) is invisible; this is what surfaces it.
+EXPECTED_MODELS = ("fire_weather_index", BLEND_MODEL, "risk_fusion_glm", "ensemble:members", "ensemble:ensprod", "public_rule")
+STALE_AFTER_DAYS = 2   # last scored date older than this many days => "stale"
+GAP_LOOKBACK_DAYS = 30
+
+
+def _evidence_dir_for(model: str, dirs: dict) -> Optional[Path]:
+    key = "ensemble" if model.startswith("ensemble:") else ("fire_weather_index" if model.startswith("fire_weather_index") else model)
+    return Path(dirs[key]) if key in dirs else None
+
+
+def _shadow_state_hint(model: str) -> Optional[str]:
+    """For a model that has never produced rows, say WHY if its own shadow runner can tell us."""
+    if model != "risk_fusion_glm":
+        return None
+    try:
+        from services import risk_fusion_glm_shadow as glm
+        d = glm.diagnostics()
+    except Exception:
+        return None
+    if not d.get("configured"):
+        return "not configured: no model bundle is set (SMF_RISK_FUSION_GLM_BUNDLE) or registered, so it never runs"
+    if not d.get("enabled"):
+        return "configured but switched off (admin shadow-model toggle / RISK_FUSION_GLM_SHADOW_ENABLED)"
+    if d.get("auto_disabled"):
+        return f"auto-disabled after repeated failures: {d.get('last_error')}"
+    if not d.get("successful_runs"):
+        return f"enabled but has never completed a run (last error: {d.get('last_error')})"
+    return None
+
+
+def freshness(today: Optional[str] = None, db_path: Optional[Path] = None, dirs: Optional[dict] = None) -> list[dict]:
+    """One row per expected model: when it last scored, how long ago, any missing days since it started, and a status of
+    never | stale | gaps | ok. Missing days only count between a model's first and last scored date (a model that started
+    recently isn't 'missing' the days before it existed)."""
+    dirs = dirs or EVIDENCE_DIRS
+    today_d = datetime.strptime(today, "%Y-%m-%d").date() if today else datetime.now(CHICAGO).date()
+    horizon = (today_d - timedelta(days=GAP_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    conn = _connect(db_path)
+    try:
+        out = []
+        for model in EXPECTED_MODELS:
+            dates = sorted(r[0] for r in conn.execute(
+                "SELECT DISTINCT valid_date FROM fire_danger_model_scores WHERE model = ?", (model,)))
+            ev_dir = _evidence_dir_for(model, dirs)
+            files = len(list(ev_dir.glob("*.json"))) if ev_dir and ev_dir.exists() else None
+            row: dict[str, Any] = {"model": model, "label": model_label(model), "dates_scored": len(dates), "evidence_files": files}
+            if not dates:
+                row.update(status="never", last_date=None, days_since=None, missing_dates=[],
+                           detail=_shadow_state_hint(model) or ("no evidence files found" if files == 0 else "no scores ingested yet"))
+                out.append(row)
+                continue
+            last = datetime.strptime(dates[-1], "%Y-%m-%d").date()
+            days_since = (today_d - last).days
+            have = set(dates)
+            span_start = max(datetime.strptime(dates[0], "%Y-%m-%d").date(), datetime.strptime(horizon, "%Y-%m-%d").date())
+            missing = [(span_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range((last - span_start).days + 1)
+                       if (span_start + timedelta(days=i)).strftime("%Y-%m-%d") not in have]
+            status = "stale" if days_since > STALE_AFTER_DAYS else ("gaps" if missing else "ok")
+            detail = {"stale": f"nothing scored for {days_since} days (last {dates[-1]})",
+                      "gaps": f"{len(missing)} missing day(s) since it started: {', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}",
+                      "ok": "scoring every day"}[status]
+            row.update(status=status, last_date=dates[-1], days_since=days_since, missing_dates=missing, detail=detail)
+            out.append(row)
+        return out
     finally:
         conn.close()
 

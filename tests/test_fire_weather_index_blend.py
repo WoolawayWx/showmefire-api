@@ -95,6 +95,8 @@ class BlendMathTests(unittest.TestCase):
         self.assertEqual(chosen["RRFS"]["cycle"], "2026-10-28T12:00Z")
         self.assertEqual(blend.pick_members({"hrrr_0": {}, "rrfs_m6": {}})["RRFS"]["member_id"], "rrfs_m6")
         self.assertNotIn("FV3-HIRES", chosen)
+        # HiResW FV3 was retired by NOAA: even if a stale fv3_0 field showed up it is no longer a blend source.
+        self.assertEqual(list(blend.pick_members({"hrrr_0": {}, "rrfs_0": {}, "fv3_0": {}})), ["HRRR", "RRFS"])
 
 
 class RunTests(unittest.TestCase):
@@ -103,7 +105,7 @@ class RunTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.anchor = datetime(2026, 10, 28, 12)
         self.lat, self.lon = _latlon()
-        self.members = {"hrrr_0": _fields(1), "rrfs_0": _fields(2, shift=1.5), "fv3_0": _fields(3, shift=-1.0)}
+        self.members = {"hrrr_0": _fields(1), "rrfs_0": _fields(2, shift=1.5)}
         self.plan = [SimpleNamespace(member_id=m, cycle=self.anchor) for m in self.members]
         self.patches = [patch.object(fwis, "diagnostics", return_value={"enabled": True}),
                         patch.object(fwis, "load_bundle", return_value=BUNDLE),
@@ -127,8 +129,8 @@ class RunTests(unittest.TestCase):
         rec = json.loads(evidence.read_text())
         self.assertEqual(rec["valid_local_date"], "2026-10-28")
         self.assertEqual(rec["model"], "fire_weather_index:blend")
-        self.assertEqual(rec["sources"]["used_short"], ["HRRR", "RRFS", "FV3"])
-        self.assertTrue(rec["sources"]["fv3_t2m_is_tmax_tmin_proxy"])
+        self.assertEqual(rec["sources"]["used_short"], ["HRRR", "RRFS"])
+        self.assertNotIn("fv3_t2m_is_tmax_tmin_proxy", rec["sources"])
         self.assertEqual(len(rec["county_fips"]), len(rec["score"]))
         image = Path(out["image"])
         self.assertTrue(image.exists() and image.stat().st_size > 10_000)
@@ -143,7 +145,7 @@ class RunTests(unittest.TestCase):
         out = self._run()
         hrrr_only = blend.county_rows(blend.reduce_member(self.members["hrrr_0"]), CELLS["cell_to_fips"])
         mixed = blend.county_rows(blend.blend_grids({f: blend.reduce_member(self.members[m]) for f, m in
-                                                     (("HRRR", "hrrr_0"), ("RRFS", "rrfs_0"), ("FV3", "fv3_0"))})[0], CELLS["cell_to_fips"])
+                                                     (("HRRR", "hrrr_0"), ("RRFS", "rrfs_0"))})[0], CELLS["cell_to_fips"])
         self.assertTrue(out["ok"])
         fips = sorted(hrrr_only)[0]
         self.assertNotEqual(round(hrrr_only[fips]["rh_min_afternoon"], 3), round(mixed[fips]["rh_min_afternoon"], 3))

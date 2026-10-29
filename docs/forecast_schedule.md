@@ -9,7 +9,7 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 |---|---|---|
 | 12:05 | 09z forecast starts polling, then runs (holds the forecast lock while it runs) | `scripts/forecasts_09z.sh` |
 | 13:00 | **12z forecast** starts polling; runs once f04-f15 are on AWS (about 13:10Z) and it is at least 07:30 Central | `scripts/forecasts.sh` |
-| 15:00 | **Ensemble (beta)**, needs REFS (~14:36Z) and HREF (~15:06Z) | `scripts/ensemble_12z.sh` |
+| 15:00 | **Ensemble (beta)**, needs REFS (~14:36Z); HREF, which it also used to wait for, is retired | `scripts/ensemble_12z.sh` |
 | every 3 min, all day | **progressive hourly build**: add each newly published HRRR hour of the newest cycle to the product and publish it to the CDN (the peak fire danger product too) | APScheduler `hrrr_hourly_forecast` |
 
 ## Progressive build: each hour is shown as soon as it is processed
@@ -59,7 +59,7 @@ The hourly product also has the per-hour `fire_danger_est` layer it is built fro
   forecast starts anyway with `REQUIRE_COMPLETE_HRRR=false`, as before.
 * A running 09z forecast holds the lock; 12z waits for it (blocking `flock`), so a slow 09z delays 12z.
 * The ensemble step moved to its own cron at 15:00Z (`scripts/ensemble_12z.sh`, same lock, always exits 0) so it still
-  gets REFS/HREF and no longer delays publication or the notices.
+  gets REFS and no longer delays publication or the notices.
 
 ## The shared cache
 

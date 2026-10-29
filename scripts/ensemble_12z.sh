@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Ensemble fire danger (BETA) for the 12z cycle: HREF-style multi-model plus the
-# REFS/HREF ensprod probabilities and a categorical ensemble forecast.
+# Ensemble fire danger (BETA) for the 12z cycle: an HREF-style HRRR + RRFS ensemble plus the
+# REFS ensprod probabilities and a categorical ensemble forecast.
 #
 # This used to be a step inside scripts/forecasts.sh, right after the daily
 # forecast. The forecast now starts as soon as its HRRR hours are out (~13:15Z),
-# but this needs REFS (~14:36Z) and HREF (~15:06Z), so it has its own cron entry
+# but this needs REFS (~14:36Z) (it also used to wait for HREF, ~15:06Z, now retired), so it has its own cron entry
 # at 15:00Z (see the Dockerfile). Like the old step it only reads this run's
 # fuel-moisture hand-off if the forecast has produced it, takes the same
 # forecast lock, and is advisory only: it never blocks or fails anything else.
@@ -53,5 +53,15 @@ else
     echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
 fi
 
-# Advisory only: a failure is logged above and must not turn the cron job red.
-exit 0
+# Advisory only: nothing else depends on this job, so a failure can't block anything. But it
+# must be reported honestly: run_job.sh records our exit code for the admin Logs page and
+# prints FAILED. Always exiting 0 hid five days of OOM kills (exit 137) as "finished OK".
+if [ "$EXIT_CODE" -ne 0 ]; then
+    if [ "$EXIT_CODE" -eq 137 ]; then
+        REASON="killed (out of memory?)"
+    else
+        REASON="exit code $EXIT_CODE"
+    fi
+    [ -n "${JOB_SUMMARY_FILE:-}" ] && echo "ensemble fire danger $REASON; see logs/ensemble_12z_$(date +%Y%m%d).log" > "$JOB_SUMMARY_FILE"
+fi
+exit "$EXIT_CODE"

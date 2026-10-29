@@ -225,31 +225,63 @@ class ResolvePlanTests(unittest.TestCase):
         self.assertTrue(all(p.status == "resolved" for p in plan))
 
     def test_fallback_never_duplicates_a_claimed_cycle(self):
-        # 12z NAM not published yet: nam_0 falls back to 06z, so nam_m6 must move to 00z.
-        plan = members.resolve_plan(self.config, self.anchor, lambda url: "t12z" not in url or "nam" not in url)
+        # 12z RRFS not published yet: rrfs_0 falls back to 06z, so rrfs_m6 must move to 00z.
+        plan = members.resolve_plan(self.config, self.anchor, lambda url: "t12z" not in url or "rrfs" not in url)
         by_id = {p.member_id: p for p in plan}
-        self.assertEqual(by_id["nam_0"].cycle.hour, 6)
-        self.assertEqual(by_id["nam_m6"].cycle.hour, 0)
+        self.assertEqual(by_id["rrfs_0"].cycle.hour, 6)
+        self.assertEqual(by_id["rrfs_m6"].cycle.hour, 0)
+
+    def test_retired_sources_are_dropped_from_an_older_bundle_config(self):
+        from services.ensemble_fire_danger import runtime
+        old = json.loads(json.dumps(self.config))
+        old["sources"]["nam_nest"] = {"name": "NAM 3km", "url": "https://x/nam.{date}/{hh}/{fxx}", "cycles": [0, 6, 12, 18],
+                                      "max_lead": {"default": 60}, "wind_factor": 0.8, "archived": True, "latency_hours": 2.25}
+        old["members"] += [{"id": "nam_0", "source": "nam_nest", "cycle_offset_hours": 0, "weight": 1.0},
+                           {"id": "nam_m6", "source": "nam_nest", "cycle_offset_hours": -6, "weight": 1.0}]
+        cleaned = runtime.without_retired_sources(old)
+        self.assertFalse([m for m in cleaned["members"] if m["source"] == "nam_nest"])
+        for retired in ("hiresw_arw", "hiresw_fv3", "hiresw_arw2"):
+            old["members"].append({"id": f"{retired}_0", "source": retired, "cycle_offset_hours": 0, "weight": 1.0})
+        old["ensprod_members"].append({"id": "href", "source": "href", "cycle_offset_hours": 0, "weight": 1.0})
+        cleaned = runtime.without_retired_sources(old)
+        self.assertEqual([m["id"] for m in cleaned["members"]], [m["id"] for m in self.config["members"]])
+        self.assertEqual([m["id"] for m in cleaned["ensprod_members"]], ["refs"])
+        self.assertEqual(len(cleaned["members"]), len(self.config["members"]))
+        self.assertIs(runtime.without_retired_sources(self.config), self.config)  # nothing to drop: untouched
+        self.assertIs(runtime.without_retired_sources(old, retired=frozenset()), old)  # filter disabled
+        plan = members.resolve_plan(cleaned, self.anchor, lambda url: True)
+        self.assertFalse([p.member_id for p in plan if p.member_id.startswith("nam")])
+
+    def test_nam_is_not_a_source_or_member(self):
+        # NOAA is retiring NAM; its replacements are the RRFS members and the REFS ensprod track.
+        self.assertNotIn("nam_nest", self.config["sources"])
+        self.assertFalse([m["id"] for m in self.config["members"] if m["source"] == "nam_nest" or m["id"].startswith("nam")])
+        plan = members.resolve_plan(self.config, self.anchor, lambda url: True)
+        self.assertFalse([p.member_id for p in plan if "nam" in p.member_id])
 
     def test_emulated_live_latency(self):
         emulate = self.anchor + timedelta(hours=float(self.config["live_run_offset_hours"]))
         plan = members.resolve_plan(self.config, self.anchor, lambda url: True, emulate_live_at=emulate)
         by_id = {p.member_id: p for p in plan}
         self.assertEqual(by_id["hrrr_0"].cycle.hour, 12)
-        self.assertEqual(by_id["href"].cycle.hour, 0)  # HREF 12z (~3.1h) is not out by anchor+3h
+        self.assertEqual(by_id["refs"].cycle.hour, 12)  # REFS 12z (~2.9h) is out by anchor+3h
+        self.assertEqual(by_id["rrfs_0"].cycle.hour, 12)
 
     def test_archive_url_used_for_capture(self):
+        # No current source needs archive_url (NAM, the one that did, is gone), but capture still honours it.
+        config = json.loads(json.dumps(self.config))
+        config["sources"]["rrfs"]["archive_url"] = "https://archive.example/rrfs.{date}/{hh}/f{fxx:03d}.grib2"
         seen = []
-        members.resolve_plan(self.config, self.anchor, lambda url: seen.append(url) or True, use_archive=True,
+        members.resolve_plan(config, self.anchor, lambda url: seen.append(url) or True, use_archive=True,
                              kinds=("member",))
-        self.assertTrue(any("noaa-nam-pds" in url for url in seen))
-        self.assertFalse(any("nomads.ncep.noaa.gov/pub/data/nccf/com/nam" in url for url in seen))
+        self.assertTrue(any("archive.example" in url for url in seen))
+        self.assertFalse(any("noaa-rrfs-ops-pds" in url and "rrfs.t" in url for url in seen))
 
     def test_unavailable_member_recorded(self):
-        plan = members.resolve_plan(self.config, self.anchor, lambda url: "hiresw" not in url)
-        arw = next(p for p in plan if p.member_id == "arw_0")
-        self.assertEqual(arw.status, "unavailable")
-        self.assertIn("not published", arw.reason)
+        plan = members.resolve_plan(self.config, self.anchor, lambda url: "rrfs" not in url)
+        rrfs = next(p for p in plan if p.member_id == "rrfs_0")
+        self.assertEqual(rrfs.status, "unavailable")
+        self.assertIn("not published", rrfs.reason)
 
 
 class RegridTests(unittest.TestCase):
