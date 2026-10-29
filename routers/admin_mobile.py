@@ -4,6 +4,8 @@ with tokens returned in the response body instead of cookies.
     POST /api/admin/mobile/login            email + password -> tokens, or a second step is needed
     POST /api/admin/mobile/login/totp       the authenticator code for that second step
     POST /api/admin/mobile/login/recovery   or a recovery code
+    POST /api/admin/mobile/login/passkey/options   a passkey (Face ID, fingerprint, device PIN): the challenge to sign
+    POST /api/admin/mobile/login/passkey/verify    the signed answer -> tokens (replaces both the password and the second step)
     POST /api/admin/mobile/refresh          a new access token; the refresh token is replaced every time (sessions.rotate)
     POST /api/admin/mobile/logout           ends the session (and with it that phone's staff push)
 
@@ -24,6 +26,7 @@ from pydantic import BaseModel, Field
 from core import sandbox_data, security
 from core.admin_auth import events, mfa, permissions, sessions, throttle, users
 from core.rate_limit import client_ip
+from routers.admin_auth import PasskeyVerify, passkey_limiter  # the website's passkey sign-in shares this body model and its rate limit
 
 ACCESS_MINUTES = int(os.getenv("MOBILE_ACCESS_TOKEN_MINUTES", "15"))
 GENERIC_LOGIN_ERROR = "Invalid credentials"
@@ -163,6 +166,31 @@ def login_recovery(data: MfaCode, request: Request):
     body = _start(user, request, "mobile+recovery")
     body["recovery_remaining"] = mfa.recovery_remaining(user["id"])
     return body
+
+
+@router.post("/login/passkey/options", dependencies=[Depends(passkey_limiter)])
+def login_passkey_options():
+    """A challenge for the phone to sign with a passkey. Any passkey for this site will do (they are discoverable), so no
+    email is needed first."""
+    return mfa.passkey_auth_options()
+
+
+@router.post("/login/passkey/verify", dependencies=[Depends(passkey_limiter)])
+def login_passkey_verify(data: PasskeyVerify, request: Request):
+    """A passkey is proof of possession plus the person's fingerprint, face or PIN (user verification is required), so it
+    replaces both the password and the second step, exactly as on the website. Everything else a password sign-in checks still
+    applies: the account must exist, be enabled and not expired, reviewer accounts need the sandbox switched on, and an
+    account still on a temporary password is sent to the website first."""
+    ip = client_ip(request)
+    admin_id = mfa.passkey_auth_verify(data.challenge_id, data.credential)
+    user = users.get_by_id(admin_id) if admin_id is not None else None
+    if user is None or user["disabled_at"] or users.is_expired(user):
+        events.record("passkey_fail", admin_id, ip)
+        raise HTTPException(status_code=401, detail="That passkey was not accepted.")
+    blocked = _ready_for_session(user)
+    if blocked:
+        return blocked
+    return _start(user, request, "mobile+passkey")
 
 
 @router.post("/refresh")
