@@ -471,6 +471,22 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
             FOREIGN KEY (event_id) REFERENCES fire_events(id)
         )
     ''')
+    # Clef's advisory answers about a record (ai/clef.py): shown to staff, never read to decide anything.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clef_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_type TEXT NOT NULL,
+            subject_id INTEGER NOT NULL,
+            task TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            answers_json TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            images_used INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            UNIQUE (subject_type, subject_id, task)
+        )
+    ''')
     # One row per batch ingest (a feed file read, an official import): what was read and what happened to each record.
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fire_ingest_runs (
@@ -3097,23 +3113,24 @@ def list_detection_events_for_scoring(limit: int = 2000) -> List[Dict]:
 
 
 def list_labeled_detection_events(limit: int = 5000) -> List[Dict]:
-    """Reviewed fire_events rows usable as training labels for the
-    detection-confidence model - same bootstrap set fire_confidence.py's
-    incident-level scorer already draws on."""
+    """Reviewed satellite detections usable as training labels for the detection-confidence model.
+
+    Every detection a reviewer has decided on counts: approved (whatever its cause label, or none) is a real fire,
+    rejected or labelled not_a_fire is not a fire (see detection-confidence-model/features.py label_for). Still-pending
+    detections are left out. `incident_id` is returned so evaluation can keep one fire's detections together."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         cursor.execute(
-            '''SELECT id, source, frp, confidence, satellite, bright_t7, bright_t13,
-                      pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
+            '''SELECT id, incident_id, source, status, verification_tier, frp, confidence, satellite, bright_t7,
+                      bright_t13, pixel_area, quality_flag, solar_zenith_angle, satellite_zenith_angle,
                       daynight, land_cover, fuel_model_fbfm40, canopy_cover_pct, county_fips,
                       cause_category
                FROM fire_events
                WHERE source IN ('modis', 'viirs', 'ngfs')
-                 AND verification_tier IN ('admin_reviewed', 'official_source_confirmed')
-                 AND cause_category != 'unknown'
+                 AND (status IN ('approved', 'rejected') OR cause_category = 'not_a_fire')
                ORDER BY id DESC
                LIMIT ?''',
             (limit,),
@@ -4547,6 +4564,10 @@ def apply_incident_review_to_new_event(cursor: sqlite3.Cursor, event_id: int, in
                 from_tier=prior[1], to_tier=prior[1],
                 reason=f"inherited incident decision ({why or 'incident review'})",
             )
+            if decision == "rejected" and why == "not_a_fire":
+                # Keep the "not a fire" label with the detection: the incident is deleted after its 7-day hold,
+                # and the label is what lets it still count as a negative example for the detection model.
+                cursor.execute("UPDATE fire_events SET cause_category = 'not_a_fire' WHERE id = ?", (event_id,))
     carry_forward_incident_label(cursor, event_id, incident_id)
     if row and row[0] == "approved" and row[3]:
         # The reviewer's own label on the approval wins over a public classification carried forward above.
@@ -4584,8 +4605,35 @@ def purge_due_fire_incidents(actor: str = "system:not_a_fire") -> int:
             "SELECT id FROM fire_incidents WHERE delete_after IS NOT NULL AND delete_after <= datetime('now') AND status != 'deleted'"
         ).fetchall()]
     for incident_id in due:
+        # Every incident is scheduled for deletion only by the "not a fire" button, so whatever is still in it is a
+        # negative example: label it before the soft delete, so it keeps counting for the detection model.
+        _label_incident_not_a_fire(incident_id)
         delete_fire_incident_and_members(incident_id, actor=actor, reason="marked not a fire; 7-day hold ended")
     return len(due)
+
+
+def _label_incident_not_a_fire(incident_id: int) -> int:
+    """cause_category='not_a_fire' on the incident's detections that lack it (never on one an admin approved on its own)."""
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        cursor = conn.execute(
+            "UPDATE fire_events SET cause_category = 'not_a_fire' "
+            "WHERE incident_id = ? AND cause_category != 'not_a_fire' AND status != 'approved'", (incident_id,))
+        conn.commit()
+        return cursor.rowcount
+
+
+def backfill_not_a_fire_labels(dry_run: bool = False) -> int:
+    """Label detections of incidents already marked "not a fire" (rejected for that reason, deleted or not) that
+    never got the label: those that joined during the 7-day hold, and those of incidents deleted before the label was
+    kept at deletion. Returns how many detections (would be) labelled. Safe to re-run."""
+    with sqlite3.connect(get_db_path(), timeout=15) as conn:
+        where = ("cause_category != 'not_a_fire' AND status != 'approved' AND incident_id IN "
+                 "(SELECT id FROM fire_incidents WHERE review_decision = 'rejected' AND review_decision_reason = 'not_a_fire')")
+        if dry_run:
+            return conn.execute(f"SELECT COUNT(*) FROM fire_events WHERE {where}").fetchone()[0]
+        cursor = conn.execute(f"UPDATE fire_events SET cause_category = 'not_a_fire' WHERE {where}")
+        conn.commit()
+        return cursor.rowcount
 
 
 def delete_fire_incident_and_members(incident_id: int, actor: str, reason: str = "") -> Dict:

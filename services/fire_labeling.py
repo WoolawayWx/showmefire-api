@@ -5,12 +5,11 @@ genuine labeled examples to train on instead of only historical
 `source='official'` import rows.
 
 Classification -> cause_category mapping used at write time:
-  confirmed_fire  -> "wildfire"      (true positive)
-  controlled_burn -> "prescribed"    (false positive, matches
-                                       detection-confidence-model/train.py's
-                                       FALSE_POSITIVE_CAUSES)
-  not_a_fire      -> "not_a_fire"    (false positive, also added to
-                                       FALSE_POSITIVE_CAUSES)
+  confirmed_fire  -> "wildfire"      (a real fire)
+  controlled_burn -> "prescribed"    (also a real fire: the detection-confidence model only learns
+                                       "fire vs not a fire", so a planned burn is a positive, not a miss)
+  not_a_fire      -> "not_a_fire"    (the only negative label; features.label_for in
+                                       api/detection-confidence-model/)
   unsure          -> no label written; an "unsure" classification carries no
                      reliable signal and would just inject noise.
 """

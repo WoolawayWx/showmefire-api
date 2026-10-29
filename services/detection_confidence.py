@@ -122,7 +122,8 @@ def _heuristic_probability(features: list) -> float:
         score += 0.15 if quality_flag <= 1 else (0.02 if quality_flag >= 3 else 0.08)
     else:
         score += 0.08
-    score -= 0.15 * cropland_frac
+    # No cropland penalty: a field fire (or an agricultural burn) is a real fire. Water stays a penalty, since heat
+    # over open water is usually sun glint or a false detection.
     score -= 0.10 * water_frac
     return max(0.0, min(1.0, score))
 
@@ -146,8 +147,8 @@ def _load_booster():
 
 
 def score_detection(row: dict) -> int:
-    """Return a 0-100 wildfire-vs-false-positive confidence percentage for
-    a single fire_events row's detection-pattern features."""
+    """Return a 0-100 "is this a real fire" confidence percentage (any kind of fire, planned or not, counts as real)
+    for a single fire_events row's detection-pattern features."""
     features = build_feature_vector(row)
     booster = _load_booster()
     probability = None

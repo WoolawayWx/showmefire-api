@@ -682,6 +682,8 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
     )
     from ai.report_features import extract_and_store
     background_tasks.add_task(extract_and_store, event["id"])  # after the response; never raises
+    from ai.clef_tasks import assess_fire_report
+    background_tasks.add_task(assess_fire_report, event["id"])  # advisory only, off unless CLEF_ENABLED
     notify_staff_alert(
         alert_type="fire_report",
         title=f"New fire report: {county_name + ' County' if county_name else 'Missouri'}",
@@ -778,6 +780,7 @@ async def _save_fire_report_upload(
 async def upload_fire_report_media(
     event_id: int,
     upload_token: str,
+    background_tasks: BackgroundTasks,
     media: UploadFile = File(...),
 ):
     """Attach a photo during the private, post-submission upload step."""
@@ -789,6 +792,8 @@ async def upload_fire_report_media(
         max_count_message=f"Maximum of {MAX_MEDIA_COUNT} media files allowed",
         type_error_message="Only JPEG, PNG, and WebP images are allowed",
     )
+    from ai.clef_tasks import assess_fire_report
+    background_tasks.add_task(assess_fire_report, event_id)  # photos arrive after the report; re-assess with them
     return {"success": True, "media": record}
 
 
@@ -1140,6 +1145,8 @@ def admin_get_fire_report(event_id: int, _admin: str = Depends(require_admin)):
         occurred_at=event["occurred_at"], exclude_event_id=event_id,
     )
     event["incident_label"] = _incident_label_for_event(event_id)
+    from ai.clef import get_assessment
+    event["clef"] = get_assessment("fire_event", event_id, "fire_report")  # advisory; None when not assessed
     return {"success": True, "report": event}
 
 

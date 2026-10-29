@@ -2,11 +2,12 @@
 
     python retrain.py
 
-Trains a candidate model (train.py's logic), evaluates it on a held-out
-split (evaluate.py), and only overwrites the currently-registered model
-(models/detection_confidence_model.json) if the candidate's AUC is not
-worse than the currently-registered model's recorded AUC (or none is
-registered yet) - the same train -> evaluate -> gate -> register discipline
+Trains a candidate model (train.py's logic), evaluates it by incident-grouped
+cross-validation (evaluate.py), and only overwrites the currently-registered
+model (models/detection_confidence_model.json) if the candidate beats the
+satellite's own confidence on held-out detections and is not meaningfully
+worse than the registered model (compared only when both were measured the
+same way) - the same train -> evaluate -> gate -> register discipline
 model-training/ensemble_fire_danger/retrain.py uses, scaled down to this
 package's single small model instead of that pipeline's versioned registry.
 
@@ -23,10 +24,10 @@ BASE_DIR = Path(__file__).resolve().parent
 API_DIR = BASE_DIR.parent
 sys.path.append(str(API_DIR))
 
-from config import LATEST_MODEL_META_PATH, LATEST_MODEL_PATH, MIN_TRAINING_SAMPLES, MODELS_DIR, RANDOM_STATE  # noqa: E402
+from config import LATEST_MODEL_META_PATH, LATEST_MODEL_PATH, MIN_PER_CLASS, MIN_TRAINING_SAMPLES, MODELS_DIR  # noqa: E402
 from evaluate import evaluate_rows  # noqa: E402
-from features import FEATURE_NAMES, build_feature_vector  # noqa: E402
-from train import FALSE_POSITIVE_CAUSES, load_training_rows  # noqa: E402
+from features import FEATURE_NAMES  # noqa: E402
+from train import fit_booster, load_training_rows, training_set  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +38,13 @@ AUC_REGRESSION_TOLERANCE = 0.03
 
 
 def _previous_auc() -> float | None:
+    """The registered model's AUC, but only if it was measured the same (grouped) way as a new candidate's: older
+    registrations used a random split that overstated AUC, so they are not comparable."""
     if not LATEST_MODEL_META_PATH.exists():
         return None
     try:
-        meta = json.loads(LATEST_MODEL_META_PATH.read_text())
-        return meta.get("eval", {}).get("auc")
+        evaluation = json.loads(LATEST_MODEL_META_PATH.read_text()).get("eval", {})
+        return evaluation.get("auc") if evaluation.get("method") == "grouped_cv" else None
     except Exception:
         return None
 
@@ -50,27 +53,31 @@ def retrain_and_gate() -> dict:
     rows = load_training_rows()
     evaluation = evaluate_rows(rows)
 
-    samples = [build_feature_vector(row) for row in rows]
-    labels = [0 if row.get("cause_category") in FALSE_POSITIVE_CAUSES else 1 for row in rows]
-    if len(samples) < MIN_TRAINING_SAMPLES or len(set(labels)) < 2:
+    samples, labels, _groups = training_set(rows)
+    fires, not_fires = sum(labels), len(labels) - sum(labels)
+    if len(samples) < MIN_TRAINING_SAMPLES or min(fires, not_fires) < MIN_PER_CLASS:
         return {
             "trained": False,
             "registered": False,
-            "reason": f"only {len(samples)} labeled real-detection samples (need >= {MIN_TRAINING_SAMPLES} with both classes present)",
+            "reason": f"only {len(samples)} labeled detections ({fires} fire, {not_fires} not a fire); need >= "
+                      f"{MIN_TRAINING_SAMPLES} with at least {MIN_PER_CLASS} of each",
             "eval": evaluation,
         }
 
-    import xgboost as xgb
+    booster = fit_booster(samples, labels)
 
-    dtrain = xgb.DMatrix(samples, label=labels, feature_names=FEATURE_NAMES, missing=float("nan"))
-    booster = xgb.train(
-        {"objective": "binary:logistic", "eval_metric": "logloss", "max_depth": 3, "eta": 0.1, "seed": RANDOM_STATE},
-        dtrain,
-        num_boost_round=100,
-    )
+    candidate_auc = evaluation.get("auc") if evaluation.get("evaluated") else None
+    baseline_auc = evaluation.get("baseline_auc") if evaluation.get("evaluated") else None
+    if candidate_auc is not None and baseline_auc is not None and candidate_auc < baseline_auc:
+        return {
+            "trained": True,
+            "registered": False,
+            "reason": f"candidate AUC {candidate_auc:.3f} does not beat the satellite's own confidence ({baseline_auc:.3f}) "
+                      "on held-out incidents, so the built-in scoring stays",
+            "eval": evaluation,
+        }
 
     previous_auc = _previous_auc()
-    candidate_auc = evaluation.get("auc") if evaluation.get("evaluated") else None
     if previous_auc is not None and candidate_auc is not None and candidate_auc < previous_auc - AUC_REGRESSION_TOLERANCE:
         return {
             "trained": True,

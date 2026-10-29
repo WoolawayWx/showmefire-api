@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -684,7 +684,7 @@ def list_public_burn_ban_history(
 
 
 @router.post("/api/burn-bans/submissions", status_code=201)
-def submit_burn_ban(payload: BurnBanCreate, request: Request):
+def submit_burn_ban(payload: BurnBanCreate, request: Request, background_tasks: BackgroundTasks):
     client_ip = _client_ip(request)
     ip_hash = _ip_bucket_key(client_ip)
     now = datetime.now(timezone.utc)
@@ -732,6 +732,8 @@ def submit_burn_ban(payload: BurnBanCreate, request: Request):
         public_note=payload.public_note,
     )
     _staff_alert_for_submission(submission, comment=payload.comment, public_note=payload.public_note)
+    from ai.clef_tasks import assess_burn_ban
+    background_tasks.add_task(assess_burn_ban, submission["id"])  # advisory only, off unless CLEF_ENABLED
 
     return {
         "success": True,
@@ -751,6 +753,7 @@ def submit_burn_ban(payload: BurnBanCreate, request: Request):
 async def upload_burn_ban_proof(
     submission_id: int,
     upload_token: str,
+    background_tasks: BackgroundTasks,
     media: UploadFile = File(...),
 ):
     if not upload_token or len(upload_token) > 256:
@@ -792,6 +795,8 @@ async def upload_burn_ban_proof(
     if not record:
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=404, detail="Submission not found")
+    from ai.clef_tasks import assess_burn_ban
+    background_tasks.add_task(assess_burn_ban, submission_id)  # re-assess now that the proof is attached
     return {
         "success": True,
         "proof": {
@@ -984,6 +989,8 @@ def admin_get_burn_ban(submission_id: int, token: Optional[str] = None):
     submission = get_burn_ban_submission(submission_id, admin=True)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+    from ai.clef import get_assessment
+    submission["clef"] = get_assessment("burn_ban", submission_id, "burn_ban")  # advisory; None when not assessed
     return {"success": True, "submission": submission}
 
 

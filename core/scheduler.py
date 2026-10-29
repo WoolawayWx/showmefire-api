@@ -409,13 +409,9 @@ async def retrain_detection_confidence_job():
     the resulting model, to avoid the sys.path module-name collision with
     other model-training packages under api/ documented there."""
     try:
-        import importlib.util
+        from services.detection_confidence_trainer import retrain_and_gate
 
-        module_path = Path(__file__).resolve().parent.parent / "detection-confidence-model" / "retrain.py"
-        spec = importlib.util.spec_from_file_location("detection_confidence_retrain", module_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        result = await asyncio.to_thread(module.retrain_and_gate)
+        result = await asyncio.to_thread(retrain_and_gate)
         logger.info("Detection-confidence retrain: %s", result)
     except Exception as error:
         logger.error("Detection-confidence retrain failed: %s", error, exc_info=True)

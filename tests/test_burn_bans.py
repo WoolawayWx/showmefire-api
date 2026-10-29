@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import BackgroundTasks
 from pydantic import ValidationError
 
 from core import database
@@ -98,7 +99,7 @@ class BurnBanWorkflowTests(unittest.TestCase):
     def test_submission_and_public_redaction(self, _turnstile):
         result = burn_bans_router.submit_burn_ban(
             burn_bans_router.BurnBanCreate(**_valid_payload()),
-            _FakeRequest(),
+            _FakeRequest(), BackgroundTasks(),
         )
         submission_id = result["submission"]["id"]
         public = database.get_burn_ban_submission(submission_id, admin=False)
@@ -113,7 +114,7 @@ class BurnBanWorkflowTests(unittest.TestCase):
             burn_bans_router.BurnBanCreate(**_valid_payload(
                 effective_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )),
-            _FakeRequest(),
+            _FakeRequest(), BackgroundTasks(),
         )
         submission_id = created["submission"]["id"]
         confirmed = burn_bans_router.admin_confirm_burn_ban(
@@ -177,7 +178,7 @@ class BurnBanWorkflowTests(unittest.TestCase):
                 effective_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 expires_at="",
             )),
-            _FakeRequest(),
+            _FakeRequest(), BackgroundTasks(),
         )
         confirmed = burn_bans_router.admin_confirm_burn_ban(
             lift["submission"]["id"],
@@ -286,7 +287,7 @@ class BurnBanNotesBulkHistoryTests(unittest.TestCase):
     def test_public_comment_is_admin_only(self, _turnstile):
         result = burn_bans_router.submit_burn_ban(
             burn_bans_router.BurnBanCreate(**_valid_payload(comment="Fire chief announced on radio.")),
-            _FakeRequest(),
+            _FakeRequest(), BackgroundTasks(),
         )
         submission_id = result["submission"]["id"]
         admin = database.get_burn_ban_submission(submission_id, admin=True)
@@ -297,7 +298,7 @@ class BurnBanNotesBulkHistoryTests(unittest.TestCase):
     def _submit_public(self, **overrides):
         with patch.object(burn_bans_router, "verify_turnstile", return_value=(True, "success")):
             return burn_bans_router.submit_burn_ban(
-                burn_bans_router.BurnBanCreate(**_valid_payload(**overrides)), _FakeRequest(),
+                burn_bans_router.BurnBanCreate(**_valid_payload(**overrides)), _FakeRequest(), BackgroundTasks(),
             )["submission"]["id"]
 
     def test_admin_can_set_edit_and_clear_both_notes(self):

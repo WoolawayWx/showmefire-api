@@ -32,6 +32,24 @@ FEATURE_NAMES = [
 
 NAN = float("nan")
 
+RAW_CONFIDENCE_INDEX = FEATURE_NAMES.index("raw_confidence")
+
+
+def label_for(row: dict):
+    """The training label for a reviewed detection: 1 = a real fire, 0 = not a fire, None = no usable review yet.
+
+    The model's job is only to help detect a fire, not to say what kind. So a controlled, agricultural or debris
+    burn is a real fire (1) just like a wildfire, and an approval with no label at all still means "it is a fire".
+    What counts against a detection is a reviewer saying it is not a fire (rejecting it, or labelling it
+    not_a_fire). That is checked first, so a contradictory row is a negative."""
+    status = str(row.get("status") or "").lower()
+    cause = str(row.get("cause_category") or "").lower()
+    if status == "rejected" or cause == "not_a_fire":
+        return 0
+    if status == "approved" or str(row.get("verification_tier") or "") == "official_source_confirmed":
+        return 1
+    return None
+
 
 def _num(value):
     try:

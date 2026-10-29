@@ -42,14 +42,15 @@ def _score(features: list[float]) -> tuple[float, str, str]:
         from sklearn.linear_model import LogisticRegression
         with sqlite3.connect(get_db_path()) as conn:
             rows = conn.execute(
-                """SELECT e.cause_category, e.confidence, e.frp, e.incident_id
+                """SELECT e.cause_category, e.confidence, e.frp, e.incident_id, e.status
                    FROM fire_events e WHERE e.incident_id IS NOT NULL
-                   AND e.verification_tier IN ('admin_reviewed','official_source_confirmed')
-                   AND e.cause_category != 'unknown'"""
+                   AND e.source IN ('modis', 'viirs', 'ngfs')
+                   AND (e.status IN ('approved', 'rejected') OR e.cause_category = 'not_a_fire')"""
             ).fetchall()
         samples, labels = [], []
-        for cause, confidence, frp, incident_id in rows:
-            labels.append(0 if cause in {"prescribed", "agricultural", "debris_burn"} else 1)
+        for cause, confidence, frp, incident_id, status in rows:
+            # A real fire is a real fire, planned or not: only "not a fire" (rejected, or labelled so) is negative.
+            labels.append(0 if status == "rejected" or cause == "not_a_fire" else 1)
             samples.append([_raw_confidence(confidence), math.log1p(float(frp or 0)) / 6.0, 0.5, 0.0, 0.0])
         if len(samples) >= 12 and len(set(labels)) == 2:
             model = LogisticRegression(max_iter=200, class_weight="balanced").fit(samples, labels)

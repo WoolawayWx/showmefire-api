@@ -13,3 +13,5 @@ RANDOM_STATE = 42
 # (services/detection_confidence.py) fall back to a calibrated heuristic
 # until this threshold is crossed.
 MIN_TRAINING_SAMPLES = 30
+# ...and at least this many of each class (fire / not a fire), or the "model" is just the base rate.
+MIN_PER_CLASS = 10
