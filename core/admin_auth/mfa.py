@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import secrets
 import time
@@ -23,6 +24,8 @@ from fastapi import HTTPException
 from core import security
 
 from . import db
+
+logger = logging.getLogger(__name__)
 
 ISSUER = "Show Me Fire"
 RECOVERY_CODE_COUNT = 10
@@ -317,6 +320,10 @@ def passkey_register_verify(user: dict, challenge_id: str, credential: dict, nam
             credential=credential, expected_challenge=taken[0], expected_rp_id=rp_id, expected_origin=origins, require_user_verification=True
         )
     except Exception as exc:  # the library raises several types for a bad response
+        # The browser only hears "could not be verified"; the reason (usually a site address the server does not allow, or an
+        # authenticator that did not confirm the person) goes to the server log, with what the server is set up to accept.
+        logger.warning("Passkey registration for admin %s was not accepted: %s: %s (rp_id=%s, allowed origins=%s)",
+                       user["id"], type(exc).__name__, exc, rp_id, origins)
         raise HTTPException(status_code=400, detail="That passkey could not be verified.") from exc
     transports = (credential.get("response") or {}).get("transports") or []
     with db.tx() as conn:
@@ -373,7 +380,9 @@ def passkey_auth_verify(challenge_id: str, credential: dict, expected_admin_id: 
             credential=credential, expected_challenge=taken[0], expected_rp_id=rp_id, expected_origin=origins,
             credential_public_key=bytes(row["public_key"]), credential_current_sign_count=row["sign_count"], require_user_verification=True,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Passkey sign-in for admin %s was not accepted: %s: %s (rp_id=%s, allowed origins=%s)",
+                       row["admin_id"], type(exc).__name__, exc, rp_id, origins)
         return None
     with db.tx() as conn:
         conn.execute("UPDATE admin_passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?", (verified.new_sign_count, time.time(), row["id"]))
