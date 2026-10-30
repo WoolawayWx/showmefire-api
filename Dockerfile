@@ -152,6 +152,13 @@ RUN echo "TZ=UTC" > /etc/cron.d/ensemble12z \
     && echo "" >> /etc/cron.d/ensemble12z \
     && chmod 0644 /etc/cron.d/ensemble12z
 
+# The seven-day fire outlook worker (services/fire_outlook/, scripts/fire_outlook.sh). A tick every 30 minutes (at :07 and :37 so it
+# never lands on the */15 map refresh) finds the latest 00Z/12Z GEFS cycle, and does nothing unless SMF_FIRE_OUTLOOK_ENABLED=true.
+# GEFS 00Z/12Z is complete about 5 hours after the cycle (~05:00Z and ~17:00Z); a run takes ~10-15 minutes. The script takes its own
+# lock and the shared forecast lock (non-blocking), so it skips ticks while the daily forecast runs. The daily verification export
+# builds the training records from windows that have matured.
+RUN echo "TZ=UTC" > /etc/cron.d/fireoutlook     && echo "7,37 * * * * root /bin/bash /app/scripts/run_job.sh fire_outlook /app/scripts/fire_outlook.sh >> /app/logs/cron_fire_outlook.log 2>&1" >> /etc/cron.d/fireoutlook     && echo "40 06 * * * root /bin/bash /app/scripts/run_job.sh fire_outlook_verification /app/scripts/fire_outlook_verification.sh >> /app/logs/cron_fire_outlook.log 2>&1" >> /etc/cron.d/fireoutlook     && echo "" >> /etc/cron.d/fireoutlook     && chmod 0644 /etc/cron.d/fireoutlook
+
 # Begin checking the 09z HRRR f05-f18 window just after 12z. The job itself
 # waits for every required frame and field before forecast generation.
 RUN echo "TZ=UTC" > /etc/cron.d/forecasts09z \
