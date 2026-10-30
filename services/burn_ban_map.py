@@ -42,6 +42,19 @@ COUNTY_EDGE_COLOR = "#B6B6B6"
 STATE_EDGE_COLOR = "#000000"
 CENTRAL_TZ = ZoneInfo("America/Chicago")
 
+# Keep in step with the notice on website/app/pages/burn-bans/index.vue. Have someone qualified to give legal advice
+# read this wording before it is promoted widely (same note as services/burn_check/disclaimer.py).
+DISCLAIMER_TITLE = "Disclaimer"
+DISCLAIMER_TEXT = (
+    "Show Me Fire is for informational purposes only. We are not liable for\n"
+    "any inaccurate, incomplete, or out-of-date information on this map, or\n"
+    "for any fines, penalties, or damages resulting from burning. A county\n"
+    "shown without an active burn ban may still have restrictions that have\n"
+    "not been reported to us or reviewed. It is your sole responsibility to\n"
+    "verify current burn bans with your local fire department, county\n"
+    "officials, and local laws before starting any fire."
+)
+
 
 def burn_ban_map_public_meta() -> dict:
     updated_at = None
@@ -295,6 +308,27 @@ def _add_branding(fig, ax, active_count: int, updated_at: datetime) -> None:
         ha="right",
         va="top",
         linespacing=1.6,
+        fontname="Montserrat",
+    )
+    fig.text(
+        0.99,
+        0.30,
+        DISCLAIMER_TITLE,
+        fontsize=10,
+        fontweight="bold",
+        ha="right",
+        va="top",
+        fontname="Montserrat",
+    )
+    fig.text(
+        0.99,
+        0.27,
+        DISCLAIMER_TEXT,
+        fontsize=9,
+        ha="right",
+        va="top",
+        linespacing=1.5,
+        color="#333333",
         fontname="Montserrat",
     )
     fig.text(
