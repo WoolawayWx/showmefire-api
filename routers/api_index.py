@@ -74,6 +74,19 @@ _ROUTES: List[tuple] = [
      "height, transport wind, ventilation, Haines, Hot-Dry-Windy and smoke, in Morning/Afternoon/Evening text. Every answer includes how to "
      "request an OFFICIAL NWS spot forecast (office, request page, who is eligible). Not a spot forecast and not for planning a fire. 15/min.",
      "lat + lon, or address; window=today|tomorrow", "public"),
+    ("GET", "/fire-outlook/status", "Seven-day fire outlook",
+     "Worker state: stage, cycle age, runtime, peak memory, source coverage, last complete run (120/min).", "none", "public"),
+    ("GET", "/fire-outlook/runs", "Seven-day fire outlook",
+     "Outlook runs on disk, newest first, with the latest and whether each is stale (60/min).", "none", "public"),
+    ("GET", "/fire-outlook/runs/{run_id}/manifest", "Seven-day fire outlook",
+     "Immutable manifest: 28 six-hour windows, grid, units, source cycles, rule and conditioning state, checksums. 'latest' is accepted (120/min).",
+     "run_id", "public"),
+    ("GET", "/fire-outlook/runs/{run_id}/point", "Seven-day fire outlook",
+     "Scenario agreement (share of 31 GEFS weather scenarios reaching Elevated-or-higher / Critical-or-higher), modeled fuel-moisture range and weather "
+     "summary for each of the 28 windows at one location. Weather-scenario variation only; not a fire probability (30/min).", "run_id; lat; lon", "public"),
+    ("GET", "/fire-outlook/runs/{run_id}/files/{path}", "Seven-day fire outlook",
+     "One contour GeoJSON file the outlook map draws (contours/<layer>/wNN.geojson); the CDN serves the same files. Nothing else in a run is served (600/min).",
+     "run_id; path", "public"),
 ]
 
 

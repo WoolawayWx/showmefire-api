@@ -54,3 +54,4 @@ maps/shapefiles/MO_MoDOT_Roads_Arcs/*
 
 # Cross-container job locks (scripts/maps.sh, scripts/forecast_lock.sh)
 .locks/
+docker-compose.dev.yml

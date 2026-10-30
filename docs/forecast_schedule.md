@@ -10,6 +10,8 @@ days), but the forecast used to start at a fixed 14:30Z. It now starts when its 
 | 12:05 | 09z forecast starts polling, then runs (holds the forecast lock while it runs) | `scripts/forecasts_09z.sh` |
 | 13:00 | **12z forecast** starts polling; runs once f04-f15 are on AWS (about 13:10Z) and it is at least 07:30 Central | `scripts/forecasts.sh` |
 | 15:00 | **Ensemble (beta)**, needs REFS (~14:36Z); HREF, which it also used to wait for, is retired | `scripts/ensemble_12z.sh` |
+| every 30 min (:07, :37) | **Seven-day fire outlook** worker tick (off until `SMF_FIRE_OUTLOOK_ENABLED=true`): builds a cycle once all 31 GEFS members are out (~05:00Z / ~17:00Z); skips while the forecast lock is held; see `docs/fire_outlook_worker.md` | `scripts/fire_outlook.sh` |
+| 06:40 | Fire outlook verification export (training records) | `scripts/fire_outlook_verification.sh` |
 | every 3 min, all day | **progressive hourly build**: add each newly published HRRR hour of the newest cycle to the product and publish it to the CDN (the peak fire danger product too) | APScheduler `hrrr_hourly_forecast` |
 
 ## Progressive build: each hour is shown as soon as it is processed
