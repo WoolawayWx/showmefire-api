@@ -2,7 +2,7 @@
 Time-aware dead-fuel moisture for the seven-day outlook.
 
 `advance` is the one-hour step of services/spread_rate_moisture.py::_advance_moisture
-(parity-tested against it), extracted so it needs no xarray/scipy/RTMA cache. State is
+(parity-tested against it, given the same EMC; the EMC fit itself is corrected here, see `nelson_emc`), extracted so it needs no xarray/scipy/RTMA cache. State is
 carried continuously through a scenario's rain, drying and recovery; callers must not
 re-seed it at six-hour window boundaries.
 
@@ -29,6 +29,14 @@ State = Dict[str, np.ndarray]
 
 
 def nelson_emc(temp_c, rh) -> np.ndarray:
+    """Equilibrium moisture content (%) from air temperature (C) and RH (%): Simard's (1968) three-branch fit, converted
+    from Fahrenheit. The 10-50 % RH branch is `2.22749 + 0.160107 H - 0.014784 T_F` = `1.7544 + 0.160107 H - 0.026611 T_C`.
+
+    services/spread_rate_moisture.py::nelson_emc (and copies in v5_scorer, spatial_fm, the RRFS forecast) has this branch as
+    `2.22 - 0.160 H + 0.0166 T`, with the signs of the humidity and temperature terms reversed and the constant not converted.
+    That drives EMC to the 1 % floor for every RH from about 14 to 50 %, which is most of a Missouri afternoon, and made the
+    outlook show 10-h fuel moisture of 2-5 %. The outlook uses the corrected form on purpose and does NOT match the live
+    conditioner here (tests/test_fire_outlook_core.py pins both facts). The one-hour step in `advance` is unchanged."""
     rh = np.asarray(rh, dtype=float)
     temp_c = np.asarray(temp_c, dtype=float)
     emc = np.where(
@@ -36,7 +44,7 @@ def nelson_emc(temp_c, rh) -> np.ndarray:
         0.03 + 0.2626 * rh - 0.00104 * rh * temp_c,
         np.where(
             rh <= 50,
-            2.22 - 0.160 * rh + 0.01660 * temp_c,
+            1.7544 + 0.160107 * rh - 0.026611 * temp_c,
             21.06 - 0.4944 * rh + 0.005565 * rh ** 2 - 0.00063 * rh * temp_c,
         ),
     )

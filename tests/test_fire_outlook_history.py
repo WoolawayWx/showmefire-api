@@ -62,7 +62,7 @@ def manual(precips, skip=()):
     return state
 
 
-def test_replay_matches_the_moisture_step_and_the_existing_conditioning_math(tmp_path):
+def test_replay_matches_the_moisture_step_and_the_existing_conditioning_math(tmp_path, monkeypatch):
     precips = [0, 0, 3.0, 0, 0, 0, 1.2, 0, 0, 0]
     rtma = cache(tmp_path, {i: {"precip": p} for i, p in enumerate(precips)})
     out = run(tmp_path, rtma)
@@ -70,6 +70,7 @@ def test_replay_matches_the_moisture_step_and_the_existing_conditioning_math(tmp
     for k, key in (("fm1", "fm1_pct"), ("fm10", "fm10_pct"), ("fm100", "fm100_pct")):
         np.testing.assert_allclose(out[key], want[k], rtol=1e-6)
     from services import spread_rate_moisture as srm          # same loop as the existing production conditioner
+    monkeypatch.setattr(srm, "nelson_emc", moisture.nelson_emc)   # ...with the outlook's corrected EMC (see moisture.nelson_emc)
     ref = None
     for p in precips:
         e = srm.nelson_emc(np.full(TLAT.shape, 20.0), np.full(TLAT.shape, 40.0))

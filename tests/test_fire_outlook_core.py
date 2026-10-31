@@ -15,8 +15,11 @@ def _thresholds():
 
 # --- moisture ---------------------------------------------------------------
 
-def test_advance_matches_existing_conditioning_step():
+def test_advance_matches_existing_conditioning_step(monkeypatch):
     from services import spread_rate_moisture as ref
+    # The step (time lags, rain wetting) must match the live conditioner. The EMC fit is deliberately different (see
+    # moisture.nelson_emc), so give the reference the outlook's EMC to isolate the step.
+    monkeypatch.setattr(ref, "nelson_emc", moisture.nelson_emc)
     rng = np.random.default_rng(1)
     state = {k: rng.uniform(3, 25, GRID) for k in ("fm1", "fm10", "fm100")}
     temp, rh = rng.uniform(-5, 35, GRID), rng.uniform(5, 100, GRID)
@@ -25,7 +28,27 @@ def test_advance_matches_existing_conditioning_step():
     want = ref._advance_moisture(state, temp, rh, precip)
     for k in want:
         np.testing.assert_allclose(got[k], want[k])
-    np.testing.assert_allclose(moisture.nelson_emc(temp, rh), ref.nelson_emc(temp, rh))
+
+
+def test_emc_matches_simard_and_has_no_floor_in_the_middle_humidity_range():
+    # Simard (1968), 10-50 % RH, in Fahrenheit: 2.22749 + 0.160107 H - 0.014784 T_F
+    for t_c, rh in ((0.0, 20.0), (15.0, 30.0), (18.0, 35.0), (30.0, 45.0)):
+        want = 2.22749 + 0.160107 * rh - 0.014784 * (t_c * 1.8 + 32.0)
+        assert float(moisture.nelson_emc(t_c, rh)) == pytest.approx(want, abs=0.01)
+    assert float(moisture.nelson_emc(18.0, 35.0)) == pytest.approx(6.9, abs=0.1)
+    rhs = np.arange(12.0, 51.0, 1.0)
+    emc = moisture.nelson_emc(np.full(rhs.shape, 15.0), rhs)
+    assert (emc > 2.0).all() and (np.diff(emc) > 0).all()          # wetter air, higher EMC; never stuck at the 1 % clip
+    # the other two branches and the live fit's values there are unchanged
+    from services import spread_rate_moisture as ref
+    for rh in (5.0, 8.0, 60.0, 80.0, 95.0):
+        np.testing.assert_allclose(moisture.nelson_emc(15.0, rh), ref.nelson_emc(15.0, rh))
+
+
+def test_outlook_emc_deliberately_differs_from_the_live_fit_only_in_the_middle_range():
+    from services import spread_rate_moisture as ref
+    assert float(ref.nelson_emc(15.0, 35.0)) == 1.0                # the live fit's floor (known; reviewed separately)
+    assert float(moisture.nelson_emc(15.0, 35.0)) > 5.0
 
 
 def test_rain_then_drying_and_continuity():

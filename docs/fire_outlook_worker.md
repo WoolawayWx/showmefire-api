@@ -94,6 +94,18 @@ Set `SMF_FIRE_OUTLOOK_ENABLED=false` (ticks then exit immediately). Public runs 
 Copy `<root>/verification/records/` to the training machine's `$SMF_DATA_ROOT/fire_outlook/verification/` and run `python -m fire_outlook.retrain` in `model-training`
 (see `model-training/fire_outlook/`). Calibration stays a candidate; the public label remains "scenario agreement" until a calibration version is reviewed.
 
+## Equilibrium moisture differs from the live map on purpose (2026-10-31)
+
+`services/fire_outlook/moisture.py::nelson_emc` uses Simard's fit with the 10-50 % RH branch corrected
+(`1.7544 + 0.160107 H - 0.026611 T_C`). `services/spread_rate_moisture.py::nelson_emc` (also copied in `v5_scorer`, `spatial_fm`,
+`DailyForecast_RRFS`) has the signs of that branch reversed, which pins EMC at the 1 % floor for RH of about 14-50 % and showed the
+outlook's 10-h fuel moisture at 2-5 %. The outlook no longer matches the live conditioner there; the hourly step (time lags, rain
+wetting) still does, and `tests/test_fire_outlook_core.py` pins both facts. The live copies were NOT changed: the spatial model may
+have been trained with the old fit as a feature, so changing them needs its own review. Runs built before this change (for example
+`20261031T00Z`) used the old fit and should be rebuilt: delete the run folder and run
+`python scripts/run_fire_outlook.py --cycle <YYYY-MM-DDTHH> --no-publish`. Rain wetting is still weak (`RAIN_GAIN["fm10"]` is 0.15
+points per mm, so 13 mm adds about 2 points, where real 10-h fuels read 20-30 % after that much rain); that is inherited and unchanged.
+
 ## Known gaps (as of 2026-10-29)
 
 Not yet exercised on the production worker or against real weeks of data; the RTMA replay has only been run against synthetic cache files (the dev box has 13 RTMA hours);
