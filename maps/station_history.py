@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS station_obs (
 );
 CREATE INDEX IF NOT EXISTS idx_station_obs_field_ts ON station_obs(field, ts_utc);
 
+CREATE TABLE IF NOT EXISTS station_meta (
+    stid TEXT PRIMARY KEY,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    updated_utc TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS station_daily_extreme (
     stid TEXT NOT NULL,
     field TEXT NOT NULL,
@@ -126,6 +133,35 @@ def record_observations(
     finally:
         conn.close()
     return recorded
+
+
+def record_station_locations(
+    stations: list[dict], *, only_if=None, run_time_utc: Optional[datetime] = None, db_path: Optional[Path] = None,
+) -> int:
+    """Remember where stations are (they do not move), so readers of station_obs that run in another process, like the
+    fire outlook worker, can place a reading without the API's in-memory feed. `only_if(station)` limits which stations
+    are kept (e.g. RAWS that report fuel moisture). Returns the number of stations written."""
+    run_time_utc = run_time_utc or datetime.now(timezone.utc)
+    stamp = _iso(run_time_utc)
+    written = 0
+    conn = _connect(db_path)
+    try:
+        with conn:
+            for station in stations:
+                stid = station.get("stid")
+                try:
+                    lat, lon = float(station["latitude"]), float(station["longitude"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not stid or (only_if is not None and not only_if(station)):
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO station_meta (stid, latitude, longitude, updated_utc) VALUES (?, ?, ?, ?)",
+                    (stid, lat, lon, stamp))
+                written += 1
+    finally:
+        conn.close()
+    return written
 
 
 def _upsert_daily_extreme(conn: sqlite3.Connection, stid: str, field: str, date_local: str, value: float, ts_utc: str) -> None:

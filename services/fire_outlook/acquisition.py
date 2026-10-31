@@ -279,13 +279,23 @@ def build_adapters(config, *, raws_provider=None, fallback_ok: bool = False):
             yield member_dataset(cycle, path, regridder_for)
 
     def default_raws(cycle):
-        """RAWS 10-h fuel moisture at or before the cycle, from the observations table (causal; None if unreadable)."""
+        """RAWS 10-h fuel moisture at or before the cycle (causal; None if unavailable). The station history the API
+        records every 5 minutes comes first (raws_history); the `observations` table is the fallback, though nothing in
+        production fills it now."""
+        from services.fire_outlook import raws_history
+        payload = None
+        try:
+            payload = raws_history.fuel_moisture_payload(cycle)
+        except Exception as error:  # noqa: BLE001 - no anchor is a quality level, not a failure
+            logger.warning("station-history RAWS anchor unavailable for %s: %s", cycle, error)
+        if payload and len(payload["stations"]) >= conditioning.MIN_RAW_STATIONS:
+            return payload
         from core.database import get_db_path
         try:
             return verification.SqliteObservations(get_db_path()).fuel_moisture_payload(cycle)
-        except Exception as error:  # noqa: BLE001 - no anchor is a quality level, not a failure
+        except Exception as error:  # noqa: BLE001
             logger.warning("RAWS anchor unavailable for %s: %s", cycle, error)
-            return None
+            return payload or None
 
     provider = raws_provider if raws_provider is not None else default_raws
 

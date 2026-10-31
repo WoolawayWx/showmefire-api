@@ -112,7 +112,7 @@ async def record_station_history_job():
     to read. Reuses the already-cached get_station_data() feed - no extra
     Synoptic API call here."""
     try:
-        from maps.station_history import prune_old, record_observations
+        from maps.station_history import prune_old, record_observations, record_station_locations
         from services import derived_met
         from services.raws_calibration import fresh_station_fuel_moisture
 
@@ -154,6 +154,8 @@ async def record_station_history_job():
                 "fuel_moisture_pct": fresh_station_fuel_moisture,
             }
             record_observations(stations, fields)
+            # Where the fuel-moisture stations are, for the fire outlook worker (a separate process, so it cannot read this feed).
+            record_station_locations(stations, only_if=lambda s: fresh_station_fuel_moisture(s) is not None)
             # Neighbor-state stations: pressure only, to anchor the 3-hour change maps at the border.
             buffer_stations = get_buffer_station_data().get("stations") or []
             record_observations(buffer_stations, {"sea_level_pressure_mb": _obs("sea_level_pressure")})
