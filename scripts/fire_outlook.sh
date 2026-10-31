@@ -30,6 +30,10 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 mkdir -p "$PROJECT_DIR/logs"
 LOG_FILE="$PROJECT_DIR/logs/fire_outlook_$(date +%Y%m%d).log"
 
+# cron gives jobs an almost empty environment; pick up the container's settings (SMF_FIRE_OUTLOOK_ENABLED etc.) before checking them.
+# shellcheck source=container_env.sh
+. "$SCRIPT_DIR/container_env.sh"
+
 case "$(printf '%s' "${SMF_FIRE_OUTLOOK_ENABLED:-false}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) ;;
     *) echo "fire outlook disabled (SMF_FIRE_OUTLOOK_ENABLED is not true)"; exit 0 ;;
