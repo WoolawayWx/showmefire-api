@@ -41,7 +41,7 @@ except ImportError:
 CHECK_SECONDS = 30 * 60
 
 
-def build_adapters():
+def build_adapters(config):
     """Wire the real stages. GEFS 168 h + NBM acquisition (services/fire_outlook/acquisition.py) does not exist
     yet, so this refuses rather than fabricating inputs."""
     try:
@@ -49,7 +49,7 @@ def build_adapters():
     except ImportError as error:
         raise NotImplementedError(
             "GEFS 168-hour / NBM acquisition (services/fire_outlook/acquisition.py) is not implemented yet") from error
-    return acquisition.build_adapters()
+    return acquisition.build_adapters(config)
 
 
 def main(argv=None) -> int:
@@ -71,7 +71,7 @@ def main(argv=None) -> int:
         print("fire outlook worker disabled (set SMF_FIRE_OUTLOOK_ENABLED=true)")
         return 0
     try:
-        adapters = build_adapters()
+        adapters = build_adapters(config)
     except NotImplementedError as error:
         print(error)
         return 3

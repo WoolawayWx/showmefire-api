@@ -34,7 +34,7 @@ def proj(tmp_path):
     """A throw-away project dir laid out like /app, with stub worker/export scripts and a flock shim."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    for name in ("fire_outlook.sh", "fire_outlook_verification.sh"):
+    for name in ("fire_outlook.sh", "fire_outlook_verification.sh", "container_env.sh"):
         shutil.copy(API_ROOT / "scripts" / name, scripts / name)
     stub = ("import os, sys, time, pathlib\n"
             "root = pathlib.Path(__file__).resolve().parents[1]\n"
