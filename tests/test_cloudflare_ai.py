@@ -40,6 +40,26 @@ class CloudflareAIClientTests(unittest.TestCase):
         with self.assertRaisesRegex(CloudflareAIError, r"response is NoneType.*usage"):
             self._client({"usage": {}}).generate_text("p")
 
+    def test_session_affinity_header_only_when_requested_and_usage_captured(self):
+        client = self._client({"response": "ok", "usage": {"prompt_tokens": 900, "prompt_tokens_details": {"cached_tokens": 800}}})
+        client.generate_text("p", system="s")
+        self.assertNotIn("x-session-affinity", client.http_client.calls[0][1]["headers"])
+        client.generate_text("p", system="s", session_id="ses_1")
+        self.assertEqual(client.http_client.calls[1][1]["headers"]["x-session-affinity"], "ses_1")
+        self.assertEqual(client.last_usage["prompt_tokens"], 900)
+
+    def test_chat_completions_shape_is_read_and_exhausted_budget_is_explained(self):
+        ok = self._client({"choices": [{"message": {"content": " Hello ", "reasoning_content": "thinking"}, "finish_reason": "stop"}]})
+        self.assertEqual(ok.generate_text("p"), "Hello")
+        cut = self._client({"choices": [{"message": {"content": None, "reasoning_content": "thinking"}, "finish_reason": "length"}]})
+        with self.assertRaisesRegex(CloudflareAIError, "ran out of max_tokens"):
+            cut.generate_text("p", max_tokens=500)
+
+    def test_missing_usage_is_tolerated(self):
+        client = self._client({"response": "ok"})
+        client.generate_text("p", session_id="ses_1")
+        self.assertIsNone(client.last_usage)
+
     def test_posts_chat_messages_and_returns_workers_ai_response(self):
         http_client = FakeHttpClient(FakeResponse({
             "success": True,

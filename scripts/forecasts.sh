@@ -113,19 +113,19 @@ run_step "Comparing shared HRRR cache with the downloaded one" "$PROJECT_DIR/scr
 run_step "Comparing 9z run against same-day 12z run" "$PROJECT_DIR/scripts/compare_09z_12z.py" degraded || \
   echo "WARNING: 9z comparison generation failed at $(date)" >> "$LOG_FILE" 2>&1
 
+# Per-county danger runs BEFORE the AI text so the discussion reads today's county classes (ai/briefing.py
+# ignores a dangerbycounty.json older than the station forecast). It is a supplementary product, not the core
+# forecast: a failure here must not stop the run or suppress the "forecast ready" notifications below.
+run_step "Updating Per County Maps" "$PROJECT_DIR/forecast/PerCounty.py" degraded
+if [ $? -ne 0 ]; then
+    echo "WARNING: Updating Per County Maps failed at $(date) - the discussion falls back to regional detail; continuing" >> "$LOG_FILE" 2>&1
+fi
+
 run_step "Running AI Text Generation" "$PROJECT_DIR/forecast/forecast_ai.py"
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
     echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
     exit $EXIT_CODE
-fi
-
-# Per-county maps are a supplementary product, not the core forecast. A
-# failure here must not suppress the "forecast ready" notifications below.
-run_step "Updating Per County Maps" "$PROJECT_DIR/forecast/PerCounty.py" degraded
-EXIT_CODE=$?
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "WARNING: Updating Per County Maps failed at $(date) with exit code $EXIT_CODE - continuing so forecast notifications still go out" >> "$LOG_FILE" 2>&1
 fi
 
 echo "=== Sending forecast maps to Discord ===" >> "$LOG_FILE" 2>&1

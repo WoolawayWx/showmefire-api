@@ -12,6 +12,7 @@ import json
 import math
 import re
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -120,6 +121,32 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not any((precip, fuel, rh, wind, temp_c, danger)):
             continue
 
+        def at_extreme(key: str, pick) -> str | None:
+            """Timestamp of the hour where `key` is at its min/max for this station."""
+            best = None
+            for item in forecasts:
+                number = _finite(item.get(key))
+                if number is not None and item.get("time") and (best is None or pick(number, best[0])):
+                    best = (number, item["time"])
+            return best[1] if best else None
+
+        # Hours with measurable rain: the forecast field is cumulative, so a rise
+        # between consecutive hours marks the rain window.
+        rain_hours = []
+        previous_precip = 0.0
+        for item in forecasts:
+            number = _finite(item.get("precip_in"))
+            if number is None:
+                continue
+            if number - previous_precip >= 0.01 and item.get("time"):
+                rain_hours.append(item["time"])
+            previous_precip = max(previous_precip, number)
+        danger_by_time = [
+            (item.get("time"), int(number)) for item in forecasts
+            if item.get("time") and (number := _finite(item.get("fire_danger"))) is not None
+            and 0 <= int(number) <= 4
+        ]
+
         rows.append({
             "station_id": str(station_id),
             "region": region_for(latitude, longitude),
@@ -138,8 +165,63 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "temp_f": max(temp_c) * 9 / 5 + 32 if temp_c else None,
             "fire_danger": max(danger) if danger else None,
             "danger_peak_times": danger_peak_times,
+            "min_rh_time": at_extreme("rh", lambda new, old: new < old),
+            "max_wind_time": at_extreme("wind_speed_ms", lambda new, old: new > old),
+            "max_temp_time": at_extreme("temp_c", lambda new, old: new > old),
+            "rain_hours": rain_hours,
+            "danger_by_time": danger_by_time,
         })
     return rows
+
+
+def _central_label(timestamp: str) -> str | None:
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed.astimezone(ZoneInfo("America/Chicago")).strftime("%-I %p %Z")
+
+
+def _central_span(timestamps: Iterable[str | None]) -> dict[str, str] | None:
+    """Earliest-to-latest Central-time span of the given ISO timestamps (middle half of
+    stations' values would hide outliers; the full span is what the data supports)."""
+    parsed = []
+    for timestamp in timestamps:
+        if not timestamp:
+            continue
+        try:
+            value = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        parsed.append(value if value.tzinfo else value.replace(tzinfo=ZoneInfo("UTC")))
+    if not parsed:
+        return None
+    return {"from": _central_label(min(parsed).isoformat()), "to": _central_label(max(parsed).isoformat())}
+
+
+def _danger_trend(rows: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Highest danger class among stations in the first and last third of the period,
+    so prose can say whether danger builds or eases through the day."""
+    times = sorted({time for row in rows for time, _ in row.get("danger_by_time", [])})
+    if len(times) < 3:
+        return None
+    third = max(1, len(times) // 3)
+    early, late = set(times[:third]), set(times[-third:])
+
+    def highest(window: set[str]) -> int | None:
+        values = [level for row in rows for time, level in row.get("danger_by_time", []) if time in window]
+        return max(values) if values else None
+
+    start, end = highest(early), highest(late)
+    if start is None or end is None:
+        return None
+    return {
+        "early": DANGER_LABELS[start],
+        "late": DANGER_LABELS[end],
+        "direction": "building" if end > start else "easing" if end < start else "steady",
+    }
 
 
 def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -217,6 +299,17 @@ def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     else:
         result["fire_danger_peak_start"] = None
         result["fire_danger_peak_end"] = None
+    result["min_rh_time"] = _central_span(row.get("min_rh_time") for row in row_list)
+    result["max_wind_time"] = _central_span(row.get("max_wind_time") for row in row_list)
+    result["max_temp_time"] = _central_span(row.get("max_temp_time") for row in row_list)
+    rain_stations = [row for row in row_list if row.get("rain_hours")]
+    result["precip_station_share"] = (
+        round(len(rain_stations) / len(row_list), 2) if row_list else None
+    )
+    result["precip_window"] = _central_span(
+        hour for row in rain_stations for hour in row["rain_hours"]
+    )
+    result["danger_trend"] = _danger_trend(row_list)
     result["precipitation"] = (
         "trace" if result["precip_in"]["max"] is not None and result["precip_in"]["max"] < 0.05
         else "measurable"
@@ -226,89 +319,185 @@ def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _county_summary(county_path: Path | None) -> dict[str, Any] | None:
+COUNTY_SHAPEFILE = Path(__file__).resolve().parent.parent / "maps" / "shapefiles" / "MO_County_Boundaries" / "MO_County_Boundaries.shp"
+# Shapefile COUNTYNAME -> the spelling PerCounty.py writes to dangerbycounty.json.
+_COUNTY_NAME_OVERRIDES = {
+    "Dekalb": "DeKalb", "St Charles": "St. Charles", "St Clair": "St. Clair", "St Francois": "St. Francois",
+    "St Louis": "St. Louis", "St Louis City": "St. Louis City", "Ste Genevieve": "Ste. Genevieve",
+}
+MAX_COUNTIES_PER_CLASS = 15
+MAX_COUNTIES_PER_REGION_CLASS = 5  # the prose may name only five counties per sentence; class_counts keeps the totals
+MAX_DISCUSSION_SENTENCES = 16
+
+
+@lru_cache(maxsize=1)
+def county_regions() -> dict[str, dict[str, str]]:
+    """County name -> {"region": "NW"|..., "fips": "29xxx"} from each county's bounding-box
+    centre (the shapefile is Web Mercator), using the same region_for() as the stations."""
+    import shapefile
+
+    try:
+        reader = shapefile.Reader(str(COUNTY_SHAPEFILE))
+    except Exception:
+        return {}
+    fields = [field[0] for field in reader.fields[1:]]
+    result: dict[str, dict[str, str]] = {}
+    for shape_record in reader.iterShapeRecords():
+        row = dict(zip(fields, shape_record.record))
+        x_min, y_min, x_max, y_max = shape_record.shape.bbox
+        radius = 6378137.0
+        longitude = math.degrees(((x_min + x_max) / 2) / radius)
+        latitude = math.degrees(math.atan(math.sinh(((y_min + y_max) / 2) / radius)))
+        name = str(row.get("COUNTYNAME") or "").strip()
+        name = _COUNTY_NAME_OVERRIDES.get(name, name)
+        raw = str(row.get("COUNTYFIPS") or "").strip()
+        result[name] = {
+            "region": region_for(latitude, longitude),
+            "fips": raw if len(raw) == 5 else f"29{raw.zfill(3)}",
+        }
+    return result
+
+
+def _read_county_entries(county_path: Path | None) -> list[Mapping[str, Any]]:
     if county_path is None or not county_path.exists():
-        return None
+        return []
     try:
         with county_path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, ValueError):
-        return None
-
+        return []
     if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, Mapping):
-        entries = payload.get("counties", [])
-    else:
-        entries = []
+        return payload
+    if isinstance(payload, Mapping):
+        return payload.get("counties", [])
+    return []
+
+
+def _county_entries(
+    county_path: Path | None,
+    source_mtime: float | None,
+    tif_path: Path | None,
+) -> list[Mapping[str, Any]]:
+    """County danger classes that belong to THIS forecast, or [] when none can be shown.
+
+    dangerbycounty.json is used only if it is not older than the station forecast it
+    accompanies (the 12z script runs PerCounty first; the 9z run never writes it).
+    Otherwise the classes are computed in memory from the peak-danger raster, again
+    only if that raster is fresh. Stale county data is never used."""
+    def fresh(path: Path | None) -> bool:
+        if path is None or not path.exists():
+            return False
+        return source_mtime is None or path.stat().st_mtime >= source_mtime
+
+    if fresh(county_path):
+        entries = _read_county_entries(county_path)
+        if entries:
+            return entries
+    if tif_path is not None and fresh(tif_path):
+        try:
+            from forecast.PerCounty import compute_county_danger
+
+            return [
+                {"county": entry["county"], "max_fire_danger": entry["max_fire_danger"]}
+                for entry in compute_county_danger(tif_path)
+            ]
+        except Exception as exc:  # optional detail: never block the discussion
+            print(f"County danger could not be computed for the briefing: {exc}")
+    return []
+
+
+def _county_summary(entries: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     values = []
     counties_by_class: dict[str, list[str]] = {}
+    by_region: dict[str, dict[str, list[str]]] = {}
+    regions = county_regions()
     for entry in entries:
         value = _finite(entry.get("max_fire_danger")) if isinstance(entry, Mapping) else None
-        if value is not None and 0 <= int(value) < len(DANGER_LABELS):
-            values.append(int(value))
-            county_name = entry.get("county") if isinstance(entry, Mapping) else None
-            if county_name:
-                counties_by_class.setdefault(DANGER_LABELS[int(value)], []).append(county_name)
+        if value is None or not 0 <= int(value) < len(DANGER_LABELS):
+            continue
+        level = int(value)
+        values.append(level)
+        county_name = entry.get("county")
+        if not county_name:
+            continue
+        label = DANGER_LABELS[level]
+        counties_by_class.setdefault(label, []).append(county_name)
+        region = regions.get(county_name, {}).get("region")
+        if region:
+            by_region.setdefault(REGION_NAMES[region], {}).setdefault(label, []).append(county_name)
     if not values:
         return None
     counts = {label: values.count(index) for index, label in enumerate(DANGER_LABELS)}
+    # Low counties are the default; only name the ones above it, capped per class.
+    region_detail = {
+        region: {
+            "class_counts": {label: len(names) for label, names in classes.items()},
+            # Only the region's highest class above Low is listed (five names at most): one short list per
+            # region keeps the prose to one county sentence each; lower classes stay in class_counts.
+            "counties_above_low": {
+                label: sorted(names)[:MAX_COUNTIES_PER_REGION_CLASS]
+                for label, names in list(
+                    sorted(
+                        ((l, n) for l, n in classes.items() if l != DANGER_LABELS[0]),
+                        key=lambda item: DANGER_LABELS.index(item[0]),
+                        reverse=True,
+                    )
+                )[:1]
+            },
+        }
+        for region, classes in by_region.items()
+    }
     return {
         "county_count": len(values),
         "fire_danger_class_counts": {label: count for label, count in counts.items() if count},
         "fire_danger_present": [label for label, count in counts.items() if count],
         "highest_fire_danger": DANGER_LABELS[max(values)],
-        "counties_by_fire_danger": counties_by_class,
+        "by_region": region_detail,
     }
 
 
-FIRE_WEATHER_MAX_AGE_HOURS = 3
+def _red_flag(alerts: list[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    """Active Red Flag Warnings / Fire Weather Watches as event -> counties. Empty list
+    when none are active (the key is then left out of the briefing entirely)."""
+    if alerts is None:
+        try:
+            from services.mobile_content import active_fire_weather_alerts
 
-
-def _current_dispersion(path: Path, now: datetime | None = None) -> dict[str, Any] | None:
-    """Latest hourly HRRR dispersion estimate for the current hour
-    (maps/fire_weather_maps.py), or None when it is missing or older than
-    FIRE_WEATHER_MAX_AGE_HOURS. It describes conditions now, not the afternoon
-    forecast; the prompt says so."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        valid = datetime.strptime(payload["valid_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
-    except (OSError, ValueError, KeyError):
-        return None
-    now = now or datetime.now(ZoneInfo("UTC"))
-    if (now - valid).total_seconds() > FIRE_WEATHER_MAX_AGE_HOURS * 3600:
-        return None
-
-    def area(summary: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "mixing_height_ft": summary["mixing_height_ft"],
-            "transport_wind_mph": summary["transport_speed_mph"],
-            "transport_wind_from": summary.get("transport_direction"),
-            "smoke_dispersal": summary.get("ventilation_dominant"),
-        }
-
-    state = payload["statewide"]
-    return {
-        "valid_time": valid.astimezone(ZoneInfo("America/Chicago")).strftime("%-I %p CT %b %-d"),
-        "source": payload.get("source"),
-        "statewide": {
-            **area(state),
-            "smoke_dispersal_percent": state.get("ventilation_category_percent"),
-            "surface_inversion_percent": state.get("surface_inversion_percent"),
-            "haines_max": state["haines"].get("max"),
-            "hot_dry_windy_max": state["hdw"].get("max"),
-        },
-        "regions": {name: area(region) for name, region in payload.get("regions", {}).items() if region.get("cell_count")},
-    }
+            alerts = active_fire_weather_alerts()
+        except Exception:
+            return []
+    names_by_fips = {info["fips"]: name for name, info in county_regions().items()}
+    grouped: dict[str, dict[str, Any]] = {}
+    for alert in alerts:
+        event = alert.get("event")
+        if not event:
+            continue
+        group = grouped.setdefault(event, {"event": event, "counties": set(), "ends": None})
+        group["counties"].update(
+            names_by_fips[fips] for fips in alert.get("countyFips") or [] if fips in names_by_fips
+        )
+        ends = alert.get("expires")
+        label = _central_label(ends) if ends else None
+        if label and group["ends"] is None:
+            group["ends"] = label
+    return [
+        {"event": group["event"], "counties": sorted(group["counties"]), "ends": group["ends"]}
+        for group in grouped.values() if group["counties"]
+    ]
 
 
 def build_briefing(
     archive_dir: str | Path,
     forecast_path: str | Path | None = None,
     county_path: str | Path | None = None,
-    fire_weather_path: str | Path | None = None,
+    alerts: list[Mapping[str, Any]] | None = None,
+    county_tif_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Return a JSON-serializable briefing from the latest station forecast."""
+    """Return a JSON-serializable briefing from the latest station forecast.
+
+    Only forecast products go in: station forecast values, county danger classes for the
+    same run, and active Red Flag/Fire Weather Watch counties. Current-conditions data
+    (smoke dispersal, mixing height) is deliberately excluded."""
     archive_path = Path(archive_dir)
     path = Path(forecast_path) if forecast_path else _latest_forecast_file(archive_path)
     with path.open(encoding="utf-8") as handle:
@@ -319,11 +508,9 @@ def build_briefing(
         REGION_NAMES[name]: _summary(row for row in rows if row["region"] == name)
         for name in ("NW", "NE", "Central", "SW", "SE")
     }
-    resolved_county_path = (
-        Path(county_path)
-        if county_path
-        else archive_path.parent.parent / "gis" / "dangerbycounty.json"
-    )
+    gis_dir = archive_path.parent.parent / "gis"
+    resolved_county_path = Path(county_path) if county_path else gis_dir / "dangerbycounty.json"
+    resolved_tif = Path(county_tif_path) if county_tif_path else gis_dir / "peak_fire_danger.tif"
     briefing = {
         "source_file": path.name,
         "run_date": payload.get("run_date"),
@@ -337,14 +524,13 @@ def build_briefing(
         "regions": regions,
         "statewide": _summary(rows),
     }
-    dispersion = _current_dispersion(
-        Path(fire_weather_path)
-        if fire_weather_path
-        else archive_path.parent.parent / "data" / "current_conditions" / "fire_weather_latest.json"
+    county_summary = _county_summary(
+        _county_entries(
+            resolved_county_path,
+            path.stat().st_mtime if not county_path else None,
+            resolved_tif,
+        )
     )
-    if dispersion:
-        briefing["current_dispersion"] = dispersion
-    county_summary = _county_summary(resolved_county_path)
     if county_summary:
         briefing["county_danger"] = county_summary
         # County danger provides broader spatial coverage than stations. Merge
@@ -359,6 +545,9 @@ def build_briefing(
             index for index, label in enumerate(DANGER_LABELS) if label in present
         ]
         briefing["statewide"]["highest_fire_danger"] = DANGER_LABELS[max(danger_values)]
+    red_flag = _red_flag(alerts)
+    if red_flag:
+        briefing["red_flag"] = red_flag
     return briefing
 
 
@@ -367,8 +556,28 @@ def briefing_json(briefing: Mapping[str, Any]) -> str:
     return json.dumps(briefing, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def validate_briefing_text(text: str, briefing: Mapping[str, Any]) -> bool:
-    """Check model prose for unsupported danger classes and rainfall totals."""
+MAX_COUNTIES_PER_SENTENCE = 5
+
+
+def _county_placement_problem(text: str, briefing: Mapping[str, Any]) -> str | None:
+    """A sentence may name at most five counties, and when it names exactly one region every county in it
+    must belong to that region."""
+    regions = county_regions()
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        counties = [n for n in regions if re.search(rf"(?<![\w.]){re.escape(n)}(?![\w])", sentence)]
+        if len(counties) > MAX_COUNTIES_PER_SENTENCE:
+            return f"more than {MAX_COUNTIES_PER_SENTENCE} counties in one sentence ({', '.join(counties)})"
+        named = [r for r in briefing.get("regions", {}) if re.search(rf"\b{r}\b", sentence)]
+        if len(named) == 1 and any(REGION_NAMES.get(regions[c]["region"]) != named[0] for c in counties):
+            return "county named under the wrong region"
+    return None
+
+
+def briefing_text_problem(text: str, briefing: Mapping[str, Any]) -> str | None:
+    """Why model prose is unacceptable (unsupported class, place, wording or rainfall), or None if it is fine."""
+    problem = _county_placement_problem(text, briefing)
+    if problem:
+        return problem
     allowed = set(briefing["statewide"].get("fire_danger_present") or ["Low"])
     for label in DANGER_LABELS:
         danger_context = (
@@ -383,19 +592,71 @@ def validate_briefing_text(text: str, briefing: Mapping[str, Any]) -> bool:
             re.search(danger_context, text, re.IGNORECASE)
             or re.search(class_context, text, re.IGNORECASE)
         ) and label not in allowed:
-            return False
+            return "unsupported danger class"
+
+    if re.search(r"dispersal|mixing height|transport wind|smoke", text, re.IGNORECASE):
+        return "smoke/dispersal wording"
+    # Talk about the briefing itself, or about data that is missing, is never forecast content.
+    meta = re.search(r"\bbriefing\b|\bjson\b|not available|unavailable|no data|not provided", text, re.IGNORECASE)
+    if meta:
+        return f"talk about the briefing or missing data ({meta.group(0)!r})"
+    # The forecast carries sustained wind only.
+    if re.search(r"\bgust", text, re.IGNORECASE):
+        return "gust wording"
+    # Warnings/watches may be mentioned only when one is active (and then only as the briefing lists them).
+    if not briefing.get("red_flag") and re.search(
+        r"red flag|fire weather watch|\bwarnings?\b", text, re.IGNORECASE
+    ):
+        return "red flag/warning wording with none active"
+    if not _named_places_supported(text, briefing):
+        return "county or region not in the briefing"
+
+    # Rain is forecast per region (amount and window), never per county: a county named in a sentence
+    # about rain would be an invented location.
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if re.search(r"\b(?:rain\w*|precipitation|showers?)\b", sentence, re.IGNORECASE) and any(
+            re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", sentence) for name in county_regions()
+        ):
+            return "rain sentence names a county"
 
     maximum = briefing["statewide"]["precip_in"].get("max")
     if maximum is None:
-        return True
-    return not any(
-        float(match.group(1)) > maximum * 1.2
+        return None
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        # A sentence about exactly one region is held to that region's own forecast maximum.
+        named = [
+            name for name in briefing.get("regions", {})
+            if re.search(rf"\b{name}\b", sentence)
+        ]
+        cap = maximum
+        if len(named) == 1:
+            region_max = briefing["regions"][named[0]]["precip_in"].get("max")
+            cap = region_max if region_max is not None else 0.0
         for match in re.finditer(
-            r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:inches?|in\b|in\.)",
-            text,
-            re.IGNORECASE,
-        )
-    )
+            r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:inches?|in\b|in\.)", sentence, re.IGNORECASE
+        ):
+            if float(match.group(1)) > cap * 1.2 + 0.005:
+                return "rain amount above forecast maximum"
+    return None
+
+
+def validate_briefing_text(text: str, briefing: Mapping[str, Any]) -> bool:
+    """Check model prose for unsupported danger classes, places and rainfall totals."""
+    return briefing_text_problem(text, briefing) is None
+
+
+def _named_places_supported(text: str, briefing: Mapping[str, Any]) -> bool:
+    """Every county the prose names must appear in the supplied briefing, and a region
+    with no stations may not be described."""
+    supplied = json.dumps(briefing, sort_keys=True)
+    for name in county_regions():
+        # A county named anywhere in the text (with or without "County") must be one the briefing supplied.
+        if re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", text) and f'"{name}"' not in supplied:
+            return False
+    for region, summary in briefing.get("regions", {}).items():
+        if summary.get("station_count") == 0 and re.search(rf"\b{region} Missouri\b", text):
+            return False
+    return True
 
 
 def contains_core_weather_facts(text: str, briefing: Mapping[str, Any]) -> bool:
@@ -425,7 +686,7 @@ def contains_core_weather_facts(text: str, briefing: Mapping[str, Any]) -> bool:
 
 def validate_operational_style(text: str, briefing: Mapping[str, Any]) -> bool:
     """Keep AI prose concise and appropriate for operational readers."""
-    if len(re.findall(r"[.!?](?:\s|$)", text)) > 6:
+    if len(re.findall(r"[.!?](?:\s|$)", text)) > MAX_DISCUSSION_SENTENCES:
         return False
     if re.search(r"\d+\.\d+\s*(?:°?\s*F|degrees?|mph|%)\b", text, re.IGNORECASE):
         return False

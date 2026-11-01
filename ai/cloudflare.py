@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Mapping
 
@@ -12,6 +13,22 @@ from core.sandbox import is_sandbox
 
 DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 WORKERS_AI_URL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+
+
+logger = logging.getLogger(__name__)
+
+SESSION_AFFINITY_HEADER = "x-session-affinity"
+
+
+def _cached_tokens(usage: Mapping[str, Any]) -> int | None:
+    """Cached prompt tokens from a Workers AI `usage` object, whichever shape it uses
+    (OpenAI-style prompt_tokens_details.cached_tokens, or a flat cached_tokens)."""
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, Mapping) and isinstance(details.get("cached_tokens"), int):
+        return details["cached_tokens"]
+    if isinstance(usage.get("cached_tokens"), int):
+        return usage["cached_tokens"]
+    return None
 
 
 class CloudflareAIError(RuntimeError):
@@ -36,6 +53,8 @@ class CloudflareAIClient:
         self.model = (model or os.getenv("CLOUDFLARE_AI_MODEL", DEFAULT_MODEL)).strip()
         self.timeout = timeout
         self.http_client = http_client
+        # Usage of the most recent call (None when the API reported none), for cache-hit logging.
+        self.last_usage: dict[str, Any] | None = None
 
     @property
     def configured(self) -> bool:
@@ -48,7 +67,11 @@ class CloudflareAIClient:
         *,
         model: str | None = None,
         max_tokens: int = 320,
+        session_id: str | None = None,
     ) -> str:
+        """`session_id` turns on Workers AI prefix caching: requests with the same id are routed
+        to the same model instance, so a static system prompt is reused instead of recomputed.
+        Keep everything that never changes in `system`, and everything dynamic in `prompt`."""
         if is_sandbox():  # reviewer sandbox: no outside calls
             raise CloudflareAIError("AI is switched off in the reviewer sandbox")
         if not self.api_key:
@@ -74,6 +97,10 @@ class CloudflareAIClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        session_id = (session_id or os.getenv("CLOUDFLARE_AI_SESSION_AFFINITY") or "").strip()
+        if session_id:
+            headers[SESSION_AFFINITY_HEADER] = session_id
+        self.last_usage = None
 
         try:
             if self.http_client is not None:
@@ -109,7 +136,26 @@ class CloudflareAIClient:
             raise CloudflareAIError(detail or "Workers AI returned an unsuccessful response")
 
         result = payload.get("result")
+        usage = result.get("usage") if isinstance(result, Mapping) else None
+        if isinstance(usage, Mapping):
+            self.last_usage = dict(usage)
+            if session_id:
+                logger.info(
+                    "Workers AI %s: prompt_tokens=%s cached_tokens=%s",
+                    selected_model, usage.get("prompt_tokens"), _cached_tokens(usage),
+                )
         text = result.get("response") if isinstance(result, Mapping) else None
+        if text is None and isinstance(result, Mapping) and isinstance(result.get("choices"), list):
+            # Chat-completions shape (e.g. @cf/moonshotai/kimi-k2.5). Reasoning models spend max_tokens on
+            # their thinking first, so a short budget can leave `content` empty with finish_reason "length".
+            choice = (result["choices"] or [{}])[0]
+            message = choice.get("message") if isinstance(choice, Mapping) else None
+            text = message.get("content") if isinstance(message, Mapping) else None
+            if not (isinstance(text, str) and text.strip()) and isinstance(choice, Mapping) and choice.get("finish_reason") == "length":
+                raise CloudflareAIError(
+                    f"Workers AI ran out of max_tokens ({max_tokens}) before producing an answer "
+                    "(a reasoning model spends tokens thinking); raise the token limit"
+                )
         # When the model's whole reply is valid JSON, Workers AI can return it already parsed (an object/array)
         # instead of a string. Hand callers the JSON text either way.
         if isinstance(text, (dict, list)):
@@ -129,10 +175,13 @@ def generate_text(
     *,
     model: str | None = None,
     client: CloudflareAIClient | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Generate text using configured Workers AI credentials."""
+    extra = {"session_id": session_id} if session_id else {}  # fakes without the argument keep working
     return (client or CloudflareAIClient()).generate_text(
         prompt,
         system=system,
         model=model,
+        **extra,
     )

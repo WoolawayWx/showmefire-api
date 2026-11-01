@@ -58,11 +58,16 @@ def classify_county(values: np.ndarray) -> int | None:
     return 0
 
 
-def main():
-    init_database()
-    counties = gpd.read_file(COUNTY_SHAPEFILE)
+def compute_county_danger(tif_path=FIRE_DANGER_TIF, shapefile_path=COUNTY_SHAPEFILE):
+    """Classify every county from the peak fire danger raster.
 
-    with rasterio.open(FIRE_DANGER_TIF) as src:
+    Returns [{'county', 'county_fips', 'max_fire_danger', 'cells'}]. Pure
+    computation: nothing is written, so a run that must not publish county
+    products (the 9z forecast) can still read today's county classes.
+    """
+    counties = gpd.read_file(shapefile_path)
+
+    with rasterio.open(tif_path) as src:
         fire_danger = src.read(1)
         raster_crs = src.crs
         transform = src.transform
@@ -72,19 +77,11 @@ def main():
     if counties.crs != raster_crs:
         counties = counties.to_crs(raster_crs)
 
-    print(f"Raster shape: {fire_danger.shape}, CRS: {raster_crs}, nodata: {nodata}")
-    print(f"County CRS: {counties.crs}, bounds: {counties.total_bounds}")
-
     results = []
-    for idx, row in counties.iterrows():
+    for _idx, row in counties.iterrows():
         county_name = normalize_county_name(row['COUNTYNAME'])
-        geom = row['geometry']
-
-        # Boolean mask: True where the county intersects the raster
-        mask = geometry_mask([geom], transform=transform, invert=True,
+        mask = geometry_mask([row['geometry']], transform=transform, invert=True,
                              out_shape=fire_danger.shape, all_touched=True)
-
-        # Extract valid (non-nodata) cells within the county
         county_cells = fire_danger[mask]
         if nodata is not None:
             county_cells = county_cells[county_cells != nodata]
@@ -92,12 +89,25 @@ def main():
         level = classify_county(county_cells)
         raw_fips = str(row.get('COUNTYFIPS') or '').strip()
         county_fips = raw_fips if len(raw_fips) == 5 else f"29{raw_fips.zfill(3)}"
-
         results.append({
             'county': county_name,
             'county_fips': county_fips,
             'max_fire_danger': level,
+            'cells': county_cells,
         })
+    return results
+
+
+def main():
+    init_database()
+    results = []
+    for entry in compute_county_danger():
+        county_name = entry['county']
+        county_fips = entry['county_fips']
+        level = entry['max_fire_danger']
+        county_cells = entry.pop('cells')
+
+        results.append(entry)
 
         if level is not None:
             upsert_county_forecast_day(
