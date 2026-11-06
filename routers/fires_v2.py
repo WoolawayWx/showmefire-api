@@ -159,10 +159,19 @@ def admin_queue_v2(limit: int = 50, offset: int = 0, _admin: str = Depends(requi
 
     events = list_fire_events(status="pending", admin=True, limit=limit, offset=offset)
     pending_feedback = list_pending_fire_incident_feedback(limit=limit)
+    # These annotations are advisory. A malformed legacy row or a partially
+    # migrated optional table must not take the entire moderation queue down
+    # with a 500; the underlying reports are still useful without the badge.
     for item in pending_feedback:
-        item["feedback_priority_score"] = score_feedback(item["id"])
+        try:
+            item["feedback_priority_score"] = score_feedback(item["id"])
+        except Exception:
+            item["feedback_priority_score"] = None
     for event in events:
-        event["ai_summary"] = report_summary_status(event)
+        try:
+            event["ai_summary"] = report_summary_status(event)
+        except Exception:
+            event["ai_summary"] = {"event_id": event.get("id"), "summary": None, "status": "unavailable"}
     return {
         "success": True,
         "reports": events,

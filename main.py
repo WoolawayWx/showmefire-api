@@ -208,7 +208,23 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
         )
     except Exception:
         logger.warning("Failed to send system issue alert for unhandled exception", exc_info=True)
-    return JSONResponse(status_code=500, content={"success": False, "error": "Internal server error"})
+    # Starlette's CORS middleware does not always get a chance to decorate
+    # responses produced by an exception handler. Preserve the CORS contract
+    # on JSON 500s so the browser exposes the actual API failure instead of
+    # misleadingly reporting it as a CORS/network error.
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin and (origin in origins or origin_allowed(origin)):
+        headers = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "error": "Internal server error"},
+        headers=headers,
+    )
 
 
 class NoCacheStaticFiles(StaticFiles):
