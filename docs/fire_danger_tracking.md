@@ -8,14 +8,14 @@ a model, a score, or anything public. Admin page: `/admin/fire-danger-tracking`.
 | Model | Where its county result comes from | Valid date |
 |---|---|---|
 | `fire_weather_index` (shadow) | `model-shadow/fire-weather-index/*.fire_weather_index_score.json` (score + category) | `valid_local_date` |
-| `fire_weather_index:blend` (shadow) | `model-shadow/fire-weather-index/*.fire_weather_index_blend_score.json` (HRRR+RRFS+FV3 blend, below) | `valid_local_date` |
+| `fire_weather_index:blend` (shadow) | `model-shadow/fire-weather-index/*.fire_weather_index_blend_score.json` (HRRR+RRFS blend, below) | `valid_local_date` |
 | `risk_fusion_glm` (shadow) | `model-shadow/risk-fusion-glm/*.glm_score.json` (P(>=1 fire)) | `valid_local_date` |
 | `ensemble:<track>` (shadow) | `model-shadow/ensemble-fire-danger/*.json` (county categorical + P(>=Elevated)) | America/Chicago date of the anchor cycle; only 09Z-15Z daytime cycles |
 | `public_rule` | `county_forecast_days` (the public rule-based category) | `forecast_date` |
 
 Not tracked: `fire_weather_ml` (it stores map-level summaries only, no county result).
 
-**There is no production blend of these models.** Each scores independently. The HRRR + RRFS + FV3-HIRES blend exists only in
+**There is no production blend of these models.** Each scores independently. The HRRR + RRFS blend exists only in
 the offline training panel (`model-training/fire_weather_index/build_county_days.py`); live scoring is HRRR-only. The
 "consensus" block is an analysis (mean category across model families on the same county-days) to show whether combining them
 would help; nothing serves it.
@@ -52,19 +52,18 @@ they all scored.
 - Counties with a NULL `county_fips` on an event cannot be attributed and are left out.
 
 ## The blended Fire Weather Severity Index (beta/preview)
-`services/fire_weather_index_blend.py` scores the same index on the HRRR + RRFS + HiResW FV3 average and draws it in the house
+`services/fire_weather_index_blend.py` scores the same index on the HRRR + RRFS average and draws it in the house
 style, so the blend can be compared with the HRRR-only shadow. It runs inside the 12Z ensemble run (cron 15:00Z), which has already
-fetched and regridded all three onto the forecast grid for the same valid hours; nothing new is downloaded.
+fetched and regridded both onto the forecast grid for the same valid hours; nothing new is downloaded.
 - Each source's hourly fields are reduced with exactly the HRRR-only hook's four reductions (afternoon-min RH, max wind, max VPD,
   24 h precip), then averaged with equal weight over the sources that have a value in each cell (the offline blend's rule). The
   same bundle and scoring are used, so the two products differ only in their weather input. A parity test checks the reductions
   against the HRRR-only hook.
-- One member per source: `hrrr_0`, `rrfs_0` (else `rrfs_m6`), `fv3_0`. Needs at least two sources.
+- One member per source: `hrrr_0`, `rrfs_0` (else `rrfs_m6`). Needs both sources. (HiResW FV3 was retired by NOAA and is no longer a blend source.)
 - Outputs: image `testbed/images/fire_weather_index_blend_shadow_latest.png`, manifest key `fire_weather_index_blend_shadow`
   (testbed page card), evidence `<run_id>.fire_weather_index_blend_score.json` (tracked above as `fire_weather_index:blend`).
 - Gated by the same enabled switch as the fire_weather_index shadow, best-effort, and it never reads or writes that shadow's health
   state, so a blend failure cannot disable it.
 - Not included (same as the live HRRR-only shadow): antecedent rain, the fuel-type precip threshold and score smoothing that the
-  offline diagnostic adds. FV3-HIRES temperature is a (max+min)/2 proxy, which biases VPD; this is stated on the map.
-- RRFS and FV3-HIRES are only blended in when the ensemble run fetched them. FV3 is optional and only available for the 00Z/12Z
-  cycles on NOMADS.
+  offline diagnostic adds.
+- RRFS is only blended in when the ensemble run fetched it.

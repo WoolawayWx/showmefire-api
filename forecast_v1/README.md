@@ -84,9 +84,8 @@ Run-level `warnings` retain their string-array API contract and contain only
 operational degradation: RRFS loss, GEFS fallback, or partial/unavailable
 meteorological confidence. `sourceDiagnostics` in the manifest and admin
 status provide source/role/severity, affected leads, missing fields, and the
-sanitized full acquisition error. FV3-HIRES is a zero-weight shadow source;
-its missing fields remain informational and do not raise the global degraded
-banner.
+sanitized full acquisition error. FV3-HIRES (HiResW FV3) is retired - NOAA no
+longer serves it - and is never acquired; its registry row stays `disabled`.
 
 Fire-danger probabilities come from 51 scenarios run through the canonical
 rule (`services/rule_uncertainty.category_vectorized`). Each scenario holds its

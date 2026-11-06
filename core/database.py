@@ -5723,11 +5723,9 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
     # Seed the forecast-source-model registry once. hrrr/rrfs/refs/gefs are
     # marked 'active' with no weight_profile_json override (they keep using
     # contracts.BLEND_WEIGHTS as before - this table only carries an *overlay*
-    # for models beyond those four). fv3hires starts 'shadow': acquired every
-    # run and measured against the live hrrr/rrfs blend (forecast_source_model_metrics),
-    # but contributes zero weight to what's actually served until someone
-    # reviews that performance and explicitly promotes it to 'active' with a
-    # weight through the admin UI - so this seed alone changes no live output.
+    # for models beyond those four). fv3hires is seeded 'disabled': HiResW FV3
+    # was retired by NOAA, so it is never acquired (see forecast_v1.registry.
+    # RETIRED_ADAPTER_KEYS) and the row only exists so old history still resolves.
     cursor.execute("SELECT COUNT(*) FROM forecast_source_models")
     if cursor.fetchone()[0] == 0:
         cursor.executemany(
@@ -5741,11 +5739,20 @@ def _ensure_graphics_tables(cursor: sqlite3.Cursor) -> None:
         )
         cursor.execute(
             "INSERT INTO forecast_source_models(key,display_name,adapter_key,status,notes) VALUES (?,?,?,?,?)",
-            ("fv3hires", "FV3-HIRES (HiResW FV3)", "fv3hires", "shadow",
-             "No native 2m temperature (only 80m TMP + 2m TMAX/TMIN) and no gust field - those "
-             "variables fall back to whichever other active model covers the hour. NOMADS-only, "
-             "short retention, forward-only capture. Beta: acquired + measured against the live "
-             "blend every run, zero weight in production output until promoted."),
+            ("fv3hires", "FV3-HIRES (HiResW FV3)", "fv3hires", "disabled",
+             "RETIRED: NOAA no longer serves HiResW FV3. Never acquired; kept only so stored history resolves."),
+        )
+
+    # Existing databases were seeded with fv3hires as 'shadow' (acquired every run). Move it to
+    # 'disabled' once and log it; the registry refuses to re-enable a retired adapter.
+    cursor.execute("SELECT 1 FROM forecast_source_models WHERE key='fv3hires' AND status!='disabled'")
+    if cursor.fetchone():
+        cursor.execute(
+            "UPDATE forecast_source_models SET status='disabled', updated_at=CURRENT_TIMESTAMP WHERE key='fv3hires'"
+        )
+        cursor.execute(
+            "INSERT INTO forecast_source_model_events(id,model_key,action,detail) VALUES (?,?,?,?)",
+            (secrets.token_hex(16), "fv3hires", "disabled", "retired: NOAA no longer serves HiResW FV3"),
         )
 
     # Future billing hook: these columns are unused today (subscription_status

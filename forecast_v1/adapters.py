@@ -193,7 +193,10 @@ class GEFSAdapter(DatasetAdapter):
 
 
 class FV3HiresAdapter(DatasetAdapter):
-    """HiResW FV3 (NOMADS-only, no backfill).
+    """RETIRED - NOAA no longer serves HiResW FV3; never acquired (see registry.RETIRED_ADAPTER_KEYS).
+    Kept so stored history that references "fv3hires" still decodes.
+
+    HiResW FV3 (NOMADS-only, no backfill).
 
     No native 2m instantaneous temperature (only 80m TMP + 2m TMAX/TMIN) and
     no gust field - strict_required=False NaN-fills those, which _available_for_hour

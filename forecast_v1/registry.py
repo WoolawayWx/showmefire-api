@@ -30,12 +30,15 @@ CORE_MODEL_KEYS = frozenset({"hrrr", "rrfs", "refs", "gefs"})
 
 # Herbie fetch parameters for adapters the registry can enable beyond the
 # core four. Keyed by adapter_key (must also exist in adapters.ADAPTERS).
-ADAPTER_ACQUISITION: dict[str, dict] = {
-    "fv3hires": dict(
-        herbie_model="hiresw", product="fv3_2p5km", domain="conus",
-        leads=tuple(range(0, 49)), members=(None,),
-    ),
-}
+# Empty today: the only extra adapter, fv3hires, is retired (see below).
+ADAPTER_ACQUISITION: dict[str, dict] = {}
+
+# Adapters whose upstream feed no longer exists. They are never acquired and
+# never weighted, whatever a row in forecast_source_models says, and the admin
+# add/status paths refuse to bring them back. fv3hires: NOAA stopped serving
+# HiResW FV3. The adapter class and SOURCE_BITS entry stay so already-stored
+# manifests/history that reference them still decode.
+RETIRED_ADAPTER_KEYS = frozenset({"fv3hires"})
 
 
 @contextmanager
@@ -69,6 +72,8 @@ def get_model(key: str) -> dict | None:
 
 
 def add_model(key: str, display_name: str, adapter_key: str, notes: str = "") -> dict:
+    if adapter_key in RETIRED_ADAPTER_KEYS:
+        raise ValueError(f"adapter '{adapter_key}' is retired - its upstream feed no longer exists")
     if adapter_key not in ADAPTER_ACQUISITION:
         raise ValueError(f"no acquisition parameters registered for adapter '{adapter_key}'")
     with _db() as db:
@@ -97,6 +102,8 @@ def set_status(key: str, status: str, weight: float | None = None) -> dict:
     model = get_model(key)
     if not model:
         raise ValueError(f"no such model: {key}")
+    if model["adapter_key"] in RETIRED_ADAPTER_KEYS and status != "disabled":
+        raise ValueError(f"'{key}' uses a retired adapter ('{model['adapter_key']}'); it can only stay disabled")
     if status == "active":
         if weight is None:
             weight = json.loads(model["weight_profile_json"]).get("weight") if model["weight_profile_json"] else None
@@ -192,7 +199,7 @@ def extra_specs(now: datetime | None = None) -> tuple[AcquisitionSpec, ...]:
     now = now or datetime.now(timezone.utc)
     specs = []
     for model in list_models():
-        if model["key"] in CORE_MODEL_KEYS or model["status"] == "disabled":
+        if model["key"] in CORE_MODEL_KEYS or model["status"] == "disabled" or model["adapter_key"] in RETIRED_ADAPTER_KEYS:
             continue
         params = ADAPTER_ACQUISITION.get(model["adapter_key"])
         if not params or not _due(model, now):
@@ -215,7 +222,8 @@ def weight_overlay(base_weights: dict[str, float], lead_hour: int) -> dict[str, 
         return base_weights
     extra: dict[str, float] = {}
     for model in list_models():
-        if model["key"] in CORE_MODEL_KEYS or model["status"] != "active" or not model["weight_profile_json"]:
+        if (model["key"] in CORE_MODEL_KEYS or model["status"] != "active" or not model["weight_profile_json"]
+                or model["adapter_key"] in RETIRED_ADAPTER_KEYS):
             continue
         weight = json.loads(model["weight_profile_json"]).get("weight")
         if weight:
