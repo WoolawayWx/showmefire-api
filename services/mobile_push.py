@@ -514,6 +514,49 @@ def check_push_receipts() -> int:
     return checked
 
 
+def _detection_alert_details(connection: sqlite3.Connection, event_key: str, sent_at: str | None, sent: int) -> dict[str, Any] | None:
+    """Staff-only context for one fire_detection alert: the county it went to (alerts match whole counties, never a
+    distance), the incident behind it, how fast it went out, and what the public answered. None if the incident is gone."""
+    try:
+        incident_id = int(event_key.split(":", 1)[1])
+    except (IndexError, ValueError):
+        return None
+    incident = connection.execute(
+        """SELECT public_slug, county_fips, county_name, detection_count, first_detected_at, last_detected_at, status
+           FROM fire_incidents WHERE id = ?""", (incident_id,)).fetchone()
+    if incident is None:
+        return None
+    responses = {row["classification"]: row["n"] for row in connection.execute(
+        "SELECT classification, COUNT(*) AS n FROM fire_incident_feedback WHERE incident_id = ? GROUP BY classification",
+        (incident_id,))}
+    lag_minutes = None
+    try:
+        first = datetime.fromisoformat(str(incident["first_detected_at"]).replace("Z", "+00:00"))
+        alerted = datetime.fromisoformat(str(sent_at).replace("Z", "+00:00"))
+        if first.tzinfo is None:
+            first = first.replace(tzinfo=timezone.utc)
+        if alerted.tzinfo is None:
+            alerted = alerted.replace(tzinfo=timezone.utc)
+        lag_minutes = max(0, round((alerted - first).total_seconds() / 60))
+    except (TypeError, ValueError):
+        pass
+    total_responses = sum(responses.values())
+    return {
+        "incident_id": incident_id,
+        "incident_slug": incident["public_slug"],
+        "incident_status": incident["status"],
+        "county_fips": incident["county_fips"],
+        "county_name": incident["county_name"],
+        "detection_count": incident["detection_count"],
+        "first_detected_at": incident["first_detected_at"],
+        "last_detected_at": incident["last_detected_at"],
+        "minutes_to_alert": lag_minutes,
+        "responses": responses,
+        "response_total": total_responses,
+        "response_pct": round(100 * total_responses / sent, 1) if sent else None,
+    }
+
+
 def push_stats(days: int = 30, recent: int = 25) -> dict[str, Any]:
     """How the app's alerts are doing: who can receive them, and what became of each one that was sent.
 
@@ -577,6 +620,9 @@ def push_stats(days: int = 30, recent: int = 25) -> dict[str, Any]:
                 item["error_counts"] = {}
             item["title"] = str(payload.get("title") or "")
             item["manual"] = item["event_key"].startswith("manual:")
+            if item["event_type"] == "fire_detection":
+                item["confidence_label"] = payload.get("confidenceLabel")
+                item["detection"] = _detection_alert_details(connection, item["event_key"], item["created_at"], item["sent"] or 0)
             item["delivered_pct"] = pct(item["delivered"], item["sent"])
             item["awaiting_receipt"] = max(0, item["sent"] - item["delivered"] - item["receipt_errors"])
             recent_alerts.append(item)
