@@ -8,6 +8,7 @@ retried once on the escalation model, so a bad reply costs one larger-model call
   report_features      CLOUDFLARE_AI_REPORT_FEATURES_MODEL, CLOUDFLARE_AI_FEATURE_MODEL   CLOUDFLARE_AI_TEXT_MODEL or Gemma
   feedback_analysis    CLOUDFLARE_AI_FEEDBACK_MODEL                                  CLOUDFLARE_AI_TEXT_MODEL or Gemma
   report_summary       CLOUDFLARE_AI_REPORT_SUMMARY_MODEL                            CLOUDFLARE_AI_TEXT_MODEL or Gemma
+  report_assistant     CLOUDFLARE_AI_REPORT_ASSISTANT_MODEL                          CLOUDFLARE_AI_TEXT_MODEL or Gemma
 
 CLOUDFLARE_AI_ESCALATION_MODEL (default: the 70B Llama) is the retry model; set it equal to a task's model to turn
 escalation off for that task. Anything not listed here (the public forecast discussion, verification summaries)
@@ -40,6 +41,7 @@ TASK_ENV: Dict[str, Tuple[str, ...]] = {
     "report_features": ("CLOUDFLARE_AI_REPORT_FEATURES_MODEL", "CLOUDFLARE_AI_FEATURE_MODEL"),
     "feedback_analysis": ("CLOUDFLARE_AI_FEEDBACK_MODEL",),
     "report_summary": ("CLOUDFLARE_AI_REPORT_SUMMARY_MODEL",),
+    "report_assistant": ("CLOUDFLARE_AI_REPORT_ASSISTANT_MODEL",),
 }
 
 
