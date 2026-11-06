@@ -106,9 +106,6 @@ FIRE_REPORT_LIMIT_PER_HOUR = int(os.getenv("FIRE_REPORT_LIMIT_PER_HOUR", "3"))
 FIRE_REPORT_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_LIMIT_PER_DAY", "10"))
 FIRE_REPORT_GLOBAL_LIMIT_PER_DAY = int(os.getenv("FIRE_REPORT_GLOBAL_LIMIT_PER_DAY", "300"))
 FIRE_LABEL_ADMIN_REVIEWED_WEIGHT = float(os.getenv("FIRE_LABEL_ADMIN_REVIEWED_WEIGHT", "0.3"))
-FIRE_ASSIST_LIMIT_PER_HOUR = int(os.getenv("FIRE_ASSIST_LIMIT_PER_HOUR", "5"))
-FIRE_ASSIST_LIMIT_PER_DAY = int(os.getenv("FIRE_ASSIST_LIMIT_PER_DAY", "15"))
-FIRE_ASSIST_GLOBAL_LIMIT_PER_DAY = int(os.getenv("FIRE_ASSIST_GLOBAL_LIMIT_PER_DAY", "500"))
 FIRE_GEOCODE_LIMIT_PER_HOUR = int(os.getenv("FIRE_GEOCODE_LIMIT_PER_HOUR", "20"))
 FIRE_GEOCODE_LIMIT_PER_DAY = int(os.getenv("FIRE_GEOCODE_LIMIT_PER_DAY", "60"))
 
@@ -576,50 +573,6 @@ def _incident_to_geojson_feature(incident: dict) -> dict:
         "geometry": {"type": "Point", "coordinates": _incident_marker_coordinates(incident, members)},
         "properties": _incident_popup_properties(incident, members),
     }
-
-
-# --- Public: Show Me Assistant ---
-
-class ReportAssistRequest(BaseModel):
-    memo: str = Field(min_length=15, max_length=4000)
-    turnstile_token: str = Field(min_length=1, max_length=4096)
-
-
-@router.post("/api/fires/reports/assist")
-def assist_fire_report(payload: ReportAssistRequest, request: Request):
-    """Suggest fire-report form values from a free-text memo (public). Stores and submits nothing; the reporter
-    reviews every suggestion. Turnstile + per-IP and global daily limits protect the Workers AI spend."""
-    from ai.report_assistant import assist
-
-    client_ip = _client_ip(request)
-    ip_hash = _ip_bucket_key(client_ip)
-    if is_ip_blocked(ip_hash):
-        raise HTTPException(status_code=403, detail="Not allowed from this network")
-
-    now = datetime.now(timezone.utc)
-    quota = consume_fire_submission_quota(f"assist:{ip_hash}", now, FIRE_ASSIST_LIMIT_PER_HOUR, FIRE_ASSIST_LIMIT_PER_DAY)
-    if not quota["allowed"]:
-        raise HTTPException(status_code=429, detail="You've used the assistant a lot. Please try again later or fill the form in by hand.",
-                            headers={"Retry-After": str(quota["retry_after"])})
-    global_quota = consume_fire_submission_quota("assist:__global__", now, 10**9, FIRE_ASSIST_GLOBAL_LIMIT_PER_DAY)
-    if not global_quota["allowed"]:
-        raise HTTPException(status_code=429, detail="The assistant is busy right now. Please fill the form in by hand.",
-                            headers={"Retry-After": str(global_quota["retry_after"])})
-
-    success, _verdict = verify_turnstile(payload.turnstile_token, client_ip)
-    if not success:
-        raise HTTPException(status_code=403, detail="Captcha verification failed. Please try again.")
-
-    memo = _clean_text(payload.memo, required=True, field="memo")
-    try:
-        result = assist(memo)
-    except Exception:
-        logger.warning("Show Me Assistant failed", exc_info=True)
-        raise HTTPException(status_code=503, detail="The assistant couldn't read that right now. Please fill the form in by hand.")
-    if result is None:
-        raise HTTPException(status_code=503, detail="The assistant isn't available right now. Please fill the form in by hand.")
-    suggestions, _model = result
-    return {"success": True, "suggestions": suggestions}
 
 
 # --- Public: geocode ---

@@ -22,8 +22,6 @@ TASKS = [
      "description": "Summarizes an incident's public feedback notes when an admin clicks Analyze with AI."},
     {"key": "report_summary", "label": "Admin report summaries",
      "description": "The short summary and queue overview shown to reviewers on pending reports."},
-    {"key": "report_assistant", "label": "Show Me Assistant",
-     "description": "Reads a memo typed on the public fire report page and suggests values for the form."},
 ]
 
 # Workers AI text models worth considering, with USD per million tokens (input / output) from Cloudflare's pricing
