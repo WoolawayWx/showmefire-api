@@ -24,6 +24,7 @@ CATEGORY_CLASSES = {
     "haines": [("2  Very Low", "#1a9850"), ("3  Very Low", "#91cf60"), ("4  Low", "#fee08b"),
                ("5  Moderate", "#fc8d59"), ("6  High", "#d73027")],
     "fire_danger_est": list(zip(CATEGORY_LABELS, CATEGORY_HEX_COLORS)),
+    "pfdi_category": list(zip(CATEGORY_LABELS, CATEGORY_HEX_COLORS)),
 }
 
 

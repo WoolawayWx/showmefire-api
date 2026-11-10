@@ -361,6 +361,8 @@ app.include_router(forecast_v1.router)
 app.include_router(forecast_v1_admin.router)
 app.include_router(fire_outlook.router)
 app.include_router(fire_outlook_admin.router)
+from routers import fire_weather_hybrid_admin
+app.include_router(fire_weather_hybrid_admin.router)
 app.include_router(forecast_models_admin.router)
 app.include_router(fuel_sensor_admin.router)
 app.include_router(graphics.router)

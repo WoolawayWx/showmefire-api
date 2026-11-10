@@ -54,4 +54,8 @@ maps/shapefiles/MO_MoDOT_Roads_Arcs/*
 
 # Cross-container job locks (scripts/maps.sh, scripts/forecast_lock.sh)
 .locks/
+
+# Machine-specific private hybrid worker paths (no credentials in these files).
+/config/*.local.json
 docker-compose.dev.yml
+keys/

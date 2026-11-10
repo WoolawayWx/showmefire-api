@@ -5,6 +5,7 @@ import numpy as np
 
 from services.fire_weather import hrrr_profiles as hp
 from services.fire_weather import indices as ix
+from services.fire_weather import physical_danger
 from services.hrrr_hourly import danger
 
 MS_TO_MPH = ix.MS_TO_MPH
@@ -47,6 +48,15 @@ def derive_hour(profiles: hp.Profiles, extras: dict[str, np.ndarray]) -> dict[st
         out["fuel_moisture_pct"], rh, out["wind_speed_mph"] * danger.MPH_TO_KT)
     if "gust" in extras:
         out["wind_gust_mph"] = extras["gust"] * MS_TO_MPH
+    # Physical Fire Danger Index (experimental). The sun on the fuel needs the cloud cover and the valid time:
+    # without them it is omitted rather than computed for an assumed sky.
+    when, lat = getattr(p, "valid_time", None), getattr(p, "lat", None)
+    if "cloud" in extras and when is not None and lat is not None:
+        pfdi = physical_danger.physical_fire_danger_at(
+            p.t2_c, rh, ix.wind_speed(east, north), extras["cloud"], lat, p.lon, when,
+            gust_10m_ms=extras.get("gust"), precip_mm_1h=extras.get("precip"))
+        out.update({"pfdi": pfdi["index"], "pfdi_category": pfdi["category"],
+                    "pfdi_flame_length_ft": pfdi["flame_length_ft"], "pfdi_fm1_pct": pfdi["fm1_pct"]})
     for key, name in (("cape", "cape_jkg"), ("cin", "cin_jkg"), ("pwat", "pwat_mm"), ("cloud", "cloud_cover_pct"),
                       ("precip", "precip_mm_1h")):
         if key in extras:

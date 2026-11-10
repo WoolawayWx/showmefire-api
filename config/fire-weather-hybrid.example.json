@@ -1,0 +1,14 @@
+{
+  "landscape": "data/fire-weather-hybrid/landscape-1km-v2.nc",
+  "cache": "data/fire-weather-hybrid/cache",
+  "states": "data/fire-weather-hybrid/fuel-state",
+  "native_library": "data/fire-weather-hybrid/native",
+  "weather_python": ".venv-weathernext/bin/python",
+  "weathernext_config": "config/weathernext.json",
+  "weathernext_enabled": true,
+  "allow_cold_start": false,
+  "bootstrap_hours": 168,
+  "bootstrap_moisture_pct": 20,
+  "sources": ["hrrr", "rrfs", "gefs"],
+  "acquire_rap": true
+}

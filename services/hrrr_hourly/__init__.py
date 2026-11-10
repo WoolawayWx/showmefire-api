@@ -127,5 +127,14 @@ ELEMENTS: tuple[Element, ...] = (
             vmax=100, ticks=tuple(range(0, 101, 20))),
     Element("smoke_column_mgm2", "Vertically integrated smoke", "mg/m2", 0.1, "HRRR COLMD", cmap="Greys",
             vmax=50, ticks=tuple(range(0, 51, 10))),
+    Element("pfdi", "Physical Fire Danger Index (experimental, 0-100)", "index", 0.5,
+            "flame length in cured reference grass (services/fire_weather/physical_danger.py)", True,
+            cmap="YlOrRd", vmax=100, ticks=tuple(range(0, 101, 20))),
+    Element("pfdi_category", "Physical fire danger level (experimental, 0 Low .. 4 Extreme)", "category", 1,
+            "PFDI flame length on the fire-line handling chart: 1 / 4 / 8 / 11 ft", True, categorical=True),
+    Element("pfdi_flame_length_ft", "Flame length in cured reference grass (PFDI)", "ft", 0.1,
+            "Rothermel spread and Byram flame length, GR2, flat ground", True, image=False),
+    Element("pfdi_fm1_pct", "1-hr fuel moisture, sunlit fuel (PFDI)", "%", 0.1,
+            "1.03 x Simard EMC at fuel-level temperature and humidity; 35 in rain", True, image=False),
 )
 BY_NAME = {element.name: element for element in ELEMENTS}

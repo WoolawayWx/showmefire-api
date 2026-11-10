@@ -1,0 +1,10 @@
+{
+  "mode": "statistics",
+  "project": "weatherdata-513919",
+  "maximum_age_hours": 24,
+  "maximum_download_bytes": 536870912,
+  "maximum_source_bytes": 8589934592,
+  "download_concurrency": 3,
+  "latitude": "lat_0p1",
+  "longitude": "lon_0p1"
+}

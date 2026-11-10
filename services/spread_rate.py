@@ -45,7 +45,6 @@ PNG_PATH = SPREAD_RATE_IMAGE_DIR / "spread_rate_latest.png"
 
 M_PER_MIN_TO_CH_PER_H = 60.0 / 20.1168
 FT_PER_M = 3.28084
-MS_TO_FT_PER_MIN = FT_PER_M * 60.0
 WIND_10M_TO_20FT = 0.9
 
 ROS_CLASS_BOUNDS = (0.0, 2.0, 5.0, 20.0, 50.0, 150.0)
@@ -162,23 +161,29 @@ def _compute_cell_ros(
     fuel_model = get_fuel_model(int(fuel_code))
     if not fuel_model.get("burnable", True):
         return None
+    # pyretechnics class order: dead 1h, 10h, 100h, dead herbaceous, live herbaceous,
+    # live woody. Dead herbaceous takes the 1-h moisture (dynamic models override it).
     moisture = (
         fm1,
         fm10,
         fm100,
+        fm1,
         live_herb,
-        live_woody,
         live_woody,
     )
     moisturized = moisturize(fuel_model, moisture)
     surface_min = calc_surface_fire_behavior_no_wind_no_slope(moisturized)
     if surface_min["base_spread_rate"] <= 0.0:
         return None
-    wind_20ft_ft_min = max(0.0, float(wind_ms)) * MS_TO_FT_PER_MIN * WIND_10M_TO_20FT
+    # calc_surface_fire_behavior_max takes midflame wind in m/min (it converts to ft
+    # internally); passing ft/min overstated wind ~3.3x.
+    wind_20ft_m_min = max(0.0, float(wind_ms)) * 60.0 * WIND_10M_TO_20FT
     bed_depth_ft = float(moisturized["delta"])
     canopy_cover = float(np.clip(canopy_cover_pct / 100.0, 0.0, 1.0))
+    if canopy_cover <= 0.05:
+        canopy_cover = 0.0  # BehavePlus: unsheltered at <=5% cover; trace canopy blows up Andrews' formula
     canopy_height_ft = max(0.0, float(canopy_height_m) * FT_PER_M)
-    midflame = calc_midflame_wind_speed(wind_20ft_ft_min, bed_depth_ft, canopy_height_ft, canopy_cover)
+    midflame = calc_midflame_wind_speed(wind_20ft_m_min, bed_depth_ft, canopy_height_ft, canopy_cover)
     slope_fraction = math.tan(math.radians(max(0.0, float(slope_deg))))
     behavior = calc_surface_fire_behavior_max(
         surface_min,

@@ -24,6 +24,8 @@ services:
       run_sch: "false"
       SMF_START_CRON: "0"
       SMF_DOWNLOAD_MODOT_ROADS: "0"
+      # The seven-day outlook worker (scripts/fire_outlook.sh) never runs locally: it downloads ~6 GB per cycle.
+      SMF_FIRE_OUTLOOK_ENABLED: "false"
       SMF_SKIP_INITIAL_FETCHES: "1"
       # Nothing leaves this machine: blank every outbound credential from .env.
       DISCORD_EVENT_URL: ""

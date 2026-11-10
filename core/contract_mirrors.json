@@ -106,6 +106,42 @@
       "invalidates": [
         "ensemble_fire_danger"
       ]
+    },
+    {
+      "name": "physical_danger",
+      "api_path": "services/fire_weather/physical_danger.py",
+      "training_path": "fire_escape/physical_danger.py",
+      "sha256": "c6e456dade9626e12f0e93975967f4dd135b85e4ae3ecc323a5b08c27f83ed11",
+      "invalidates": [
+        "fire_escape"
+      ]
+    },
+    {
+      "name": "fire_escape_features",
+      "api_path": "services/fire_escape/features.py",
+      "training_path": "fire_escape/features.py",
+      "sha256": "7d4760a0f8343d5c55ed47a8b3952982a222165d71871794c402977c5fef6847",
+      "invalidates": [
+        "fire_escape"
+      ]
+    },
+    {
+      "name": "fire_escape_hrrr_day",
+      "api_path": "services/fire_escape/hrrr_day.py",
+      "training_path": "fire_escape/hrrr_day.py",
+      "sha256": "197be6a30cde5a008e88fb9ed7d35ac8cde013cbe116dc21a1323ee11290dc0f",
+      "invalidates": [
+        "fire_escape"
+      ]
+    },
+    {
+      "name": "fire_escape_predict",
+      "api_path": "services/fire_escape/predict.py",
+      "training_path": "fire_escape/predict.py",
+      "sha256": "0a6d96b5cf85db96c0a412aa24c67313a15d255ea3a479c7321490b0eff1af53",
+      "invalidates": [
+        "fire_escape"
+      ]
     }
   ]
 }

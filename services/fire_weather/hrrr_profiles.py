@@ -132,7 +132,8 @@ def _projection_params(dataset) -> tuple[float, float]:
 
 
 def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_factory=None,
-                   run: Optional[datetime] = None, fxx: int = FORECAST_HOUR) -> Profiles:
+                   run: Optional[datetime] = None, fxx: int = FORECAST_HOUR, *, model: str = "hrrr",
+                   prs_product: str = "prs", sfc_product: str = "sfc", include_80m: bool = True) -> Profiles:
     """Download and crop the pressure-level and surface fields valid at `valid`.
 
     By default that is the previous hour's run at f01. Pass `run` and `fxx` to read a
@@ -144,12 +145,12 @@ def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_facto
     naive = (run or run_for(valid)).replace(tzinfo=None)
     try:
         def subset(product: str, search: str):
-            herbie = herbie_factory(naive, model="hrrr", product=product, fxx=fxx, save_dir=str(workdir),
+            herbie = herbie_factory(naive, model=model, product=product, fxx=fxx, save_dir=str(workdir),
                                     verbose=False, priority=["aws"])
             return [crop(item) for item in _as_list(herbie.xarray(search, remove_grib=True))]
 
-        prs = subset("prs", PRS_SEARCH)
-        surface = {key: subset("sfc", search) for key, search in SFC_SEARCHES.items()}
+        prs = subset(prs_product, PRS_SEARCH)
+        surface = {key: subset(sfc_product, search) for key, search in SFC_SEARCHES.items() if include_80m or key != "80m"}
     finally:
         if owned:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -181,7 +182,7 @@ def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_facto
     central_lon, parallel = _projection_params(levels_ds)
     lon = np.asarray(levels_ds["longitude"].values, dtype=float)
     lon = np.where(lon > 180, lon - 360, lon)
-    winds_80 = surface["80m"]
+    winds_80 = surface.get("80m")
     return Profiles(
         valid_time=valid, lat=np.asarray(levels_ds["latitude"].values, dtype=float), lon=lon,
         pressure_hpa=pressures, height_agl_m=masked(height_agl), temp_c=masked(temp), dewpoint_c=masked(dewpoint),
@@ -191,8 +192,8 @@ def fetch_profiles(valid: datetime, workdir: Optional[Path] = None, herbie_facto
         td2_c=np.asarray(_variable(surface["2m"], "d2m").values, dtype=float) - 273.15,
         u10=np.asarray(_variable(surface["10m"], "u10").values, dtype=float),
         v10=np.asarray(_variable(surface["10m"], "v10").values, dtype=float),
-        u80=np.asarray(_variable(winds_80, "u", "u80", "u100").values, dtype=float),
-        v80=np.asarray(_variable(winds_80, "v", "v80", "v100").values, dtype=float),
+        u80=np.asarray(_variable(winds_80, "u", "u80", "u100").values, dtype=float) if winds_80 else np.full_like(surface_pressure,np.nan),
+        v80=np.asarray(_variable(winds_80, "v", "v80", "v100").values, dtype=float) if winds_80 else np.full_like(surface_pressure,np.nan),
         central_longitude=central_lon, standard_parallel=parallel,
     )
 

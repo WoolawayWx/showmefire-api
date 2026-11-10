@@ -43,6 +43,7 @@ EVIDENCE_DIRS = {
     "fire_weather_index": Path(os.getenv("SMF_FIRE_WEATHER_INDEX_EVIDENCE_ROOT") or DATA_DIR / "model-shadow" / "fire-weather-index"),
     "risk_fusion_glm": Path(os.getenv("SMF_RISK_FUSION_GLM_EVIDENCE_ROOT") or DATA_DIR / "model-shadow" / "risk-fusion-glm"),
     "ensemble": Path(os.getenv("SMF_ENSEMBLE_FD_EVIDENCE_ROOT") or DATA_DIR / "model-shadow" / "ensemble-fire-danger"),
+    "fire_escape": Path(os.getenv("SMF_FIRE_ESCAPE_EVIDENCE_ROOT") or DATA_DIR / "model-shadow" / "fire-escape"),
 }
 # A run only counts as a forecast for its valid date if it was produced before this local hour that day; later reruns
 # have seen part of the day. Runs excluded by it are reported, never silently dropped.
@@ -55,7 +56,8 @@ MIN_EVENTS_TO_CONCLUDE = 10
 MIN_DATES_FOR_CI = 10
 LABELS = {"fire_weather_index": "Fire Weather Severity Index (shadow, HRRR only)",
           "fire_weather_index:blend": "Fire Weather Severity Index (shadow, HRRR+RRFS blend)", "risk_fusion_glm": "Risk fusion GLM (shadow)",
-          "public_rule": "Public rule-based Peak Fire Danger"}
+          "public_rule": "Public rule-based Peak Fire Danger",
+          "fire_escape_county": "Fire escape, county-day model (shadow): chance of a 10+ acre fire"}
 BLEND_MODEL = "fire_weather_index:blend"  # same family as fire_weather_index, so the consensus counts it once
 PROBABILITY_OF_FIRE = {"risk_fusion_glm"}  # models whose probability column means P(>= 1 fire in the county that day)
 
@@ -163,6 +165,22 @@ def ingest_scores(db_path: Optional[Path] = None, dirs: Optional[dict] = None) -
                 rows = [("risk_fusion_glm", run_id, valid, str(f), _num(lam), None, _num(p), rec.get("recorded_at"), path.name)
                         for f, lam, p in zip(rec["county_fips"], rec["lam"], rec["p_ge1_fire"])]
                 add("risk_fusion_glm", _insert(conn, rows))
+            except Exception as exc:
+                out["unreadable"] += 1
+                logger.warning("fire danger tracking: %s unreadable: %s", path.name, exc)
+
+        # Its probability is of a fire of 10 acres or more, not of any fire, so it goes in `score` (ranked, never
+        # scored as a probability of fire: see PROBABILITY_OF_FIRE).
+        for path in sorted(Path(dirs["fire_escape"]).glob("*.fire_escape.json")) if "fire_escape" in dirs else []:
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+                run_id, valid = str(rec["run_id"]), str(rec["valid_local_date"])
+                if _has_run(conn, "fire_escape_county", run_id, valid):
+                    out["skipped_files"] += 1
+                    continue
+                rows = [("fire_escape_county", run_id, valid, str(f), _num(p), None, None, rec.get("recorded_at"), path.name)
+                        for f, p in zip(rec["county_fips"], rec["p_10ac"])]
+                add("fire_escape_county", _insert(conn, rows))
             except Exception as exc:
                 out["unreadable"] += 1
                 logger.warning("fire danger tracking: %s unreadable: %s", path.name, exc)
