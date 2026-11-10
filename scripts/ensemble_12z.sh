@@ -53,6 +53,11 @@ else
     echo "=== Completed successfully at $(date) ===" >> "$LOG_FILE" 2>&1
 fi
 
+# One sheet of every county-scoring model for today (services/model_overview.py), for the Testbed. Here because this
+# is the last of the day's models to write its scores. It draws whatever has been recorded, never fails this job, and
+# does not change the exit code reported below.
+"$PYTHON" "$PROJECT_DIR/scripts/run_model_overview.py" >> "$LOG_FILE" 2>&1 ||   echo "WARNING: model overview sheet failed at $(date) (advisory only)" >> "$LOG_FILE" 2>&1
+
 # Advisory only: nothing else depends on this job, so a failure can't block anything. But it
 # must be reported honestly: run_job.sh records our exit code for the admin Logs page and
 # prints FAILED. Always exiting 0 hid five days of OOM kills (exit 137) as "finished OK".

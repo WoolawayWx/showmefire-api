@@ -139,6 +139,13 @@ else
     echo "=== FAILED at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE" 2>&1
 fi
 
+# Fire escape shadow maps (services/fire_escape): the physical index and the two trained escape models, from the
+# HRRR file the forecast above just cached, published to the Testbed. Advisory only and off unless
+# SMF_FIRE_ESCAPE_ENABLED is set (the script then prints why it skipped and exits 0). It runs here, before the
+# beta exports below, so it reads production's cache and none of the beta overrides; its exit code is ignored.
+echo "=== Fire escape shadow maps ===" >> "$LOG_FILE" 2>&1
+"$PYTHON" "$PROJECT_DIR/scripts/run_fire_escape.py" >> "$LOG_FILE" 2>&1 ||   echo "WARNING: fire escape shadow maps failed at $(date) (advisory only, nothing depends on it)" >> "$LOG_FILE" 2>&1
+
 # Beta must never be able to touch production's own state - without these,
 # DailyForecast_ModelFD.py falls back to its own unsafe defaults (writes
 # under PROJECT_DIR, FORECAST_STATUS_KEY='ForecastFireDanger' - the SAME

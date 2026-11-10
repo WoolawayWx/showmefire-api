@@ -16,7 +16,15 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+API_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(API_ROOT))
+
+# cron starts jobs with a near-empty environment: read the API's own .env before anything looks at a setting.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(API_ROOT / ".env")
+except ImportError:
+    pass
 
 from services import fire_escape, model_overview
 
