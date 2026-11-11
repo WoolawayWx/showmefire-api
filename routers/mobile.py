@@ -4,7 +4,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from core.rate_limit import RateLimiter
 from services.mobile_content import build_mobile_content, county_catalog
@@ -24,6 +24,7 @@ class NotificationPreferences(BaseModel):
     sitrep: bool = False
     fireWeather: bool = False
     fireDetection: bool = False
+    general: StrictBool = False
     countyFips: list[str] = Field(default_factory=list, max_length=115)
 
     @field_validator("countyFips")
@@ -86,6 +87,7 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
         sitrep=payload.preferences.sitrep,
         fire_weather=payload.preferences.fireWeather,
         fire_detection=payload.preferences.fireDetection,
+        general=payload.preferences.general,
         county_fips=payload.preferences.countyFips,
     )
 

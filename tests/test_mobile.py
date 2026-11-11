@@ -11,6 +11,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from core import database
+from routers import admin_notifications
 from routers import mobile as mobile_router
 from routers.mobile import PushSubscriptionRequest
 from services import mobile_content, mobile_push
@@ -117,6 +118,44 @@ class MobilePushTests(unittest.TestCase):
         mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
         mobile_push.delete_subscription("11111111-1111-4111-8111-111111111111")
         self.assertEqual(mobile_push._eligible_subscriptions("forecast"), [])
+
+    def test_general_manual_push_requires_explicit_opt_in(self):
+        self.register()  # Existing installation subscribed to other channels.
+        installation_id = UUID("22222222-2222-4222-8222-222222222222")
+        registration = {
+            "expoPushToken": "ExpoPushToken[22222222222242228222222222222222]",
+            "platform": "android",
+            "appVersion": "1.2.0",
+        }
+        notice = admin_notifications.ManualNotification(
+            channel="general", title="Announcement", body="An update from Show Me Fire", url="/"
+        )
+        self.assertIn(
+            {"value": "general", "label": "General", "county_scoped": False},
+            admin_notifications.notification_options("admin@example.org")["channels"],
+        )
+        legacy = PushSubscriptionRequest(**registration, preferences={"forecast": True})
+        mobile_router.put_push_subscription(installation_id, legacy)
+        self.assertEqual(admin_notifications.preview_notification(notice, "admin@example.org")["recipients"], 0)
+
+        opted_in = PushSubscriptionRequest(**registration, preferences={"general": True})
+        self.assertTrue(mobile_router.put_push_subscription(installation_id, opted_in)["registered"])
+        self.assertEqual(admin_notifications.preview_notification(notice, "admin@example.org")["recipients"], 1)
+        with (
+            patch.object(admin_notifications, "get_db_path", return_value=self.db_path),
+            patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "general-ticket"}]) as send,
+        ):
+            self.assertEqual(admin_notifications.send_notification(notice, "admin@example.org")["sent"], 1)
+        messages = send.call_args.args[0]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["to"], registration["expoPushToken"])
+        self.assertEqual(messages[0]["channelId"], "general")
+        self.assertEqual(mobile_push.push_stats()["audience"]["general"], 1)
+
+        opted_out = PushSubscriptionRequest(**registration, preferences={"general": False, "forecast": True})
+        mobile_router.put_push_subscription(installation_id, opted_out)
+        self.assertEqual(admin_notifications.preview_notification(notice, "admin@example.org")["recipients"], 0)
+        self.assertEqual(len(mobile_push._eligible_subscriptions("forecast")), 2)
 
     def test_subscription_with_no_enabled_categories_is_deleted(self):
         self.register()

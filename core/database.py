@@ -1302,6 +1302,7 @@ def init_database():
             sitrep_enabled INTEGER NOT NULL DEFAULT 0,
             fire_weather_enabled INTEGER NOT NULL DEFAULT 0,
             fire_detection_enabled INTEGER NOT NULL DEFAULT 0,
+            general_enabled INTEGER NOT NULL DEFAULT 0,
             county_fips_json TEXT NOT NULL DEFAULT '[]',
             enabled INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1316,6 +1317,8 @@ def init_database():
         cursor.execute(
             "ALTER TABLE mobile_push_subscriptions ADD COLUMN fire_detection_enabled INTEGER NOT NULL DEFAULT 0"
         )
+    if "general_enabled" not in subscription_columns:
+        cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN general_enabled INTEGER NOT NULL DEFAULT 0")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_events (
             event_key TEXT PRIMARY KEY,

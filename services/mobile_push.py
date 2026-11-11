@@ -75,10 +75,11 @@ def upsert_subscription(
     fire_weather: bool,
     fire_detection: bool,
     county_fips: list[str],
+    general: bool = False,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as connection:
-        if not (forecast or sitrep or fire_weather or fire_detection):
+        if not (forecast or sitrep or fire_weather or fire_detection or general):
             _delete_subscription_rows(connection, installation_id)
             return {"registered": False, "updatedAt": now}
 
@@ -93,9 +94,9 @@ def upsert_subscription(
             '''
             INSERT INTO mobile_push_subscriptions (
                 installation_id, expo_push_token, platform, app_version,
-                forecast_enabled, sitrep_enabled, fire_weather_enabled, fire_detection_enabled,
+                forecast_enabled, sitrep_enabled, fire_weather_enabled, fire_detection_enabled, general_enabled,
                 county_fips_json, enabled, created_at, updated_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(installation_id) DO UPDATE SET
                 expo_push_token = excluded.expo_push_token,
                 platform = excluded.platform,
@@ -104,6 +105,7 @@ def upsert_subscription(
                 sitrep_enabled = excluded.sitrep_enabled,
                 fire_weather_enabled = excluded.fire_weather_enabled,
                 fire_detection_enabled = excluded.fire_detection_enabled,
+                general_enabled = excluded.general_enabled,
                 county_fips_json = excluded.county_fips_json,
                 enabled = 1,
                 updated_at = excluded.updated_at,
@@ -118,6 +120,7 @@ def upsert_subscription(
                 int(sitrep),
                 int(fire_weather),
                 int(fire_detection),
+                int(general),
                 json.dumps(sorted(set(county_fips))),
                 now,
                 now,
@@ -173,6 +176,7 @@ def _eligible_subscriptions(
         "sitrep": "sitrep_enabled",
         "fire_weather": "fire_weather_enabled",
         "fire_detection": "fire_detection_enabled",
+        "general": "general_enabled",
     }[event_type]
     capped: set[str] = set()
     with _connect() as connection:
@@ -230,6 +234,7 @@ def _channel_for(event_type: str, app_version: str) -> str:
         "sitrep": "sitrep",
         "fire_weather": "fire-weather",
         "fire_detection": "fire-detection",
+        "general": "general",
     }[event_type]
 
 
@@ -574,6 +579,7 @@ def push_stats(days: int = 30, recent: int = 25) -> dict[str, Any]:
             """SELECT COUNT(*) AS devices,
                       SUM(forecast_enabled) AS forecast, SUM(sitrep_enabled) AS sitrep,
                       SUM(fire_weather_enabled) AS fire_weather, SUM(fire_detection_enabled) AS fire_detection,
+                      SUM(general_enabled) AS general,
                       SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS new_7d,
                       SUM(CASE WHEN created_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_in_period,
                       SUM(CASE WHEN last_seen_at >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS active_30d

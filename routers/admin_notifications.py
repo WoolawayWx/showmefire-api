@@ -33,11 +33,10 @@ APP_DESTINATIONS = {
     "/burn-bans": "Burn bans",
     "/report-fire": "Report a fire",
 }
-CHANNELS = ("forecast", "sitrep", "fire_weather", "fire_detection")
 
 
 class ManualNotification(BaseModel):
-    channel: Literal["forecast", "sitrep", "fire_weather", "fire_detection"]
+    channel: Literal["forecast", "sitrep", "fire_weather", "fire_detection", "general"]
     title: str = Field(min_length=1, max_length=100)
     body: str = Field(min_length=1, max_length=500)
     url: str = Field(default="/", max_length=200)
@@ -86,6 +85,7 @@ def notification_options(_admin: str = Depends(require_admin)):
             {"value": "sitrep", "label": "SitRep", "county_scoped": False},
             {"value": "fire_weather", "label": "Fire weather", "county_scoped": True},
             {"value": "fire_detection", "label": "Fire detection", "county_scoped": True},
+            {"value": "general", "label": "General", "county_scoped": False},
         ],
         "destinations": [{"value": path, "label": label} for path, label in APP_DESTINATIONS.items()],
         "counties": county_catalog(),
