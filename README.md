@@ -249,6 +249,13 @@ not a guarantee, Show Me Fire is not responsible; have it reviewed by someone qu
 `VERSION` when the wording changes). Addresses go to the US Census geocoder, falling back to OpenStreetMap Nominatim, are cached for
 a day in memory and are never logged or stored. The website tool is `/tools/burn-check`. Tests: `tests/test_burn_check.py`.
 
+**QR codes.** Staff make QR codes at `/admin/qr-codes` with no outside service: SVG (one path, scales to any print size) and PNG downloads, colors,
+error correction and quiet zone, and optional UTM tags. A *tracked* code holds `<PUBLIC_WEB_URL>/q/<slug>`; the website route `server/routes/q/[slug].get.ts`
+calls `GET /qr/go/<slug>`, which records the scan and returns the destination (UTM tags added at scan time, existing `utm_*` tags kept), so the destination
+can be edited after printing. An untracked code holds the address (with UTM tags) itself. A scan row keeps the time, a device class, the referrer host and a
+salted IP hash for the unique count (never the address); bot and link-preview hits are stored but not counted. Tables `qr_codes` / `qr_scans` are created on
+first use in `showmefire.db`. Code: `services/qr/store.py`, `routers/qr.py`, `routers/qr_admin.py`; tests: `tests/test_qr.py`.
+
 **API keys for agencies.** Other agencies apply at `/tools/api-key-request` (public form, Turnstile-protected). The questions live in
 `core/api_key_form.json` (edit that file to add or change a question; the website draws the form from `GET /v1/api-keys/form`, the API
 validates against it, and staff see each answer with the label it had when it was sent). A request is stored in `showmefire.db`, staff get a
