@@ -39,7 +39,11 @@ AUDIT_VIEW = "audit.view"
 PUSH_RECEIVE = "push.receive"
 ACCOUNTS_MANAGE = "accounts.manage"
 
+MODEL_TRAINING_VIEW = "model_training.view"
+MODEL_TRAINING_RUN = "model_training.run"
+
 ALL_PERMISSIONS = frozenset({
+    MODEL_TRAINING_VIEW, MODEL_TRAINING_RUN,
     STAFF_ACCESS, REPORTS_VIEW, REPORTS_MODERATE, BURNBANS_VIEW, BURNBANS_MODERATE, AUDIT_VIEW, PUSH_RECEIVE, ACCOUNTS_MANAGE,
 })
 _VIEW = {STAFF_ACCESS, REPORTS_VIEW, BURNBANS_VIEW, AUDIT_VIEW}
@@ -48,7 +52,7 @@ _MODERATE = {REPORTS_MODERATE, BURNBANS_MODERATE}
 ROLE_PERMISSIONS: dict[str, frozenset] = {
     "owner": ALL_PERMISSIONS,
     "admin": ALL_PERMISSIONS - {ACCOUNTS_MANAGE},
-    "staff": ALL_PERMISSIONS - {ACCOUNTS_MANAGE},
+    "staff": ALL_PERMISSIONS - {ACCOUNTS_MANAGE, MODEL_TRAINING_VIEW, MODEL_TRAINING_RUN},
     # Partners can look but not act.
     "partner": frozenset(_VIEW | {PUSH_RECEIVE}),
     # App-store reviewers get the same screens and actions as staff, against demo data only (core/sandbox.py), and no real push.

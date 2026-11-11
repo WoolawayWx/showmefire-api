@@ -318,6 +318,11 @@ app.include_router(ai_admin.router)
 app.include_router(afds.router)
 app.include_router(spatial_model.router)
 app.include_router(model_admin.router)
+if os.getenv("SMF_MODEL_TRAINING_ENABLED") == "1":
+    from routers import model_training
+
+    app.include_router(model_training.admin)
+    app.include_router(model_training.runner)
 app.include_router(verification_admin.router)
 app.include_router(rtma_peak_admin.router)
 app.include_router(mobile.router)

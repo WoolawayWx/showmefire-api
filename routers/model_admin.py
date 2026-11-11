@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
+from core.admin_auth.permissions import MODEL_TRAINING_RUN, MODEL_TRAINING_VIEW, require_permission
 from core.database import get_shadow_model_setting, list_shadow_model_settings, set_shadow_model_setting
 from core.security import require_admin, verify_confirm_token
 from models import shadow_bundles
@@ -493,3 +495,57 @@ async def verify_beta_forecast(payload: BetaVerificationRequest, token: Optional
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Beta verification failed: {error}") from error
+
+class ArchiveAction(BaseModel):
+    confirm_token: str
+    tag: Optional[str] = None
+    repo: Optional[str] = None
+
+
+@router.get("/archives/fire_escape")
+def fire_escape_archive_status(_actor: str = Depends(require_permission(MODEL_TRAINING_VIEW))):
+    from services.fire_escape import bundle_dir, install
+
+    target = bundle_dir()
+    manifest = install.installed(target) or {}
+    return {"tag": manifest.get("tag"), "previous": target.with_name(target.name + ".previous").is_dir()}
+
+
+@router.post("/archives/fire_escape/install")
+def install_fire_escape_archive(payload: ArchiveAction, _actor: str = Depends(require_permission(MODEL_TRAINING_RUN))):
+    from services.fire_escape import install
+
+    repo = payload.repo or os.getenv("SMF_GITHUB_REPO", "")
+    tag = payload.tag or ""
+    if not re.fullmatch(r"fire_escape-v[A-Za-z0-9.]+(?:-[A-Za-z0-9.]+)*-[a-f0-9]{8}", tag):
+        raise HTTPException(422, "Enter a fire_escape release tag")
+    if repo not in _allowed_import_repos() or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise HTTPException(403, "Release repository is outside the allowlist")
+    if verify_confirm_token(payload.confirm_token, f"install_release:fire_escape:{tag}:{payload.repo or 'default'}") != _actor:
+        raise HTTPException(401, "Confirmation required or expired")
+    try:
+        result = install.install_release(tag, repo, require_contract=True)
+    except (install.InstallError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        logger.warning("Fire escape release rejected: %s", exc)
+        raise HTTPException(422, "Release failed verification or another install is in progress") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "GitHub release download timed out") from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        logger.warning("Fire escape install failed: %s", exc)
+        raise HTTPException(502, "Install failed. Check GitHub CLI access and model storage in the backend.") from exc
+    logger.info("%s installed fire_escape release %s", _actor, tag)
+    return {"tag": result["tag"]}
+
+
+@router.post("/archives/fire_escape/rollback")
+def rollback_fire_escape_archive(payload: ArchiveAction, _actor: str = Depends(require_permission(MODEL_TRAINING_RUN))):
+    from services.fire_escape import install
+
+    if verify_confirm_token(payload.confirm_token, "rollback_release:fire_escape") != _actor:
+        raise HTTPException(401, "Confirmation required or expired")
+    try:
+        result = install.rollback()
+    except (install.InstallError, OSError) as exc:
+        raise HTTPException(409, "Could not restore the previous release") from exc
+    logger.info("%s restored fire_escape release %s", _actor, result["tag"])
+    return {"tag": result["tag"]}

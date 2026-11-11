@@ -8,6 +8,8 @@
 
 --latest and --tag need the `gh` CLI, authenticated (GH_TOKEN, as for pipelines/import_model.py). The release
 is verified and test-loaded before anything is replaced; a failed check leaves the running release alone.
+Run it where the API runs (inside the container: /opt/venv/bin/python), so it has the model libraries and writes
+to the data folder the job reads. On a Python without them, --no-load-test installs on checksums alone.
 Installing does not turn the daily job on: that is SMF_FIRE_ESCAPE_ENABLED.
 """
 from __future__ import annotations
@@ -33,7 +35,7 @@ from services.fire_escape import install
 
 
 def _summary(manifest: dict) -> dict:
-    return {key: manifest.get(key) for key in ("tag", "created_at", "installed_at", "source", "models", "neris_2026_auc_10ac")}
+    return {key: manifest.get(key) for key in ("tag", "created_at", "installed_at", "load_tested", "source", "models", "neris_2026_auc_10ac")}
 
 
 def main() -> int:
@@ -45,6 +47,8 @@ def main() -> int:
     action.add_argument("--status", action="store_true")
     action.add_argument("--rollback", action="store_true")
     parser.add_argument("--repo", default=None, help="owner/repo (defaults to SMF_GITHUB_REPO)")
+    parser.add_argument("--no-load-test", action="store_true",
+                        help="do not test-load the models (a Python without numpy/pandas/xgboost); checksums are still verified")
     args = parser.parse_args()
     target = fire_escape.bundle_dir()
     try:
@@ -57,12 +61,12 @@ def main() -> int:
             print(json.dumps({"rolled_back_to": _summary(install.rollback(target))}, indent=1))
             return 0
         if args.file:
-            manifest = install.install_archive(args.file, target)
+            manifest = install.install_archive(args.file, target, load_test=not args.no_load_test)
         else:
             repo = args.repo or os.getenv("SMF_GITHUB_REPO")
             if not repo:
                 raise SystemExit("No source repo - pass --repo or set SMF_GITHUB_REPO (or use --file)")
-            manifest = install.install_release(args.tag or install.latest_tag(repo), repo, target)
+            manifest = install.install_release(args.tag or install.latest_tag(repo), repo, target, load_test=not args.no_load_test)
         print(json.dumps({"installed": _summary(manifest), "folder": str(target)}, indent=1))
         return 0
     except install.InstallError as error:

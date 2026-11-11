@@ -30,11 +30,10 @@ MIRRORS_PATH = API_ROOT / "core" / "contract_mirrors.json"
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """SHA-256 of the file as the repository holds it: Windows line endings (a core.autocrlf working copy) are
+    read as LF, so a checkout on Windows verifies the same as the Linux one. Same rule as model-training's
+    `smf mirrors check`, which is also the tool that repairs a pair."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def verify(training_root: Path) -> list:

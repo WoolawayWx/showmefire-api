@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
-import zipfile
-from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Optional
+
+from services import fire_escape, model_release
+from services.model_release import InstallError
 
 ARCHIVE_NAME = "fire_escape_release.zip"
 MANIFEST_NAME = "release_manifest.json"
@@ -26,70 +26,66 @@ INSTALLED_NAME = "installed.json"
 SCHEMA = "fire-escape-release-1"
 TAG_PREFIX = "fire_escape-v"
 REQUIRED = ("county/bundle.json", "fire/bundle.json", "hrrr_adapter.json", "fuel_grid.npz")
-MAX_BYTES = 500 * 1024 * 1024       # a release is about 1 MB; anything near this is not one
-
-
-class InstallError(Exception):
-    """The release failed a check. Nothing was installed."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _safe(name: str) -> bool:
-    """A plain relative file path: no drive, no leading slash, no '..', no backslashes."""
-    path = PurePosixPath(name)
-    return bool(name) and "\\" not in name and ":" not in name and not path.is_absolute() and ".." not in path.parts
 
 
 def extract_verified(archive: Path, destination: Path) -> dict:
-    """Extract `archive` into the empty folder `destination` and return its manifest, or raise InstallError."""
-    try:
-        bundle = zipfile.ZipFile(archive)
-    except (zipfile.BadZipFile, OSError) as exc:
-        raise InstallError(f"{archive} is not a readable archive: {exc}") from exc
-    with bundle:
-        names = [info.filename for info in bundle.infolist() if not info.is_dir()]
-        if MANIFEST_NAME not in names:
-            raise InstallError(f"no {MANIFEST_NAME} in the archive")
-        manifest = json.loads(bundle.read(MANIFEST_NAME))
-        if manifest.get("schema") != SCHEMA:
-            raise InstallError(f"unknown release schema {manifest.get('schema')!r}")
-        listed = manifest.get("files") or {}
-        missing = [name for name in REQUIRED if name not in listed]
-        if missing:
-            raise InstallError(f"release is missing {missing}")
-        unsafe = [name for name in names if not _safe(name)]
-        if unsafe:
-            raise InstallError(f"unsafe path in archive: {unsafe[0]!r}")
-        unlisted = sorted(set(names) - set(listed) - {MANIFEST_NAME})
-        absent = sorted(set(listed) - set(names))
-        if unlisted or absent:
-            raise InstallError(f"archive and manifest disagree (unlisted {unlisted}, absent {absent})")
-        if sum(info.file_size for info in bundle.infolist()) > MAX_BYTES:
-            raise InstallError("archive is far larger than a release")
-        destination.mkdir(parents=True, exist_ok=False)
-        for name in listed:
-            target = destination / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with bundle.open(name) as source, open(target, "wb") as handle:
-                shutil.copyfileobj(source, handle)
-            if _sha256(target) != listed[name]["sha256"]:
-                raise InstallError(f"checksum mismatch: {name}")
-    return manifest
+    return model_release.extract_verified(archive, destination, schema=SCHEMA, required=REQUIRED)
+
+
+def validate_contract(manifest: dict, *, require_contract: bool = False):
+    supplied = manifest.get("feature_hashes")
+    if supplied is None and not require_contract:
+        return  # Legacy releases predate the feature contract.
+    api = Path(__file__).resolve().parents[2]
+    pairs = json.loads((api / "core" / "contract_mirrors.json").read_text(encoding="utf-8"))["pairs"]
+    actual = {
+        pair["name"]: hashlib.sha256((api / pair["api_path"]).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        for pair in pairs if "fire_escape" in pair["invalidates"]
+    }
+    if supplied != actual:
+        raise InstallError("release feature code differs from the API checkout")
+    contents = "".join(f"{name}:{spec['sha256']}\n" for name, spec in sorted(manifest["files"].items()))
+    contents += json.dumps(actual, sort_keys=True)
+    content = hashlib.sha256(contents.encode()).hexdigest()
+    version = manifest.get("models", {}).get("county", {}).get("version", "")
+    if manifest.get("content_sha256") != content or manifest.get("tag") != (
+        f"{TAG_PREFIX}{version.removeprefix('fire-escape-')}-{content[:8]}"
+    ):
+        raise InstallError("release content does not match its tag")
+
+
+def install_archive(archive: Path, target: Optional[Path] = None, source: str = "", load_test: bool = True,
+                    *, expected_tag: str | None = None, require_contract: bool = False) -> dict:
+    target = Path(target or fire_escape.bundle_dir())
+    with model_release.release_lock(target):
+        return model_release.install_archive(
+            archive, target, schema=SCHEMA, required=REQUIRED, source=source,
+            validate=lambda manifest: validate_contract(manifest, require_contract=require_contract),
+            smoke_test=smoke_test if load_test else None, expected_tag=expected_tag,
+        )
+
+
+def installed(target: Optional[Path] = None) -> Optional[dict]:
+    return model_release.installed(Path(target or fire_escape.bundle_dir()))
+
+
+def rollback(target: Optional[Path] = None) -> dict:
+    target = Path(target or fire_escape.bundle_dir())
+    with model_release.release_lock(target):
+        return model_release.rollback(target)
 
 
 def smoke_test(directory: Path) -> None:
     """The release loads and both models give a probability for an ordinary dry spring day."""
-    import numpy as np
-    import pandas as pd
+    try:
+        import numpy as np
+        import pandas as pd
 
-    from services.fire_escape import job, predict
+        from services.fire_escape import job, predict
+    except ImportError as exc:
+        raise InstallError(
+            f"this Python cannot load the models ({exc}). Run the installer where the API runs, e.g. inside the "
+            "container with /opt/venv/bin/python, or pass --no-load-test to install on checksums alone") from exc
 
     release = job.load_release(directory)
     if release is None:
@@ -110,57 +106,6 @@ def smoke_test(directory: Path) -> None:
     missing = [name for name in release["adapter"]["features"] if name not in typical]
     if missing or not {"lat", "lon", "frac_grass", "frac_timber", "frac_nonburnable", "canopy_cover_pct"} <= set(release["fuel_grid"]):
         raise InstallError("adapter or fuel grid is not what this server's code expects")
-
-
-def install_archive(archive: Path, target: Optional[Path] = None, source: str = "") -> dict:
-    """Verify `archive` and make it the installed release. Returns the manifest (with `installed_at`, `source`)."""
-    from services import fire_escape
-
-    target = Path(target or fire_escape.bundle_dir())
-    incoming, previous = target.with_name(target.name + ".incoming"), target.with_name(target.name + ".previous")
-    shutil.rmtree(incoming, ignore_errors=True)
-    try:
-        manifest = extract_verified(Path(archive), incoming)
-        smoke_test(incoming)
-        manifest = {**manifest, "installed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "source": source or str(archive)}
-        (incoming / INSTALLED_NAME).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
-    except Exception:
-        shutil.rmtree(incoming, ignore_errors=True)
-        raise
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        shutil.rmtree(previous, ignore_errors=True)
-        target.rename(previous)
-    incoming.rename(target)
-    return manifest
-
-
-def installed(target: Optional[Path] = None) -> Optional[dict]:
-    """The manifest of the release in place, or None (nothing installed, or a folder copied in by hand)."""
-    from services import fire_escape
-
-    path = Path(target or fire_escape.bundle_dir()) / INSTALLED_NAME
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-
-
-def rollback(target: Optional[Path] = None) -> dict:
-    """Swap the installed release with the one it replaced. Running it twice undoes it."""
-    from services import fire_escape
-
-    target = Path(target or fire_escape.bundle_dir())
-    previous, aside = target.with_name(target.name + ".previous"), target.with_name(target.name + ".swap")
-    if not previous.is_dir():
-        raise InstallError("there is no previous release to go back to")
-    shutil.rmtree(aside, ignore_errors=True)
-    if target.exists():
-        target.rename(aside)
-    previous.rename(target)
-    if aside.exists():
-        aside.rename(previous)
-    return installed(target) or {"tag": "unknown (installed by hand)"}
 
 
 def latest_tag(repo: str, timeout: int = 60) -> str:
@@ -184,14 +129,11 @@ def download(tag: str, repo: str, directory: Path, timeout: int = 300) -> Path:
     return archive
 
 
-def install_release(tag: str, repo: str, target: Optional[Path] = None) -> dict:
-    """Download `tag` from `repo` and install it; the manifest's own tag must be the one asked for."""
+def install_release(tag: str, repo: str, target: Optional[Path] = None, load_test: bool = True,
+                    *, require_contract: bool = False) -> dict:
     import tempfile
 
     with tempfile.TemporaryDirectory() as folder:
         archive = download(tag, repo, Path(folder))
-        with zipfile.ZipFile(archive) as bundle:
-            named = json.loads(bundle.read(MANIFEST_NAME)).get("tag") if MANIFEST_NAME in bundle.namelist() else None
-        if named != tag:
-            raise InstallError(f"release {tag} carries an archive for {named!r}")
-        return install_archive(archive, target, source=f"{repo}@{tag}")
+        return install_archive(archive, target, source=f"{repo}@{tag}", load_test=load_test,
+                               expected_tag=tag, require_contract=require_contract)

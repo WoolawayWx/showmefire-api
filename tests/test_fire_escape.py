@@ -366,3 +366,24 @@ def test_a_release_whose_models_need_unknown_features_is_refused(release, tmp_pa
     with pytest.raises(install.InstallError):
         install.install_archive(pack(release, tmp_path / "future.zip"), tmp_path / "target")
     assert not (tmp_path / "target").exists()
+
+
+def test_install_without_the_model_libraries_says_so_or_installs_on_checksums(release, tmp_path, monkeypatch):
+    import builtins
+
+    from services.fire_escape import install
+    real_import = builtins.__import__
+
+    def no_pandas(name, *args, **kwargs):
+        if name == "pandas":
+            raise ModuleNotFoundError("No module named 'pandas'")
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", no_pandas)
+    target = tmp_path / "target"
+    with pytest.raises(install.InstallError, match="cannot load the models"):
+        install.install_archive(pack(release, tmp_path / "a.zip"), target)
+    assert not target.exists()
+    manifest = install.install_archive(pack(release, tmp_path / "a.zip"), target, load_test=False)
+    assert manifest["load_tested"] is False and (target / "county" / "bundle.json").is_file()
+    with pytest.raises(install.InstallError, match="checksum mismatch"):          # checksums still apply
+        install.install_archive(pack(release, tmp_path / "bad.zip", tamper="fuel_grid.npz"), target, load_test=False)
