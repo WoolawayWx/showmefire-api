@@ -1383,6 +1383,25 @@ def init_database():
     if "expires_at" not in {row[1] for row in cursor.fetchall()}:
         cursor.execute("ALTER TABLE home_video ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''")
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS homepage_card (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            button_label TEXT NOT NULL,
+            url TEXT NOT NULL
+        )
+    ''')
+    cursor.execute('''
+        INSERT OR IGNORE INTO homepage_card (id, enabled, title, message, button_label, url)
+        VALUES (1, 1, ?, ?, ?, ?)
+    ''', (
+        "Show Me Fire research survey",
+        "Tell us how you use Show Me Fire and what would make it more useful to you.",
+        "Take the research survey",
+        "https://showmefire.org/forms/research-survey",
+    ))
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_receipts (
             ticket_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,

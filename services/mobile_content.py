@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo
 import shapefile
 
 from core.database import get_briefing_config, get_latest_forecast, record_fire_weather_alert_day
+from services.homepage_card import get_public_homepage_card
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ACTIVE_ALERTS_PATH = PROJECT_ROOT / "gis" / "active.json"
@@ -246,8 +248,14 @@ def build_mobile_content(api_base_url: str = PUBLIC_API_BASE_URL, cdn_base_url: 
                 for key, title, filename in FORECAST_MAPS
             ],
         }
+    try:
+        homepage_card = get_public_homepage_card()
+    except sqlite3.Error:
+        logger.exception("Homepage card unavailable")
+        homepage_card = None
     return {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "homepageCard": homepage_card,
         "forecast": forecast_payload,
         "outlooks": [
             {"day": day, "title": f"Day {day} Missouri Fire Weather Outlook", "imageUrl": f"{api_base_url}/images/mo-outlook-day{day}.webp"}
