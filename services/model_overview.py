@@ -18,6 +18,7 @@ import logging
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from textwrap import fill
 from typing import Optional
 
 import numpy as np
@@ -46,7 +47,7 @@ NOTE = ("The same day, as each model sees it.\n\n"
         "index ranks the day against its own history\n(its top level is its top 5 % of days).\n\n"
         "The two right-hand maps are chances, in percent:\nthat fire danger reaches Elevated, and that any\n"
         "wildfire is reported in the county.\n\n"
-        "A grey panel means that model did not run\nfor this day.")
+        "Gray counties have no forecast data.\nA gray panel has no data for the day.")
 
 
 def collect(day: date, db_path: Optional[Path] = None, ingest: bool = True) -> dict[str, dict]:
@@ -134,7 +135,7 @@ def render(models: dict[str, dict], day: date, out_path: Path) -> Path:
     try:
         note = fig.add_subplot(2, 4, 1)
         note.axis("off")
-        note.text(0.0, 0.95, f"Fire danger models\n{day:%A %B %d, %Y}", fontsize=18, fontweight="bold", va="top")
+        note.text(0.0, 0.95, f"Fire danger models\n{day:%A}\n{day:%B %d, %Y}", fontsize=18, fontweight="bold", va="top")
         note.text(0.0, 0.70, style.NOT_FOR_OPERATIONS, fontsize=12, fontweight="bold", color="#B00000", va="top")
         note.text(0.0, 0.60, NOTE, fontsize=10.5, va="top", linespacing=1.35)
         for position, (model, column, scale, title) in enumerate(PANELS, start=2):
@@ -144,12 +145,12 @@ def render(models: dict[str, dict], day: date, out_path: Path) -> Path:
             values = (models.get(model) or {}).get(column) or {}
             mappable, ticks, labels = _draw_panel(ax, data_crs, values, scale, counties)
             ax.add_geometries(state.geometry, crs=data_crs, edgecolor="black", facecolor="none", linewidth=1.0, zorder=9)
-            ax.set_title(title, fontsize=12, fontweight="bold")
+            ax.set_title(fill(title, width=37), fontsize=12, fontweight="bold")
             bar = fig.colorbar(mappable, ax=ax, orientation="horizontal", pad=0.02, fraction=0.045, shrink=0.9,
                                **({} if scale == "level" else {"extend": "min", "spacing": "uniform"}))
             bar.set_ticks(ticks)
             bar.set_ticklabels(labels, fontsize=8)
-            ax.text(0.5, -0.24, panel_summary(values, scale), transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
+            ax.text(0.5, -0.24, fill(panel_summary(values, scale), width=48), transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
         fig.subplots_adjust(left=0.02, right=0.99, top=0.95, bottom=0.09, wspace=0.06, hspace=0.32)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=110)

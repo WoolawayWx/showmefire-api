@@ -208,22 +208,32 @@ def ingest_scores(db_path: Optional[Path] = None, dirs: Optional[dict] = None) -
                 out["unreadable"] += 1
                 logger.warning("fire danger tracking: %s unreadable: %s", path.name, exc)
 
+        # The county exporter writes each county separately. A single forecast can
+        # span several published_at timestamps, but the comparison map needs all
+        # counties in that run, including Low (category 0).
+        before = conn.total_changes
         try:
-            groups = conn.execute(
-                '''SELECT forecast_date, forecast_run_id, published_at FROM county_forecast_days
-                   GROUP BY forecast_date, forecast_run_id, published_at''').fetchall()
-        except sqlite3.OperationalError:
-            groups = []
-        for g in groups:
-            run_id = f"{g['forecast_run_id'] or 'rule'}@{g['published_at']}"
-            if _has_run(conn, "public_rule", run_id, g["forecast_date"]):
-                continue
-            rows = [("public_rule", run_id, r["forecast_date"], str(r["county_fips"]), None, int(r["danger_level"]), None,
-                     r["published_at"], "county_forecast_days")
-                    for r in conn.execute('''SELECT forecast_date, county_fips, danger_level, published_at FROM county_forecast_days
-                                             WHERE forecast_date = ? AND forecast_run_id = ? AND published_at = ?''',
-                                          (g["forecast_date"], g["forecast_run_id"], g["published_at"]))]
-            add("public_rule", _insert(conn, rows))
+            conn.execute("""
+                WITH county_runs AS (
+                    SELECT forecast_date, forecast_run_id, MAX(published_at) AS run_published_at
+                    FROM county_forecast_days
+                    GROUP BY forecast_date, forecast_run_id
+                )
+                INSERT OR IGNORE INTO fire_danger_model_scores
+                    (model, run_id, valid_date, county_fips, score, category, probability, produced_at, source)
+                SELECT 'public_rule',
+                       COALESCE(NULLIF(r.forecast_run_id, ''), 'rule') || '@' || r.run_published_at,
+                       c.forecast_date, c.county_fips, NULL, c.danger_level, NULL, r.run_published_at,
+                       'county_forecast_days'
+                FROM county_forecast_days c
+                JOIN county_runs r ON c.forecast_date = r.forecast_date
+                    AND c.forecast_run_id IS r.forecast_run_id
+            """)
+        except sqlite3.OperationalError as exc:
+            if "no such table: county_forecast_days" not in str(exc):
+                raise
+        if conn.total_changes > before:
+            add("public_rule", conn.total_changes - before)
         conn.commit()
         return out
     finally:

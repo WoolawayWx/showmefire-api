@@ -279,6 +279,32 @@ def test_overview_collects_each_models_latest_run_for_the_day(tmp_path):
     assert model_overview.collect(date(2026, 1, 1), tmp_path / "t.db", ingest=False) == {}
 
 
+def test_overview_recovers_low_counties_from_a_split_public_run(tmp_path, monkeypatch):
+    from services import fire_danger_tracking, model_overview
+
+    empty = tmp_path / "empty"
+    dirs = {key: empty for key in ("fire_weather_index", "risk_fusion_glm", "ensemble", "fire_escape")}
+    ingest = fire_danger_tracking.ingest_scores
+    monkeypatch.setattr(fire_danger_tracking, "ingest_scores", lambda path: ingest(path, dirs))
+
+    day = DAY.isoformat()
+    db = scores_db(tmp_path / "t.db", [
+        ("public_rule", "r@2026-03-14 13:00:01", day, "29019", None, 1, None, "2026-03-14 13:00:01", "county_forecast_days"),
+    ])
+    with sqlite3.connect(db) as conn:
+        conn.execute("""CREATE TABLE county_forecast_days (
+            forecast_date TEXT, forecast_run_id TEXT, county_fips TEXT, danger_level INTEGER, published_at TEXT
+        )""")
+        conn.executemany("INSERT INTO county_forecast_days VALUES (?, 'r', ?, ?, ?)", [
+            (day, "29001", 0, "2026-03-14 13:00:00"),
+            (day, "29019", 1, "2026-03-14 13:00:01"),
+        ])
+    models = model_overview.collect(DAY, db)
+    assert models["public_rule"]["category"] == {"29001": 0, "29019": 1}
+    assert model_overview.panel_summary(models["public_rule"]["category"], "level") == "Low 1 | Moderate 1"
+    assert ingest(db, dirs)["added"] == {}
+
+
 def test_overview_panel_summaries():
     from services import model_overview
     assert model_overview.panel_summary({"a": 0, "b": 2, "c": 2}, "level") == "Low 1 | Elevated 2"

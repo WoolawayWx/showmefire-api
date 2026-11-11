@@ -16,6 +16,7 @@ import os
 import tempfile
 from datetime import date
 from pathlib import Path
+from textwrap import fill
 
 import numpy as np
 
@@ -179,7 +180,11 @@ def render_map(kind: str, result: dict, fips: list[str], day: date, out_path: Pa
                               pixel_width, pixel_height, dpi)
     try:
         mappable, ticks, labels = _draw(ax, data_crs, kind, result, fips)
-        cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
+        # Keep the map and scale in the left column, with room above for a
+        # two-line subtitle and a separate right column for explanatory copy.
+        ax.set_position([0.09, 0.09, 0.54, 0.70])
+        ax.set_anchor("C")
+        cax = fig.add_axes([0.025, 0.14, 0.018, 0.53])
         if kind == "pfdi":
             bar = plt.colorbar(mappable, cax=cax, label="Danger level")
         else:
@@ -187,12 +192,14 @@ def render_map(kind: str, result: dict, fips: list[str], day: date, out_path: Pa
         bar.set_ticks(ticks)
         bar.set_ticklabels(labels)
         add_boundaries(ax, data_crs, API_ROOT, county_zorder=8)     # above the fills, so county lines show on the county maps
-        ax.set_anchor("W")
-        plt.subplots_adjust(left=0.05)
-        fig.text(0.99, 0.835, NOT_FOR_OPERATIONS, fontsize=18, fontweight="bold", ha="right", va="top", color="#B00000")
+        fig.text(0.99, 0.79, NOT_FOR_OPERATIONS, fontsize=18, fontweight="bold", ha="right", va="top", color="#B00000")
         stale = "" if gridmet_lag_days <= 1 else f" | fuel moisture {gridmet_lag_days} days old"
-        add_title_and_branding(fig, MAPS[kind]["title"], f"Valid: {day:%a %b %d, %Y}{stale} | {summary_line(kind, result)}",
-                               MAPS[kind]["text"] + FOOTER, None, API_ROOT / "forecast")
+        description = "\n\n".join(
+            fill(" ".join(paragraph.splitlines()).replace("- ", "-"), width=45)
+            for paragraph in (MAPS[kind]["text"] + FOOTER).split("\n\n")
+        )
+        add_title_and_branding(fig, MAPS[kind]["title"], f"Valid: {day:%a %b %d, %Y}{stale}\n{summary_line(kind, result)}",
+                               description, None, API_ROOT / "forecast")
         _save(fig, out_path, dpi)
     finally:
         plt.close(fig)
@@ -225,10 +232,10 @@ def render_overview(result: dict, fips: list[str], day: date, out_path: Path) ->
                                **({} if kind == "pfdi" else {"extend": "min", "spacing": "uniform"}))
             bar.set_ticks(ticks)
             bar.set_ticklabels(labels, fontsize=8)
-            ax.text(0.5, -0.24, summary_line(kind, result), transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
+            ax.text(0.5, -0.24, fill(summary_line(kind, result), width=46), transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
         note = fig.add_subplot(2, 3, 4)
         note.axis("off")
-        note.text(0.0, 0.95, f"Fire escape models\n{day:%A %B %d, %Y}", fontsize=18, fontweight="bold", va="top")
+        note.text(0.0, 0.95, f"Fire escape models\n{day:%A}\n{day:%B %d, %Y}", fontsize=18, fontweight="bold", va="top")
         note.text(0.0, 0.70, NOT_FOR_OPERATIONS, fontsize=12, fontweight="bold", color="#B00000", va="top")
         note.text(0.0, 0.60, ("Top row: what the weather would do to a fire.\n"
                               "  1. Physics only: flame length in cured grass.\n"
