@@ -1572,6 +1572,8 @@ def init_database():
             html_body TEXT NOT NULL,
             text_body TEXT NOT NULL,
             audience_list_id TEXT NOT NULL DEFAULT 'show-me-fire-newsletter',
+            attachments_json TEXT NOT NULL DEFAULT '[]',
+            direct_recipients_json TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL DEFAULT 'draft'
                 CHECK (status IN ('draft', 'sending', 'sent')),
             resend_broadcast_id TEXT,
@@ -1586,6 +1588,10 @@ def init_database():
         cursor.execute(
             "ALTER TABLE bulletins ADD COLUMN audience_list_id TEXT NOT NULL DEFAULT 'show-me-fire-newsletter'"
         )
+    if "attachments_json" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+    if "direct_recipients_json" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN direct_recipients_json TEXT NOT NULL DEFAULT '[]'")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bulletins_status_created ON bulletins(status, created_at DESC)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS newsletter_subscribers (
@@ -7211,16 +7217,23 @@ def create_bulletin(
     html_body: str,
     text_body: str,
     audience_list_id: str = "show-me-fire-newsletter",
+    direct_recipients: List[str] | None = None,
 ) -> Dict:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
-            "INSERT INTO bulletins (subject, html_body, text_body, audience_list_id) VALUES (?, ?, ?, ?)",
-            (subject.strip(), html_body, text_body, audience_list_id.strip()),
+            "INSERT INTO bulletins (subject, html_body, text_body, audience_list_id, direct_recipients_json) VALUES (?, ?, ?, ?, ?)",
+            (subject.strip(), html_body, text_body, audience_list_id.strip(), json.dumps(direct_recipients or [])),
         )
         conn.commit()
-        return dict(conn.execute("SELECT * FROM bulletins WHERE id = ?", (cursor.lastrowid,)).fetchone())
+        row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        result = dict(row)
+        result["attachments"] = []
+        result.pop("attachments_json", None)
+        result["direct_recipients"] = direct_recipients or []
+        result.pop("direct_recipients_json", None)
+        return result
     finally:
         conn.close()
 
@@ -7230,7 +7243,18 @@ def get_bulletin(bulletin_id: int) -> Optional[Dict]:
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["attachments"] = json.loads(result.pop("attachments_json") or "[]")
+        except json.JSONDecodeError:
+            result["attachments"] = []
+        try:
+            result["direct_recipients"] = json.loads(result.pop("direct_recipients_json") or "[]")
+        except json.JSONDecodeError:
+            result["direct_recipients"] = []
+        return result
     finally:
         conn.close()
 
@@ -7239,7 +7263,19 @@ def list_bulletins() -> List[Dict]:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
-        return [dict(row) for row in conn.execute("SELECT * FROM bulletins ORDER BY created_at DESC, id DESC").fetchall()]
+        results = []
+        for row in conn.execute("SELECT * FROM bulletins ORDER BY created_at DESC, id DESC").fetchall():
+            result = dict(row)
+            try:
+                result["attachments"] = json.loads(result.pop("attachments_json") or "[]")
+            except json.JSONDecodeError:
+                result["attachments"] = []
+            try:
+                result["direct_recipients"] = json.loads(result.pop("direct_recipients_json") or "[]")
+            except json.JSONDecodeError:
+                result["direct_recipients"] = []
+            results.append(result)
+        return results
     finally:
         conn.close()
 
@@ -7250,21 +7286,83 @@ def update_bulletin(
     html_body: str,
     text_body: str,
     audience_list_id: str = "show-me-fire-newsletter",
+    direct_recipients: List[str] | None = None,
 ) -> Optional[Dict]:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
             '''UPDATE bulletins
-               SET subject = ?, html_body = ?, text_body = ?, audience_list_id = ?, updated_at = CURRENT_TIMESTAMP
+               SET subject = ?, html_body = ?, text_body = ?, audience_list_id = ?, direct_recipients_json = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ? AND status = 'draft' ''',
-            (subject.strip(), html_body, text_body, audience_list_id.strip(), bulletin_id),
+            (subject.strip(), html_body, text_body, audience_list_id.strip(), json.dumps(direct_recipients or []), bulletin_id),
         )
         conn.commit()
         if cursor.rowcount != 1:
             return None
         row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["attachments"] = json.loads(result.pop("attachments_json") or "[]")
+        except json.JSONDecodeError:
+            result["attachments"] = []
+        try:
+            result["direct_recipients"] = json.loads(result.pop("direct_recipients_json") or "[]")
+        except json.JSONDecodeError:
+            result["direct_recipients"] = []
+        return result
+    finally:
+        conn.close()
+
+
+def add_bulletin_attachment(bulletin_id: int, attachment: Dict) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT attachments_json FROM bulletins WHERE id = ? AND status = 'draft'", (bulletin_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            attachments = json.loads(row["attachments_json"] or "[]")
+        except json.JSONDecodeError:
+            attachments = []
+        attachments.append(attachment)
+        conn.execute(
+            "UPDATE bulletins SET attachments_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (json.dumps(attachments), bulletin_id),
+        )
+        conn.commit()
+        return get_bulletin(bulletin_id)
+    finally:
+        conn.close()
+
+
+def remove_bulletin_attachment(bulletin_id: int, attachment_id: str) -> Optional[Dict]:
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT attachments_json FROM bulletins WHERE id = ? AND status = 'draft'", (bulletin_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            attachments = json.loads(row["attachments_json"] or "[]")
+        except json.JSONDecodeError:
+            attachments = []
+        kept = [item for item in attachments if item.get("id") != attachment_id]
+        if len(kept) == len(attachments):
+            return get_bulletin(bulletin_id)
+        conn.execute(
+            "UPDATE bulletins SET attachments_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (json.dumps(kept), bulletin_id),
+        )
+        conn.commit()
+        return get_bulletin(bulletin_id)
     finally:
         conn.close()
 
@@ -7282,7 +7380,18 @@ def mark_bulletin_sent(bulletin_id: int, resend_broadcast_id: str) -> Optional[D
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bulletins WHERE id = ?", (bulletin_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["attachments"] = json.loads(result.pop("attachments_json") or "[]")
+        except json.JSONDecodeError:
+            result["attachments"] = []
+        try:
+            result["direct_recipients"] = json.loads(result.pop("direct_recipients_json") or "[]")
+        except json.JSONDecodeError:
+            result["direct_recipients"] = []
+        return result
     finally:
         conn.close()
 

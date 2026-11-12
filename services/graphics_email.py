@@ -132,6 +132,7 @@ def send_bulletin_email(
     html_body: str,
     text_body: str,
     manage_url: str,
+    attachments: list[dict] | None = None,
 ) -> str:
     """Send one targeted bulletin while preserving the newsletter footer."""
     sender, reply_to = _sender_settings()
@@ -149,6 +150,14 @@ def send_bulletin_email(
         "html": html_body + html_footer,
         "text": text_body + text_footer,
     }
+    if attachments:
+        payload["attachments"] = [
+            {
+                "filename": item["filename"],
+                "content": item["content"],
+            }
+            for item in attachments
+        ]
     if reply_to:
         payload["reply_to"] = reply_to
     result = _resend_request("POST", "/emails", payload)

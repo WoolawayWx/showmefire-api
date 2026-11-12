@@ -1,12 +1,15 @@
 """FireWx bulletin signup, preference, and administrative endpoints."""
 from __future__ import annotations
 
+import base64
 import re
 import os
+import secrets
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 from core.database import (
@@ -15,10 +18,13 @@ from core.database import (
     get_bulletin,
     get_newsletter_account_by_token,
     get_newsletter_preferences,
+    get_db_path,
+    add_bulletin_attachment,
     list_active_newsletter_recipients,
     list_newsletter_subscribers,
     list_bulletins,
     mark_bulletin_sent,
+    remove_bulletin_attachment,
     replace_newsletter_preferences,
     set_bulletin_error,
     unsubscribe_newsletter,
@@ -36,6 +42,10 @@ from services.graphics_email import (
 from services.mobile_content import county_catalog
 
 router = APIRouter(tags=["bulletins"])
+ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+ATTACHMENT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+ATTACHMENT_TYPES = {"application/pdf"}
+DIRECT_RECIPIENT_MAX = 25
 
 LEVEL_LABELS = {
     1: "Low",
@@ -104,6 +114,7 @@ class BulletinCreate(BaseModel):
     html_body: str = Field(min_length=1)
     text_body: str = Field(min_length=1)
     audience_list_id: str = "show-me-fire-newsletter"
+    direct_recipients: List[str] = Field(default_factory=list, max_length=DIRECT_RECIPIENT_MAX)
 
     @field_validator("audience_list_id")
     @classmethod
@@ -112,6 +123,18 @@ class BulletinCreate(BaseModel):
         if value not in LIST_OPTIONS:
             raise ValueError(f"Unknown email list: {value}")
         return value
+
+    @field_validator("direct_recipients")
+    @classmethod
+    def validate_direct_recipients(cls, values: List[str]) -> List[str]:
+        normalized = []
+        for value in values:
+            email = str(value).strip().lower()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise ValueError(f"Invalid recipient email: {value}")
+            if email not in normalized:
+                normalized.append(email)
+        return normalized
 
 
 class NewsletterManage(NewsletterSignup):
@@ -249,7 +272,9 @@ def admin_list_bulletins(_admin: str = Depends(require_admin)):
 
 @router.post("/api/admin/bulletins")
 def admin_create_bulletin(payload: BulletinCreate, _admin: str = Depends(require_admin)):
-    return create_bulletin(payload.subject, payload.html_body, payload.text_body, payload.audience_list_id)
+    return create_bulletin(
+        payload.subject, payload.html_body, payload.text_body, payload.audience_list_id, payload.direct_recipients
+    )
 
 
 @router.get("/api/admin/bulletins/{bulletin_id}")
@@ -263,7 +288,8 @@ def admin_get_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
 @router.put("/api/admin/bulletins/{bulletin_id}")
 def admin_update_bulletin(bulletin_id: int, payload: BulletinCreate, _admin: str = Depends(require_admin)):
     bulletin = update_bulletin(
-        bulletin_id, payload.subject, payload.html_body, payload.text_body, payload.audience_list_id
+        bulletin_id, payload.subject, payload.html_body, payload.text_body,
+        payload.audience_list_id, payload.direct_recipients,
     )
     if not bulletin:
         raise HTTPException(status_code=404, detail="Draft bulletin not found")
@@ -280,7 +306,68 @@ def admin_preview_bulletin(bulletin_id: int, _admin: str = Depends(require_admin
         "subject": bulletin["subject"],
         "html_body": bulletin["html_body"],
         "text_body": bulletin["text_body"],
+        "attachments": bulletin.get("attachments", []),
+        "direct_recipients": bulletin.get("direct_recipients", []),
     }
+
+
+@router.post("/api/admin/bulletins/{bulletin_id}/attachments")
+async def admin_upload_bulletin_attachment(
+    bulletin_id: int,
+    file: UploadFile = File(...),
+    _admin: str = Depends(require_admin),
+):
+    bulletin = get_bulletin(bulletin_id)
+    if not bulletin or bulletin["status"] != "draft":
+        raise HTTPException(status_code=404, detail="Draft bulletin not found")
+    content_type = (file.content_type or "").lower().strip()
+    filename = (file.filename or "").strip()
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    allowed_image = content_type.startswith("image/") and suffix in {"jpg", "jpeg", "png", "gif", "webp"}
+    allowed_pdf = content_type in ATTACHMENT_TYPES and suffix == "pdf"
+    if not filename or not (allowed_image or allowed_pdf):
+        raise HTTPException(status_code=415, detail="Only image files and PDFs are supported.")
+    existing_total = sum(int(item.get("size", 0)) for item in bulletin.get("attachments", []))
+    content = await file.read(ATTACHMENT_MAX_BYTES + 1)
+    if len(content) > ATTACHMENT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Each attachment must be 10 MB or smaller.")
+    if existing_total + len(content) > ATTACHMENT_MAX_TOTAL_BYTES:
+        raise HTTPException(status_code=413, detail="Attachments for one email may total 25 MB or less.")
+    attachment_id = secrets.token_urlsafe(12)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)[:120] or f"attachment.{suffix}"
+    attachment_dir = get_db_path().parent / "bulletin_attachments" / str(bulletin_id)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    path = attachment_dir / f"{attachment_id}-{safe_name}"
+    path.write_bytes(content)
+    metadata = {
+        "id": attachment_id,
+        "filename": safe_name,
+        "content_type": content_type,
+        "size": len(content),
+        "path": str(path),
+    }
+    result = add_bulletin_attachment(bulletin_id, metadata)
+    if result is None:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="Draft bulletin not found")
+    return result
+
+
+@router.delete("/api/admin/bulletins/{bulletin_id}/attachments/{attachment_id}")
+def admin_delete_bulletin_attachment(
+    bulletin_id: int,
+    attachment_id: str,
+    _admin: str = Depends(require_admin),
+):
+    bulletin = get_bulletin(bulletin_id)
+    if not bulletin or bulletin["status"] != "draft":
+        raise HTTPException(status_code=404, detail="Draft bulletin not found")
+    attachment = next((item for item in bulletin.get("attachments", []) if item.get("id") == attachment_id), None)
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    result = remove_bulletin_attachment(bulletin_id, attachment_id)
+    Path(attachment["path"]).unlink(missing_ok=True)
+    return result
 
 
 @router.post("/api/admin/bulletins/{bulletin_id}/send")
@@ -293,20 +380,40 @@ def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
     if not claim_bulletin_send(bulletin_id):
         raise HTTPException(status_code=409, detail="Bulletin send is already in progress")
     recipients = list_active_newsletter_recipients(bulletin["audience_list_id"])
+    recipient_emails = {item["email"].strip().lower() for item in recipients}
+    for email in bulletin.get("direct_recipients", []):
+        if email not in recipient_emails:
+            recipients.append({"email": email, "manage_token": None})
+            recipient_emails.add(email)
     if not recipients:
-        set_bulletin_error(bulletin_id, "No active subscribers are on this email list.")
-        raise HTTPException(status_code=409, detail="There are no active subscribers on this email list.")
+        set_bulletin_error(bulletin_id, "No subscribers or direct recipients were provided.")
+        raise HTTPException(status_code=409, detail="There are no subscribers or direct recipients to send to.")
     sent = 0
     try:
+        attachments = []
+        for attachment in bulletin.get("attachments", []):
+            path = Path(attachment["path"])
+            if not path.is_file():
+                raise RuntimeError(f"Attachment is missing: {attachment['filename']}")
+            attachments.append({
+                "filename": attachment["filename"],
+                "content": base64.b64encode(path.read_bytes()).decode("ascii"),
+                "content_type": attachment["content_type"],
+            })
         for recipient in recipients:
             manage_base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
-            manage_url = f"{manage_base}/comms/emails/manage?token={quote(recipient['manage_token'], safe='')}"
+            manage_url = (
+                f"{manage_base}/comms/emails/manage?token={quote(recipient['manage_token'], safe='')}"
+                if recipient.get("manage_token")
+                else f"{manage_base}/comms/emails"
+            )
             send_bulletin_email(
                 recipient["email"],
                 bulletin["subject"],
                 bulletin["html_body"],
                 bulletin["text_body"],
                 manage_url,
+                attachments,
             )
             sent += 1
         return mark_bulletin_sent(bulletin_id, f"targeted:{sent}")
