@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,28 @@ def _build_image_urls() -> list[str]:
     return urls
 
 
+def _county_danger_for_push(forecast: dict) -> dict[str, tuple[int, str]]:
+    if os.getenv("FORECAST_COUNTY_MAPS_READY") != "1":
+        return {}
+    try:
+        valid = datetime.fromisoformat(str(forecast["valid_time"]).replace("Z", "+00:00"))
+        if valid.date() != datetime.now(timezone.utc).date():
+            return {}
+        rows = json.loads((BASE_DIR / "gis" / "dangerbycounty.json").read_text())
+    except (OSError, KeyError, ValueError):
+        return {}
+    if not isinstance(rows, list):
+        return {}
+    return {
+        row["county_fips"]: (row["max_fire_danger"], row["county"].strip())
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("county_fips"), str)
+        and isinstance(row.get("county"), str) and row["county"].strip()
+        and type(row.get("max_fire_danger")) is int and 0 <= row["max_fire_danger"] <= 4
+    }
+
+
 def main() -> int:
     latest = get_latest_forecast()
     if not latest:
@@ -56,7 +79,9 @@ def main() -> int:
     else:
         print("Forecast completion Discord event was not sent")
 
-    mobile_sent = notify_forecast(latest, image_urls[0] if image_urls else None)
+    mobile_sent = notify_forecast(
+        latest, image_urls[0] if image_urls else None, county_danger=_county_danger_for_push(latest)
+    )
     print(f"Forecast completion mobile event delivered to {mobile_sent} device(s)")
 
     email_result = run_daily_forecast_delivery()

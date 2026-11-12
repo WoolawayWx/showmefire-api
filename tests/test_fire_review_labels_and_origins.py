@@ -160,6 +160,33 @@ def test_an_osint_lead_records_the_integration_the_link_and_the_lead_as_received
     assert origin["raw"] == {"title": "Grass fire"}
 
 
+def test_osint_filter_includes_grouped_and_legacy_leads(db):
+    public = _report(db)
+    satellite_id = _detection()["event_id"]
+    leads = [
+        database.upsert_ingest_report(
+            source=source, external_id="post-1", title="Grass fire", description="Near Route 63",
+            source_url="https://example.com/post-1", source_name=source, latitude=38.95, longitude=-92.33,
+            occurred_at="2026-10-20T14:00:00Z", occurred_at_precision="minute",
+            acres=None, county_fips="29019", county_name="Boone",
+        )[0]
+        for source in ("muse", "legacy_feed")
+    ]
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM fire_event_origins WHERE event_id IN (?, ?)", (leads[1]["id"], satellite_id))
+
+    reports = fires_router.admin_list_fire_reports(_admin="staff@x.org", osint_only=True)["reports"]
+
+    assert {report["id"] for report in reports} == {lead["id"] for lead in leads}
+    assert all(report["incident_id"] for report in reports)
+    assert not fires_router.admin_list_fire_reports(
+        _admin="staff@x.org", osint_only=True, ungrouped_only=True,
+    )["reports"]
+    assert public["id"] in {
+        report["id"] for report in fires_router.admin_list_fire_reports(_admin="staff@x.org")["reports"]
+    }
+
+
 def test_the_ingest_endpoint_passes_the_integration_and_post_source(db, monkeypatch):
     captured = {}
     monkeypatch.setattr(ingest_router, "consume_fire_submission_quota", lambda *a, **k: {"allowed": True})

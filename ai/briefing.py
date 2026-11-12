@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -105,6 +106,7 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         fuel = values("fuel_moisture")
         rh = values("rh")
         wind = values("wind_speed_ms")
+        gust = values("wind_gust_ms")
         temp_c = values("temp_c")
         danger = [int(number) for number in values("fire_danger") if 0 <= int(number) <= 4]
         wind_directions = values("wind_direction_deg")
@@ -132,6 +134,7 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "fuel_moisture": min(fuel) if fuel else None,
             "rh": min(rh) if rh else None,
             "wind_mph": max(wind) * MS_TO_MPH if wind else None,
+            "gust_mph": max(gust) * MS_TO_MPH if gust else None,
             "wind_direction_sectors": [
                 _direction_sector(direction) for direction in wind_directions
             ],
@@ -144,17 +147,16 @@ def _daily_station_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     row_list = list(rows)
-    metric_keys = ("precip_in", "fuel_moisture", "rh", "wind_mph", "temp_f")
-    metric_digits = {"precip_in": 3, "fuel_moisture": 1, "rh": 1, "wind_mph": 1, "temp_f": 1}
+    metric_digits = {"precip_in": 3, "fuel_moisture": 1, "rh": 1, "wind_mph": 1, "gust_mph": 1, "temp_f": 1}
     result: dict[str, Any] = {"station_count": len(row_list)}
-    for key in metric_keys:
+    for key, digits in metric_digits.items():
         values = sorted(
             number for row in row_list if (number := _finite(row.get(key))) is not None
         )
         result[key] = {
-            "min": _round(values[0], metric_digits[key]) if values else None,
-            "p50": _round(_percentile(values, 0.5), metric_digits[key]) if values else None,
-            "max": _round(values[-1], metric_digits[key]) if values else None,
+            "min": _round(values[0], digits) if values else None,
+            "p50": _round(_percentile(values, 0.5), digits) if values else None,
+            "max": _round(values[-1], digits) if values else None,
         }
     danger_counts = {label: 0 for label in DANGER_LABELS}
     for row in row_list:
@@ -197,10 +199,12 @@ def _summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         row["fire_danger"] for row in row_list
         if isinstance(row.get("fire_danger"), int)
     ]
-    result["highest_fire_danger"] = DANGER_LABELS[max(danger_values)] if danger_values else None
+    peak_danger = max(danger_values, default=None)
+    result["highest_fire_danger"] = DANGER_LABELS[peak_danger] if peak_danger is not None else None
     result["highest_station_fire_danger"] = result["highest_fire_danger"]
     peak_times = [
-        timestamp for row in row_list for timestamp in row.get("danger_peak_times", [])
+        timestamp for row in row_list if peak_danger is not None and row.get("fire_danger") == peak_danger
+        for timestamp in row.get("danger_peak_times", [])
     ]
     if peak_times:
         try:
@@ -262,51 +266,71 @@ def _county_summary(county_path: Path | None) -> dict[str, Any] | None:
     }
 
 
-FIRE_WEATHER_MAX_AGE_HOURS = 3
+def _forecast_dispersion(
+    payload: Mapping[str, Any], root: Path,
+) -> dict[str, Any] | None:
+    """Use a single hourly HRRR run overlapping the station forecast's valid hours."""
+    from services.hrrr_hourly import store
+    from services.fire_weather.indices import VENTILATION_CATEGORIES
 
+    def parse_time(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-def _current_dispersion(path: Path, now: datetime | None = None) -> dict[str, Any] | None:
-    """Latest hourly HRRR dispersion estimate for the current hour
-    (maps/fire_weather_maps.py), or None when it is missing or older than
-    FIRE_WEATHER_MAX_AGE_HOURS. It describes conditions now, not the afternoon
-    forecast; the prompt says so."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        valid = datetime.strptime(payload["valid_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
-    except (OSError, ValueError, KeyError):
-        return None
-    now = now or datetime.now(ZoneInfo("UTC"))
-    if (now - valid).total_seconds() > FIRE_WEATHER_MAX_AGE_HOURS * 3600:
-        return None
-
-    def area(summary: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "mixing_height_ft": summary["mixing_height_ft"],
-            "transport_wind_mph": summary["transport_speed_mph"],
-            "transport_wind_from": summary.get("transport_direction"),
-            "smoke_dispersal": summary.get("ventilation_dominant"),
+        forecast_cycle = parse_time(payload["run_date"])
+        valid_hours = {
+            parse_time(row["time"])
+            for station in payload.get("stations", {}).values()
+            for row in station.get("forecasts", [])
+            if row.get("time")
         }
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    if not valid_hours or forecast_cycle.tzinfo is None:
+        return None
 
-    state = payload["statewide"]
-    return {
-        "valid_time": valid.astimezone(ZoneInfo("America/Chicago")).strftime("%-I %p CT %b %-d"),
-        "source": payload.get("source"),
-        "statewide": {
-            **area(state),
-            "smoke_dispersal_percent": state.get("ventilation_category_percent"),
-            "surface_inversion_percent": state.get("surface_inversion_percent"),
-            "haines_max": state["haines"].get("max"),
-            "hot_dry_windy_max": state["hdw"].get("max"),
-        },
-        "regions": {name: area(region) for name, region in payload.get("regions", {}).items() if region.get("cell_count")},
-    }
+    best = None
+    central = ZoneInfo("America/Chicago")
+    metrics = ("mixing_height_ft", "transport_speed_mph", "ventilation_kt_ft")
+    for offset in range(7):
+        cycle = forecast_cycle - timedelta(hours=offset)
+        manifest = store.read_manifest(store.cycle_id(cycle), root) or {}
+        series = manifest.get("series", {})
+        medians = {
+            name: {
+                row["lead_hour"]: _finite(row.get("median"))
+                for row in series.get(name, [])
+                if row and "lead_hour" in row
+            }
+            for name in metrics
+        }
+        hours = []
+        for lead in sorted(manifest.get("forecast_hours", [])):
+            valid = cycle + timedelta(hours=lead)
+            if valid not in valid_hours:
+                continue
+            values = {name: medians[name].get(lead) for name in metrics}
+            if any(value is None or value < 0 for value in values.values()):
+                continue
+            ventilation = values["ventilation_kt_ft"]
+            category = next(name for name, lower, _ in reversed(VENTILATION_CATEGORIES) if ventilation >= lower * 1000)
+            hours.append({
+                "time": valid.astimezone(central).strftime("%-I %p %Z"),
+                **{name: round(value) for name, value in values.items()},
+                "smoke_dispersal": category,
+            })
+        if len(hours) >= 2 and (best is None or len(hours) > len(best["hours"])):
+            best = {"cycle": store.cycle_id(cycle), "hours": hours}
+        if len(hours) == len(valid_hours):
+            break
+    return best
 
 
 def build_briefing(
     archive_dir: str | Path,
     forecast_path: str | Path | None = None,
     county_path: str | Path | None = None,
-    fire_weather_path: str | Path | None = None,
+    hrrr_hourly_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-serializable briefing from the latest station forecast."""
     archive_path = Path(archive_dir)
@@ -332,18 +356,18 @@ def build_briefing(
             "fuel_moisture": "percent",
             "rh": "percent",
             "wind_mph": "mph",
+            "gust_mph": "mph",
             "temp_f": "degrees Fahrenheit",
         },
         "regions": regions,
         "statewide": _summary(rows),
     }
-    dispersion = _current_dispersion(
-        Path(fire_weather_path)
-        if fire_weather_path
-        else archive_path.parent.parent / "data" / "current_conditions" / "fire_weather_latest.json"
-    )
+    hourly_root = Path(hrrr_hourly_root or os.getenv("SMF_HRRR_HOURLY_DIR") or (
+        archive_path.parent.parent / "data" / "hrrr_hourly"
+    ))
+    dispersion = _forecast_dispersion(payload, hourly_root)
     if dispersion:
-        briefing["current_dispersion"] = dispersion
+        briefing["forecast_dispersion"] = dispersion
     county_summary = _county_summary(resolved_county_path)
     if county_summary:
         briefing["county_danger"] = county_summary
@@ -424,10 +448,15 @@ def contains_core_weather_facts(text: str, briefing: Mapping[str, Any]) -> bool:
 
 
 def validate_operational_style(text: str, briefing: Mapping[str, Any]) -> bool:
-    """Keep AI prose concise and appropriate for operational readers."""
-    if len(re.findall(r"[.!?](?:\s|$)", text)) > 6:
+    """Keep AI prose within the discussion format and reject truncated text."""
+    if not text.rstrip().endswith((".", "!", "?")) or len(re.findall(r"[.!?](?:\s|$)", text)) > 22:
         return False
     if re.search(r"\d+\.\d+\s*(?:°?\s*F|degrees?|mph|%)\b", text, re.IGNORECASE):
+        return False
+    if briefing.get("forecast_dispersion") and not (
+        re.search(r"\b(?:mixing heights?|mixing depths?)\b", text, re.IGNORECASE)
+        and re.search(r"\b(?:smoke dispersal|smoke dispersion|ventilation)\b", text, re.IGNORECASE)
+    ):
         return False
     if "average" in text.lower():
         return False

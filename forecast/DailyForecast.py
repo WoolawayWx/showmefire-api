@@ -996,6 +996,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
         ws_ms = wind_magnitude
         ws_fire_ms = ws_ms * HRRR_FIRE_WIND_REDUCTION_FACTOR
         ws_kts = ws_fire_ms * 1.94384
+        gust = ds_hour['gust'].values if 'gust' in ds_hour else None
 
         # Extract precipitation if available
         precip_mm = np.zeros_like(temp)
@@ -1104,6 +1105,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                     val_t = float(temp[sy, sx])
                     val_rh = float(rh[sy, sx])
                     val_ws = float(ws_fire_ms[sy, sx])
+                    val_gust = float(gust[sy, sx]) if gust is not None else None
                     val_wind_direction = (
                         math.degrees(math.atan2(-float(u[sy, sx]), -float(v[sy, sx]))) + 360
                     ) % 360
@@ -1159,6 +1161,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
                         "temp_c": round(val_t, 2),
                         "rh": round(val_rh, 1),
                         "wind_speed_ms": round(val_ws, 2),
+                        "wind_gust_ms": round(val_gust, 2) if val_gust is not None and math.isfinite(val_gust) else None,
                         "wind_direction_deg": round(val_wind_direction, 1),
                         "precip_in": round(val_precip_in, 3),
                         "precip_mm": round(val_precip_mm, 2),

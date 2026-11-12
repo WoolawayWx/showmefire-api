@@ -21,7 +21,7 @@ from services import day_archive, full_obs_archive
 from services.hrrr_hourly import scheduler_job as hrrr_hourly_job
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
-from services.mobile_push import check_push_receipts, purge_delivery_records
+from services.mobile_push import check_push_receipts, deliver_scheduled_forecasts, purge_delivery_records
 from core.config import AFD_POLL_MINUTES
 from services.v5_verification import verify_pending as verify_v5_shadow
 from services.v4_verification import verify_pending as verify_v4_shadow
@@ -657,6 +657,8 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(deliver_scheduled_forecasts, 'cron', second=0, id='deliver_scheduled_forecasts',
+                      max_instances=1, coalesce=True)
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
     # Staff push (services/staff_push.py) and the reviewer sandbox (core/sandbox_data.py) have their own jobs, apart from
     # the public push ones above. Each is a no-op while its feature is switched off.

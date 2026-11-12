@@ -128,8 +128,13 @@ if [ $EXIT_CODE -ne 0 ]; then
     echo "WARNING: Updating Per County Maps failed at $(date) with exit code $EXIT_CODE - continuing so forecast notifications still go out" >> "$LOG_FILE" 2>&1
 fi
 
+FORECAST_COUNTY_MAPS_READY=0
+if [ "$EXIT_CODE" -eq 0 ]; then
+    FORECAST_COUNTY_MAPS_READY=1
+fi
+
 echo "=== Sending forecast maps to Discord ===" >> "$LOG_FILE" 2>&1
-"$PYTHON" "$PROJECT_DIR/scripts/notify_forecast_complete.py" >> "$LOG_FILE" 2>&1 || \
+FORECAST_COUNTY_MAPS_READY="$FORECAST_COUNTY_MAPS_READY" "$PYTHON" "$PROJECT_DIR/scripts/notify_forecast_complete.py" >> "$LOG_FILE" 2>&1 || \
   { echo "WARNING: Forecast Discord completion notification failed at $(date)" >> "$LOG_FILE" 2>&1
     health stage "Forecast completion notifications" degraded "notify_forecast_complete.py failed" --log "$LOG_FILE"; }
 

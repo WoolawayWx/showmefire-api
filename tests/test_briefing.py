@@ -23,7 +23,7 @@ class BriefingTests(unittest.TestCase):
                     "northwest": {
                         "lat": 40.0, "lon": -94.5,
                         "forecasts": [
-                            {"temp_c": 20, "rh": 50, "wind_speed_ms": 3, "precip_in": 0.10, "fuel_moisture": 15, "fire_danger": 0},
+                            {"time": "2026-08-28T15:00:00Z", "temp_c": 20, "rh": 50, "wind_speed_ms": 3, "wind_gust_ms": 10, "precip_in": 0.10, "fuel_moisture": 15, "fire_danger": 0},
                         ],
                     },
                     "outside": {
@@ -43,6 +43,9 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(central["wind_direction_start"], "north")
         self.assertEqual(central["wind_direction_end"], "south")
         self.assertEqual(briefing["statewide"]["fire_danger_peak_start"], "4:00 PM CDT")
+        self.assertEqual(briefing["statewide"]["gust_mph"]["max"], 22.4)
+        self.assertEqual(briefing["regions"]["Northwest"]["gust_mph"]["max"], 22.4)
+        self.assertIsNone(central["gust_mph"]["max"])
         self.assertEqual(briefing["statewide"]["station_count"], 2)
         self.assertEqual(briefing["statewide"]["precip_in"]["max"], 0.15)
         self.assertEqual(briefing["statewide"]["precipitation"], "measurable")

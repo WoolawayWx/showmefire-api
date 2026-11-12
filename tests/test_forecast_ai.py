@@ -13,7 +13,7 @@ class FakeClient:
     def __init__(self):
         self.prompts = []
 
-    def generate_text(self, prompt):
+    def generate_text(self, prompt, *, max_tokens):
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             return "Elevated Fire Danger Across Missouri"
@@ -28,18 +28,20 @@ class ForecastAITests(unittest.TestCase):
     def _forecast_file(self, directory):
         path = Path(directory) / "station_forecasts_20260828_12.json"
         path.write_text(json.dumps({
+            "run_date": "2026-08-28T12:00:00Z",
             "stations": {
                 "station": {
                     "lat": 38.0,
                     "lon": -92.0,
                     "forecasts": [{
+                        "time": f"2026-08-28T{hour}:00:00Z",
                         "temp_c": 30,
                         "rh": 25,
                         "wind_speed_ms": 4,
                         "precip_in": 0.08,
                         "fuel_moisture": 8,
                         "fire_danger": 2,
-                    }],
+                    } for hour in (15, 20, 23)],
                 },
             },
         }))
@@ -70,45 +72,42 @@ class ForecastAITests(unittest.TestCase):
         self.assertIn("0.08 inches", discussion)
 
 
-class CurrentDispersionTests(unittest.TestCase):
-    def _fire_weather_file(self, directory, valid_time):
-        area = {
-            "mixing_height_ft": {"min": 2000, "median": 4200, "max": 6000},
-            "transport_speed_mph": {"min": 20, "median": 30, "max": 40},
-            "transport_direction": "northwest", "ventilation_dominant": "Very Good",
-            "ventilation_category_percent": {"Very Good": 70.0, "Good": 30.0},
-            "surface_inversion_percent": 0.0, "haines": {"max": 5}, "hdw": {"max": 140}, "cell_count": 10,
-        }
-        path = Path(directory) / "fire_weather_latest.json"
-        path.write_text(json.dumps({"valid_time": valid_time, "source": "HRRR",
-                                    "statewide": area, "regions": {"Central": area}}))
-        return path
-
-    def _briefing(self, directory, valid_time):
-        forecast = ForecastAITests()._forecast_file(directory)
-        return build_briefing(directory, forecast_path=forecast,
-                              fire_weather_path=self._fire_weather_file(directory, valid_time))
-
-    def test_fresh_analysis_is_added_and_used_by_fallback(self):
-        from datetime import datetime, timezone
-        from forecast.forecast_ai import fallback_text
-
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00:00Z")
+class ForecastDispersionTests(unittest.TestCase):
+    def test_matching_forecast_hours_are_used_in_memo_and_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
-            briefing = self._briefing(directory, now)
-        self.assertEqual(briefing["current_dispersion"]["statewide"]["smoke_dispersal"], "Very Good")
-        _headline, discussion = fallback_text(briefing)
-        self.assertIn("mixing heights are near 4,200 ft", discussion)
-        self.assertIn("very good smoke dispersal", discussion)
-
-    def test_stale_or_missing_analysis_is_left_out(self):
-        with tempfile.TemporaryDirectory() as directory:
-            briefing = self._briefing(directory, "2020-01-01T00:00:00Z")
-            self.assertNotIn("current_dispersion", briefing)
+            root = Path(directory)
             forecast = ForecastAITests()._forecast_file(directory)
-            briefing = build_briefing(directory, forecast_path=forecast,
-                                      fire_weather_path=Path(directory) / "missing.json")
-        self.assertNotIn("current_dispersion", briefing)
+            for cycle, leads in (("12", [3]), ("11", [4, 9, 12, 13]), ("13", [2, 7, 10])):
+                run = root / f"20260828_{cycle}z"
+                run.mkdir()
+                (run / "manifest.json").write_text(json.dumps({
+                    "forecast_hours": leads,
+                    "series": {
+                        name: [{"lead_hour": lead, "median": value} for lead, value in zip(leads, values)]
+                        for name, values in {
+                            "mixing_height_ft": [1000, 4200, 2200, 2000],
+                            "transport_speed_mph": [10, 30, 15, 10],
+                            "ventilation_kt_ft": [10000, 110000, 35000, 20000],
+                        }.items()
+                    },
+                }))
+            briefing = build_briefing(root, forecast_path=forecast, hrrr_hourly_root=root)
+
+        dispersion = briefing["forecast_dispersion"]
+        self.assertEqual(dispersion["cycle"], "20260828_11z")
+        self.assertEqual([hour["time"] for hour in dispersion["hours"]], ["10 AM CDT", "3 PM CDT", "6 PM CDT"])
+        client = FakeClient()
+        _headline, discussion = generate_forecast_text(briefing, client=client)
+        self.assertIn('"forecast_dispersion"', client.prompts[-1])
+        self.assertIn("poor dispersal at 10 AM CDT", discussion)
+        self.assertIn("Ventilation peaks at 3 PM CDT, with very good dispersal", discussion)
+        self.assertIn("By 6 PM CDT, HRRR forecasts poor dispersal", discussion)
+
+    def test_missing_hourly_guidance_is_omitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            forecast = ForecastAITests()._forecast_file(directory)
+            briefing = build_briefing(directory, forecast_path=forecast, hrrr_hourly_root=directory)
+        self.assertNotIn("forecast_dispersion", briefing)
 
 
 if __name__ == "__main__":

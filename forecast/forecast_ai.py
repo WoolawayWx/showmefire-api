@@ -23,7 +23,6 @@ from ai.briefing import (
     briefing_json,
     build_briefing,
     contains_core_weather_facts,
-    REGION_NAMES,
     validate_briefing_text,
     validate_operational_style,
 )
@@ -64,128 +63,101 @@ def fallback_text(briefing: dict) -> tuple[str, str]:
         if lowest != highest
         else f"{highest} Fire Danger Across Missouri"
     )
-    regional_classes = {}
-    for region_name, region in briefing["regions"].items():
-        region_highest = region.get("highest_fire_danger")
-        if region.get("station_count") and region_highest:
-            regional_classes.setdefault(region_highest, []).append(
-                REGION_NAMES.get(region_name, region_name)
-            )
-    driest_region = min(
-        (
-            region for region in briefing["regions"].values()
-            if region.get("station_count") and region["rh"]["min"] is not None
-        ),
-        key=lambda region: region["rh"]["min"],
-        default=None,
-    )
-    strongest_region = max(
-        (
-            region for region in briefing["regions"].values()
-            if region.get("station_count") and region["wind_mph"]["max"] is not None
-        ),
-        key=lambda region: region["wind_mph"]["max"],
-        default=None,
-    )
-    driest_name = next(
-        (
-            REGION_NAMES.get(name, name) for name, region in briefing["regions"].items()
-            if region is driest_region
-        ),
-        "the driest areas",
-    )
-    strongest_name = next(
-        (
-            REGION_NAMES.get(name, name) for name, region in briefing["regions"].items()
-            if region is strongest_region
-        ),
-        "the strongest-wind areas",
-    )
-    lower_classes = [
-        f"{danger.lower()} conditions are expected in "
-        f"{', '.join(regions[:-1]) + ', and ' if len(regions) > 1 else ''}{regions[-1]} Missouri"
-        for danger, regions in regional_classes.items()
-        if danger != highest
+    regions = {name: region for name, region in briefing["regions"].items() if region["station_count"]}
+    priority = [
+        name for name, region in regions.items()
+        if region["highest_fire_danger"] == highest
     ]
-    highest_regions = ", ".join(regional_classes.get(highest, []))
-    regional_sentence = (
-        f"The highest fire danger is expected in {highest_regions} Missouri, while "
-        f"{' and '.join(lower_classes)}."
-        if highest_regions and lower_classes
-        else f"{highest} fire danger is expected across Missouri."
-    )
-    peak_class = state.get("highest_station_fire_danger") or highest
-    peak_regions = regional_classes.get(peak_class, [])
     peak_start = state.get("fire_danger_peak_start")
     peak_end = state.get("fire_danger_peak_end")
-    if peak_start and peak_end and peak_start != peak_end:
-        peak_time = f"between {peak_start} and {peak_end}"
-    elif peak_start:
-        peak_time = f"around {peak_start}"
+    timing = ""
+    if peak_start and state.get("highest_station_fire_danger") == highest:
+        timing = f" around {peak_start}" if peak_start == peak_end else f" between {peak_start} and {peak_end}"
+    if priority:
+        overview = f"Highest concern is {' and '.join(priority)} Missouri, where fire danger reaches {highest}{timing}."
     else:
-        peak_time = None
-    peak_location = ", ".join(peak_regions)
-    if not peak_location:
-        county_locations = (
-            briefing.get("county_danger", {})
-            .get("counties_by_fire_danger", {})
-            .get(highest, [])
+        overview = f"The forecast reaches {highest} fire danger{timing}."
+
+    groups = {}
+    for name, region in sorted(regions.items(), key=lambda item: item[0] not in priority):
+        facts = []
+        for key, bound, wording in (
+            ("rh", "min", "relative humidity down to {}%"),
+            ("fuel_moisture", "min", "fuel moisture down to {}%"),
+            ("wind_mph", "max", "sustained winds up to {} mph"),
+            ("gust_mph", "max", "gusts up to {} mph"),
+        ):
+            value = region.get(key, {}).get(bound)
+            if value is not None:
+                facts.append(wording.format(round(value)))
+        groups.setdefault((region["highest_fire_danger"], tuple(facts)), []).append(name)
+
+    priority_details = []
+    regional_details = []
+    for (danger, facts), names in groups.items():
+        location = " and ".join(names) + " Missouri"
+        detail = ", ".join(facts[:-1]) + f", and {facts[-1]}" if len(facts) > 2 else " and ".join(facts)
+        if danger == highest:
+            if detail:
+                priority_details.append(f"In {location}, expect {detail}.")
+        elif danger:
+            detail = f" with {detail}" if detail else ""
+            regional_details.append(f"Fire danger reaches {danger} in {location}{detail}.")
+
+    regional_timing = []
+    for name, region in regions.items():
+        start = region.get("fire_danger_peak_start")
+        end = region.get("fire_danger_peak_end")
+        if name in priority or not start:
+            continue
+        if start == end:
+            regional_timing.append(f"{name} Missouri stations reach their peak around {start}.")
+        elif end:
+            regional_timing.append(f"In {name} Missouri, stations reach their peak at times from {start} to {end}.")
+
+    shifts = {}
+    for name, region in regions.items():
+        start = region.get("wind_direction_start")
+        end = region.get("wind_direction_end")
+        if start and end and start != end:
+            shifts.setdefault((start, end), []).append(name)
+    wind = [
+        f"In {' and '.join(names)} Missouri, winds shift from {start} to {end} over the forecast period."
+        for (start, end), names in shifts.items()
+    ]
+
+    smoke = ""
+    if dispersion := briefing.get("forecast_dispersion"):
+        hours = dispersion["hours"]
+        peak_index = max(range(len(hours)), key=lambda index: hours[index]["ventilation_kt_ft"])
+        last_category = hours[-1]["smoke_dispersal"]
+        late_index = len(hours) - 1
+        while late_index > peak_index + 1 and hours[late_index - 1]["smoke_dispersal"] == last_category:
+            late_index -= 1
+        first, peak, late = hours[0], hours[peak_index], hours[late_index]
+        smoke = (
+            f"HRRR starts the period with {first['smoke_dispersal'].lower()} dispersal at {first['time']} "
+            f"and mixing heights near {round(first['mixing_height_ft'], -2):,} ft above ground."
         )
-        peak_location = ", ".join(county_locations[:5])
-    peak_sentence = (
-        f"Peak {peak_class.lower()} fire danger in {peak_location} Missouri is "
-        f"expected {peak_time}."
-        if peak_time and peak_location
-        else ""
-    )
-    wind_direction = state.get("predominant_wind_direction")
-    wind_start = state.get("wind_direction_start")
-    wind_end = state.get("wind_direction_end")
-    if wind_start and wind_end and wind_start != wind_end:
-        wind_direction_text = (
-            f" Winds turn from the {wind_start} early in the period toward the "
-            f"{wind_end} direction later."
-        )
-    elif wind_direction:
-        wind_direction_text = f" Winds are predominantly from the {wind_direction}."
-    else:
-        wind_direction_text = ""
-    discussion = (
-        f"Fire danger will range from {lowest.lower()} to {highest.lower()} across "
-        f"Missouri, with maximum temperatures ranging from {round(state['temp_f']['min'])}°F "
-        f"to {round(state['temp_f']['max'])}°F. "
-        + regional_sentence
-        + " "
-        + peak_sentence
-        + (" " if peak_sentence else "")
-        + f"The driest air will be in {driest_name} Missouri, where humidity falls to "
-        f"{round(driest_region['rh']['min']) if driest_region else round(state['rh']['min'])}%; "
-        f"fuel moisture ranges from {round(state['fuel_moisture']['min'])}% to "
-        f"{round(state['fuel_moisture']['max'])}%, and winds remain generally light, "
-        f"with the strongest values near {round(state['wind_mph']['max'])} mph in "
-        f"{strongest_name} Missouri.{wind_direction_text}"
-        + rain_text
-        + _dispersion_sentence(briefing.get("current_dispersion"))
-    )
+        if peak_index:
+            smoke += (
+                f" Ventilation peaks at {peak['time']}, with {peak['smoke_dispersal'].lower()} dispersal, "
+                f"mixing heights near {round(peak['mixing_height_ft'], -2):,} ft, "
+                f"and transport winds near {peak['transport_speed_mph']} mph."
+            )
+        if late_index != peak_index:
+            smoke += (
+                f" By {late['time']}, HRRR forecasts {late['smoke_dispersal'].lower()} dispersal "
+                f"with mixing heights near {round(late['mixing_height_ft'], -2):,} ft."
+            )
+
+    discussion = "\n\n".join(filter(None, (
+        " ".join([overview, *priority_details]),
+        " ".join([*regional_details, *regional_timing, rain_text.strip()]).strip(),
+        " ".join(wind),
+        smoke,
+    )))
     return headline, discussion
-
-
-def _dispersion_sentence(dispersion: dict | None) -> str:
-    """One factual sentence on the current hourly dispersion estimate, labeled with its time."""
-    if not dispersion:
-        return ""
-    state = dispersion["statewide"]
-    mixing = state["mixing_height_ft"].get("median")
-    transport = state["transport_wind_mph"].get("median")
-    category = state.get("smoke_dispersal")
-    if mixing is None or transport is None or not category:
-        return ""
-    direction = f" from the {state['transport_wind_from']}" if state.get("transport_wind_from") else ""
-    return (
-        f" As of {dispersion['valid_time']}, mixing heights are near {round(mixing):,} ft with "
-        f"transport winds near {round(transport)} mph{direction}, giving mostly "
-        f"{category.lower()} smoke dispersal."
-    )
 
 
 def generate_text(
@@ -197,7 +169,7 @@ def generate_text(
     """Generate validated text, retrying once with stricter instructions."""
     for attempt in range(2):
         try:
-            text = client.generate_text(prompt)
+            text = client.generate_text(prompt, max_tokens=950 if require_core_facts else 64)
             if text and valid_text(text, briefing) and (
                 not require_core_facts
                 or (
@@ -231,21 +203,28 @@ def generate_forecast_text(
     if not client.configured:
         return headline, discussion
 
+    headline_data = briefing_json({"statewide": {"fire_danger_present": briefing["statewide"]["fire_danger_present"]}})
     data = briefing_json(briefing)
     headline_prompt = (
         "Write a factual 5-8 word headline for a Missouri fire-weather forecast. "
         "Use only this JSON and mention only classes in statewide.fire_danger_present. "
-        "Do not include a date. Return plain text only.\n\n" + data
+        "Do not include a date. Return plain text only.\n\n" + headline_data
     )
     summary_prompt = (
-        "Act as an NWS meteorologist writing a concise fire-weather forecast "
-        "discussion in AFD style. Use 4-6 well-formed sentences when regional conditions differ, "
-        "using fewer only when the data is uniform. Start with the overall statewide "
-        "pattern, then synthesize the meaningful regional differences and fire-weather "
-        "drivers into natural human meteorologist prose. Combine regions with similar "
-        "conditions and emphasize the primary contrast; do not write one repetitive "
-        "sentence per region. Do not mechanically recite every JSON field, use field "
-        "labels such as 'RH', or write a list of regions. "
+        "Write a Missouri fire-weather memo that opens like an incident command briefing and develops "
+        "into a plain-language forecast discussion in the style of an NWS Area Forecast Discussion. "
+        "Aim for 250-400 words across 4-5 plain-text paragraphs when the data supports that detail. "
+        "Use a brief opening for the main concern, then develop the forecast evolution, regional "
+        "differences, and smoke and mixing guidance. Explain what changes through the operational period "
+        "and connect the timing to fire-weather drivers only where the supplied data supports it. "
+        "Lead with the highest concern, where it is, and when crews can expect it. Follow with the "
+        "wind shifts and regional contrasts that matter during the operational period. Group areas "
+        "with similar conditions and keep sentences easy to read aloud. Mention minimum relative "
+        "humidity, minimum fuel moisture, and peak sustained winds where they explain the concern. "
+        "The ranges describe daily station extrema, which may occur at different hours. "
+        "Use gust_mph.max where available and meaningful, identifying it as the forecast peak gust "
+        "and keeping it distinct from sustained wind. Omit missing values. Avoid a repetitive list "
+        "of statistics or field labels such as 'RH'. "
         "Prioritize smooth grammar, complete sentences, and natural transitions over "
         "mentioning every available number. "
         "Use full region names such as Northwest and Southwest. If wind direction "
@@ -253,8 +232,9 @@ def generate_forecast_text(
         "through the forecast period; do not invent a direction when it is absent. "
         "State when the peak danger is expected and identify the most affected regions "
         "or counties when the briefing provides them. Mention other locations only "
-        "when they add meaningful contrast. Do not invent exact timing beyond the "
-        "supplied peak window. "
+        "when they add meaningful contrast. Treat peak windows as the earliest and latest "
+        "times at which stations reach the area's highest class, not a continuous period "
+        "at that class across the area. Do not infer exact wind-shift timing. "
         "Use only this JSON. Report precipitation only in inches, never above "
         "statewide.precip_in.max, and never mention a danger class absent from "
         "statewide.fire_danger_present. Round temperature, RH, wind, and fuel "
@@ -262,11 +242,14 @@ def generate_forecast_text(
         "unavailable. Do not invent fronts, timing, cloud cover, confidence, "
         "causes, or impacts that are not in the JSON. Do not give recommendations, "
         "use headings, report averages, or use markdown. "
-        "If current_dispersion is present it describes conditions at its "
-        "valid_time (current conditions), not the afternoon forecast: you may add at most one short sentence on current "
-        "smoke dispersal (mixing height, transport wind, smoke dispersal category) and "
-        "must say it is as of that time; never present it as afternoon or forecast "
-        "conditions.\n\n" + data
+        "When forecast_dispersion is available, weave smoke dispersal and mixing heights into "
+        "the forecast narrative alongside the other weather changes. Describe when dispersal is "
+        "limited, when it improves or is strongest, and when it weakens if the hourly values show "
+        "those changes. Include representative mixing heights in feet above ground and transport "
+        "wind speeds when they help explain the trend. These are statewide grid medians and the "
+        "dispersal category corresponds to the median ventilation, so avoid applying these values "
+        "to individual regions or extending them outside the supplied hours. Omit dispersion if "
+        "forecast_dispersion is absent.\n\n" + data
     )
     generated_headline = generate_text(client, headline_prompt, briefing)
     generated_discussion = generate_text(

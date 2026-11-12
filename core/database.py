@@ -1299,6 +1299,8 @@ def init_database():
             platform TEXT NOT NULL,
             app_version TEXT NOT NULL DEFAULT '',
             forecast_enabled INTEGER NOT NULL DEFAULT 0,
+            local_forecast_titles INTEGER NOT NULL DEFAULT 0,
+            forecast_not_before TEXT,
             sitrep_enabled INTEGER NOT NULL DEFAULT 0,
             fire_weather_enabled INTEGER NOT NULL DEFAULT 0,
             fire_detection_enabled INTEGER NOT NULL DEFAULT 0,
@@ -1317,6 +1319,10 @@ def init_database():
         cursor.execute(
             "ALTER TABLE mobile_push_subscriptions ADD COLUMN fire_detection_enabled INTEGER NOT NULL DEFAULT 0"
         )
+    if "forecast_not_before" not in subscription_columns:
+        cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN forecast_not_before TEXT")
+    if "local_forecast_titles" not in subscription_columns:
+        cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN local_forecast_titles INTEGER NOT NULL DEFAULT 0")
     if "general_enabled" not in subscription_columns:
         cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN general_enabled INTEGER NOT NULL DEFAULT 0")
     cursor.execute('''
@@ -1327,6 +1333,15 @@ def init_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mobile_forecast_queue (
+            event_key TEXT NOT NULL,
+            installation_id TEXT NOT NULL,
+            forecast_day TEXT NOT NULL,
+            PRIMARY KEY (event_key, installation_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mobile_forecast_queue_installation ON mobile_forecast_queue(installation_id)")
     # What became of each alert, filled in as it is sent and as Expo's delivery receipts come back. NULL means the alert
     # was never sent through send_mobile_event (a baseline row, or one from before this was tracked).
     cursor.execute("PRAGMA table_info(mobile_push_events)")
@@ -3386,6 +3401,7 @@ def list_fire_events(
     offset: int = 0,
     admin: bool = False,
     ungrouped_only: bool = False,
+    osint_only: bool = False,
 ) -> List[Dict]:
     """
     List fire events. Public callers must pass status='approved' (the
@@ -3436,6 +3452,15 @@ def list_fire_events(
             min_lon, min_lat, max_lon, max_lat = bbox
             clauses.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
             params.extend([min_lat, max_lat, min_lon, max_lon])
+        if osint_only:
+            # Older events may predate origin tracking. Use the same source defaults as build_origin.
+            known_sources = tuple(_ORIGIN_DEFAULTS)
+            placeholders = ", ".join("?" for _ in known_sources)
+            clauses.append(f"""COALESCE(
+                (SELECT kind = 'osint_api' FROM fire_event_origins WHERE event_id = fire_events.id),
+                source NOT IN ({placeholders})
+            )""")
+            params.extend(known_sources)
         if ungrouped_only:
             clauses.append("incident_id IS NULL")
 

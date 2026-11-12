@@ -97,7 +97,7 @@ class MobilePushTests(unittest.TestCase):
         self.database_patch.stop()
         self.temporary.cleanup()
 
-    def register(self, installation_id="11111111-1111-4111-8111-111111111111"):
+    def register(self, installation_id="11111111-1111-4111-8111-111111111111", *, local_titles=False, counties=None, forecast_not_before=None):
         return mobile_push.upsert_subscription(
             installation_id=installation_id,
             expo_push_token=f"ExpoPushToken[{installation_id.replace('-', '')}]",
@@ -107,7 +107,9 @@ class MobilePushTests(unittest.TestCase):
             sitrep=True,
             fire_weather=True,
             fire_detection=False,
-            county_fips=["29019"],
+            county_fips=["29019"] if counties is None else counties,
+            local_forecast_titles=local_titles,
+            forecast_not_before=forecast_not_before,
         )
 
     def test_subscription_upsert_delete_and_recipient_filtering(self):
@@ -281,6 +283,52 @@ class MobilePushTests(unittest.TestCase):
         self.assertEqual(message["data"]["forecastRevision"], "2026-07-21T11:45:00Z")
         self.assertEqual(message["richContent"]["image"], "https://api.example/images/mo-forecastfiredanger.png?v=42")
         self.assertTrue(message["mutableContent"])
+
+    def test_local_forecast_titles_share_the_statewide_push_batch(self):
+        self.register()
+        self.register("local", local_titles=True, counties=["29019", "29001", "29003", "29005"])
+        self.register("no-match", local_titles=True, counties=["29003"])
+        tickets = [{"status": "ok", "id": f"ticket-{i}"} for i in range(3)]
+        with patch.object(mobile_push, "_send_batch", return_value=tickets) as sender:
+            sent = mobile_push.notify_forecast(
+                {"id": 43, "title": "Statewide forecast"},
+                county_danger={"29019": (2, "Boone"), "29001": (1, "Adair"), "29005": (1, "Atchison")},
+            )
+
+        self.assertEqual(sent, 3)
+        sender.assert_called_once()
+        messages = {message["to"]: message for message in sender.call_args.args[0]}
+        local = messages["ExpoPushToken[local]"]
+        self.assertEqual(local["title"], "Moderate to Elevated fire danger • Your counties")
+        self.assertEqual(local["body"], "Elevated: Boone • Moderate: Adair, Atchison • No forecast for 1 selected")
+        self.assertEqual(messages["ExpoPushToken[nomatch]"]["title"], "Statewide forecast")
+        self.assertEqual(messages["ExpoPushToken[11111111111141118111111111111111]"]["title"], "Statewide forecast")
+
+    def test_forecast_waits_until_preferred_time_or_sends_at_late_publication(self):
+        self.register("scheduled", local_titles=True, forecast_not_before="08:30")
+        self.register("immediate")
+        early = datetime(2026, 11, 11, 14, 15, tzinfo=timezone.utc)
+        due = datetime(2026, 11, 11, 14, 30, tzinfo=timezone.utc)
+        tickets = [
+            [{"status": "ok", "id": "immediate-ticket"}],
+            [{"status": "ok", "id": "scheduled-ticket"}],
+            [{"status": "ok", "id": "late-1"}, {"status": "ok", "id": "late-2"}],
+        ]
+        with patch.object(mobile_push, "datetime", wraps=datetime) as clock, patch.object(
+            mobile_push, "_send_batch", side_effect=tickets,
+        ) as sender:
+            clock.now.side_effect = lambda tz: early.astimezone(tz)
+            self.assertEqual(mobile_push.notify_forecast(
+                {"id": "early", "title": "Statewide forecast"}, county_danger={"29019": (2, "Boone")},
+            ), 1)
+            self.assertEqual(sender.call_args.args[0][0]["to"], "ExpoPushToken[immediate]")
+            self.assertEqual(mobile_push.deliver_scheduled_forecasts(early), 0)
+            self.assertEqual(mobile_push.deliver_scheduled_forecasts(due), 1)
+            self.assertEqual(sender.call_args.args[0][0]["title"], "Elevated fire danger • Boone")
+            self.assertEqual(mobile_push.deliver_scheduled_forecasts(due), 0)
+            clock.now.side_effect = lambda tz: due.astimezone(tz)
+            self.assertEqual(mobile_push.notify_forecast({"id": "late", "title": "Later forecast"}), 2)
+        self.assertEqual(sender.call_count, 3)
 
     def test_fire_alerts_seed_without_sending_then_deliver_new_products(self):
         self.register()

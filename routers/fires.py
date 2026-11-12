@@ -1144,12 +1144,16 @@ def admin_list_fire_reports(
     limit: int = 50,
     offset: int = 0,
     ungrouped_only: bool = False,
+    osint_only: bool = False,
 ):
     """List fire reports for moderation (admin only). ungrouped_only=true
     excludes reports already linked to an incident - pair with GET
     /api/admin/fires/incidents/pending-queue for the grouped queue view, so
     nothing shows up twice between the two lists."""
-    events = list_fire_events(status=status, source=source, limit=limit, offset=offset, admin=True, ungrouped_only=ungrouped_only)
+    events = list_fire_events(
+        status=status, source=source, limit=limit, offset=offset, admin=True,
+        ungrouped_only=ungrouped_only, osint_only=osint_only,
+    )
     return {"success": True, "reports": events, "count": len(events)}
 
 

@@ -21,6 +21,8 @@ EXPO_TOKEN_PATTERN = re.compile(r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$
 
 class NotificationPreferences(BaseModel):
     forecast: bool = False
+    localForecastTitles: StrictBool = False
+    forecastNotBefore: str | None = Field(default=None, pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
     sitrep: bool = False
     fireWeather: bool = False
     fireDetection: bool = False
@@ -84,6 +86,8 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
         platform=payload.platform,
         app_version=payload.appVersion,
         forecast=payload.preferences.forecast,
+        local_forecast_titles=payload.preferences.localForecastTitles,
+        forecast_not_before=payload.preferences.forecastNotBefore,
         sitrep=payload.preferences.sitrep,
         fire_weather=payload.preferences.fireWeather,
         fire_detection=payload.preferences.fireDetection,

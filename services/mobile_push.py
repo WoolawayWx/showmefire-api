@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from ai.briefing import DANGER_LABELS
 from core.database import get_db_path
 from core.sandbox import is_sandbox
 
@@ -58,6 +59,7 @@ def _delete_subscription_rows(connection: sqlite3.Connection, installation_id: s
         "DELETE FROM mobile_push_tickets WHERE installation_id = ?",
         (installation_id,),
     )
+    connection.execute("DELETE FROM mobile_forecast_queue WHERE installation_id = ?", (installation_id,))
     connection.execute(
         "DELETE FROM mobile_push_subscriptions WHERE installation_id = ?",
         (installation_id,),
@@ -76,6 +78,8 @@ def upsert_subscription(
     fire_detection: bool,
     county_fips: list[str],
     general: bool = False,
+    local_forecast_titles: bool = False,
+    forecast_not_before: str | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as connection:
@@ -94,14 +98,16 @@ def upsert_subscription(
             '''
             INSERT INTO mobile_push_subscriptions (
                 installation_id, expo_push_token, platform, app_version,
-                forecast_enabled, sitrep_enabled, fire_weather_enabled, fire_detection_enabled, general_enabled,
+                forecast_enabled, local_forecast_titles, forecast_not_before, sitrep_enabled, fire_weather_enabled, fire_detection_enabled, general_enabled,
                 county_fips_json, enabled, created_at, updated_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(installation_id) DO UPDATE SET
                 expo_push_token = excluded.expo_push_token,
                 platform = excluded.platform,
                 app_version = excluded.app_version,
                 forecast_enabled = excluded.forecast_enabled,
+                local_forecast_titles = excluded.local_forecast_titles,
+                forecast_not_before = excluded.forecast_not_before,
                 sitrep_enabled = excluded.sitrep_enabled,
                 fire_weather_enabled = excluded.fire_weather_enabled,
                 fire_detection_enabled = excluded.fire_detection_enabled,
@@ -117,6 +123,8 @@ def upsert_subscription(
                 platform,
                 app_version,
                 int(forecast),
+                int(local_forecast_titles),
+                forecast_not_before,
                 int(sitrep),
                 int(fire_weather),
                 int(fire_detection),
@@ -127,6 +135,8 @@ def upsert_subscription(
                 now,
             ),
         )
+        if not forecast:
+            connection.execute("DELETE FROM mobile_forecast_queue WHERE installation_id = ?", (installation_id,))
     return {"registered": True, "updatedAt": now}
 
 
@@ -165,7 +175,7 @@ def record_event(event_key: str, event_type: str, payload: dict[str, Any]) -> bo
 
 def _eligible_subscriptions(
     event_type: str, county_fips: Iterable[str] | None = None, *, all_counties: bool = False,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Subscribers opted into `event_type`. County-scoped channels also need a
     county match unless `all_counties` (manual statewide broadcast) is set.
     fire_detection also skips installations that already got
@@ -181,7 +191,7 @@ def _eligible_subscriptions(
     capped: set[str] = set()
     with _connect() as connection:
         rows = connection.execute(
-            f"SELECT installation_id, expo_push_token, county_fips_json, app_version FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
+            f"SELECT installation_id, expo_push_token, county_fips_json, app_version, local_forecast_titles, forecast_not_before FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
         ).fetchall()
         if event_type == "fire_detection":
             capped = {
@@ -195,21 +205,26 @@ def _eligible_subscriptions(
                     (FEEDBACK_PROMPT_DAILY_CAP,),
                 ).fetchall()
             }
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     for row in rows:
         if row["installation_id"] in capped:
             continue
-        if event_type in {"fire_weather", "fire_detection"} and not (all_counties and not county_set):
+        scoped = event_type in {"fire_weather", "fire_detection"} and not (all_counties and not county_set)
+        personalized = event_type == "forecast" and row["local_forecast_titles"]
+        selected = set()
+        if scoped or personalized:
             try:
                 selected = set(json.loads(row["county_fips_json"] or "[]"))
-            except json.JSONDecodeError:
-                selected = set()
-            if not county_set.intersection(selected):
-                continue
+            except (TypeError, json.JSONDecodeError):
+                pass
+        if scoped and not county_set.intersection(selected):
+            continue
         result.append({
             "installation_id": row["installation_id"],
             "expo_push_token": row["expo_push_token"],
             "app_version": row["app_version"] or "",
+            "forecast_title_counties": selected if personalized else set(),
+            "forecast_not_before": row["forecast_not_before"],
         })
     return result
 
@@ -265,6 +280,33 @@ def _send_batch(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return []
 
 
+def _forecast_county_copy(
+    counties: set[str], danger: dict[str, tuple[int, str]],
+) -> tuple[str, str] | None:
+    groups: dict[int, list[str]] = {}
+    for fips in counties:
+        if fips in danger:
+            level, name = danger[fips]
+            groups.setdefault(level, []).append(name)
+    if not groups:
+        return None
+
+    low, high = DANGER_LABELS[min(groups)], DANGER_LABELS[max(groups)]
+    category = high if low == high else f"{low} to {high}"
+    missing = len(counties) - sum(len(names) for names in groups.values())
+    if len(counties) == 1:
+        return f"{category} fire danger • {next(iter(groups.values()))[0]}", "Your daily fire weather forecast is ready."
+
+    title = f"{category} fire danger • Your counties"
+    levels = sorted(groups, reverse=True)
+    unavailable = f" • No forecast for {missing} selected" if missing else ""
+    details = " • ".join(f"{DANGER_LABELS[level]}: {', '.join(sorted(groups[level]))}" for level in levels)
+    if len(details) + len(unavailable) > 500:
+        details = " • ".join(f"{DANGER_LABELS[level]}: {len(groups[level])}" for level in levels)
+        details = f"Selected counties — {details}"
+    return title, details + unavailable
+
+
 def send_mobile_event(
     *,
     event_type: str,
@@ -276,26 +318,58 @@ def send_mobile_event(
     extra_data: dict[str, Any] | None = None,
     image_url: str | None = None,
     all_counties: bool = False,
+    forecast_county_danger: dict[str, tuple[int, str]] | None = None,
 ) -> int:
     if is_sandbox():  # reviewer sandbox: nothing is recorded or sent
         return 0
     payload = {"title": title, "body": body, "url": url, **(extra_data or {})}
     if image_url:
         payload["imageUrl"] = image_url
-    if not record_event(event_key, event_type, payload):
+    subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
+    if event_type == "forecast":
+        now = datetime.now(CHICAGO_TZ)
+        clock = now.strftime("%H:%M")
+        pending = [item for item in subscriptions if (item["forecast_not_before"] or "") > clock]
+        subscriptions = [item for item in subscriptions if (item["forecast_not_before"] or "") <= clock]
+        with _connect() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO mobile_push_events (event_key, event_type, payload_json) VALUES (?, ?, ?)",
+                (event_key, event_type, json.dumps({
+                    **payload, "_countyDanger": forecast_county_danger or {},
+                } if pending else payload)),
+            )
+            if not cursor.rowcount:
+                return 0
+            connection.executemany(
+                "INSERT INTO mobile_forecast_queue (event_key, installation_id, forecast_day) VALUES (?, ?, ?)",
+                [(event_key, item["installation_id"], now.date().isoformat()) for item in pending],
+            )
+    elif not record_event(event_key, event_type, payload):
         return 0
 
-    subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
+    return _deliver_event(
+        event_type, event_key, subscriptions, title, body, url,
+        extra_data=extra_data, image_url=image_url, forecast_county_danger=forecast_county_danger,
+    )
+
+
+def _deliver_event(
+    event_type: str, event_key: str, subscriptions: list[dict[str, Any]], title: str, body: str, url: str,
+    *, extra_data: dict[str, Any] | None = None, image_url: str | None = None,
+    forecast_county_danger: dict[str, tuple[int, str]] | None = None,
+) -> int:
     unregistered = 0
     sent = 0
     for start in range(0, len(subscriptions), 100):
         batch_subscriptions = subscriptions[start:start + 100]
         messages = []
         for item in batch_subscriptions:
+            local_copy = _forecast_county_copy(item["forecast_title_counties"], forecast_county_danger or {})
+            message_title, message_body = local_copy or (title, body)
             message = {
                 "to": item["expo_push_token"],
-                "title": title,
-                "body": body[:500],
+                "title": message_title,
+                "body": message_body[:500],
                 "sound": "default",
                 "priority": "high" if event_type == "fire_weather" else "default",
                 "channelId": _channel_for(event_type, item["app_version"]),
@@ -321,13 +395,62 @@ def send_mobile_event(
     return sent
 
 
+def deliver_scheduled_forecasts(now: datetime | None = None) -> int:
+    """Claim today's due forecast notifications once across scheduler processes."""
+    if is_sandbox():
+        return 0
+    now = (now or datetime.now(timezone.utc)).astimezone(CHICAGO_TZ)
+    today, clock = now.date().isoformat(), now.strftime("%H:%M")
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM mobile_forecast_queue WHERE forecast_day < ?", (today,))
+        due = connection.execute(
+            """SELECT q.event_key, q.installation_id, s.expo_push_token, s.app_version,
+                      s.local_forecast_titles, s.county_fips_json, e.payload_json
+               FROM mobile_forecast_queue q
+               JOIN mobile_push_subscriptions s USING (installation_id)
+               JOIN mobile_push_events e USING (event_key)
+               WHERE q.forecast_day = ? AND s.enabled = 1 AND s.forecast_enabled = 1
+                 AND COALESCE(s.forecast_not_before, '') <= ?""",
+            (today, clock),
+        ).fetchall()
+        groups = {}
+        payloads = {}
+        for row in due:
+            item = dict(row)
+            key = item["event_key"]
+            payloads[key] = item.pop("payload_json")
+            groups.setdefault(key, []).append(item)
+        connection.executemany(
+            "DELETE FROM mobile_forecast_queue WHERE event_key = ? AND installation_id = ?",
+            [(row["event_key"], row["installation_id"]) for row in due],
+        )
+
+    sent = 0
+    for key, subscriptions in groups.items():
+        payload = json.loads(payloads[key])
+        for item in subscriptions:
+            item["forecast_title_counties"] = (
+                set(json.loads(item["county_fips_json"])) if item["local_forecast_titles"] else set()
+            )
+        sent += _deliver_event(
+            "forecast", key, subscriptions, payload["title"], payload["body"], payload["url"],
+            extra_data={name: value for name, value in payload.items()
+                        if name not in {"title", "body", "url", "imageUrl", "_countyDanger"}},
+            image_url=payload.get("imageUrl"), forecast_county_danger=payload.get("_countyDanger"),
+        )
+    return sent
+
+
 def _record_send_result(event_key: str, *, recipients: int, sent: int, unregistered: int) -> None:
     """Keep the outcome of one alert on its event row. A tracking failure must never fail the alert itself."""
     try:
         with _connect() as connection:
             connection.execute(
-                """UPDATE mobile_push_events SET recipients = ?, sent = ?, unregistered = ?, failed = ?,
-                       delivered = 0, receipt_errors = 0 WHERE event_key = ?""",
+                """UPDATE mobile_push_events SET recipients = COALESCE(recipients, 0) + ?,
+                       sent = COALESCE(sent, 0) + ?, unregistered = COALESCE(unregistered, 0) + ?,
+                       failed = COALESCE(failed, 0) + ?, delivered = COALESCE(delivered, 0),
+                       receipt_errors = COALESCE(receipt_errors, 0) WHERE event_key = ?""",
                 (recipients, sent, unregistered, max(0, recipients - sent - unregistered), event_key),
             )
     except sqlite3.Error:
@@ -353,7 +476,10 @@ def _tally_receipts(connection: sqlite3.Connection, tallies: dict[str, dict[str,
         )
 
 
-def notify_forecast(forecast: dict[str, Any], image_url: str | None = None) -> int:
+def notify_forecast(
+    forecast: dict[str, Any], image_url: str | None = None,
+    *, county_danger: dict[str, tuple[int, str]] | None = None,
+) -> int:
     identity = forecast.get("updated_at") or forecast.get("id") or forecast.get("valid_time")
     return send_mobile_event(
         event_type="forecast",
@@ -363,6 +489,7 @@ def notify_forecast(forecast: dict[str, Any], image_url: str | None = None) -> i
         url="/forecasts",
         extra_data={"forecastRevision": str(identity)},
         image_url=image_url,
+        forecast_county_danger=county_danger,
     )
 
 
