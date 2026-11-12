@@ -1571,6 +1571,7 @@ def init_database():
             subject TEXT NOT NULL,
             html_body TEXT NOT NULL,
             text_body TEXT NOT NULL,
+            audience_list_id TEXT NOT NULL DEFAULT 'show-me-fire-newsletter',
             status TEXT NOT NULL DEFAULT 'draft'
                 CHECK (status IN ('draft', 'sending', 'sent')),
             resend_broadcast_id TEXT,
@@ -1580,6 +1581,11 @@ def init_database():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    bulletin_columns = {row[1] for row in cursor.execute("PRAGMA table_info(bulletins)").fetchall()}
+    if "audience_list_id" not in bulletin_columns:
+        cursor.execute(
+            "ALTER TABLE bulletins ADD COLUMN audience_list_id TEXT NOT NULL DEFAULT 'show-me-fire-newsletter'"
+        )
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bulletins_status_created ON bulletins(status, created_at DESC)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS newsletter_subscribers (
@@ -7066,6 +7072,28 @@ def list_newsletter_subscribers() -> List[Dict]:
         conn.close()
 
 
+def list_active_newsletter_recipients(list_id: str) -> List[Dict]:
+    """Return active subscribers in one local newsletter list for targeted sends."""
+    conn = sqlite3.connect(get_db_path(), timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [
+            dict(row) for row in conn.execute(
+                """SELECT email, manage_token
+                   FROM newsletter_subscribers
+                   WHERE unsubscribed_at IS NULL
+                     AND manage_token IS NOT NULL AND manage_token != ''
+                     AND EXISTS (
+                         SELECT 1 FROM json_each(subscription_types_json) WHERE value = ?
+                     )
+                   ORDER BY email""",
+                (list_id.strip(),),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def replace_newsletter_preferences(email: str, preferences: List[Dict]) -> List[Dict]:
     normalized = email.strip().lower()
     conn = sqlite3.connect(get_db_path(), timeout=15)
@@ -7178,13 +7206,18 @@ def unsubscribe_newsletter(token: str) -> bool:
         conn.close()
 
 
-def create_bulletin(subject: str, html_body: str, text_body: str) -> Dict:
+def create_bulletin(
+    subject: str,
+    html_body: str,
+    text_body: str,
+    audience_list_id: str = "show-me-fire-newsletter",
+) -> Dict:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
-            "INSERT INTO bulletins (subject, html_body, text_body) VALUES (?, ?, ?)",
-            (subject.strip(), html_body, text_body),
+            "INSERT INTO bulletins (subject, html_body, text_body, audience_list_id) VALUES (?, ?, ?, ?)",
+            (subject.strip(), html_body, text_body, audience_list_id.strip()),
         )
         conn.commit()
         return dict(conn.execute("SELECT * FROM bulletins WHERE id = ?", (cursor.lastrowid,)).fetchone())
@@ -7211,15 +7244,21 @@ def list_bulletins() -> List[Dict]:
         conn.close()
 
 
-def update_bulletin(bulletin_id: int, subject: str, html_body: str, text_body: str) -> Optional[Dict]:
+def update_bulletin(
+    bulletin_id: int,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    audience_list_id: str = "show-me-fire-newsletter",
+) -> Optional[Dict]:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.execute(
             '''UPDATE bulletins
-               SET subject = ?, html_body = ?, text_body = ?, updated_at = CURRENT_TIMESTAMP
+               SET subject = ?, html_body = ?, text_body = ?, audience_list_id = ?, updated_at = CURRENT_TIMESTAMP
                WHERE id = ? AND status = 'draft' ''',
-            (subject.strip(), html_body, text_body, bulletin_id),
+            (subject.strip(), html_body, text_body, audience_list_id.strip(), bulletin_id),
         )
         conn.commit()
         if cursor.rowcount != 1:

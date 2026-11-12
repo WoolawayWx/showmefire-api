@@ -15,6 +15,7 @@ from core.database import (
     get_bulletin,
     get_newsletter_account_by_token,
     get_newsletter_preferences,
+    list_active_newsletter_recipients,
     list_newsletter_subscribers,
     list_bulletins,
     mark_bulletin_sent,
@@ -28,7 +29,7 @@ from core.database import (
 from core.security import require_admin
 from services.graphics_email import (
     set_audience_contact_properties,
-    send_bulletin_broadcast,
+    send_bulletin_email,
     set_audience_contact_unsubscribed,
     upsert_audience_contact,
 )
@@ -102,6 +103,15 @@ class BulletinCreate(BaseModel):
     subject: str = Field(min_length=1, max_length=255)
     html_body: str = Field(min_length=1)
     text_body: str = Field(min_length=1)
+    audience_list_id: str = "show-me-fire-newsletter"
+
+    @field_validator("audience_list_id")
+    @classmethod
+    def validate_audience_list(cls, value: str) -> str:
+        value = str(value).strip()
+        if value not in LIST_OPTIONS:
+            raise ValueError(f"Unknown email list: {value}")
+        return value
 
 
 class NewsletterManage(NewsletterSignup):
@@ -234,12 +244,12 @@ def newsletter_counties():
 
 @router.get("/api/admin/bulletins")
 def admin_list_bulletins(_admin: str = Depends(require_admin)):
-    return {"bulletins": list_bulletins()}
+    return {"bulletins": list_bulletins(), "lists": [{"id": key, "label": value} for key, value in LIST_OPTIONS.items()]}
 
 
 @router.post("/api/admin/bulletins")
 def admin_create_bulletin(payload: BulletinCreate, _admin: str = Depends(require_admin)):
-    return create_bulletin(payload.subject, payload.html_body, payload.text_body)
+    return create_bulletin(payload.subject, payload.html_body, payload.text_body, payload.audience_list_id)
 
 
 @router.get("/api/admin/bulletins/{bulletin_id}")
@@ -252,7 +262,9 @@ def admin_get_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
 
 @router.put("/api/admin/bulletins/{bulletin_id}")
 def admin_update_bulletin(bulletin_id: int, payload: BulletinCreate, _admin: str = Depends(require_admin)):
-    bulletin = update_bulletin(bulletin_id, payload.subject, payload.html_body, payload.text_body)
+    bulletin = update_bulletin(
+        bulletin_id, payload.subject, payload.html_body, payload.text_body, payload.audience_list_id
+    )
     if not bulletin:
         raise HTTPException(status_code=404, detail="Draft bulletin not found")
     return bulletin
@@ -280,14 +292,27 @@ def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
         raise HTTPException(status_code=409, detail="Bulletin has already been sent")
     if not claim_bulletin_send(bulletin_id):
         raise HTTPException(status_code=409, detail="Bulletin send is already in progress")
+    recipients = list_active_newsletter_recipients(bulletin["audience_list_id"])
+    if not recipients:
+        set_bulletin_error(bulletin_id, "No active subscribers are on this email list.")
+        raise HTTPException(status_code=409, detail="There are no active subscribers on this email list.")
+    sent = 0
     try:
-        broadcast_id = send_bulletin_broadcast(
-            bulletin["subject"], bulletin["html_body"], bulletin["text_body"]
-        )
-        return mark_bulletin_sent(bulletin_id, broadcast_id)
+        for recipient in recipients:
+            manage_base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
+            manage_url = f"{manage_base}/comms/emails/manage?token={quote(recipient['manage_token'], safe='')}"
+            send_bulletin_email(
+                recipient["email"],
+                bulletin["subject"],
+                bulletin["html_body"],
+                bulletin["text_body"],
+                manage_url,
+            )
+            sent += 1
+        return mark_bulletin_sent(bulletin_id, f"targeted:{sent}")
     except Exception as exc:
-        set_bulletin_error(bulletin_id, str(exc))
-        raise HTTPException(status_code=502, detail=f"Bulletin send failed: {exc}") from exc
+        set_bulletin_error(bulletin_id, f"{exc} (sent {sent} of {len(recipients)})")
+        raise HTTPException(status_code=502, detail=f"Bulletin send failed after {sent} of {len(recipients)} recipients: {exc}") from exc
 
 
 @router.get("/api/admin/newsletter/preferences")

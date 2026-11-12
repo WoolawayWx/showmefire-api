@@ -126,6 +126,35 @@ def send_bulletin_broadcast(subject: str, html_body: str, text_body: str) -> str
     return broadcast_id
 
 
+def send_bulletin_email(
+    recipient: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    manage_url: str,
+) -> str:
+    """Send one targeted bulletin while preserving the newsletter footer."""
+    sender, reply_to = _sender_settings()
+    html_footer = (
+        '<p style="font-size:12px;color:#64748b">'
+        'Manage your Show Me Fire email preferences: '
+        f'<a href="{html.escape(manage_url, quote=True)}">Manage preferences</a>'
+        "</p>"
+    )
+    text_footer = f"\n\nManage your Show Me Fire email preferences:\n{manage_url}\n"
+    payload = {
+        "from": sender,
+        "to": [recipient],
+        "subject": subject,
+        "html": html_body + html_footer,
+        "text": text_body + text_footer,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    result = _resend_request("POST", "/emails", payload)
+    return str(result.get("id") or "")
+
+
 def send_daily_forecast_email(
     recipient: str, subject: str, html_body: str, text_body: str,
 ) -> str:
