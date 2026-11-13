@@ -53,6 +53,8 @@ def _land_cover_context(members: list, incident: Optional[dict] = None) -> dict:
         "land_cover": land_cover_strings[-1] if land_cover_strings else None,
         "fuel_groups": None,
         "fuel_source": None,
+        "fuel_cells": None,
+        "fuel_resolution_km": None,
     }
     # Our own fuel/cover summary around the incident (LANDFIRE fuel models from the static bundle), so every incident has
     # one whichever detection feed saw it. Stored values from the detections win; this fills what they lack.
@@ -63,6 +65,8 @@ def _land_cover_context(members: list, incident: Optional[dict] = None) -> dict:
         if computed:
             context["fuel_groups"] = computed["groups"]
             context["fuel_source"] = computed["source"]
+            context["fuel_cells"] = computed["cells"]
+            context["fuel_resolution_km"] = computed["resolution_km"]
             if context["fuel_model_fbfm40"] is None:
                 context["fuel_model_fbfm40"] = computed["fuel_model_fbfm40"]
             if context["avg_canopy_cover_pct"] is None:

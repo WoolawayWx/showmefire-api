@@ -59,6 +59,26 @@ class IncidentFuelTests(unittest.TestCase):
         self.assertEqual(result["canopy_cover_pct"], 40.0)
         self.assertIn(result["fuel_model_fbfm40"], (102, 183))
         self.assertEqual(result["source"], incident_fuel.SOURCE)
+        self.assertGreaterEqual(result["cells"], 2)
+        self.assertAlmostEqual(result["resolution_km"], 1.0, delta=0.2)      # the synthetic grid is ~1 km
+
+    def test_a_coarse_grid_reports_that_it_rests_on_one_cell(self):
+        # ~3 km cells like the production bundle: a 1.5 km radius reaches a single cell, so the summary says so.
+        n = 12
+        lat = np.linspace(36.0, 36.0 + 0.028 * (n - 1), n)[:, None] * np.ones(n)
+        lon = np.linspace(-93.9, -93.9 + 0.034 * (n - 1), n)[None, :] * np.ones((n, 1))
+        full = lambda value: (("y", "x"), np.full((n, n), value, dtype="float32"))
+        ds = xr.Dataset(
+            {"slope_degrees": full(5.0), "aspect_sin": full(0.0), "aspect_cos": full(1.0), "canopy_cover_pct": full(60.0),
+             "canopy_height_m": full(10.0), "latitude": (("y", "x"), lat.astype("float32")),
+             "longitude": (("y", "x"), lon.astype("float32")), "static_valid_mask": full(1.0), "fuel_model_fbfm40": full(189.0)},
+            coords={"x": np.arange(n) * 3000.0, "y": np.arange(n) * 3000.0}, attrs={"bundle_version": "coarse"})
+        ds.to_netcdf(self.bundle, engine="netcdf4")
+        with patch.dict("os.environ", {"FIRE_BEHAVIOR_STATIC_BUNDLE": str(self.bundle)}):
+            result = incident_fuel.fuel_context(36.15, -93.75)
+        self.assertEqual(result["cells"], 1)
+        self.assertEqual(result["groups"], [{"group": "Timber litter", "pct": 100}])
+        self.assertGreaterEqual(result["resolution_km"], 2.5)
 
     def test_non_burnable_codes_read_as_land_cover(self):
         with self._use([91] * 6 + [93] * 14):

@@ -92,6 +92,9 @@ def _compute(latitude: float, longitude: float, radius_km: float) -> Optional[di
         "canopy_cover_pct": round(float(canopy.mean()), 1) if canopy.size else None,
         "groups": groups,
         "radius_km": radius_km,
+        # How coarse the data is: the grid's cell size and how many cells the summary rests on. With cells of ~3 km and
+        # a 1.5 km radius this is usually 1, which means "the fuel of this one cell", not a mix; callers should say so.
+        "resolution_km": round(spacing_km, 1),
         "cells": int(total),
         "source": SOURCE,
         "bundle_version": fields.get("bundle_version"),
