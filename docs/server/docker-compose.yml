@@ -1,0 +1,163 @@
+services:
+  backend:
+    build: ./showmefire-api
+    image: showmefire-api:latest
+    container_name: show-me-fire-api
+    # Web API + the quick in-process scheduler jobs (stations, alerts, pushes, fire detections, WildCAD...).
+    # The long jobs (forecast-v1, hourly HRRR, archives...) run in the `scheduler` service below, so a deploy of
+    # the API no longer kills them. Cron-driven batch jobs (forecasts, maps, validation) run in the `worker`
+    # service so a memory-hungry job can only OOM-kill itself, not the API.
+    mem_limit: 14g
+    memswap_limit: 14g
+    environment:
+      # Which scheduled-job groups this process runs (core/job_groups.py). `api` = everything except the heavy jobs,
+      # which the `scheduler` service runs. Remove this line (and stop `scheduler`) to roll back to the old single process.
+      - SMF_SCHEDULER_GROUPS=api
+      - SMF_START_CRON=0
+      - SMF_GIS_PUBLISH_DIR=/app/gis
+      - SMF_GIS_RESOLUTION_METERS=3000
+      - SMF_GIS_RETENTION_DAYS=30
+      # Day archive (services/day_archive.py). Both stay off until the first bundles are
+      # checked: PRUNE_LOCAL deletes server source files older than SMF_ARCHIVE_LOCAL_DAYS (7)
+      # once their bundle is verified in R2; DELETE removes a bundle from R2 only after the
+      # 30-day window AND a verified download receipt.
+      - SMF_DAY_ARCHIVE_PRUNE_LOCAL=false
+      - SMF_DAY_ARCHIVE_DELETE=false
+    volumes:
+      - /mnt/adrive/showmefire-data/gis:/app/gis
+      - ./showmefire-api:/app
+      - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/archive:/app/archive
+      - /mnt/adrive/showmefire-data/cache:/app/cache
+      - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      - /mnt/adrive/showmefire-data/files:/app/files
+    ports:
+      - "5001:8000"
+    env_file:
+      - ./showmefire-api/.env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  scheduler:
+    # Same image/volumes as backend, but runs only the heavy APScheduler jobs (forecast-v1, hourly HRRR, RTMA,
+    # precipitation/burn-ban graphics, archives, verification, retraining, storage cleanup): no web server.
+    # `./deploy.sh --api-only` restarts only the backend and leaves this running. Runbook:
+    # showmefire-api/docs/scheduler_worker.md. A stop waits for running jobs (SMF_SCHEDULER_STOP_WAIT_SECONDS, below the grace period).
+    image: showmefire-api:latest
+    container_name: show-me-fire-scheduler
+    depends_on:
+      - backend
+    command: ["python", "-m", "core.scheduler_worker", "--groups", "heavy"]
+    mem_limit: 10g
+    memswap_limit: 10g
+    stop_grace_period: 30m
+    environment:
+      - SMF_SCHEDULER_GROUPS=heavy
+      - SMF_START_CRON=0
+      - SMF_DOWNLOAD_MODOT_ROADS=0
+      - SMF_METRICS_ENABLED=0
+      - SMF_SCHEDULER_STOP_WAIT_SECONDS=1500
+      - SMF_GIS_PUBLISH_DIR=/app/gis
+      - SMF_GIS_RESOLUTION_METERS=3000
+      - SMF_GIS_RETENTION_DAYS=30
+      - SMF_DAY_ARCHIVE_PRUNE_LOCAL=false
+      - SMF_DAY_ARCHIVE_DELETE=false
+    volumes:
+      - /mnt/adrive/showmefire-data/gis:/app/gis
+      - ./showmefire-api:/app
+      - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/archive:/app/archive
+      - /mnt/adrive/showmefire-data/cache:/app/cache
+      - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      - /mnt/adrive/showmefire-data/files:/app/files
+    env_file:
+      - ./showmefire-api/.env
+    healthcheck:
+      # Healthy while the worker's heartbeat file is under 5 minutes old.
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(stat -c %Y /app/data/current_conditions/status/scheduler_heavy.json) )) -lt 300"]
+      interval: 1m
+      start_period: 5m
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    # Same image/volumes as backend, but runs only cron (forecasts.sh,
+    # forecasts_09z.sh, maps.sh, validateForecast.sh, ...). Reaches the API at
+    # http://backend:8000 (see scripts/worker-entrypoint.sh).
+    image: showmefire-api:latest
+    container_name: show-me-fire-worker
+    depends_on:
+      - backend
+    entrypoint: ["/bin/sh", "/app/scripts/worker-entrypoint.sh"]
+    command: ["cron", "-f"]
+    mem_limit: 8g
+    memswap_limit: 8g
+    environment:
+      - SMF_GIS_PUBLISH_DIR=/app/gis
+      - SMF_GIS_RESOLUTION_METERS=3000
+      - SMF_GIS_RETENTION_DAYS=30
+    volumes:
+      - /mnt/adrive/showmefire-data/gis:/app/gis
+      - ./showmefire-api:/app
+      - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/archive:/app/archive
+      - /mnt/adrive/showmefire-data/cache:/app/cache
+      - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      - /mnt/adrive/showmefire-data/files:/app/files
+    env_file:
+      - ./showmefire-api/.env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  qgis-server:
+    # Native arm64 build (Debian trixie's packaged qgis-server) — matches the
+    # QGIS 4.0 project template in qgis/showmefire.qgz. Replaces the official
+    # qgis/qgis-server:4.0-trixie image, which has no arm64 build and had to
+    # run under amd64 emulation on this Ampere host.
+    build: ./showmefire-api/qgis
+    container_name: show-me-fire-qgis
+    restart: unless-stopped
+    # Keep GIS serving from contending with forecast generation on the host.
+    cpus: "0.50"
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpu_shares: 128
+    pids_limit: 64
+    environment:
+      LANG: en_US.UTF-8
+      QGIS_PROJECT_FILE: /project/showmefire.qgz
+      QGIS_SERVER_LOG_STDERR: "1"
+      QGIS_SERVER_LOG_LEVEL: "2"
+      HOME: /var/lib/qgis
+      DISPLAY: ":99"
+    # Start QGIS directly. The image's helper script cannot reliably detect
+    # its child processes when running through Docker Desktop x86 emulation.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        rm -f /tmp/.X99-lock
+        Xvfb :99 -ac -screen 0 1280x1024x16 +extension GLX +render -noreset &
+        exec spawn-fcgi -n -u www-data -g www-data -d /var/lib/qgis -p 9993 -- /usr/lib/cgi-bin/qgis_mapserv.fcgi
+    volumes:
+      # Runtime forecast data is intentionally ignored by Git.
+      - ${SMF_GIS_PUBLISH_DIR:-/mnt/adrive/showmefire-data/gis}:/data:ro
+      # The QGIS project template is tracked in the repository.
+      - ./showmefire-api/qgis/showmefire.qgz:/project/showmefire.qgz:ro
+    expose:
+      - "9993"
+  qgis-proxy:
+    image: nginx:1.27-alpine
+    container_name: show-me-fire-qgis-proxy
+    restart: unless-stopped
+    cpus: "0.25"
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpu_shares: 64
+    pids_limit: 32
+    depends_on:
+      - qgis-server
+    ports:
+      - "8085:80"
+    volumes:
+      - ./showmefire-api/qgis/nginx.conf:/etc/nginx/conf.d/default.conf:ro
