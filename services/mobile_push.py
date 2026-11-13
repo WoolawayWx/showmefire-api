@@ -164,6 +164,51 @@ def purge_delivery_records(retention_days: int = 7) -> dict[str, int]:
     return {"receipts": receipt_cursor.rowcount, "tickets": ticket_cursor.rowcount}
 
 
+HISTORY_DAYS = 7  # matches purge_delivery_records: tickets older than this are deleted anyway
+HISTORY_MAX_ITEMS = 100
+
+
+def notification_history(installation_id: str, days: int = HISTORY_DAYS) -> list[dict[str, Any]]:
+    """What was sent to one installation in the last `days` days, newest first.
+
+    Built from the delivery tickets (so only pushes Expo accepted for this
+    device) joined to the event payload. Forecast copy personalised per device
+    is not stored, so a forecast shows the statewide title/body. Rows vanish
+    when the subscription is deleted, because its tickets are deleted with it.
+    """
+    days = max(1, min(days, HISTORY_DAYS))
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT e.event_key, e.event_type, e.payload_json, MIN(t.created_at) AS sent_at
+               FROM mobile_push_tickets t JOIN mobile_push_events e ON e.event_key = t.event_key
+               WHERE t.installation_id = ? AND t.created_at >= datetime('now', ?)
+               GROUP BY e.event_key
+               ORDER BY sent_at DESC, e.event_key DESC
+               LIMIT ?""",
+            (installation_id, f"-{days} days", HISTORY_MAX_ITEMS),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or not payload.get("title"):
+            continue
+        item = {
+            "id": row["event_key"],
+            "eventType": row["event_type"],
+            "title": str(payload["title"]),
+            "body": str(payload.get("body") or ""),
+            "url": str(payload.get("url") or ""),
+            "sentAt": row["sent_at"].replace(" ", "T") + "Z",
+        }
+        if payload.get("imageUrl"):
+            item["imageUrl"] = str(payload["imageUrl"])
+        items.append(item)
+    return items
+
+
 def record_event(event_key: str, event_type: str, payload: dict[str, Any]) -> bool:
     with _connect() as connection:
         cursor = connection.execute(
@@ -251,6 +296,21 @@ def _channel_for(event_type: str, app_version: str) -> str:
         "fire_detection": "fire-detection",
         "general": "general",
     }[event_type]
+
+
+# Notification action category the app registers at runtime (src/notifications/push.ts); it has one
+# "Open in Maps" button. Apps that don't know the id simply show the notification without buttons.
+FIRE_DETECTION_MAP_CATEGORY = "fire-detection-map"
+
+
+def _valid_coordinate(latitude: Any, longitude: Any) -> tuple[float | None, float | None]:
+    try:
+        lat, lon = round(float(latitude), 5), round(float(longitude), 5)
+    except (TypeError, ValueError):
+        return None, None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None, None
+    return lat, lon
 
 
 def _headers() -> dict[str, str]:
@@ -375,6 +435,8 @@ def _deliver_event(
                 "channelId": _channel_for(event_type, item["app_version"]),
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
             }
+            if event_type == "fire_detection" and (extra_data or {}).get("latitude") is not None:
+                message["categoryId"] = FIRE_DETECTION_MAP_CATEGORY
             if image_url:
                 message["richContent"] = {"image": image_url}
                 message["mutableContent"] = True
@@ -571,6 +633,11 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
         extra_data = {"confidenceLabel": incident.get("confidence_label")}
         if slug:
             extra_data["incidentSlug"] = slug
+        # The app's "Open in Maps" notification action drops a pin here (see FIRE_DETECTION_MAP_CATEGORY).
+        latitude, longitude = _valid_coordinate(incident.get("latitude"), incident.get("longitude"))
+        if latitude is not None:
+            extra_data["latitude"] = latitude
+            extra_data["longitude"] = longitude
         sent += send_mobile_event(
             event_type="fire_detection",
             event_key=f"fire_detection:{incident_id}",

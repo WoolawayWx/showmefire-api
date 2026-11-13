@@ -135,6 +135,8 @@ def list_feedback_candidate_incidents(now: datetime | None = None) -> list[dict]
                 "county_name": incident.get("county_name"),
                 "score": score,
                 "confidence_label": label,
+                "latitude": incident.get("centroid_latitude"),
+                "longitude": incident.get("centroid_longitude"),
             })
     return result
 

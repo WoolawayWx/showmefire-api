@@ -113,13 +113,15 @@ class BulletinCreate(BaseModel):
     subject: str = Field(min_length=1, max_length=255)
     html_body: str = Field(min_length=1)
     text_body: str = Field(min_length=1)
-    audience_list_id: str = "show-me-fire-newsletter"
+    audience_list_id: str = ""
     direct_recipients: List[str] = Field(default_factory=list, max_length=DIRECT_RECIPIENT_MAX)
 
     @field_validator("audience_list_id")
     @classmethod
     def validate_audience_list(cls, value: str) -> str:
         value = str(value).strip()
+        if not value:
+            return ""
         if value not in LIST_OPTIONS:
             raise ValueError(f"Unknown email list: {value}")
         return value
@@ -379,7 +381,11 @@ def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
         raise HTTPException(status_code=409, detail="Bulletin has already been sent")
     if not claim_bulletin_send(bulletin_id):
         raise HTTPException(status_code=409, detail="Bulletin send is already in progress")
-    recipients = list_active_newsletter_recipients(bulletin["audience_list_id"])
+    recipients = (
+        list_active_newsletter_recipients(bulletin["audience_list_id"])
+        if bulletin.get("audience_list_id")
+        else []
+    )
     recipient_emails = {item["email"].strip().lower() for item in recipients}
     for email in bulletin.get("direct_recipients", []):
         if email not in recipient_emails:

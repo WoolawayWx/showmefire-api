@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from core.rate_limit import RateLimiter
 from services.mobile_content import build_mobile_content, county_catalog
-from services.mobile_push import delete_subscription, upsert_subscription
+from services.mobile_push import delete_subscription, notification_history, upsert_subscription
 from services.mobile_maps import build_catalog
 from services.mobile_widget import county_points, widget_summary
 
@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/mobile", tags=["mobile"])
 # Widgets refresh every 30+ min each, but rural carriers put many phones behind one IP, so keep this generous.
 widget_limiter = RateLimiter("mobile_widget", 120)
 maps_limiter = RateLimiter("mobile_maps", 120)
+history_limiter = RateLimiter("mobile_notification_history", 120)
 EXPO_TOKEN_PATTERN = re.compile(r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
 
 
@@ -94,6 +95,13 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
         general=payload.preferences.general,
         county_fips=payload.preferences.countyFips,
     )
+
+
+@router.get("/push-subscriptions/{installation_id}/history", dependencies=[Depends(history_limiter)])
+def get_notification_history(installation_id: UUID, response: Response):
+    """Notifications sent to this installation in the last 7 days (same anonymous installation-id trust as the PUT)."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"notifications": notification_history(str(installation_id))}
 
 
 @router.delete("/push-subscriptions/{installation_id}", status_code=204)

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from core import database
 from routers import admin_notifications
+from fastapi import Response
 from routers import mobile as mobile_router
 from routers.mobile import PushSubscriptionRequest
 from services import mobile_content, mobile_push
@@ -184,6 +185,58 @@ class MobilePushTests(unittest.TestCase):
         second = mobile_router.delete_push_subscription(UUID(installation_id))
 
         self.assertEqual((first.status_code, second.status_code), (204, 204))
+
+    def test_feedback_prompt_carries_coordinates_and_map_category(self):
+        mobile_push.upsert_subscription(
+            installation_id="11111111-1111-4111-8111-111111111111", expo_push_token="ExpoPushToken[abcdefghijklmnopqrstuv]",
+            platform="ios", app_version="1.2.0", forecast=False, sitrep=False, fire_weather=False,
+            fire_detection=True, county_fips=["29019"],
+        )
+        incident = {"incident_id": 5, "incident_slug": "abc", "county_fips": "29019", "county_name": "Boone",
+                    "confidence_label": "high", "latitude": 38.95123456, "longitude": -92.3}
+        no_point = {**incident, "incident_id": 6, "incident_slug": "def", "latitude": None, "longitude": None}
+        mobile_push.record_event("fire_detection:baseline:v2", "fire_detection", {})
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "tk"}]) as send:
+            mobile_push.notify_feedback_candidates([incident], now=datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc))
+            message = send.call_args.args[0][0]
+            self.assertEqual(message["categoryId"], "fire-detection-map")
+            self.assertEqual(message["data"]["latitude"], 38.95123)
+            self.assertEqual(message["data"]["longitude"], -92.3)
+            mobile_push.notify_feedback_candidates([no_point], now=datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc))
+            plain = send.call_args.args[0][0]
+            self.assertNotIn("categoryId", plain)
+            self.assertNotIn("latitude", plain["data"])
+
+    def test_notification_history_is_per_device_recent_and_newest_first(self):
+        mine = "11111111-1111-4111-8111-111111111111"
+        other = "22222222-2222-4222-8222-222222222222"
+        self.register(mine)
+        self.register(other, counties=["29019"])
+        events = [
+            ("e-old", "sitrep", '{"title":"Old","body":"b","url":"/x"}'),
+            ("e-new", "fire_detection", '{"title":"New","body":"b2","url":"/y","imageUrl":"https://cdn/x.png"}'),
+            ("e-other", "sitrep", '{"title":"Not mine","body":"","url":""}'),
+            ("e-bad", "sitrep", "not json"),
+            ("e-mid", "forecast", '{"title":"Mid","body":"","url":"/z","_countyDanger":{}}'),
+        ]
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.executemany("INSERT INTO mobile_push_events (event_key, event_type, payload_json) VALUES (?, ?, ?)", events)
+            connection.executemany(
+                "INSERT INTO mobile_push_tickets (ticket_id, installation_id, event_key, created_at) VALUES (?, ?, ?, ?)",
+                [
+                    ("t1", mine, "e-old", "2000-01-01 00:00:00"),  # far outside 7 days
+                    ("t2", mine, "e-new", "2999-01-02 10:00:00"),
+                    ("t3", other, "e-other", "2999-01-02 11:00:00"),
+                    ("t4", mine, "e-bad", "2999-01-02 12:00:00"),
+                    ("t5", mine, "e-mid", "2999-01-01 09:00:00"),
+                ],
+            )
+        history = mobile_push.notification_history(mine)
+        self.assertEqual([item["id"] for item in history], ["e-new", "e-mid"])
+        self.assertEqual(history[0]["sentAt"], "2999-01-02T10:00:00Z")
+        self.assertEqual(history[0]["imageUrl"], "https://cdn/x.png")
+        self.assertNotIn("_countyDanger", history[1])
+        self.assertEqual(mobile_router.get_notification_history(UUID(mine), Response())["notifications"], history)
 
     def test_delete_subscription_removes_delivery_data_but_preserves_events(self):
         self.register()
