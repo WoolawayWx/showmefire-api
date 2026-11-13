@@ -12,9 +12,12 @@ confidence, reviewed public feedback by category (never notes or contact
 details), approved report arrivals, staff review, official listings. Unreviewed
 feedback is never shown.
 
-Kinds: first_detected, detections, confidence, feedback, report, review, official, dispatch, notification.
-Feedback and report entries carry a `status` (pending, approved, rejected) that is updated in place as
+Kinds: first_detected, detections, confidence, feedback, report, osint, review, official, dispatch, notification.
+Feedback, report and osint entries carry a `status` (pending, approved, rejected) that is updated in place as
 staff review them; the app colours them yellow, green and red. Everything else is a plain event.
+
+Every entry also carries a `marker` that says how to draw it, decided here so the app and the website cannot disagree
+(see `assign_markers`): blue before staff confirm the incident, green after.
 
 Feedback shows what it was submitted as (a fire, a controlled burn, not a fire, not sure) and its review
 status; the comment text and any contact details are never shown.
@@ -62,6 +65,13 @@ REPORT_SUMMARY = {
     "pending": "A public fire report was submitted, awaiting review",
     "approved": "A public fire report was added",
     "rejected": "A public fire report was reviewed and not accepted",
+}
+# Reports that arrived through an ingest feed (OSINT / online monitoring). Only the fact that one arrived is public: never
+# the post text, link, author or which feed it came from.
+OSINT_SUMMARY = {
+    "pending": "An online report was received, awaiting review",
+    "approved": "An online report was added",
+    "rejected": "An online report was reviewed and not accepted",
 }
 STATUSES = ("pending", "approved", "rejected")
 
@@ -120,6 +130,48 @@ def upsert_status_entry(
     return True
 
 
+def _moment(value: Any) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+MARKERS = ("first", "public_report", "update", "confirmed", "update_confirmed", "rejected")
+
+
+def assign_markers(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add `marker` to each entry (in place, returned for convenience).
+
+    first             blue marker with "!": the incident's first entry (its first satellite detection, or the dispatch /
+                      agency record that started it)
+    public_report     blue marker with a check: a public report, online report or feedback made before staff confirmed
+    update            blue circle: any other status update before staff confirmed
+    confirmed         green marker with a check: staff confirmed the incident
+    update_confirmed  empty green circle: anything after staff confirmed
+    rejected          red cross: a report or feedback that staff did not accept
+    """
+    if not entries:
+        return entries
+    ordered = sorted(entries, key=lambda entry: _moment(entry["at"]))
+    confirmed_at = next((_moment(e["at"]) for e in ordered if e["kind"] == "review" and e["status"] == "approved"), None)
+    first = next((e for e in ordered if e["kind"] == "first_detected"), ordered[0])
+    for entry in entries:
+        if entry["status"] == "rejected":
+            entry["marker"] = "rejected"
+        elif entry["kind"] == "review" and entry["status"] == "approved":
+            entry["marker"] = "confirmed"
+        elif entry is first:
+            entry["marker"] = "first"
+        elif confirmed_at is not None and _moment(entry["at"]) >= confirmed_at:
+            entry["marker"] = "update_confirmed"
+        elif entry["kind"] in ("report", "feedback", "osint"):
+            entry["marker"] = "public_report"
+        else:
+            entry["marker"] = "update"
+    return entries
+
+
 def list_history(incident_id: int, limit: int = PUBLIC_LIMIT) -> list[dict[str, Any]]:
     """Newest first, in the shape the public API returns."""
     with _connect() as connection:
@@ -136,7 +188,7 @@ def list_history(incident_id: int, limit: int = PUBLIC_LIMIT) -> list[dict[str, 
             data = {}
         entries.append({"at": row["occurred_at"], "kind": row["kind"], "summary": row["summary"],
                         "status": data.get("status") if data.get("status") in STATUSES else None, "data": data})
-    return entries
+    return assign_markers(entries)
 
 
 def _confidence(incident: dict[str, Any], members: list[dict[str, Any]]) -> tuple[int, str] | None:
@@ -226,6 +278,14 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
             status = member.get("status") if member.get("status") in STATUSES else "pending"
             if upsert_status_entry(connection, incident_id, "report", REPORT_SUMMARY[status],
                                    occurred_at=member.get("occurred_at"), status=status, dedupe_key=f"report:{member['id']}"):
+                written += 1
+
+    # Online (OSINT) reports ingested from monitoring feeds and linked to the incident.
+    for member in members:
+        if member.get("origin_kind") == "osint_api" and member.get("source") != "user_submission":
+            status = member.get("status") if member.get("status") in STATUSES else "pending"
+            if upsert_status_entry(connection, incident_id, "osint", OSINT_SUMMARY[status],
+                                   occurred_at=member.get("occurred_at"), status=status, dedupe_key=f"osint:{member['id']}"):
                 written += 1
 
     if incident.get("review_decision") == "approved" and incident.get("review_decided_at"):

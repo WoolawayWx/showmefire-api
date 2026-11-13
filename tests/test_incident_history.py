@@ -178,6 +178,64 @@ class IncidentHistoryTests(unittest.TestCase):
         self.assertEqual(sorted(e["status"] for e in after), ["approved", "rejected"])
         self.assertIn("Public feedback submitted as not a fire, not accepted", [e["summary"] for e in after])
 
+    def test_online_reports_appear_on_the_timeline_without_their_content(self):
+        self._detection(1, minutes_ago=120)
+        incident_id = self._incident_id()
+        when = (NOW - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+        event, _created = database.upsert_ingest_report(
+            source="muse", external_id="post-1", title="Smoke west of town", description="secret post text",
+            source_url="https://facebook.com/some/post", source_name="Some Facebook Group", latitude=36.61, longitude=-93.78,
+            occurred_at=when, occurred_at_precision="minute", acres=None, county_fips="29009", county_name="Barry",
+            origin={"kind": "osint_api", "feed": "Muse monitoring"},
+        )
+        incident_history.sync_incident_history(NOW)
+        incident_history.sync_incident_history(NOW + timedelta(minutes=5))        # idempotent
+        history = [e for e in incident_history.list_history(incident_id) if e["kind"] == "osint"]
+        self.assertEqual([(e["summary"], e["status"], e["marker"]) for e in history],
+                         [("An online report was received, awaiting review", "pending", "public_report")])
+        text = str(incident_history.list_history(incident_id))
+        for private in ("secret post text", "facebook.com", "Some Facebook Group", "Muse"):
+            self.assertNotIn(private, text)
+
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("UPDATE fire_events SET status = 'approved' WHERE id = ?", (event["id"],))
+        incident_history.sync_incident_history(NOW + timedelta(minutes=10))
+        after = [e for e in incident_history.list_history(incident_id) if e["kind"] == "osint"]
+        self.assertEqual([(e["summary"], e["status"]) for e in after], [("An online report was added", "approved")])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssignMarkersTests(unittest.TestCase):
+    def entry(self, at, kind, status=None):
+        return {"at": at, "kind": kind, "summary": kind, "status": status, "data": {}}
+
+    def test_blue_before_staff_confirm_and_green_after(self):
+        from services.incident_history import assign_markers
+
+        entries = [
+            self.entry("2026-11-13T09:40:00Z", "dispatch"),
+            self.entry("2026-11-13T09:15:00Z", "detections"),
+            self.entry("2026-11-13T08:50:00Z", "review", "approved"),
+            self.entry("2026-11-12T23:05:00Z", "report", "pending"),
+            self.entry("2026-11-12T22:30:00Z", "confidence"),
+            self.entry("2026-11-12T22:28:00Z", "notification"),
+            self.entry("2026-11-12T22:26:00Z", "first_detected"),
+        ]
+        markers = [e["marker"] for e in assign_markers(entries)]
+        self.assertEqual(markers, ["update_confirmed", "update_confirmed", "confirmed", "public_report", "update", "update", "first"])
+
+    def test_dispatch_started_incident_marks_its_first_entry_and_rejected_reports_stay_red(self):
+        from services.incident_history import assign_markers
+
+        entries = [self.entry("2026-11-13T10:00:00Z", "report", "rejected"), self.entry("2026-11-13T09:00:00Z", "dispatch")]
+        self.assertEqual([e["marker"] for e in assign_markers(entries)], ["rejected", "first"])
+
+    def test_a_report_after_confirmation_is_just_a_green_update(self):
+        from services.incident_history import assign_markers
+
+        entries = [self.entry("2026-11-13T11:00:00Z", "report", "approved"), self.entry("2026-11-13T10:00:00Z", "review", "approved"),
+                   self.entry("2026-11-13T09:00:00Z", "first_detected")]
+        self.assertEqual([e["marker"] for e in assign_markers(entries)], ["update_confirmed", "confirmed", "first"])

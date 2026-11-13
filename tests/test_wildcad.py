@@ -161,7 +161,7 @@ class IngestTests(WildcadBase):
         self.assertEqual((dispatch["incident_number"], dispatch["name"], dispatch["acres"]), ("MOMOS-412", "Rockhouse", 5.0))
         self.assertNotIn("ic", json.dumps(dispatch).lower().replace("incident", ""))        # the commander is staff-only
         timeline = [entry["summary"] for entry in incident_history.list_history(incidents[0]["id"])]
-        self.assertTrue(any(line.startswith("Reported to dispatch as incident 412, Rockhouse") for line in timeline))
+        self.assertTrue(any(line.startswith("Reported to dispatch as incident 412 and named Rockhouse") for line in timeline))
         self.assertTrue(any(line.startswith("On scene: ") for line in timeline))
 
     def test_a_dispatch_record_with_no_satellite_starts_an_incident_and_non_fires_do_not(self):
@@ -271,6 +271,8 @@ class HealthAndPushTests(WildcadBase):
             self.assertEqual(mobile_push.notify_official_listing(noon), 1)
             message = send.call_args.args[0][0]
             self.assertEqual(message["title"], "Fire crews dispatched: Shannon Test")
+            self.assertIn("dispatch incident", message["body"])
+            self.assertIn("near Shannon County", message["body"])
             self.assertTrue(message["data"]["smfNumber"].startswith("SMF-2026-"))
             # NIFC lists the same incident later: no second push, but its row is marked handled.
             with closing(sqlite3.connect(self.db_path)) as connection, connection:

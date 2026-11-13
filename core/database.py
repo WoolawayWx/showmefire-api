@@ -4375,7 +4375,8 @@ def list_fire_incident_members(incident_id: int) -> List[Dict]:
         cursor.execute('''
             SELECT id, latitude, longitude, occurred_at, satellite, confidence, frp, source, status,
                    bright_t7, land_cover, detection_confidence_pct, footprint_geojson, cause_category,
-                   (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed
+                   (SELECT feed FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_feed,
+                   (SELECT kind FROM fire_event_origins o WHERE o.event_id = fire_events.id) AS origin_kind
             FROM fire_events
             WHERE incident_id = ?
             ORDER BY occurred_at ASC

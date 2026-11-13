@@ -544,10 +544,11 @@ def apply_incidents(incidents: list[dict[str, Any]], now: datetime) -> dict[str,
                      now.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S")),
                 )
                 if incident_id is not None:
-                    name_part = ", " + incident["name"] if incident["name"] else ""
+                    # Dispatch creating the incident is also what names it.
+                    named = f" and named {incident['name']}" if incident["name"] else " (not named yet)"
                     incident_history.record(
                         connection, incident_id, "dispatch",
-                        f"Reported to dispatch as incident {incident['inc_num']}{name_part} ({_acres_text(incident['acres'])})",
+                        f"Reported to dispatch as incident {incident['inc_num']}{named} ({_acres_text(incident['acres'])})",
                         occurred_at=incident["reported_at"], data={"incident_number": incident["inc_num"], "acres": incident["acres"]},
                         dedupe_key=f"dispatch:{key}:reported",
                     )
@@ -581,7 +582,8 @@ def _diff_and_record(connection: sqlite3.Connection, before: dict[str, Any], inc
     if incident["name"] and incident["name"] != before["name"]:
         incident_history.record(
             connection, incident_id, "dispatch",
-            f"Dispatch changed the name from {before['name'] or 'unnamed'} to {incident['name']}", occurred_at=now,
+            (f"Dispatch changed the name from {before['name']} to {incident['name']}" if before["name"]
+             else f"Dispatch named the incident {incident['name']}"), occurred_at=now,
             data={"name": incident["name"]}, dedupe_key=f"dispatch:{key}:name:{incident['name']}",
         )
     if incident["acres"] != before["acres"] and incident["acres"] is not None:
@@ -690,6 +692,15 @@ def staff_resources(incident_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(
             "SELECT code, description, status, location, kind, is_person, is_public, inc_num, incident_name, status_changed_at "
             "FROM wildcad_resources WHERE incident_id = ? ORDER BY status, code", (incident_id,))]
+
+
+def dispatch_name_for(incident_id: int) -> str | None:
+    """The name dispatch gave the incident (e.g. "Rockhouse"), or None when it has no dispatch record or no name yet."""
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT name FROM wildcad_incidents WHERE incident_id = ? AND name IS NOT NULL AND TRIM(name) != '' "
+            "ORDER BY reported_at LIMIT 1", (incident_id,)).fetchone()
+    return row["name"] if row else None
 
 
 def dispatch_for(incident_id: int) -> dict[str, Any] | None:

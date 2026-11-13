@@ -514,6 +514,15 @@ def _incident_marker_coordinates(incident: dict, members: list) -> list:
     return [float(hottest["longitude"]), float(hottest["latitude"])]
 
 
+def _dispatch_name(incident_id: int) -> Optional[str]:
+    try:
+        from services.wildcad import dispatch_name_for
+
+        return dispatch_name_for(incident_id)
+    except Exception:  # noqa: BLE001 - a name is a nicety; never break the map feed over it
+        return None
+
+
 def _incident_popup_properties(incident: dict, members: Optional[list] = None) -> dict:
     """Shared property set for every incident map feature - the point
     marker (_incident_to_geojson_feature) and the ML shape
@@ -536,6 +545,8 @@ def _incident_popup_properties(incident: dict, members: Optional[list] = None) -
         "INCIDENT_SLUG": incident.get("public_slug"),
         "DETECTION_COUNT": incident.get("detection_count", 0),
         "COUNTY": incident.get("county_name"),
+        # The name dispatch (WildCAD-E) gave it, when there is one.
+        "INCIDENT_NAME": _dispatch_name(incident["id"]),
         "FIRST_DETECTED_AT": incident.get("first_detected_at"),
         "LAST_DETECTED_AT": incident.get("last_detected_at"),
         "ACQ_DATE_TIME": latest.get("occurred_at") or incident.get("last_detected_at"),

@@ -43,15 +43,31 @@ from services.wildcad import dispatch_for, feed_status, official_sources_for, pu
 router = APIRouter(prefix="/api/v2", tags=["fires-v2"])
 
 
-def _land_cover_context(members: list) -> dict:
+def _land_cover_context(members: list, incident: Optional[dict] = None) -> dict:
     fuel_models = [m["fuel_model_fbfm40"] for m in members if m.get("fuel_model_fbfm40") is not None]
     canopy_values = [m["canopy_cover_pct"] for m in members if m.get("canopy_cover_pct") is not None]
     land_cover_strings = [m["land_cover"] for m in members if m.get("land_cover")]
-    return {
+    context = {
         "fuel_model_fbfm40": statistics.mode(fuel_models) if fuel_models else None,
         "avg_canopy_cover_pct": round(sum(canopy_values) / len(canopy_values), 1) if canopy_values else None,
         "land_cover": land_cover_strings[-1] if land_cover_strings else None,
+        "fuel_groups": None,
+        "fuel_source": None,
     }
+    # Our own fuel/cover summary around the incident (LANDFIRE fuel models from the static bundle), so every incident has
+    # one whichever detection feed saw it. Stored values from the detections win; this fills what they lack.
+    if incident:
+        from services.incident_fuel import fuel_context
+
+        computed = fuel_context(incident.get("centroid_latitude"), incident.get("centroid_longitude"))
+        if computed:
+            context["fuel_groups"] = computed["groups"]
+            context["fuel_source"] = computed["source"]
+            if context["fuel_model_fbfm40"] is None:
+                context["fuel_model_fbfm40"] = computed["fuel_model_fbfm40"]
+            if context["avg_canopy_cover_pct"] is None:
+                context["avg_canopy_cover_pct"] = computed["canopy_cover_pct"]
+    return context
 
 
 def _incident_confidence(incident: dict, members: list) -> dict:
@@ -100,7 +116,7 @@ def _incident_v2(incident: dict) -> dict:
         "detection_confidence": _detection_confidence(members),
         "incident_confidence": _incident_confidence(incident, members),
         "weather_danger": _weather_danger(incident),
-        "land_cover_context": _land_cover_context(members),
+        "land_cover_context": _land_cover_context(members, incident),
         "feedback_summary": {
             "count": incident.get("feedback_count", 0),
             "pending_count": incident.get("pending_feedback_count", 0),
@@ -113,6 +129,7 @@ def _incident_v2(incident: dict) -> dict:
         "official_sources": official_sources_for(incident["id"], official_source_for(incident["id"])),
         "smf_number": incident.get("smf_number"),
         "dispatch": dispatch_for(incident["id"]),
+        "name": (dispatch_for(incident["id"]) or {}).get("name"),
     }
 
 
@@ -161,6 +178,10 @@ def get_incident_v2(slug: str):
 
     lat, lon = incident.get("centroid_latitude"), incident.get("centroid_longitude")
     detail["wind"] = get_wind(float(lat), float(lon)) if lat is not None and lon is not None else None
+    # The next eight hours from our own hourly HRRR product (None when there is no fresh forecast).
+    from services.incident_weather import weather_outlook
+
+    detail["weather_outlook"] = weather_outlook(lat, lon) if lat is not None and lon is not None else None
     return {"success": True, "incident": detail}
 
 

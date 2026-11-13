@@ -672,6 +672,25 @@ def _note_incident_push(incident_id: int | None, event_key: str, delivered: int,
         logger.exception("could not record the push on incident %s", incident_id)
 
 
+def _dispatch_detail(incident_id: int) -> str:
+    """", incident MOMOS-412, 6 resources assigned": what dispatch says about it, from public fields only. Never fails the push."""
+    try:
+        from services.wildcad import dispatch_for, public_resources
+
+        parts = []
+        dispatch = dispatch_for(incident_id)
+        if dispatch and dispatch.get("incident_number"):
+            parts.append(f"dispatch incident {dispatch['incident_number']}")
+        resources = public_resources(incident_id)
+        assigned = len(resources["equipment"]) + resources["personnel"]
+        if assigned:
+            parts.append(f"{assigned} {'resource' if assigned == 1 else 'resources'} assigned")
+        return (", " + ", ".join(parts)) if parts else ""
+    except Exception:  # noqa: BLE001
+        logger.exception("could not add dispatch detail to the push for incident %s", incident_id)
+        return ""
+
+
 def notify_official_listing(now: datetime | None = None) -> int:
     """Tell fire-detection subscribers when an agency or dispatch lists a fire: NIFC WFIGS (services/official_incidents.py)
     or WildCAD-E dispatch (services/wildcad.py).
@@ -713,7 +732,7 @@ def notify_official_listing(now: datetime | None = None) -> int:
         size = f", about {first['acres']:g} acres" if first["acres"] else ""
         name = first["name"] or "a fire"
         if first["source"] == "wildcad":
-            title, body = f"Fire crews dispatched: {name}", f"Reported {where}{size}. Tap to see what we know about it."
+            title, body = f"Fire crews dispatched: {name}", f"Reported {where}{size}{_dispatch_detail(incident_id)}. Tap to see what we know about it."
         else:
             title, body = f"Forest Service is working the {name}", f"Listed {where}{size}. Tap to see what we know about it."
         event_key = f"fire_detection:official:incident:{incident_id}"
