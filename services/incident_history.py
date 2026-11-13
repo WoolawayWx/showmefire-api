@@ -12,7 +12,12 @@ confidence, reviewed public feedback by category (never notes or contact
 details), approved report arrivals, staff review, official listings. Unreviewed
 feedback is never shown.
 
-Kinds: first_detected, detections, confidence, feedback, report, review, official.
+Kinds: first_detected, detections, confidence, feedback, report, review, official, notification.
+Feedback and report entries carry a `status` (pending, approved, rejected) that is updated in place as
+staff review them; the app colours them yellow, green and red. Everything else is a plain event.
+
+What is shown about unreviewed or rejected feedback is only that it exists and its status: the category
+(confirmed fire, controlled burn, ...) appears once staff have approved it.
 """
 from __future__ import annotations
 
@@ -32,12 +37,22 @@ DETECTION_MIN_INTERVAL = timedelta(minutes=30)  # ...or when this long has passe
 CONFIDENCE_POINT_STEP = 10              # a score move this large is worth a line even inside one label
 PUBLIC_LIMIT = 100
 
-FEEDBACK_SUMMARY = {
-    "confirmed_fire": "Reviewed public feedback: confirmed as a fire",
-    "controlled_burn": "Reviewed public feedback: reported as a controlled burn",
-    "not_a_fire": "Reviewed public feedback: reported as not a fire",
-    "unsure": "Reviewed public feedback: not sure what it is",
+FEEDBACK_APPROVED_SUMMARY = {
+    "confirmed_fire": "Public feedback approved: confirmed as a fire",
+    "controlled_burn": "Public feedback approved: reported as a controlled burn",
+    "not_a_fire": "Public feedback approved: reported as not a fire",
+    "unsure": "Public feedback approved: not sure what it is",
 }
+FEEDBACK_SUMMARY = {
+    "pending": "Public feedback submitted, awaiting review",
+    "rejected": "Public feedback reviewed and not accepted",
+}
+REPORT_SUMMARY = {
+    "pending": "A public fire report was submitted, awaiting review",
+    "approved": "A public fire report was added",
+    "rejected": "A public fire report was reviewed and not accepted",
+}
+STATUSES = ("pending", "approved", "rejected")
 
 
 def _utc_iso(value: Any = None) -> str:
@@ -74,6 +89,26 @@ def record(
     return cursor.rowcount == 1
 
 
+def upsert_status_entry(
+    connection: sqlite3.Connection, incident_id: int, kind: str, summary: str, *, occurred_at: Any, status: str,
+    dedupe_key: str, data: dict | None = None,
+) -> bool:
+    """One entry per feedback/report whose summary and status follow its review. Returns True when something changed."""
+    payload = json.dumps({**(data or {}), "status": status}, separators=(",", ":"))
+    existing = connection.execute(
+        "SELECT id, summary, data_json FROM fire_incident_history WHERE incident_id = ? AND dedupe_key = ?",
+        (incident_id, dedupe_key),
+    ).fetchone()
+    if existing is None:
+        return record(connection, incident_id, kind, summary, occurred_at=occurred_at,
+                      data={**(data or {}), "status": status}, dedupe_key=dedupe_key)
+    if existing["summary"] == summary and existing["data_json"] == payload:
+        return False
+    connection.execute("UPDATE fire_incident_history SET summary = ?, data_json = ? WHERE id = ?",
+                       (summary, payload, existing["id"]))
+    return True
+
+
 def list_history(incident_id: int, limit: int = PUBLIC_LIMIT) -> list[dict[str, Any]]:
     """Newest first, in the shape the public API returns."""
     with _connect() as connection:
@@ -88,7 +123,8 @@ def list_history(incident_id: int, limit: int = PUBLIC_LIMIT) -> list[dict[str, 
             data = json.loads(row["data_json"] or "{}")
         except json.JSONDecodeError:
             data = {}
-        entries.append({"at": row["occurred_at"], "kind": row["kind"], "summary": row["summary"], "data": data})
+        entries.append({"at": row["occurred_at"], "kind": row["kind"], "summary": row["summary"],
+                        "status": data.get("status") if data.get("status") in STATUSES else None, "data": data})
     return entries
 
 
@@ -154,28 +190,35 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
             state["confidence"] = {"score": score, "label": label}
             written += 1
 
-    # Reviewed public feedback, each at the time it was reviewed (never notes or contact details).
+    # Public feedback: one entry each, following its review status (never notes or contact details; the category
+    # is only shown once staff approved it).
     for row in connection.execute(
-        "SELECT id, classification, COALESCE(reviewed_at, created_at) AS at FROM fire_incident_feedback "
-        "WHERE incident_id = ? AND status = 'approved'", (incident_id,),
+        "SELECT id, classification, status, created_at FROM fire_incident_feedback WHERE incident_id = ?", (incident_id,),
     ).fetchall():
-        summary = FEEDBACK_SUMMARY.get(row["classification"])
-        if summary and record(connection, incident_id, "feedback", summary, occurred_at=row["at"],
-                              data={"classification": row["classification"]}, dedupe_key=f"feedback:{row['id']}"):
+        status = row["status"] if row["status"] in STATUSES else "pending"
+        if status == "approved":
+            summary = FEEDBACK_APPROVED_SUMMARY.get(row["classification"], "Public feedback approved")
+        else:
+            summary = FEEDBACK_SUMMARY[status]
+        data = {"classification": row["classification"]} if status == "approved" else {}
+        if upsert_status_entry(connection, incident_id, "feedback", summary, occurred_at=row["created_at"],
+                               status=status, dedupe_key=f"feedback:{row['id']}", data=data):
             written += 1
 
-    # Approved public fire reports that joined the incident.
+    # Public fire reports linked to the incident.
     for member in members:
-        if member.get("source") == "user_submission" and member.get("status") == "approved":
-            if record(connection, incident_id, "report", "A public fire report was added",
-                      occurred_at=member.get("occurred_at"), dedupe_key=f"report:{member['id']}"):
+        if member.get("source") == "user_submission":
+            status = member.get("status") if member.get("status") in STATUSES else "pending"
+            if upsert_status_entry(connection, incident_id, "report", REPORT_SUMMARY[status],
+                                   occurred_at=member.get("occurred_at"), status=status, dedupe_key=f"report:{member['id']}"):
                 written += 1
 
     if incident.get("review_decision") == "approved" and incident.get("review_decided_at"):
         label = {"wildfire": "wildfire", "prescribed": "prescribed burn"}.get(incident.get("review_label") or "", "")
         if record(connection, incident_id, "review",
                   f"Reviewed by Show Me Fire staff{f' and labelled a {label}' if label else ' and approved'}",
-                  occurred_at=incident["review_decided_at"], dedupe_key=f"review:{incident['review_decided_at']}"):
+                  occurred_at=incident["review_decided_at"], data={"status": "approved"},
+                  dedupe_key=f"review:{incident['review_decided_at']}"):
             written += 1
 
     connection.execute(

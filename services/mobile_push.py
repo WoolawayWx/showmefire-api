@@ -638,7 +638,7 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
         if latitude is not None:
             extra_data["latitude"] = latitude
             extra_data["longitude"] = longitude
-        sent += send_mobile_event(
+        delivered = send_mobile_event(
             event_type="fire_detection",
             event_key=f"fire_detection:{incident_id}",
             title="Help verify a satellite detection",
@@ -647,7 +647,27 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
             county_fips=[county_fips] if county_fips else [],
             extra_data=extra_data,
         )
+        sent += delivered
+        _note_incident_push(incident_id, f"fire_detection:{incident_id}", delivered,
+                            f"Asked {_people(delivered)} {where} to help verify it")
     return sent
+
+
+def _people(count: int) -> str:
+    return "1 person" if count == 1 else f"{count} people"
+
+
+def _note_incident_push(incident_id: int | None, event_key: str, delivered: int, summary: str) -> None:
+    """Put "a notification went out" on the incident's public timeline. Never lets a failure disturb the send."""
+    if not incident_id or delivered <= 0:
+        return
+    try:
+        from services.incident_history import record
+
+        with _connect() as connection:
+            record(connection, incident_id, "notification", summary, data={"recipients": delivered}, dedupe_key=f"push:{event_key}")
+    except Exception:  # noqa: BLE001
+        logger.exception("could not record the push on incident %s", incident_id)
 
 
 def notify_official_listing(now: datetime | None = None) -> int:
@@ -665,7 +685,7 @@ def notify_official_listing(now: datetime | None = None) -> int:
     cutoff = (now - NOTIFY_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
     with _connect() as connection:
         rows = connection.execute(
-            """SELECT o.irwin_id, o.name, o.acres, i.public_slug, i.county_fips, i.county_name
+            """SELECT o.irwin_id, o.incident_id, o.name, o.acres, i.public_slug, i.county_fips, i.county_name
                FROM fire_incident_official o JOIN fire_incidents i ON i.id = o.incident_id
                WHERE o.notified_at IS NULL AND o.ended_at IS NULL AND o.first_seen_at >= ?
                  AND i.status NOT IN ('deleted', 'merged') AND COALESCE(i.review_decision, '') != 'rejected'
@@ -676,7 +696,7 @@ def notify_official_listing(now: datetime | None = None) -> int:
     for row in rows:
         where = f"near {row['county_name']} County" if row["county_name"] else "in Missouri"
         size = f", about {row['acres']:g} acres" if row["acres"] else ""
-        sent += send_mobile_event(
+        delivered = send_mobile_event(
             event_type="fire_detection",
             event_key=f"fire_detection:official:{row['irwin_id']}",
             title=f"Forest Service is working the {row['name']}",
@@ -685,6 +705,9 @@ def notify_official_listing(now: datetime | None = None) -> int:
             county_fips=[row["county_fips"]] if row["county_fips"] else [],
             extra_data={"incidentSlug": row["public_slug"], "official": True},
         )
+        sent += delivered
+        _note_incident_push(row["incident_id"], f"fire_detection:official:{row['irwin_id']}", delivered,
+                            f"Told {_people(delivered)} {where} the Forest Service listed it")
         with _connect() as connection:
             connection.execute(
                 "UPDATE fire_incident_official SET notified_at = CURRENT_TIMESTAMP WHERE irwin_id = ?", (row["irwin_id"],)

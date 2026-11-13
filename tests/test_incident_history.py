@@ -97,8 +97,24 @@ class IncidentHistoryTests(unittest.TestCase):
             self.assertIn("near Barry County", message["body"])
             self.assertEqual(self._sync_official([_feature()], NOW + timedelta(minutes=10)), 0)   # once per record
             self.assertEqual(send.call_count, 1)
+        incident_id = self._incident_id()
+        notes = [e for e in incident_history.list_history(incident_id) if e["kind"] == "notification"]
+        self.assertEqual([e["summary"] for e in notes], ["Told 1 person near Barry County the Forest Service listed it"])
         # It shows up in this device's notification history too.
         self.assertEqual(len(mobile_push.notification_history("11111111-1111-4111-8111-111111111111")), 1)
+
+    def test_feedback_prompt_push_lands_on_the_timeline(self):
+        self._subscribe()
+        self._detection(1)
+        incident_id = self._incident_id()
+        mobile_push.record_event("fire_detection:baseline:v2", "fire_detection", {})
+        candidate = {"incident_id": incident_id, "incident_slug": "abc", "county_fips": "29009", "county_name": "Barry",
+                     "confidence_label": "high", "latitude": 36.61, "longitude": -93.78}
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "t9"}]):
+            self.assertEqual(mobile_push.notify_feedback_candidates([candidate], now=NOW), 1)
+        notes = [e for e in incident_history.list_history(incident_id) if e["kind"] == "notification"]
+        self.assertEqual([e["summary"] for e in notes], ["Asked 1 person near Barry County to help verify it"])
+        self.assertIsNone(notes[0]["status"])
 
     def test_listing_with_no_matching_detection_starts_an_incident(self):
         self._sync_official([])
@@ -128,9 +144,24 @@ class IncidentHistoryTests(unittest.TestCase):
         history = incident_history.list_history(incident_id)
         summaries = [entry["summary"] for entry in history]
         self.assertTrue(any(s.startswith("Satellite detections grew from 3 to 8") for s in summaries))
-        self.assertEqual(summaries.count("Reviewed public feedback: confirmed as a fire"), 1)
-        self.assertNotIn("Reviewed public feedback: reported as not a fire", summaries)   # unreviewed stays private
+        self.assertEqual(summaries.count("Public feedback approved: confirmed as a fire"), 1)
+        self.assertEqual(summaries.count("Public feedback submitted, awaiting review"), 1)
+        # The pending one never reveals what it claims, and notes never appear.
+        self.assertNotIn("Public feedback approved: reported as not a fire", summaries)
         self.assertNotIn("secret note", str(history))
+        self.assertNotIn("unreviewed", str(history))
+        statuses = {entry["summary"]: entry["status"] for entry in history if entry["kind"] == "feedback"}
+        self.assertEqual(statuses["Public feedback approved: confirmed as a fire"], "approved")
+        self.assertEqual(statuses["Public feedback submitted, awaiting review"], "pending")
+
+        # Review changes the same entry in place: pending -> rejected.
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("UPDATE fire_incident_feedback SET status = 'rejected' WHERE note = 'unreviewed'")
+        incident_history.sync_incident_history(NOW + timedelta(minutes=15))
+        after = [e for e in incident_history.list_history(incident_id) if e["kind"] == "feedback"]
+        self.assertEqual(len(after), 2)
+        self.assertEqual(sorted(e["status"] for e in after), ["approved", "rejected"])
+        self.assertIn("Public feedback reviewed and not accepted", [e["summary"] for e in after])
 
 
 if __name__ == "__main__":
