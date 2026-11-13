@@ -37,8 +37,17 @@ REQUIRED_RISK_FUSION_ASSET_ROLES = {
 
 
 IMPORTABLE_MODEL_TYPES = ["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_risk_fusion",
-                          "fire_behavior_static", "fire_weather_index", "fire_weather_ml",
-                          "ensemble_fire_danger"]
+                          "fire_behavior_static", "ground_cover_static", "fire_weather_index",
+                          "fire_weather_ml", "ensemble_fire_danger"]
+
+GROUND_COVER_CELL_M = 480
+GROUND_COVER_VARIABLES = frozenset(
+    ["nlcd_water_pct", "nlcd_developed_pct", "nlcd_barren_pct", "nlcd_forest_pct", "nlcd_shrub_pct",
+     "nlcd_grass_pct", "nlcd_pasture_pct", "nlcd_crops_pct", "nlcd_wetlands_pct", "nlcd_other_pct",
+     "fbfm_nb_developed_pct", "fbfm_nb_snow_pct", "fbfm_nb_cropland_pct", "fbfm_nb_water_pct",
+     "fbfm_nb_bare_pct", "fbfm_grass_pct", "fbfm_grass_shrub_pct", "fbfm_shrub_pct",
+     "fbfm_timber_understory_pct", "fbfm_timber_litter_pct", "fbfm_slash_pct", "fbfm_other_pct",
+     "fbfm40_mode", "canopy_cover_mean_pct", "canopy_height_mean_m", "valid_pct"])
 
 
 class ImportValidationError(Exception):
@@ -117,6 +126,51 @@ def _verify_fire_behavior_static_assets(files, declarations):
     return resolved
 
 
+def _verify_ground_cover_assets(files, declarations):
+    import numpy as np
+    import pyproj
+    import xarray as xr
+
+    required = {"static_bundle", "static_manifest"}
+    if missing := required - set(declarations):
+        raise ImportValidationError(f"Ground cover static release assets missing: {sorted(missing)}")
+    resolved = {}
+    for role, declaration in declarations.items():
+        path = files.get(declaration["filename"])
+        if not path or _sha256(path) != declaration["sha256"]:
+            raise ImportValidationError(f"Missing or invalid release asset: {role}")
+        resolved[role] = path
+    manifest = json.loads(resolved["static_manifest"].read_text())
+    if manifest.get("synthetic"):
+        raise ImportValidationError("Synthetic ground cover bundles cannot be imported into production")
+    if manifest.get("sha256") != _sha256(resolved["static_bundle"]):
+        raise ImportValidationError("Ground cover static bundle/manifest checksum mismatch")
+    validation = manifest.get("validation") or {}
+    required_gates = {"crs_validated", "units_validated", "nodata_validated"}
+    if not required_gates.issubset(validation) or not all(validation[key] is True for key in required_gates):
+        raise ImportValidationError("Ground cover static manifest is missing required validation gates")
+    with xr.open_dataset(resolved["static_bundle"]) as ds:
+        if missing := GROUND_COVER_VARIABLES - set(ds.data_vars):
+            raise ImportValidationError(f"Ground cover variables missing: {sorted(missing)}")
+        try:
+            epsg = pyproj.CRS.from_wkt(ds.attrs.get("crs_wkt", "")).to_epsg()
+        except Exception:
+            epsg = None
+        if epsg != 5070:
+            raise ImportValidationError("Ground cover grid must be EPSG:5070")
+        x, y = np.asarray(ds["x"].values), np.asarray(ds["y"].values)
+        if (len(x) < 2 or len(y) < 2 or not np.allclose(np.diff(x), GROUND_COVER_CELL_M)
+                or not np.allclose(np.diff(y), -GROUND_COVER_CELL_M)):
+            raise ImportValidationError(f"Ground cover grid must be regular at {GROUND_COVER_CELL_M} m")
+        if ds.attrs.get("grid_fingerprint") != manifest.get("grid_fingerprint"):
+            raise ImportValidationError("Ground cover grid fingerprint mismatch")
+        if declarations["static_bundle"].get("grid_fingerprint") != manifest.get("grid_fingerprint"):
+            raise ImportValidationError("Ground cover release declaration grid fingerprint mismatch")
+        if not (np.asarray(ds["valid_pct"].values) > 0).any():
+            raise ImportValidationError("Ground cover bundle has no valid cells")
+    return resolved
+
+
 def _verify_spatial_assets(files, declarations):
     import numpy as np
     import onnxruntime as ort
@@ -185,6 +239,8 @@ def import_release(model_type, tag, repo, bump="patch", timeout=None):
                 resolved = _verify_spatial_assets(files_by_name, declarations)
             elif model_type == "fire_behavior_static":
                 resolved = _verify_fire_behavior_static_assets(files_by_name, declarations)
+            elif model_type == "ground_cover_static":
+                resolved = _verify_ground_cover_assets(files_by_name, declarations)
             elif model_type == "fire_risk_fusion":
                 resolved = _verify_generic_multiasset(files_by_name, declarations, REQUIRED_RISK_FUSION_ASSET_ROLES)
             else:

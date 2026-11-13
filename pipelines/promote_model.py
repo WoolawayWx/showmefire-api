@@ -25,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description="Promote a beta model to stable")
     parser.add_argument("--model", required=True,
                          choices=["fuel_moisture", "fire_danger", "fuel_moisture_spatial", "fire_behavior_static",
-                                  "fire_risk_fusion", "risk_fusion_glm", "fire_weather_ml", "fire_weather_index",
+                                  "ground_cover_static", "fire_risk_fusion", "risk_fusion_glm", "fire_weather_ml", "fire_weather_index",
                                   "ensemble_fire_danger"],
                          help="Which model type to promote. Note: fire_risk_fusion has a hard v1 "
                               "advisory_only boundary in validate_promotion_candidate() - this choice "

@@ -260,6 +260,12 @@ def validate_promotion_candidate(model_type, candidate):
         manifest_asset = (candidate.get("assets") or {}).get("static_manifest")
         if not manifest_asset:
             blockers.append("static_manifest asset is required")
+    if model_type == "ground_cover_static":
+        assets = candidate.get("assets") or {}
+        if not assets.get("static_bundle"):
+            blockers.append("static_bundle asset is required")
+        if not assets.get("static_manifest"):
+            blockers.append("static_manifest asset is required")
     if model_type == "fire_risk_fusion":
         missing = sorted(REQUIRED_BETA_METADATA.union(REQUIRED_RISK_FUSION_METADATA).difference(metadata))
         if missing:
