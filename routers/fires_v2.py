@@ -38,6 +38,7 @@ from routers.fires import PUBLIC_API_BASE_URL
 
 from services.incident_history import list_history
 from services.official_incidents import official_source_for
+from services.wildcad import dispatch_for, feed_status, official_sources_for, public_resources
 
 router = APIRouter(prefix="/api/v2", tags=["fires-v2"])
 
@@ -109,6 +110,9 @@ def _incident_v2(incident: dict) -> dict:
         "graphic_url": graphic_url,
         "feedback_url": feedback_url,
         "official_source": official_source_for(incident["id"]),
+        "official_sources": official_sources_for(incident["id"], official_source_for(incident["id"])),
+        "smf_number": incident.get("smf_number"),
+        "dispatch": dispatch_for(incident["id"]),
     }
 
 
@@ -135,6 +139,13 @@ def list_incidents_v2(
     return {"success": True, "incidents": [_incident_v2(incident) for incident in incidents], "count": len(incidents)}
 
 
+@router.get("/dispatch/status")
+def dispatch_status(response: Response):
+    """Freshness of the local WildCAD dispatch cache (reads our database, never the upstream)."""
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return {"success": True, **feed_status()}
+
+
 @router.get("/fires/incidents/{slug}")
 def get_incident_v2(slug: str):
     incident = get_public_fire_incident(slug)
@@ -143,6 +154,7 @@ def get_incident_v2(slug: str):
         raise HTTPException(status_code=404, detail="Incident not found")
     detail = _incident_v2(incident)
     detail["history"] = list_history(incident["id"])
+    detail["resources"] = public_resources(incident["id"])
     # Wind is a live external lookup, so it belongs on the single-incident
     # detail (opened on demand from the map popup), never the 500-item list.
     from services.incident_wind import get_wind

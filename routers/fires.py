@@ -1682,6 +1682,14 @@ def admin_get_fire_incident(incident_id: int, _admin: str = Depends(REPORTS_VIEW
         ) if event
     ]
     incident["feedback"] = list_fire_incident_feedback(incident_id)
+    # Timeline, agency/dispatch records and the full resource list (people included) are staff-only here.
+    from services.incident_history import list_history
+    from services.official_incidents import official_source_for
+    from services.wildcad import dispatch_for, staff_resources
+    incident["history"] = list_history(incident_id)
+    incident["official_source"] = official_source_for(incident_id)
+    incident["dispatch"] = dispatch_for(incident_id)
+    incident["dispatch_resources"] = staff_resources(incident_id)
     from ai.feedback_analysis import get_analysis
     incident["feedback_analysis"] = get_analysis(incident_id, incident["feedback"])
     from ai.clef import get_assessment

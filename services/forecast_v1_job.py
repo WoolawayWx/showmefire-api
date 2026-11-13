@@ -10,6 +10,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
 from core.database import get_db_path
 from services.synoptic import get_station_data
 from forecast_v1.acquisition import acquire_cycle, latest_publishable_12z
@@ -71,7 +76,72 @@ def _configure_run_log() -> None:
 
 
 _configure_run_log()
-_execution_lock = threading.Lock()
+
+
+class _RunLock:
+    """The single-run lock, shared by every process on the host.
+
+    A run takes hours, and the API (admin "Run now" in older builds) and the heavy scheduler worker can be different
+    containers on one volume, so a `threading.Lock` no longer excludes anything. This keeps the in-process lock (cheap,
+    covers threads) and adds an `fcntl.flock` on FORECAST_V1_DIR/.run.lock. The kernel drops the flock when the holding
+    process dies, so a killed run never leaves the lock stuck. `locked()` probes it from any process. Where fcntl does not
+    exist (Windows development) it falls back to the thread lock alone."""
+
+    def __init__(self) -> None:
+        self._thread = threading.Lock()
+        self._fd: int | None = None
+
+    @staticmethod
+    def _path() -> Path:
+        return Path(FORECAST_V1_DIR) / ".run.lock"
+
+    def acquire(self, blocking: bool = False) -> bool:
+        if not self._thread.acquire(blocking=False):
+            return False
+        if fcntl is None:
+            return True
+        fd = None
+        try:
+            self._path().parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self._path(), os.O_CREAT | os.O_RDWR)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if fd is not None:
+                os.close(fd)
+            self._thread.release()
+            return False
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None and fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        self._thread.release()
+
+    def locked(self) -> bool:
+        if self._thread.locked():
+            return True
+        if fcntl is None:
+            return False
+        try:
+            fd = os.open(self._path(), os.O_RDWR)
+        except OSError:
+            return False   # no lock file yet, so nobody has ever held it
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except OSError:
+            return True
+        finally:
+            os.close(fd)
+
+
+_execution_lock = _RunLock()
 PHASE_LABELS = {
     "queued": "Waiting to start",
     "preparing": "Preparing run",
@@ -421,7 +491,9 @@ def run_forecast_v1_operational(now: datetime | None = None, make_public: bool |
     # Snapshot the live station cache here, in the caller's process, and hand
     # it to the worker as plain data - the worker is a separate process
     # pool member and cannot see synoptic.py's in-memory cache.
-    raw_stations = get_station_data().get("stations") or []
+    from services.station_feed_snapshot import station_data_for_job
+
+    raw_stations = station_data_for_job().get("stations") or []   # snapshot when run in the heavy worker
     return _exclusive_run(_run_forecast_v1_operational_impl, now, make_public, raw_stations)
 
 
@@ -466,8 +538,49 @@ def trigger_forecast_v1(requested_by: str) -> dict:
             "message": "Waiting for an isolated forecast worker", "progress_percent": 0, "events": [],
         }
         _write_job(job)
-        threading.Thread(target=_run_admin_forecast, args=(job,), daemon=True, name="forecast-v1-admin").start()
+        # The request is only queued: whichever process runs the heavy scheduler group (the scheduler worker in a split
+        # deployment) starts it within ~30 s, so a long run never lives inside the API process a deploy restarts.
         return job
+
+
+def run_requested_admin_forecast() -> dict:
+    """Start the admin-requested run if one is queued and nothing else is running. Called every 30 s by the heavy group."""
+    with _job_lock:
+        job = _read_job()
+        if job.get("status") != "queued" or job.get("requested_by") == "scheduler":
+            return {"started": False}
+        try:
+            requested = datetime.fromisoformat(str(job.get("requested_at")).replace("Z", "+00:00")).astimezone(timezone.utc)
+            age = (datetime.now(timezone.utc) - requested).total_seconds()
+        except (TypeError, ValueError):
+            age = 0
+        if age > int(os.getenv("SMF_FORECAST_V1_REQUEST_TTL_SECONDS", "3600")):
+            _finish_job("failed", error=RuntimeError("The run was requested but no scheduler picked it up in time"))
+            return {"started": False, "expired": True}
+        if _execution_lock.locked():
+            return {"started": False, "busy": True}   # a scheduled run is going; try again next tick
+    _run_admin_forecast(job)
+    return {"started": True, "job_id": job.get("job_id")}
+
+
+def reconcile_orphaned_run() -> dict:
+    """After a worker restart: a job file that still says "running" while nothing holds the run lock belongs to a process
+    that died. Mark it failed (and its half-built forecast run, so the next tick retries it) instead of waiting out the
+    4 hour timeout. Safe to call at any time: it does nothing while a run really holds the lock."""
+    with _job_lock:
+        job = _read_job()
+        if job.get("status") != "running" or _execution_lock.locked():
+            return {"reconciled": False}
+        _finish_job("failed", error=RuntimeError("The run was interrupted when its worker stopped"))
+    try:
+        from forecast_v1.repository import transaction as forecast_transaction
+
+        with forecast_transaction() as connection:
+            cursor = connection.execute("UPDATE forecast_runs SET status = 'failed' WHERE status = 'staging'")
+            return {"reconciled": True, "forecast_runs_failed": cursor.rowcount}
+    except Exception:  # noqa: BLE001 - the job file is already fixed; the run row is a courtesy
+        logger.warning("forecast_v1: could not mark the interrupted run failed", exc_info=True)
+        return {"reconciled": True, "forecast_runs_failed": None}
 
 
 def get_forecast_v1_job_status() -> dict:

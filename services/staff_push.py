@@ -81,6 +81,8 @@ PUSH_TYPES: Dict[str, Dict[str, str]] = {
     "fire_report": {"title": "New fire report", "route": "/staff/reports", "id_pattern": r"/admin/fires/(\d+)"},
     "incident_feedback": {"title": "New incident feedback", "route": "/staff/incidents", "id_pattern": ""},
     "burn_ban": {"title": "New burn-ban request", "route": "/staff/burn-bans", "id_pattern": r"/(\d+)\b"},
+    # Not moderation work, but a stalled dispatch feed means fires are going unseen: worth waking someone for.
+    "feed_stale": {"title": "Dispatch feed problem", "route": "/staff", "id_pattern": ""},
 }
 _unknown_logged: set = set()
 

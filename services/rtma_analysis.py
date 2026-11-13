@@ -187,7 +187,7 @@ def _history_observations(hour_utc: datetime, coordinates: dict) -> list[dict]:
 
 
 def _station_coordinates() -> dict:
-    from services.synoptic import get_station_data
+    from services.station_feed_snapshot import station_data_for_job as get_station_data
 
     coordinates = {}
     for station in get_station_data().get("stations") or []:

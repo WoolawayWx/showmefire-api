@@ -116,6 +116,22 @@ class IncidentHistoryTests(unittest.TestCase):
         self.assertEqual([e["summary"] for e in notes], ["Asked 1 person near Barry County to help verify it"])
         self.assertIsNone(notes[0]["status"])
 
+    def test_staff_approval_is_a_confirmed_entry_even_if_recorded_before_statuses_existed(self):
+        self._detection(1)
+        incident_id = self._incident_id()
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute(
+                "UPDATE fire_incidents SET review_decision = 'approved', review_label = 'wildfire', "
+                "review_decided_at = '2026-11-13 00:18:00' WHERE id = ?", (incident_id,))
+            connection.execute(  # the old shape: no status, older wording
+                "INSERT INTO fire_incident_history (incident_id, occurred_at, kind, summary, dedupe_key) "
+                "VALUES (?, '2026-11-13T00:18:00Z', 'review', 'Reviewed by Show Me Fire staff and labelled a wildfire', "
+                "'review:2026-11-13 00:18:00')", (incident_id,))
+        incident_history.sync_incident_history(NOW)
+        review = [e for e in incident_history.list_history(incident_id) if e["kind"] == "review"]
+        self.assertEqual([(e["summary"], e["status"]) for e in review],
+                         [("Confirmed by Show Me Fire staff as a wildfire", "approved")])
+
     def test_listing_with_no_matching_detection_starts_an_incident(self):
         self._sync_official([])
         self._sync_official([_feature(irwin="{BBB-2}", name="Lone Fire", lat=36.9, lon=-91.5, fips="29203")])
@@ -144,15 +160,14 @@ class IncidentHistoryTests(unittest.TestCase):
         history = incident_history.list_history(incident_id)
         summaries = [entry["summary"] for entry in history]
         self.assertTrue(any(s.startswith("Satellite detections grew from 3 to 8") for s in summaries))
-        self.assertEqual(summaries.count("Public feedback approved: confirmed as a fire"), 1)
-        self.assertEqual(summaries.count("Public feedback submitted, awaiting review"), 1)
-        # The pending one never reveals what it claims, and notes never appear.
-        self.assertNotIn("Public feedback approved: reported as not a fire", summaries)
+        self.assertEqual(summaries.count("Public feedback submitted as a fire, approved"), 1)
+        self.assertEqual(summaries.count("Public feedback submitted as not a fire, awaiting review"), 1)
+        # What it was submitted as is shown at every stage; comment text never is.
         self.assertNotIn("secret note", str(history))
         self.assertNotIn("unreviewed", str(history))
         statuses = {entry["summary"]: entry["status"] for entry in history if entry["kind"] == "feedback"}
-        self.assertEqual(statuses["Public feedback approved: confirmed as a fire"], "approved")
-        self.assertEqual(statuses["Public feedback submitted, awaiting review"], "pending")
+        self.assertEqual(statuses["Public feedback submitted as a fire, approved"], "approved")
+        self.assertEqual(statuses["Public feedback submitted as not a fire, awaiting review"], "pending")
 
         # Review changes the same entry in place: pending -> rejected.
         with closing(sqlite3.connect(self.db_path)) as connection, connection:
@@ -161,7 +176,7 @@ class IncidentHistoryTests(unittest.TestCase):
         after = [e for e in incident_history.list_history(incident_id) if e["kind"] == "feedback"]
         self.assertEqual(len(after), 2)
         self.assertEqual(sorted(e["status"] for e in after), ["approved", "rejected"])
-        self.assertIn("Public feedback reviewed and not accepted", [e["summary"] for e in after])
+        self.assertIn("Public feedback submitted as not a fire, not accepted", [e["summary"] for e in after])
 
 
 if __name__ == "__main__":

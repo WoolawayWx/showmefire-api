@@ -675,6 +675,164 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_status ON fire_incident_feedback(status, created_at DESC)')
 
 
+SMF_PREFIX = {"incident": ("SMF", 5), "event": ("SMFD", 7)}
+_SMF_YEAR_SQL = "CAST(strftime('%Y', 'now', '-6 hours') AS INTEGER)"  # Central year, close enough for a label
+
+
+def format_smf_number(kind: str, year: int, number: int) -> str:
+    prefix, width = SMF_PREFIX[kind]
+    return f"{prefix}-{year}-{number:0{width}d}"
+
+
+def _ensure_smf_numbers(cursor: sqlite3.Cursor) -> None:
+    """Every incident (SMF-2026-00123) and every detection/report/official record (SMFD-2026-0004567) gets its own
+    permanent internal number; everything else (dispatch records, resources, history, pushes) links to it.
+
+    Numbers come from `smf_counters` and are never reused. New rows get theirs from an AFTER INSERT trigger, so
+    every code path that creates an incident or event is covered, in the same transaction as the insert; existing
+    rows are numbered once, in id order, by the backfill below."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS smf_counters (
+            kind TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            next_value INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (kind, year)
+        )
+    ''')
+    for kind, table in (("incident", "fire_incidents"), ("event", "fire_events")):
+        columns = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "smf_number" not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN smf_number TEXT")
+        cursor.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_smf_number ON {table}(smf_number) WHERE smf_number IS NOT NULL")
+        prefix, width = SMF_PREFIX[kind]
+        cursor.execute(f"DROP TRIGGER IF EXISTS trg_{table}_smf")
+        cursor.execute(f"""
+            CREATE TRIGGER trg_{table}_smf AFTER INSERT ON {table} WHEN NEW.smf_number IS NULL
+            BEGIN
+                INSERT OR IGNORE INTO smf_counters (kind, year, next_value) VALUES ('{kind}', {_SMF_YEAR_SQL}, 1);
+                UPDATE {table} SET smf_number = '{prefix}-' || strftime('%Y', 'now', '-6 hours') || '-' ||
+                    printf('%0{width}d', (SELECT next_value FROM smf_counters WHERE kind = '{kind}' AND year = {_SMF_YEAR_SQL}))
+                WHERE id = NEW.id;
+                UPDATE smf_counters SET next_value = next_value + 1 WHERE kind = '{kind}' AND year = {_SMF_YEAR_SQL};
+            END
+        """)
+        _backfill_smf_numbers(cursor, kind, table)
+
+
+def _backfill_smf_numbers(cursor: sqlite3.Cursor, kind: str, table: str) -> None:
+    rows = cursor.execute(
+        f"SELECT id, COALESCE(created_at, '') AS created FROM {table} WHERE smf_number IS NULL ORDER BY id"
+    ).fetchall()
+    if not rows:
+        return
+    counters = {row[0]: row[1] for row in cursor.execute("SELECT year, next_value FROM smf_counters WHERE kind = ?", (kind,))}
+    updates = []
+    for row in rows:
+        created = str(row[1] or "")
+        year = int(created[:4]) if created[:4].isdigit() else datetime.now().year
+        number = counters.get(year, 1)
+        counters[year] = number + 1
+        updates.append((format_smf_number(kind, year, number), row[0]))
+    cursor.executemany(f"UPDATE {table} SET smf_number = ? WHERE id = ?", updates)
+    for year, next_value in counters.items():
+        cursor.execute(
+            "INSERT INTO smf_counters (kind, year, next_value) VALUES (?, ?, ?) "
+            "ON CONFLICT(kind, year) DO UPDATE SET next_value = excluded.next_value",
+            (kind, year, next_value),
+        )
+
+
+def _ensure_wildcad_tables(cursor: sqlite3.Cursor) -> None:
+    """Local store for the WildCAD-E dispatch feed (services/wildcad.py). Everything that reads dispatch data reads
+    these tables; only the guarded poller talks to the upstream."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wildcad_feed_state (
+            kind TEXT PRIMARY KEY,
+            next_allowed_at TEXT,
+            last_attempt_at TEXT,
+            last_success_at TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_status INTEGER,
+            last_error TEXT,
+            etag TEXT,
+            last_modified TEXT,
+            paused_reason TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wildcad_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            record_count INTEGER NOT NULL DEFAULT 0,
+            body_json TEXT NOT NULL,
+            UNIQUE (kind, sha256)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wildcad_snapshots_kind ON wildcad_snapshots(kind, fetched_at DESC)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wildcad_incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_key TEXT NOT NULL UNIQUE,
+            center TEXT NOT NULL,
+            inc_num TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            uuid TEXT,
+            irwin_id TEXT,
+            dispatch_unit TEXT,
+            name TEXT NOT NULL DEFAULT '',
+            incident_type TEXT NOT NULL DEFAULT '',
+            acres REAL,
+            latitude REAL,
+            longitude REAL,
+            county_fips TEXT,
+            county_name TEXT,
+            reported_at TEXT,
+            contained_at TEXT,
+            controlled_at TEXT,
+            out_at TEXT,
+            web_comment TEXT NOT NULL DEFAULT '',
+            ic_name TEXT NOT NULL DEFAULT '',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            resource_signature TEXT NOT NULL DEFAULT '',
+            event_id INTEGER,
+            incident_id INTEGER,
+            notified_at TEXT,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ended_at TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wildcad_incidents_incident ON wildcad_incidents(incident_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wildcad_incidents_unit ON wildcad_incidents(dispatch_unit, inc_num)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wildcad_incidents_irwin ON wildcad_incidents(irwin_id)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS wildcad_resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            center TEXT NOT NULL,
+            code TEXT NOT NULL,
+            upstream_id INTEGER,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            location TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'unknown',
+            is_person INTEGER NOT NULL DEFAULT 1,
+            is_public INTEGER NOT NULL DEFAULT 1,
+            dispatch_unit TEXT,
+            inc_num TEXT,
+            incident_name TEXT NOT NULL DEFAULT '',
+            incident_id INTEGER,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (center, code)
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wildcad_resources_incident ON wildcad_resources(incident_id, status)')
+
+
 def _ensure_recurring_fire_source_tables(cursor: sqlite3.Cursor) -> None:
     """Fixed industrial heat sources (mills, flares, kilns, plants) that
     repeatedly trigger satellite fire detections at the same location.
@@ -1561,6 +1719,8 @@ def init_database():
     # 16. Unified fire-event store (user submissions + satellite/NGFS/official detections)
     _ensure_fire_event_tables(cursor)
     _ensure_fire_incident_tables(cursor)
+    _ensure_smf_numbers(cursor)
+    _ensure_wildcad_tables(cursor)
     from services import audit
     audit.ensure_table(cursor)  # the append-only moderation audit log (services/audit.py)
     _ensure_recurring_fire_source_tables(cursor)
@@ -2869,6 +3029,7 @@ _ORIGIN_DEFAULTS = {
     "goes": ("satellite_feed", "GOES"),
     "official": ("official_import", "Official dataset"),
     "nifc_wfigs": ("official_import", "NIFC WFIGS (U.S. Forest Service)"),
+    "wildcad": ("official_import", "WildCAD-E dispatch (MOMOC)"),
     "user_submission": ("public_form", "Public fire report form"),
 }
 _RAW_ORIGIN_LIMIT = 8000
@@ -3224,7 +3385,7 @@ def upsert_detection_event(
                         cursor, latitude, longitude, occurred_at, county_fips, county_name
                     )
                     cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
-            elif source == "nifc_wfigs" and cluster_incidents:
+            elif source in ("nifc_wfigs", "wildcad") and cluster_incidents:
                 # An agency's own record of a fire joins the detection cluster it belongs to (or starts the incident),
                 # the same way an approved public report does, instead of living in a separate list.
                 incident_id = find_or_create_incident_for_detection(

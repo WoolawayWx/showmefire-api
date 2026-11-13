@@ -12,12 +12,12 @@ confidence, reviewed public feedback by category (never notes or contact
 details), approved report arrivals, staff review, official listings. Unreviewed
 feedback is never shown.
 
-Kinds: first_detected, detections, confidence, feedback, report, review, official, notification.
+Kinds: first_detected, detections, confidence, feedback, report, review, official, dispatch, notification.
 Feedback and report entries carry a `status` (pending, approved, rejected) that is updated in place as
 staff review them; the app colours them yellow, green and red. Everything else is a plain event.
 
-What is shown about unreviewed or rejected feedback is only that it exists and its status: the category
-(confirmed fire, controlled burn, ...) appears once staff have approved it.
+Feedback shows what it was submitted as (a fire, a controlled burn, not a fire, not sure) and its review
+status; the comment text and any contact details are never shown.
 """
 from __future__ import annotations
 
@@ -27,26 +27,37 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from core.database import get_db_path
 
 logger = logging.getLogger(__name__)
 
+
+def get_db_path():
+    """Resolved at call time so tests (and anything else) that patch core.database.get_db_path also reach this module."""
+    from core import database
+
+    return database.get_db_path()
+
+SATELLITE_SOURCES = {"modis", "viirs", "ngfs"}
 ACTIVE_WINDOW_DAYS = 14
 DETECTION_STEP = 3                      # record a count change once it grows by this many...
 DETECTION_MIN_INTERVAL = timedelta(minutes=30)  # ...or when this long has passed since the last note
 CONFIDENCE_POINT_STEP = 10              # a score move this large is worth a line even inside one label
 PUBLIC_LIMIT = 100
 
-FEEDBACK_APPROVED_SUMMARY = {
-    "confirmed_fire": "Public feedback approved: confirmed as a fire",
-    "controlled_burn": "Public feedback approved: reported as a controlled burn",
-    "not_a_fire": "Public feedback approved: reported as not a fire",
-    "unsure": "Public feedback approved: not sure what it is",
+FEEDBACK_AS = {
+    "confirmed_fire": "a fire",
+    "controlled_burn": "a controlled burn",
+    "not_a_fire": "not a fire",
+    "unsure": "not sure",
 }
-FEEDBACK_SUMMARY = {
-    "pending": "Public feedback submitted, awaiting review",
-    "rejected": "Public feedback reviewed and not accepted",
-}
+FEEDBACK_OUTCOME = {"pending": "awaiting review", "approved": "approved", "rejected": "not accepted"}
+
+
+def feedback_summary(classification: str, status: str) -> str:
+    """"Public feedback submitted as a controlled burn, awaiting review" (the comment is never included)."""
+    return f"Public feedback submitted as {FEEDBACK_AS.get(classification, 'something else')}, {FEEDBACK_OUTCOME[status]}"
+
+
 REPORT_SUMMARY = {
     "pending": "A public fire report was submitted, awaiting review",
     "approved": "A public fire report was added",
@@ -156,15 +167,22 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
     state: dict[str, Any] = json.loads(state_row["state_json"]) if state_row else {}
     members = list_fire_incident_members(incident_id)
 
-    if record(connection, incident_id, "first_detected", "First satellite detection",
-              occurred_at=incident.get("first_detected_at"), dedupe_key="first"):
+    # Satellite wording only once a satellite has actually seen it: an incident that began as a dispatch or agency
+    # record has no satellite member yet (its own "Reported to dispatch" / "Listed by" entry is its first line).
+    satellite_times = sorted(str(m.get("occurred_at") or "") for m in members
+                             if m.get("source") in SATELLITE_SOURCES and m.get("occurred_at"))
+    has_satellite = bool(satellite_times)
+    if has_satellite and record(connection, incident_id, "first_detected", "First satellite detection",
+                                occurred_at=satellite_times[0], dedupe_key="first"):
         written += 1
 
     # Detection count: note growth, not every single new pixel.
     count = int(incident.get("detection_count") or 0)
     previous = state.get("detections")
     last_noted = state.get("detections_noted_at")
-    if previous is None:
+    if not has_satellite:
+        pass
+    elif previous is None:
         state["detections"], state["detections_noted_at"] = count, _utc_iso(now)
     elif count != previous:
         waited = last_noted is None or now - datetime.fromisoformat(last_noted.replace("Z", "+00:00")) >= DETECTION_MIN_INTERVAL
@@ -176,7 +194,7 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
             written += 1
 
     # Confidence: a label change, or a big enough score move.
-    current = _confidence(incident, members)
+    current = _confidence(incident, members) if has_satellite else None
     if current is not None:
         score, label = current
         before = state.get("confidence")
@@ -196,11 +214,8 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
         "SELECT id, classification, status, created_at FROM fire_incident_feedback WHERE incident_id = ?", (incident_id,),
     ).fetchall():
         status = row["status"] if row["status"] in STATUSES else "pending"
-        if status == "approved":
-            summary = FEEDBACK_APPROVED_SUMMARY.get(row["classification"], "Public feedback approved")
-        else:
-            summary = FEEDBACK_SUMMARY[status]
-        data = {"classification": row["classification"]} if status == "approved" else {}
+        summary = feedback_summary(row["classification"], status)
+        data = {"classification": row["classification"]}
         if upsert_status_entry(connection, incident_id, "feedback", summary, occurred_at=row["created_at"],
                                status=status, dedupe_key=f"feedback:{row['id']}", data=data):
             written += 1
@@ -214,11 +229,12 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
                 written += 1
 
     if incident.get("review_decision") == "approved" and incident.get("review_decided_at"):
-        label = {"wildfire": "wildfire", "prescribed": "prescribed burn"}.get(incident.get("review_label") or "", "")
-        if record(connection, incident_id, "review",
-                  f"Reviewed by Show Me Fire staff{f' and labelled a {label}' if label else ' and approved'}",
-                  occurred_at=incident["review_decided_at"], data={"status": "approved"},
-                  dedupe_key=f"review:{incident['review_decided_at']}"):
+        # Staff approving an incident is a confirmation: green in the app. Updated in place so an entry written
+        # before statuses existed picks the status up.
+        label = {"wildfire": "a wildfire", "prescribed": "a prescribed burn"}.get(incident.get("review_label") or "", "a fire")
+        if upsert_status_entry(connection, incident_id, "review", f"Confirmed by Show Me Fire staff as {label}",
+                               occurred_at=incident["review_decided_at"], status="approved",
+                               dedupe_key=f"review:{incident['review_decided_at']}"):
             written += 1
 
     connection.execute(

@@ -162,6 +162,15 @@ def _apply_merge(cursor: sqlite3.Cursor, survivor_id: int, loser_ids: list[int])
         [survivor_id, *loser_ids],
     )
 
+    # Everything else that hangs off an incident follows the survivor, so a merged-away link never loses its history,
+    # its agency/dispatch records or its resources.
+    for table in ("fire_incident_official", "wildcad_incidents", "wildcad_resources"):
+        cursor.execute(f"UPDATE {table} SET incident_id = ? WHERE incident_id IN ({placeholders})", [survivor_id, *loser_ids])
+    cursor.execute(f"UPDATE OR IGNORE fire_incident_history SET incident_id = ? WHERE incident_id IN ({placeholders})",
+                   [survivor_id, *loser_ids])
+    cursor.execute(f"DELETE FROM fire_incident_history WHERE incident_id IN ({placeholders})", loser_ids)
+    cursor.execute(f"DELETE FROM fire_incident_history_state WHERE incident_id IN ({placeholders})", loser_ids)
+
     _recompute_incident_stats(cursor, survivor_id)
     cursor.execute(
         f"UPDATE fire_incidents SET status = 'merged', merged_into_id = ?, updated_at = CURRENT_TIMESTAMP "

@@ -204,6 +204,19 @@ def get_model_schedule(request: Request, token: Optional[str] = None):
             "cadence": str(job.trigger),
             "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
         })
+    # Model jobs the heavy scheduler worker runs (not in this process's scheduler any more).
+    from core.scheduler import describe_all_jobs
+    from services.scheduler_heartbeat import read_heartbeat
+
+    present = {row["id"] for row in jobs}
+    next_runs = {item["id"]: item.get("next_run_at") for item in ((read_heartbeat() or {}).get("jobs") or [])}
+    for job in describe_all_jobs():
+        meta = MODEL_RELEVANT_JOBS.get(job["id"])
+        if meta is None or job["id"] in present:
+            continue
+        jobs.append({"id": job["id"], "category": meta["category"], "description": meta["description"],
+                     "cadence": str(job["trigger"]), "next_run_time": next_runs.get(job["id"]),
+                     "container": "scheduler worker"})
     jobs.sort(key=lambda row: (row["category"], row["id"]))
     return {"scheduler_running": True, "jobs": jobs}
 

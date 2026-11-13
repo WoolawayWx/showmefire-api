@@ -631,6 +631,8 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
         county_name = incident.get("county_name")
         where = f"near {county_name} County" if county_name else "near you"
         extra_data = {"confidenceLabel": incident.get("confidence_label")}
+        if incident.get("smf_number"):
+            extra_data["smfNumber"] = incident["smf_number"]
         if slug:
             extra_data["incidentSlug"] = slug
         # The app's "Open in Maps" notification action drops a pin here (see FIRE_DETECTION_MAP_CATEGORY).
@@ -671,11 +673,13 @@ def _note_incident_push(incident_id: int | None, event_key: str, delivered: int,
 
 
 def notify_official_listing(now: datetime | None = None) -> int:
-    """Tell fire-detection subscribers when an agency lists a fire (services/official_incidents.py).
+    """Tell fire-detection subscribers when an agency or dispatch lists a fire: NIFC WFIGS (services/official_incidents.py)
+    or WildCAD-E dispatch (services/wildcad.py).
 
     Same channel as the detection prompts: the "Help verify fire detections" opt-in, the incident's county, quiet hours
-    (held, not dropped) and the per-device daily cap all apply. One push per IRWIN record, only for listings first seen
-    in the last 12 hours, and never for an incident staff rejected.
+    (held, not dropped) and the per-device daily cap all apply. One push per INCIDENT, whichever source listed it first,
+    so dispatch followed by NIFC never notifies twice; only for listings first seen in the last 12 hours, and never for an
+    incident staff rejected.
     """
     from services.official_incidents import NOTIFY_WINDOW
 
@@ -684,34 +688,51 @@ def notify_official_listing(now: datetime | None = None) -> int:
         return 0
     cutoff = (now - NOTIFY_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
     with _connect() as connection:
-        rows = connection.execute(
-            """SELECT o.irwin_id, o.incident_id, o.name, o.acres, i.public_slug, i.county_fips, i.county_name
-               FROM fire_incident_official o JOIN fire_incidents i ON i.id = o.incident_id
-               WHERE o.notified_at IS NULL AND o.ended_at IS NULL AND o.first_seen_at >= ?
-                 AND i.status NOT IN ('deleted', 'merged') AND COALESCE(i.review_decision, '') != 'rejected'
-                 AND i.public_slug IS NOT NULL""",
+        base = """FROM {table} s JOIN fire_incidents i ON i.id = s.incident_id
+                  WHERE s.notified_at IS NULL AND s.first_seen_at >= ? AND {extra}
+                    AND i.status NOT IN ('deleted', 'merged') AND COALESCE(i.review_decision, '') != 'rejected'
+                    AND i.public_slug IS NOT NULL"""
+        nifc = connection.execute(
+            "SELECT 'nifc' AS source, s.irwin_id AS ref, s.incident_id, s.name, s.acres, s.first_seen_at, i.public_slug, "
+            "i.smf_number, i.county_fips, i.county_name " + base.format(table="fire_incident_official", extra="s.ended_at IS NULL"),
             (cutoff,),
         ).fetchall()
+        dispatch = connection.execute(
+            "SELECT 'wildcad' AS source, s.incident_key AS ref, s.incident_id, s.name, s.acres, s.first_seen_at, i.public_slug, "
+            "i.smf_number, i.county_fips, i.county_name " + base.format(table="wildcad_incidents", extra="s.out_at IS NULL"),
+            (cutoff,),
+        ).fetchall()
+    by_incident: dict[int, list[Any]] = {}
+    for row in sorted([*nifc, *dispatch], key=lambda item: item["first_seen_at"]):
+        by_incident.setdefault(row["incident_id"], []).append(row)
+
     sent = 0
-    for row in rows:
-        where = f"near {row['county_name']} County" if row["county_name"] else "in Missouri"
-        size = f", about {row['acres']:g} acres" if row["acres"] else ""
+    for incident_id, rows in by_incident.items():
+        first = rows[0]
+        where = f"near {first['county_name']} County" if first["county_name"] else "in Missouri"
+        size = f", about {first['acres']:g} acres" if first["acres"] else ""
+        name = first["name"] or "a fire"
+        if first["source"] == "wildcad":
+            title, body = f"Fire crews dispatched: {name}", f"Reported {where}{size}. Tap to see what we know about it."
+        else:
+            title, body = f"Forest Service is working the {name}", f"Listed {where}{size}. Tap to see what we know about it."
+        event_key = f"fire_detection:official:incident:{incident_id}"
         delivered = send_mobile_event(
             event_type="fire_detection",
-            event_key=f"fire_detection:official:{row['irwin_id']}",
-            title=f"Forest Service is working the {row['name']}",
-            body=f"Listed {where}{size}. Tap to see what we know about it.",
-            url=f"/incidents/{quote(row['public_slug'], safe='')}",
-            county_fips=[row["county_fips"]] if row["county_fips"] else [],
-            extra_data={"incidentSlug": row["public_slug"], "official": True},
+            event_key=event_key,
+            title=title,
+            body=body,
+            url=f"/incidents/{quote(first['public_slug'], safe='')}",
+            county_fips=[first["county_fips"]] if first["county_fips"] else [],
+            extra_data={"incidentSlug": first["public_slug"], "smfNumber": first["smf_number"], "official": True},
         )
         sent += delivered
-        _note_incident_push(row["incident_id"], f"fire_detection:official:{row['irwin_id']}", delivered,
-                            f"Told {_people(delivered)} {where} the Forest Service listed it")
+        what = "dispatch" if first["source"] == "wildcad" else "the Forest Service"
+        _note_incident_push(incident_id, event_key, delivered, f"Told {_people(delivered)} {where} {what} listed it")
         with _connect() as connection:
-            connection.execute(
-                "UPDATE fire_incident_official SET notified_at = CURRENT_TIMESTAMP WHERE irwin_id = ?", (row["irwin_id"],)
-            )
+            for row in rows:
+                table, column = (("fire_incident_official", "irwin_id") if row["source"] == "nifc" else ("wildcad_incidents", "incident_key"))
+                connection.execute(f"UPDATE {table} SET notified_at = CURRENT_TIMESTAMP WHERE {column} = ?", (row["ref"],))
     return sent
 
 

@@ -270,6 +270,9 @@ async def fetch_synoptic_data():
         station_data["error"] = None
         
         logger.info(f"[{station_data['last_updated']}] Station data updated successfully ({len(combined_stations)} stations)")
+        from services.station_feed_snapshot import write_snapshot  # shared with the heavy scheduler worker
+
+        write_snapshot("stations", station_data)
         try:
             # Verification storage is intentionally best-effort: a database
             # problem must not turn a successful station refresh into an API

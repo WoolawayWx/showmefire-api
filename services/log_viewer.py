@@ -496,6 +496,32 @@ def overview(scheduler=None) -> Dict[str, Any]:
                 "window": summary.get("window"),
             })
 
+    # Jobs the heavy scheduler worker runs (another container): schedule from the job registry, next run from its heartbeat.
+    try:
+        from core.scheduler import describe_all_jobs
+        from services.scheduler_heartbeat import read_heartbeat, worker_status
+
+        worker = worker_status()
+        next_runs = {item["id"]: item.get("next_run_at") for item in ((read_heartbeat() or {}).get("jobs") or [])}
+        for job in describe_all_jobs():
+            if job["group"] != "heavy" or job["id"] in seen or (scheduler is not None and getattr(scheduler, "running", False)
+                                                                  and scheduler.get_job(job["id"])):
+                continue
+            seen.add(job["id"])
+            summary = summaries.get(job["id"], {})
+            every = _interval_seconds(job["trigger"])
+            func = getattr(job["func"], "__wrapped__", job["func"])
+            jobs.append({
+                "id": job["id"], "label": _humanize(job["id"]),
+                "description": _first_doc_line(func), "source": "scheduler", "container": "scheduler worker",
+                "schedule": _schedule_text(job["trigger"]), "next_run_at": next_runs.get(job["id"]),
+                "paused": worker is None,   # no fresh heartbeat: nothing is running these right now
+                "log": "api.log", "state": _state(summary.get("last"), every, now),
+                "last": summary.get("last"), "last_failure": summary.get("last_failure"), "window": summary.get("window"),
+            })
+    except Exception:  # noqa: BLE001 - the Logs page must load even if this introspection fails
+        pass
+
     for job_id, meta in CRON_JOBS.items():
         seen.add(job_id)
         summary = summaries.get(job_id, {})

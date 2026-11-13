@@ -7,6 +7,7 @@ from pathlib import Path
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 from core.executors import get_process_pool, get_rtma_job_lock, run_in_process_pool_async
+from core.job_groups import GroupFilteredScheduler, groups_from_env
 from services.synoptic import fetch_synoptic_data, fetch_raws_stations_multi_state, get_station_data, get_buffer_station_data, fetch_buffer_stations
 from services.timeseries import fetchtimeseriesdata
 from services.station_precip import fetch_station_precip
@@ -74,6 +75,9 @@ async def fetch_and_store_raws_stations():
         raws_station_data["stations"] = raws_stations
         raws_station_data["last_updated"] = datetime.now().isoformat()
         raws_station_data["error"] = None
+        from services.station_feed_snapshot import write_snapshot  # shared with the heavy scheduler worker
+
+        write_snapshot("raws", raws_station_data)
     except Exception as e:
         # A transient fetch failure must not wipe out the last known-good
         # RAWS list - this global feeds the testbed beta products and the
@@ -196,10 +200,13 @@ async def refresh_testbed_spread_rate_job():
 async def rtma_spread_rate_pipeline_job():
     """Ensure latest RTMA is cached on the server, then refresh spread-rate."""
     try:
+        from services.station_feed_snapshot import raws_data_for_job
+
+        raws = raws_data_for_job()   # live in the API; the shared snapshot in the heavy worker
         async with get_rtma_job_lock():
             await run_in_process_pool_async(
                 run_spread_rate_pipeline,
-                raws_station_data if raws_station_data.get("stations") else None,
+                raws if raws.get("stations") else None,
             )
         try:
             await asyncio.to_thread(cleanup_rtma_cache)
@@ -421,6 +428,37 @@ async def ingest_fire_detections_job():
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
 
 
+async def forecast_v1_admin_requests_job():
+    """Runs a forecast_v1 run an admin requested ("Run now" only queues it, see services/forecast_v1_job.py)."""
+    from services.forecast_v1_job import run_requested_admin_forecast
+
+    await asyncio.to_thread(run_requested_admin_forecast)
+
+
+async def scheduler_worker_watch_job():
+    from services.scheduler_heartbeat import run_watch
+
+    await asyncio.to_thread(run_watch)
+
+
+async def wildcad_incidents_job():
+    from services.wildcad import poll_incidents_job
+
+    await asyncio.to_thread(poll_incidents_job)
+
+
+async def wildcad_resources_job():
+    from services.wildcad import poll_resources_job
+
+    await asyncio.to_thread(poll_resources_job)
+
+
+async def wildcad_health_job():
+    from services.wildcad_health import run_health_check
+
+    await asyncio.to_thread(run_health_check)
+
+
 async def official_incidents_job():
     """USFS Missouri wildfires from NIFC's WFIGS feed -> incidents, timelines, pushes (services/official_incidents.py)."""
     from services.official_incidents import sync_official_incidents
@@ -607,7 +645,10 @@ MODEL_RELEVANT_JOBS = {
 }
 
 
-def start_scheduler_jobs(scheduler: AsyncIOScheduler):
+def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredScheduler:
+    """Register the jobs of the enabled groups (core/job_groups.py; default SMF_SCHEDULER_GROUPS, i.e. both) without
+    starting anything. Returns the filtering wrapper so callers can see what was registered and skipped."""
+    scheduler = GroupFilteredScheduler(scheduler, groups if groups is not None else groups_from_env())
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
@@ -922,6 +963,13 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         id='official_incidents', max_instances=1, coalesce=True,
     )
 
+    # WildCAD-E dispatch feed (services/wildcad.py). Each endpoint is requested at most once per 5 minutes (enforced in the
+    # database, not just here), ~150 s apart; both are no-ops unless WILDCAD_ENABLED=1. The health check is separate so a
+    # feed that stops answering is noticed even if these jobs die.
+    scheduler.add_job(wildcad_incidents_job, 'cron', minute='*/5', second=10, id='wildcad_incidents', max_instances=1, coalesce=True)
+    scheduler.add_job(wildcad_resources_job, 'cron', minute='2-57/5', second=40, id='wildcad_resources', max_instances=1, coalesce=True)
+    scheduler.add_job(wildcad_health_job, 'cron', minute='1-56/5', second=30, id='wildcad_health', max_instances=1, coalesce=True)
+
     scheduler.add_job(
         ingest_fire_detections_job,
         'cron',
@@ -1064,10 +1112,63 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         coalesce=True,
     )
 
-    # Record every run for the admin Logs page (services/job_runs.py). Must stay after the last add_job.
+    # Admin "Run now" for forecast_v1 only enqueues a request; whichever process runs the heavy group picks it up here,
+    # so a long run is never started inside the API process (where a deploy would kill it).
+    scheduler.add_job(
+        forecast_v1_admin_requests_job,
+        'interval',
+        seconds=30,
+        id='forecast_v1_admin_requests',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # In a split deployment the API watches the heavy worker's heartbeat and alerts staff if it stops.
+    scheduler.add_job(
+        scheduler_worker_watch_job,
+        'interval',
+        minutes=5,
+        seconds=20,
+        id='scheduler_worker_watch',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    return scheduler
+
+
+def start_scheduler_jobs(scheduler: AsyncIOScheduler, groups=None) -> int:
+    """Register the jobs of the enabled groups, record every run for the admin Logs page (services/job_runs.py) and
+    start the scheduler. Tracking must stay after the last add_job."""
+    registered = register_jobs(scheduler, groups)
     tracked = job_runs.track_scheduler_jobs(scheduler)
     scheduler.start()
-    logger.info("Scheduler started with %d jobs", tracked)
+    logger.info("Scheduler started with %d jobs (groups %s; %d left to the other group)", tracked,
+                ",".join(sorted(registered.groups)), len(registered.skipped))
+    return tracked
+
+@functools.lru_cache(maxsize=1)
+def describe_all_jobs() -> list[dict]:
+    """Every job any container runs (id, group, trigger, function), read from a throwaway scheduler that is never started.
+    Needed because in a split deployment the API's own scheduler no longer knows the heavy jobs, yet the Logs page and the
+    model schedule must still list them. Jobs behind an env flag (forecast_v1, SPC auto-refresh, detection R2 publish) are
+    included by forcing those flags on while registering."""
+    from core.job_groups import ALL_GROUPS, CONDITIONAL_FLAGS, group_of
+
+    saved = {key: os.environ.get(key) for key in CONDITIONAL_FLAGS}
+    os.environ.update(CONDITIONAL_FLAGS)
+    try:
+        probe = AsyncIOScheduler(timezone=timezone('America/Chicago'))
+        register_jobs(probe, set(ALL_GROUPS))
+        jobs = [{"id": job.id, "group": group_of(job.id), "trigger": job.trigger, "func": job.func} for job in probe.get_jobs()]
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return jobs
+
 
 async def run_initial_fetches():
     await fetch_synoptic_data()

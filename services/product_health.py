@@ -16,6 +16,7 @@ from typing import Callable, Optional
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 STATUS_DIR = PROJECT_DIR / "data" / "current_conditions" / "status"
+REMINDER_HOURS = 6  # a still-stale product is mentioned again this often
 ROUTINE_SOUNDING_MAX_HOURS = 30  # twice-daily sites, with slack for once-a-day staffing schedules
 
 
@@ -120,9 +121,47 @@ def check_product(product: Product, now: Optional[datetime] = None) -> dict:
             "age_minutes": round(age, 1), "problems": problems}
 
 
+def active_products() -> list[Product]:
+    """The fixed products plus the WildCAD feeds, which only count once the feed is switched on."""
+    products = list(PRODUCTS)
+    try:
+        from services import wildcad, wildcad_health
+
+        if wildcad.enabled():
+            products += wildcad_health.products()
+        from services import scheduler_heartbeat
+
+        if scheduler_heartbeat.heartbeat_age_minutes() is not None:
+            products += scheduler_heartbeat.products()
+    except Exception:  # noqa: BLE001 - a broken optional check must not break the endpoint
+        pass
+    return products
+
+
+def plan_alerts(report: dict, state: dict, now: datetime) -> tuple[list[tuple[str, str]], dict]:
+    """(alerts to send as (message, detail), new state)."""
+    alerts, new_state = [], {}
+    for product in report["products"]:
+        key, label = product["key"], product["label"]
+        previous = state.get(key)
+        if product["status"] == "ok":
+            if previous:
+                alerts.append((f"{label} recovered", f"{label} is updating normally again."))
+            continue
+        detail = f"{label} ({product['source']}): " + "; ".join(product["problems"])
+        last_sent = datetime.fromisoformat(previous["alerted"]) if previous else None
+        if last_sent is None or (now - last_sent).total_seconds() >= REMINDER_HOURS * 3600:
+            verb = "still stale" if previous else "is stale"
+            alerts.append((f"{label} {verb}", detail))
+            new_state[key] = {"alerted": now.isoformat(), "since": (previous or {}).get("since", now.isoformat())}
+        else:
+            new_state[key] = previous
+    return alerts, new_state
+
+
 def check_all(now: Optional[datetime] = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    products = [check_product(product, now) for product in PRODUCTS]
+    products = [check_product(product, now) for product in active_products()]
     bad = [p for p in products if p["status"] != "ok"]
     return {
         "generated": now.strftime("%Y-%m-%dT%H:%M:%SZ"),

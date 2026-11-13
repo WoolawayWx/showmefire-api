@@ -49,7 +49,8 @@ MODERATE_THRESHOLD = 40
 # corroboration boost - it's a different kind of evidence, not a stronger
 # version of the same one, so it earns a flat bonus rather than feeding the
 # satellite-tuned components above.
-_SATELLITE_AND_KNOWN_SOURCES = {"modis", "viirs", "ngfs", "user_submission", "official"}
+# nifc_wfigs and wildcad are agency records, not OSINT leads: they must not get the social-media corroboration bonus.
+_SATELLITE_AND_KNOWN_SOURCES = {"modis", "viirs", "ngfs", "user_submission", "official", "nifc_wfigs", "wildcad"}
 OSINT_CORROBORATION_BONUS = 8
 
 

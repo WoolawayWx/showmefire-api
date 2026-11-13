@@ -24,10 +24,17 @@ from typing import Any
 
 import httpx
 
-from core.database import get_db_path, upsert_detection_event
+from core.database import upsert_detection_event
 from services import incident_history
 
 logger = logging.getLogger(__name__)
+
+
+def get_db_path():
+    """Resolved at call time so tests (and anything else) that patch core.database.get_db_path also reach this module."""
+    from core import database
+
+    return database.get_db_path()
 
 WFIGS_CURRENT_URL = (
     "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/"

@@ -96,6 +96,15 @@ def check_scheduler(request: Request) -> CheckResult:
         if not scheduler.running:
             return CheckStatus.error, "scheduler instance present but not running"
         job_count = len(scheduler.get_jobs())
+        from services.scheduler_heartbeat import STALE_AFTER_MINUTES, _split_here, heartbeat_age_minutes
+
+        if _split_here():   # the heavy jobs live in the scheduler worker: it must be heartbeating too
+            age = heartbeat_age_minutes()
+            if age is None:
+                return CheckStatus.degraded, f"running, {job_count} jobs scheduled; the heavy scheduler worker has never reported"
+            if age > STALE_AFTER_MINUTES:
+                return CheckStatus.error, f"running, {job_count} jobs scheduled; heavy scheduler worker silent for {age:.0f} min"
+            return CheckStatus.ok, f"running, {job_count} jobs scheduled; heavy scheduler worker alive"
         return CheckStatus.ok, f"running, {job_count} jobs scheduled"
 
     return _timed("scheduler", _run)

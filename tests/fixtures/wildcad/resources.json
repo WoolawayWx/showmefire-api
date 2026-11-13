@@ -1,0 +1,946 @@
+[
+ {
+  "data": [
+   {
+    "id": 170450,
+    "code": "Doe, Jane",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Jane Doe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117121,
+    "code": "E-862",
+    "status": "Out of Svc",
+    "location": "Ozark NSR- Van Buren",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Van Buren",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 159626,
+    "code": "UR 33",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MOMTF UAS MOD 33",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 157750,
+    "code": "MTV C-3E",
+    "status": "Out of Svc",
+    "location": "Cassville Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck E",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 175781,
+    "code": "Roe, Sam",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Sam Roe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116875,
+    "code": "D-33",
+    "status": "Out of Svc",
+    "location": "Ava/Cass/Willow Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 HOU",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 167831,
+    "code": "Poe, Alex",
+    "status": "Out of Svc",
+    "location": "OZP Headquaters",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Alex Poe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 175777,
+    "code": "Lee, Pat",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Pat Lee",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 175778,
+    "code": "Kay, Robin",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Robin Kay",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 205244,
+    "code": "*WIGLA5573",
+    "status": "Out of Svc",
+    "location": "Ozark NSR- Van Buren",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "WI-GLA-5573",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 174589,
+    "code": "UT-41",
+    "status": "Out of Svc",
+    "location": "Mark Twain Helibase",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Utility 41",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117879,
+    "code": "Mingo MOD",
+    "status": "Out of Svc",
+    "location": "MTF Eleven Point Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Zone 2 Mod",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 175776,
+    "code": "Doe, Jane5",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Jane Doe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 175779,
+    "code": "Roe, Sam6",
+    "status": "Out of Svc",
+    "location": "MTF Supervisors Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Sam Roe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116955,
+    "code": "Mingo JC",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "20 person crew",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 170677,
+    "code": "Poe, Alex7",
+    "status": "Out of Svc",
+    "location": "MTF Big Creek Roadless Area",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Alex Poe",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 204916,
+    "code": "Lee, Pat8",
+    "status": "Out of Svc",
+    "location": null,
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Pat Lee",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117653,
+    "code": "UT-12",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E612 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 174210,
+    "code": "E-627",
+    "status": "Out of Svc",
+    "location": "Ozark NSR- Van Buren",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Van Buren",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 138957,
+    "code": "C-861",
+    "status": "Out of Svc",
+    "location": "Ozark NSR- Van Buren",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Chase 861 OZP",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 141821,
+    "code": "MTV C-3B",
+    "status": "On Scene",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck B",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 157941,
+    "code": "H-9HR",
+    "status": "Out of Svc",
+    "location": "MTF Ava Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "N429HR - Bell 429",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116828,
+    "code": "D-23",
+    "status": "Out of Svc",
+    "location": "Winona Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 Z2 WINONA ",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 172210,
+    "code": "San Juan MOD",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "San Juan Module",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117662,
+    "code": "E-611",
+    "status": "Out of Svc",
+    "location": "Salem Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Salem",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117120,
+    "code": "E-861",
+    "status": "Out of Svc",
+    "location": "Ozark NSR- Van Buren",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Van Buren",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117336,
+    "code": "*SDBKF611",
+    "status": "Out of Svc",
+    "location": "Mountain Grove, MO",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "SD-BKF-611",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117656,
+    "code": "UT-22",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E-622 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 141820,
+    "code": "MTV C-3A",
+    "status": "On Scene",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck A",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 117668,
+    "code": "9HR Chase",
+    "status": "Out of Svc",
+    "location": "Mark Twain Helibase",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Heli. 9HR Chase",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 141827,
+    "code": "MTV C-3SAW",
+    "status": "On Scene",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck E",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 170512,
+    "code": "Kay, Robin9",
+    "status": "Out of Svc",
+    "location": "JCC Mingo Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Robin Kay",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 159303,
+    "code": "Skid Steer",
+    "status": "Out of Svc",
+    "location": "JCC Mingo Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MINGO Skid Steer",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 159564,
+    "code": "UR 32",
+    "status": "Out of Svc",
+    "location": "Ava/Cass/Willow Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "UAS MOD 32",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 173102,
+    "code": "BC 13",
+    "status": "Out of Svc",
+    "location": "MTF Salem Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "John Knapper MNSUF",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117752,
+    "code": "E-642 ",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Mingo JCC",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116785,
+    "code": "D-22",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 PB",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117333,
+    "code": "UT-13",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116826,
+    "code": "D-13",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "T3 DOZER D-456 POT.",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117882,
+    "code": "E-633",
+    "status": "Out of Svc",
+    "location": "Mountain Grove, MO",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Zone 3",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117159,
+    "code": "E-612",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Potosi",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 204875,
+    "code": "*UTDRD7611",
+    "status": "Out of Svc",
+    "location": "St. Robert, MO",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "UT-DRD-7611",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 141824,
+    "code": "MTV C-3C",
+    "status": "Out of Svc",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck C",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 141826,
+    "code": "MTV C-3D",
+    "status": "Out of Svc",
+    "location": "Cassville Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck D",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116981,
+    "code": "D-31",
+    "status": "Out of Svc",
+    "location": "Ava/Cass/Willow Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 AVA",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117582,
+    "code": "UT-31",
+    "status": "Out of Svc",
+    "location": "MTF Hercules Glades NWA",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E631 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116758,
+    "code": "D-34",
+    "status": "Out of Svc",
+    "location": "Houston Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 HOU",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117161,
+    "code": "E-631",
+    "status": "Out of Svc",
+    "location": "MTF Ava Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Ava",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117657,
+    "code": "UT-32",
+    "status": "Out of Svc",
+    "location": "MTF Houston Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E-632 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117549,
+    "code": "MJCC A",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Job Corp Alpha",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117552,
+    "code": "MJCC B",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Job Corp Bravo",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117669,
+    "code": "UT-9HR",
+    "status": "Out of Svc",
+    "location": "Ava/Cass/Willow Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Heli. 9HR Utility",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117815,
+    "code": "MTV Crew",
+    "status": "Out of Svc",
+    "location": "Cassville Office",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Mark Twain Vet Crew",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116870,
+    "code": "D-32",
+    "status": "Out of Svc",
+    "location": "Houston Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 AVA",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 205505,
+    "code": "*MNSUF612",
+    "status": "Out of Svc",
+    "location": "Mountain Grove, MO",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MN-SUF-612",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117184,
+    "code": "E-621",
+    "status": "Out of Svc",
+    "location": "Doniphan/EP Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Doniphan",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116827,
+    "code": "D-21",
+    "status": "Out of Svc",
+    "location": "Doniphan/EP Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "DZR3 DON",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117663,
+    "code": "UT-11",
+    "status": "Out of Svc",
+    "location": "Salem Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E-611 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116820,
+    "code": "D-11",
+    "status": "Out of Svc",
+    "location": "Salem Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "T3 DOZER D-1826 SAL.",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 205360,
+    "code": "*NMSCD1632",
+    "status": "Out of Svc",
+    "location": "MTF Eleven Point Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "NM-SCD-1632",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117111,
+    "code": "E-632",
+    "status": "Out of Svc",
+    "location": "MTF Houston Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Houston",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 205318,
+    "code": "*WYHDD1605",
+    "status": "Returning",
+    "location": "MTF Ava Unit",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "WY-HDD-E1605",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 116960,
+    "code": "MTV C-3",
+    "status": "On Scene",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "MTVC Truck F",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 173591,
+    "code": "Doe, Jane10",
+    "status": "On Scene",
+    "location": "MDC Southwest",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "Jane Doe",
+    "incident_name": "Rockhouse",
+    "incident_identifiers": {
+     "unit": "MOMOS",
+     "incident_num": 412
+    }
+   },
+   {
+    "id": 117024,
+    "code": "E-622",
+    "status": "Out of Svc",
+    "location": "Poplar Bluff Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "ENG6 Poplar Bluff",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 117655,
+    "code": "UT-21",
+    "status": "Out of Svc",
+    "location": "Doniphan/EP Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "E-621 Utility Truck",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   },
+   {
+    "id": 116822,
+    "code": "D-12",
+    "status": "Out of Svc",
+    "location": "Potosi/Fred Ranger Station",
+    "is_public": true,
+    "retrieved": "2026-11-13T03:31:34.699259+00:00",
+    "description": "T3 DOZER D-1852 POT.",
+    "incident_name": null,
+    "incident_identifiers": {
+     "unit": null,
+     "incident_num": null
+    }
+   }
+  ],
+  "retrieved": "2026-11-13T03:31:34.699259",
+  "webComment": "Main Line: (555) 555-0100"
+ }
+]

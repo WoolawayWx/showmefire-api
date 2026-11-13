@@ -17,10 +17,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from services.product_health import check_all  # noqa: E402
+from services.product_health import REMINDER_HOURS, check_all, plan_alerts  # noqa: E402,F401
 
 STATE_PATH = PROJECT_DIR / "data" / "current_conditions" / "product_health_state.json"
-REMINDER_HOURS = 6
 
 
 def _load_state() -> dict:
@@ -28,27 +27,6 @@ def _load_state() -> dict:
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-
-
-def plan_alerts(report: dict, state: dict, now: datetime) -> tuple[list[tuple[str, str]], dict]:
-    """(alerts to send as (message, detail), new state)."""
-    alerts, new_state = [], {}
-    for product in report["products"]:
-        key, label = product["key"], product["label"]
-        previous = state.get(key)
-        if product["status"] == "ok":
-            if previous:
-                alerts.append((f"{label} recovered", f"{label} is updating normally again."))
-            continue
-        detail = f"{label} ({product['source']}): " + "; ".join(product["problems"])
-        last_sent = datetime.fromisoformat(previous["alerted"]) if previous else None
-        if last_sent is None or (now - last_sent).total_seconds() >= REMINDER_HOURS * 3600:
-            verb = "still stale" if previous else "is stale"
-            alerts.append((f"{label} {verb}", detail))
-            new_state[key] = {"alerted": now.isoformat(), "since": (previous or {}).get("since", now.isoformat())}
-        else:
-            new_state[key] = previous
-    return alerts, new_state
 
 
 def main() -> None:

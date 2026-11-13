@@ -132,9 +132,12 @@ async def lifespan(app: FastAPI):
         logger.warning("%s; development mode only", message)
 
     try:
-        init_database()
-        ensure_forecast_v1_schema()
-        ensure_field_schema()
+        from core.startup_lock import startup_lock
+
+        with startup_lock():   # the scheduler worker runs the same setup; never both at once
+            init_database()
+            ensure_forecast_v1_schema()
+            ensure_field_schema()
     except Exception as exc:
         logger.error("Database initialization failed: %s", exc, exc_info=True)
         raise
