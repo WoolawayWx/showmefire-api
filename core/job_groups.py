@@ -52,6 +52,7 @@ API_JOBS = {
     # fire detections, incidents and the dispatch feeds
     "fetch_fire_detections", "fetch_advanced_fire_detections", "ingest_fire_detections", "official_incidents",
     "wildcad_incidents", "wildcad_resources", "wildcad_health", "recurring_source_detector", "burn_ban_maintenance",
+    "ground_cover_shadow",
     # fills in-process state that routers read (drift_monitor._state); alerts if the heavy worker dies
     "drift_check", "forecast_watchdog", "scheduler_worker_watch",
 }

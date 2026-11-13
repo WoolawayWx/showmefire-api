@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import xarray as xr
 
-from services import fire_behavior_static, incident_fuel
+from services import fire_behavior_static, ground_cover, incident_fuel
 
 
 def _bundle(path: Path, fuel_rows):
@@ -31,6 +31,12 @@ def _bundle(path: Path, fuel_rows):
 
 class IncidentFuelTests(unittest.TestCase):
     def setUp(self):
+        # These tests are about the coarse 3 km bundle; keep the 480 m product (if this machine has one) out of them.
+        patcher = patch.object(ground_cover, "_locate_bundle", side_effect=FileNotFoundError("none"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        ground_cover._RUNTIME = None
+        ground_cover._cached.cache_clear()
         self.temporary = tempfile.TemporaryDirectory()
         self.bundle = Path(self.temporary.name) / "bundle.nc"
         fire_behavior_static._RUNTIME = None

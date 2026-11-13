@@ -909,6 +909,36 @@ def _ensure_fire_danger_tracking_tables(cursor: sqlite3.Cursor) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_danger_scores_model_date ON fire_danger_model_scores(model, valid_date)')
 
 
+def _ensure_ground_cover_shadow_tables(cursor: sqlite3.Cursor) -> None:
+    """Shadow comparison of the incident confidence score with and without a land-cover string.
+
+    About 41% of incidents (VIIRS, MODIS, reports) carry no NOAA land_cover string, so the cropland/water penalties never
+    apply to them. services/ground_cover_shadow.py scores those incidents a second time with a stand-in string built from
+    our NLCD ground cover and records both here. Append-only and never read by any live score or public output."""
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS incident_confidence_shadow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER NOT NULL,
+            scored_at TEXT NOT NULL,
+            live_score INTEGER NOT NULL,
+            live_label TEXT NOT NULL,
+            shadow_score INTEGER NOT NULL,
+            shadow_label TEXT NOT NULL,
+            delta INTEGER NOT NULL,
+            stand_in_land_cover TEXT NOT NULL,
+            cropland_pct REAL NOT NULL DEFAULT 0,
+            water_pct REAL NOT NULL DEFAULT 0,
+            basis TEXT NOT NULL DEFAULT '',
+            cells INTEGER NOT NULL DEFAULT 0,
+            bundle_version TEXT NOT NULL DEFAULT '',
+            member_count INTEGER NOT NULL DEFAULT 0,
+            live_is_v2 INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_incident_conf_shadow_incident ON incident_confidence_shadow(incident_id, id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_incident_conf_shadow_time ON incident_confidence_shadow(scored_at)')
+
+
 def _ensure_detection_ml_tables(cursor: sqlite3.Cursor) -> None:
     """Review labels and score capture for the vegetation-fire confidence model.
 
@@ -1727,6 +1757,7 @@ def init_database():
     _ensure_fire_exclusion_zone_tables(cursor)
     _ensure_detection_ml_tables(cursor)
     _ensure_fire_danger_tracking_tables(cursor)
+    _ensure_ground_cover_shadow_tables(cursor)
 
     # 17. Anonymous fire-report abuse controls (per-IP throttle + blocklist)
     _ensure_fire_abuse_tables(cursor)

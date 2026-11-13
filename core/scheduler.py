@@ -357,6 +357,17 @@ async def recurring_source_detector_job():
         logger.error("Recurring source detector failed: %s", error, exc_info=True)
 
 
+async def ground_cover_shadow_job():
+    """Every 30 min: score incidents with no NOAA land-cover string a second time using a stand-in string from our NLCD
+    ground cover, and record both scores in incident_confidence_shadow. Never touches a live score (see
+    services/ground_cover_shadow.py). Does nothing when the ground cover product is not loaded."""
+    try:
+        from services.ground_cover_shadow import run_shadow_scan
+        await asyncio.to_thread(run_shadow_scan)
+    except Exception as error:
+        logger.error("Ground cover shadow scoring failed: %s", error, exc_info=True)
+
+
 async def run_post_promotion_monitor_job():
     """Seven-day post-promotion guardrail: auto-rollback on live metric regression.
 
@@ -1066,6 +1077,15 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
         hour=4,
         minute=20,
         id='recurring_source_detector',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        ground_cover_shadow_job,
+        'interval',
+        minutes=30,
+        id='ground_cover_shadow',
         max_instances=1,
         coalesce=True,
     )

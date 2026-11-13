@@ -55,18 +55,27 @@ def _land_cover_context(members: list, incident: Optional[dict] = None) -> dict:
         "fuel_source": None,
         "fuel_cells": None,
         "fuel_resolution_km": None,
+        "ground_cover": None,
+        "fuel_basis": None,
     }
     # Our own fuel/cover summary around the incident (LANDFIRE fuel models from the static bundle), so every incident has
     # one whichever detection feed saw it. Stored values from the detections win; this fills what they lack.
     if incident:
         from services.incident_fuel import fuel_context
 
-        computed = fuel_context(incident.get("centroid_latitude"), incident.get("centroid_longitude"))
+        computed = fuel_context(
+            incident.get("centroid_latitude"), incident.get("centroid_longitude"),
+            footprints=[m.get("footprint_geojson") for m in members], outline=incident.get("shape_geojson"),
+        )
         if computed:
             context["fuel_groups"] = computed["groups"]
             context["fuel_source"] = computed["source"]
             context["fuel_cells"] = computed["cells"]
             context["fuel_resolution_km"] = computed["resolution_km"]
+            # From the 480 m product only: NLCD ground cover in NOAA's class names (usable when NOAA sent no
+            # land_cover string) and what area the numbers were sampled over (footprint, outline or point).
+            context["ground_cover"] = computed.get("ground_cover")
+            context["fuel_basis"] = computed.get("basis")
             if context["fuel_model_fbfm40"] is None:
                 context["fuel_model_fbfm40"] = computed["fuel_model_fbfm40"]
             if context["avg_canopy_cover_pct"] is None:

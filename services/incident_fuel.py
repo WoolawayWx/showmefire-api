@@ -106,12 +106,24 @@ def _cached(latitude: float, longitude: float, radius_km: float, bundle_version:
     return _compute(latitude, longitude, radius_km)
 
 
-def fuel_context(latitude: Any, longitude: Any, radius_km: float = DEFAULT_RADIUS_KM) -> Optional[dict[str, Any]]:
-    """Fuel mix, dominant fuel model and canopy cover within `radius_km` of a point, or None. Never raises."""
+def fuel_context(
+    latitude: Any, longitude: Any, radius_km: float = DEFAULT_RADIUS_KM,
+    footprints: Any = None, outline: Any = None,
+) -> Optional[dict[str, Any]]:
+    """Fuel mix, dominant fuel model and canopy cover for an incident, or None. Never raises.
+
+    Prefers the 480 m ground cover product (sampled over the detection footprints, else the outline, else the 3 x 3
+    cells around the point); falls back to the coarse ~3 km fire-behavior bundle within `radius_km` of the point.
+    """
     try:
         lat, lon = float(latitude), float(longitude)
         if not (math.isfinite(lat) and math.isfinite(lon)):
             return None
+        from services import ground_cover
+
+        detailed = ground_cover.sample(lat, lon, footprints=footprints, outline=outline)
+        if detailed:
+            return detailed
         from services.fire_behavior_static import diagnostics
 
         # Rounded to ~100 m so every request for the same incident hits the cache; the bundle version is part of the

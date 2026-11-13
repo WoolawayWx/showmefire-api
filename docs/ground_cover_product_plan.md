@@ -249,6 +249,22 @@ Goal: see what the confidence score would be if every incident had cropland and 
 5. Note the open question the shadow run answers: the cropland penalty was designed around NGFS's coarse pixels. Whether the
    same penalty is right for 375 m VIIRS pixels is not known from the code, which is why this is a shadow comparison first.
 
+**Status (2026-11-13): steps 1-3 are built, step 4 is deliberately not.**
+
+- Job `ground_cover_shadow` (api group, every 30 minutes, listed in `core/job_groups.py`) runs
+  `services/ground_cover_shadow.py`. It scores incidents active in the last 24 h that have no NOAA `land_cover` string,
+  once as stored and once with a stand-in string from our NLCD mix, and appends both to `incident_confidence_shadow`
+  (a row is only added when the live score, shadow score or stand-in changes). It reads the live scorer's code but never
+  writes a live score, and it does nothing when the ground cover product is not loaded.
+- Both scores come from the v2 scorer so the only difference is land cover; `live_is_v2` records whether v2 is what the
+  site shows. If v1 is live, "live" here is what v2 would say, not what users see.
+- Switch off with `SMF_GROUND_COVER_SHADOW=0`. Roll back by removing the job or leaving it off; nothing else changes.
+- Review: `python scripts/review_ground_cover_shadow.py` (after at least 14 days and about 100 incidents; the report says
+  whether it is ready). It lists the score-change distribution, label flips (for example moderate to low) and the 20
+  largest changes to check by hand against satellite imagery and what staff decided.
+- Step 4 (an `SMF_GROUND_COVER_SCORING=1` flag that feeds the stand-in string to the live scorer) is NOT implemented. Add
+  it only after that review, off by default. There is no `api/CLAUDE.md`, so document the flag here when it exists.
+
 ## 9. If you later want fuel as a model feature (not part of v1)
 
 The shadow detection model reads `fuel_model_fbfm40` and `canopy_cover_pct` (`api/detection-confidence-model/features.py`). They
@@ -280,7 +296,8 @@ release path, and only then start filling the columns at ingest. Do not fill the
 - [ ] New model type added in both repos, with tests.
 - [ ] Registered, published as a prerelease, imported and promoted on the server.
 - [ ] `services/ground_cover.py` and the `incident_fuel.py` change merged, with tests; the panel and app show a fuel bar.
-- [ ] Shadow job running; review done after two weeks; decision recorded on the live-score flag.
+- [x] Shadow job written and tested (deploy it, then let it run).
+- [ ] Review done after two weeks; decision recorded on the live-score flag.
 
 ## 13. Prompt to paste into a Claude Code session on the desktop
 

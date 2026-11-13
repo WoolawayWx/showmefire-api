@@ -4,17 +4,19 @@ import os
 import re
 import secrets
 import time
+from datetime import date, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from core.admin_auth.permissions import MODEL_TRAINING_RUN, MODEL_TRAINING_VIEW, require_permission
 from core.rate_limit import RateLimiter
 from core.logging_setup import redact
 from core.security import verify_confirm_token
 from services import model_training_store as store
+from services import day_archive
 
 admin = APIRouter(prefix="/api/admin/model-training", tags=["model-training"])
 runner = APIRouter(prefix="/api/runner/v1", tags=["model-training-runner"])
@@ -44,6 +46,7 @@ class Snapshot(BaseModel):
     models: list[Model] = Field(max_length=50)
     jobs: list[Job] = Field(max_length=40)
     sources: list[dict] = Field(max_length=50)
+    transfers: list[Literal["r2", "server"]] = Field(default_factory=list, max_length=2)
 
 
 class Confirmation(BaseModel):
@@ -63,6 +66,31 @@ class Start(Confirmation):
     model: str
     stage: str | None = None
     from_stage: bool = False
+
+
+Component = Literal["hrrr", "rrfs", "rtma", "ensemble", "observations", "forecasts"]
+
+
+class Transfer(BaseModel):
+    runner: str = Field(pattern=r"^[a-f0-9]{24}$")
+    source: Literal["r2", "server"]
+    start: date
+    end: date
+    components: list[Component] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if not 0 <= (self.end - self.start).days < 31:
+            raise ValueError("Choose an ordered range of up to 31 days")
+        if self.source == "r2" and (not self.components or len(set(self.components)) != len(self.components)):
+            raise ValueError("Select one or more distinct R2 components")
+        if self.source == "server" and self.components:
+            raise ValueError("Server archives are transferred as whole ZIP files")
+        return self
+
+
+class StartTransfer(Transfer, Confirmation):
+    pass
 
 
 def confirm(payload, action, actor):
@@ -105,7 +133,9 @@ async def sync(request: Request):
             job["log"] = redact(job["log"])
     except (ValueError, ValidationError) as exc:
         raise HTTPException(422, "Invalid runner snapshot") from exc
-    snapshot["remote"] = snapshot["remote"] and remote_enabled()
+    if not remote_enabled():
+        snapshot["remote"] = False
+        snapshot["transfers"] = []
     result = await run_in_threadpool(save_snapshot, runner_id, snapshot)
     if result is None:
         raise HTTPException(401, "Runner revoked")
@@ -162,29 +192,68 @@ def start(payload: Start, actor: str = Depends(run)):
     confirm(payload, f"training_start:{payload.runner}:{payload.model}:{selection or 'all'}", actor)
     if not remote_enabled():
         raise HTTPException(409, "Remote training is disabled on the API")
+    return queue_job(payload.runner, payload.model, selection, actor,
+                     lambda snapshot: any(model["key"] == payload.model and model["remote"] and
+                                          (payload.stage is None or payload.stage in model["stages"])
+                                          for model in snapshot["models"]) and snapshot["remote"])
+
+
+@admin.post("/transfers/estimate")
+def estimate_transfer(payload: Transfer, _actor: str = Depends(view)):
+    if payload.source == "server":
+        return {"bytes": None, "available_days": None, "missing": []}
+    from routers.day_archive_admin import _s3
+
+    s3 = _s3()
+    total = available = 0
+    missing = []
+    for offset in range((payload.end - payload.start).days + 1):
+        day = (payload.start + timedelta(days=offset)).isoformat()
+        manifest = day_archive.read_manifest(s3, day) or {}
+        count = 0
+        for name in payload.components:
+            part = manifest.get("components", {}).get(name, {})
+            if part.get("status") == "present" and part.get("key") and part.get("sha256"):
+                total += part["size"]
+                count += 1
+            else:
+                missing.append(f"{day} {name}")
+        available += bool(count)
+    return {"bytes": total, "available_days": available, "missing": missing}
+
+
+@admin.post("/transfers", status_code=201)
+def start_transfer(payload: StartTransfer, actor: str = Depends(run)):
+    components = sorted(payload.components)
+    selection = f"{payload.start}:{payload.end}:{','.join(components)}"
+    confirm(payload, f"training_transfer:{payload.runner}:{payload.source}:{selection}", actor)
+    if not remote_enabled():
+        raise HTTPException(409, "Remote starts are disabled on the API")
+    return queue_job(payload.runner, f"transfer:{payload.source}", selection, actor,
+                     lambda snapshot: payload.source in snapshot.get("transfers", []))
+
+
+def queue_job(runner_id, target, selection, actor, available):
     now = time.time()
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         store.expire(conn, now)
         if store.paused(conn):
-            raise HTTPException(409, "Remote training is paused")
-        row = conn.execute("SELECT seen,snapshot FROM mt_runners WHERE id=? AND revoked=0", (payload.runner,)).fetchone()
+            raise HTTPException(409, "Remote starts are paused")
+        row = conn.execute("SELECT seen,snapshot FROM mt_runners WHERE id=? AND revoked=0", (runner_id,)).fetchone()
         if row is None or row["seen"] is None:
-            raise HTTPException(409, "Runner has not reported its model catalog")
+            raise HTTPException(409, "Runner has not reported its capabilities")
         snapshot = json.loads(row["snapshot"])
-        model = next((model for model in snapshot["models"] if model["key"] == payload.model), None)
-        if not snapshot["remote"] or not model or not model["remote"] or (
-            payload.stage is not None and payload.stage not in model["stages"]
-        ):
-            raise HTTPException(422, "Model or stage unavailable on this runner")
+        if not available(snapshot):
+            raise HTTPException(422, "Operation unavailable on this runner")
         if conn.execute(
             "SELECT 1 FROM mt_requests WHERE runner=? AND model=? AND status IN ('queued','claimed','running')",
-            (payload.runner, payload.model),
+            (runner_id, target),
         ).fetchone():
-            raise HTTPException(409, "Model already queued or running")
+            raise HTTPException(409, "Operation already queued or running")
         job_id = secrets.token_hex(12)
         conn.execute("INSERT INTO mt_requests(id,runner,model,stage,actor,created,updated) VALUES (?,?,?,?,?,?,?)",
-                     (job_id, payload.runner, payload.model, selection, actor, now, now))
+                     (job_id, runner_id, target, selection, actor, now, now))
     return {"id": job_id}
 
 

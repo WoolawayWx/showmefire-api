@@ -73,13 +73,16 @@ def sync(conn, runner_id, snapshot):
         "SELECT id FROM mt_requests WHERE runner=? AND cancel=1 AND status IN ('claimed','running')", (runner_id,),
     )]
     assignment = None
-    if snapshot["remote"] and not paused(conn) and not conn.execute(
+    transfers = [f"transfer:{source}" for source in snapshot.get("transfers", [])]
+    if (snapshot["remote"] or transfers) and not paused(conn) and not conn.execute(
         "SELECT 1 FROM mt_requests WHERE runner=? AND status IN ('claimed','running')", (runner_id,),
     ).fetchone():
-        row = conn.execute(
-            "SELECT id,model,stage FROM mt_requests WHERE runner=? AND status='queued' ORDER BY created LIMIT 1",
+        queued = conn.execute(
+            "SELECT id,model,stage FROM mt_requests WHERE runner=? AND status='queued' ORDER BY created",
             (runner_id,),
-        ).fetchone()
+        )
+        row = next((row for row in queued if (row["model"] in transfers if row["model"].startswith("transfer:")
+                                          else snapshot["remote"])), None)
         if row:
             conn.execute("UPDATE mt_requests SET status='claimed',updated=? WHERE id=?", (now, row["id"]))
             assignment = dict(row)

@@ -4,7 +4,7 @@ No web page lives here by design: these are JSON endpoints for the CLI, scripts 
 """
 import logging
 import re
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -33,8 +33,8 @@ def _day(value: str) -> str:
 
 
 class MarkDownloaded(BaseModel):
-    files: List[str] = Field(default_factory=list, description="Names of the files that were verified")
-    verified: bool = Field(default=True, description="True only if every checksum matched the manifest")
+    files: List[str] = Field(min_length=1, description="Names of all files checked against the manifest")
+    verified: bool = Field(description="True after checking every file against the manifest")
 
 
 @router.get("")
@@ -65,13 +65,16 @@ def get_day_links(date: str, expires_in: int = Query(3600, ge=60, le=86400),
 
 
 @router.post("/{date}/mark-downloaded")
-def mark_day_downloaded(date: str, payload: Optional[MarkDownloaded] = None, admin: str = Depends(require_admin)):
+def mark_day_downloaded(date: str, payload: MarkDownloaded, admin: str = Depends(require_admin)):
     """Record a verified download (writes a receipt to R2). Only unlocks R2 expiry after the window."""
     s3 = _s3()
     day = _day(date)
-    if day_archive.read_manifest(s3, day) is None:
+    links = day_archive.presigned_links(s3, day)
+    if links is None:
         raise HTTPException(status_code=404, detail=f"No day archive for {date}")
-    payload = payload or MarkDownloaded()
+    expected = {item["name"] for item in links}
+    if len(expected) < 2 or not payload.verified or set(payload.files) != expected:
+        raise HTTPException(status_code=422, detail="Confirm verification of every file in the current bundle")
     receipt = day_archive.write_receipt(s3, day, admin, files=payload.files, verified=payload.verified)
     return {"success": True, "receipt": receipt}
 

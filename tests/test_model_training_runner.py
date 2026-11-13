@@ -84,3 +84,25 @@ def test_runner_lifecycle(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as revoked:
         sync()
     assert revoked.value.status_code == 401
+
+
+def test_transfer_only_runner_claims_selected_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr(routes.store, "get_db_path", lambda: tmp_path / "training.db")
+    monkeypatch.setattr(routes, "verify_confirm_token", lambda token, action: ACTOR if token == action else None)
+    monkeypatch.setenv("SMF_MODEL_TRAINING_REMOTE", "1")
+    runner_id = routes.register(routes.Register(name="Transfer workstation", confirm_token="training_runner_create"),
+                                ACTOR)["id"]
+    snapshot = {"remote": False, "transfers": ["r2"], "models": [], "jobs": [], "sources": [], "free_bytes": 1}
+    routes.save_snapshot(runner_id, snapshot)
+    selection = "2026-10-01:2026-10-02:hrrr,rtma"
+    request = routes.StartTransfer(runner=runner_id, source="r2", start="2026-10-01", end="2026-10-02",
+                                   components=["rtma", "hrrr"],
+                                   confirm_token=f"training_transfer:{runner_id}:r2:{selection}")
+    job_id = routes.start_transfer(request, ACTOR)["id"]
+    with pytest.raises(HTTPException) as duplicate:
+        routes.start_transfer(request, ACTOR)
+    assert duplicate.value.status_code == 409
+    assert routes.save_snapshot(runner_id, {**snapshot, "transfers": []})["assignment"] is None
+    assert routes.save_snapshot(runner_id, snapshot)["assignment"] == {
+        "id": job_id, "model": "transfer:r2", "stage": selection,
+    }

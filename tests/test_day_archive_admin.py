@@ -47,7 +47,10 @@ def test_list_manifest_links_and_mark_downloaded_read_from_r2(env):
         assert all(link["url"].startswith("https://r2.example/day-archive/") for link in links)
         assert client.get("/admin/day-archive/2000-01-01").status_code == 404
         assert client.get("/admin/day-archive/not-a-date").status_code == 422
-        marked = client.post(f"/admin/day-archive/{DAY}/mark-downloaded", json={"files": ["forecasts.zip"]})
+        receipt_path = f"/admin/day-archive/{DAY}/mark-downloaded"
+        assert client.post(receipt_path).status_code == 422
+        assert client.post(receipt_path, json={"files": ["forecasts.zip"], "verified": True}).status_code == 422
+        marked = client.post(receipt_path, json={"files": [link["name"] for link in links], "verified": True})
         assert marked.status_code == 200
     receipt = s3.json(f"day-archive/receipts/{DAY}.json")
     assert receipt["downloaded_by"] == "admin@example.org" and receipt["verified"] is True
@@ -56,4 +59,5 @@ def test_list_manifest_links_and_mark_downloaded_read_from_r2(env):
 def test_mark_downloaded_unknown_day_is_404(env):
     root, s3 = env
     with patch.object(router_module, "_s3", return_value=s3):
-        assert _client(s3).post("/admin/day-archive/2000-01-01/mark-downloaded").status_code == 404
+        assert _client(s3).post("/admin/day-archive/2000-01-01/mark-downloaded",
+                                json={"files": ["manifest.json"], "verified": True}).status_code == 404
