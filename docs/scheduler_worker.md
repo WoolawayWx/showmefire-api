@@ -33,6 +33,8 @@ tests), `api` = the API container once the worker exists, `heavy` = the worker.
   6 hours and says when it recovered. It does nothing before a worker has ever reported, and nothing when `heavy` is in the API's own groups.
 - Database setup (`init_database` and friends) runs under `core/startup_lock.py` in both processes, so they cannot race the table rebuild.
 
+**The exact compose service and `deploy.sh` edits for the real server files are in `docs/scheduler_worker_server_changes.md`; use that. The generic snippet below is kept for reference.**
+
 ## Server setup (the server's `docker-compose.yml` and `.env` are not in this repo)
 
 Add to the server compose file (same image, volumes and `env_file` as the API; copy them from the existing `show-me-fire-api` /
@@ -84,8 +86,7 @@ heartbeat). The worker does not need the localhost:8000 port-forward: no schedul
 - Recreate the scheduler container only when its code matters (a heavy job changed) and the guard says nothing is running. A stop waits up to
   `SMF_SCHEDULER_STOP_WAIT_SECONDS` for running jobs; forecast_v1 itself cannot be paused mid-run, so a stop during one still loses that run
   (it restarts from the next 30-minute tick).
-- The worker keeps running **old code until it is redeployed**: keep database changes additive and don't make a heavy job depend on a new API
-  route.
+- The repo is bind-mounted into every container, so a `git pull` changes files under a running scheduler: it keeps the modules it already loaded but reads later (lazy) imports from the new files. Keep heavy-job changes additive and restart the scheduler (full guard) when they change.
 
 ## Manual actions that still run inside the API
 
