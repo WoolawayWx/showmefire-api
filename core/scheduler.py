@@ -414,8 +414,20 @@ async def ingest_fire_detections_job():
             await asyncio.to_thread(notify_feedback_candidates, candidates)
         except Exception as push_error:
             logger.error("Fire detection push notify failed: %s", push_error, exc_info=True)
+        # The public per-incident timeline (never raises; services/incident_history.py).
+        from services.incident_history import sync_incident_history
+        await asyncio.to_thread(sync_incident_history)
     except Exception as error:
         logger.error("Fire detection ingest failed: %s", error, exc_info=True)
+
+
+async def official_incidents_job():
+    """USFS Missouri wildfires from NIFC's WFIGS feed -> incidents, timelines, pushes (services/official_incidents.py)."""
+    from services.official_incidents import sync_official_incidents
+    from services.incident_history import sync_incident_history
+
+    await asyncio.to_thread(sync_official_incidents)
+    await asyncio.to_thread(sync_incident_history)
 
 
 async def retrain_detection_confidence_job():
@@ -903,6 +915,11 @@ def start_scheduler_jobs(scheduler: AsyncIOScheduler):
         id='verify_v4_shadow',
         max_instances=1,
         coalesce=True,
+    )
+
+    scheduler.add_job(
+        official_incidents_job, 'interval', minutes=10, seconds=20,
+        id='official_incidents', max_instances=1, coalesce=True,
     )
 
     scheduler.add_job(

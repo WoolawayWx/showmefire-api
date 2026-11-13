@@ -650,6 +650,48 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
     return sent
 
 
+def notify_official_listing(now: datetime | None = None) -> int:
+    """Tell fire-detection subscribers when an agency lists a fire (services/official_incidents.py).
+
+    Same channel as the detection prompts: the "Help verify fire detections" opt-in, the incident's county, quiet hours
+    (held, not dropped) and the per-device daily cap all apply. One push per IRWIN record, only for listings first seen
+    in the last 12 hours, and never for an incident staff rejected.
+    """
+    from services.official_incidents import NOTIFY_WINDOW
+
+    now = now or datetime.now(timezone.utc)
+    if _in_feedback_quiet_hours(now):
+        return 0
+    cutoff = (now - NOTIFY_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT o.irwin_id, o.name, o.acres, i.public_slug, i.county_fips, i.county_name
+               FROM fire_incident_official o JOIN fire_incidents i ON i.id = o.incident_id
+               WHERE o.notified_at IS NULL AND o.ended_at IS NULL AND o.first_seen_at >= ?
+                 AND i.status NOT IN ('deleted', 'merged') AND COALESCE(i.review_decision, '') != 'rejected'
+                 AND i.public_slug IS NOT NULL""",
+            (cutoff,),
+        ).fetchall()
+    sent = 0
+    for row in rows:
+        where = f"near {row['county_name']} County" if row["county_name"] else "in Missouri"
+        size = f", about {row['acres']:g} acres" if row["acres"] else ""
+        sent += send_mobile_event(
+            event_type="fire_detection",
+            event_key=f"fire_detection:official:{row['irwin_id']}",
+            title=f"Forest Service is working the {row['name']}",
+            body=f"Listed {where}{size}. Tap to see what we know about it.",
+            url=f"/incidents/{quote(row['public_slug'], safe='')}",
+            county_fips=[row["county_fips"]] if row["county_fips"] else [],
+            extra_data={"incidentSlug": row["public_slug"], "official": True},
+        )
+        with _connect() as connection:
+            connection.execute(
+                "UPDATE fire_incident_official SET notified_at = CURRENT_TIMESTAMP WHERE irwin_id = ?", (row["irwin_id"],)
+            )
+    return sent
+
+
 def check_push_receipts() -> int:
     with _connect() as connection:
         rows = connection.execute(

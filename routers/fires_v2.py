@@ -36,6 +36,9 @@ from core.database import (
 from core.security import require_admin
 from routers.fires import PUBLIC_API_BASE_URL
 
+from services.incident_history import list_history
+from services.official_incidents import official_source_for
+
 router = APIRouter(prefix="/api/v2", tags=["fires-v2"])
 
 
@@ -105,6 +108,7 @@ def _incident_v2(incident: dict) -> dict:
         },
         "graphic_url": graphic_url,
         "feedback_url": feedback_url,
+        "official_source": official_source_for(incident["id"]),
     }
 
 
@@ -138,6 +142,7 @@ def get_incident_v2(slug: str):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Incident not found")
     detail = _incident_v2(incident)
+    detail["history"] = list_history(incident["id"])
     # Wind is a live external lookup, so it belongs on the single-incident
     # detail (opened on demand from the map popup), never the 500-item list.
     from services.incident_wind import get_wind

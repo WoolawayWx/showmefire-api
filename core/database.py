@@ -633,6 +633,44 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
     ):
         if name not in feedback_columns:
             cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incident_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            incident_id INTEGER NOT NULL,
+            occurred_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            data_json TEXT NOT NULL DEFAULT '{}',
+            dedupe_key TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_fire_incident_history_dedupe ON fire_incident_history(incident_id, dedupe_key) WHERE dedupe_key IS NOT NULL')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_history_incident ON fire_incident_history(incident_id, occurred_at DESC)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incident_history_state (
+            incident_id INTEGER PRIMARY KEY,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS fire_incident_official (
+            irwin_id TEXT PRIMARY KEY,
+            incident_id INTEGER,
+            event_id INTEGER,
+            name TEXT NOT NULL,
+            agency TEXT NOT NULL DEFAULT 'USFS',
+            acres REAL,
+            percent_contained REAL,
+            discovered_at TEXT,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ended_at TIMESTAMP,
+            notified_at TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_official_incident ON fire_incident_official(incident_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_incident ON fire_incident_feedback(incident_id, created_at DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_fire_incident_feedback_status ON fire_incident_feedback(status, created_at DESC)')
 
@@ -2830,6 +2868,7 @@ _ORIGIN_DEFAULTS = {
     "ngfs": ("satellite_feed", "NOAA NESDIS NGFS"),
     "goes": ("satellite_feed", "GOES"),
     "official": ("official_import", "Official dataset"),
+    "nifc_wfigs": ("official_import", "NIFC WFIGS (U.S. Forest Service)"),
     "user_submission": ("public_form", "Public fire report form"),
 }
 _RAW_ORIGIN_LIMIT = 8000
@@ -3185,6 +3224,13 @@ def upsert_detection_event(
                         cursor, latitude, longitude, occurred_at, county_fips, county_name
                     )
                     cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
+            elif source == "nifc_wfigs" and cluster_incidents:
+                # An agency's own record of a fire joins the detection cluster it belongs to (or starts the incident),
+                # the same way an approved public report does, instead of living in a separate list.
+                incident_id = find_or_create_incident_for_detection(
+                    cursor, latitude, longitude, occurred_at, county_fips, county_name
+                )
+                cursor.execute('UPDATE fire_events SET incident_id = ? WHERE id = ?', (incident_id, event_id))
             record_fire_moderation(cursor, event_id, action="ingested", actor=f"system:{source}_ingest",
                                     to_status=initial_status, to_tier=verification_tier,
                                     reason=f"ingested from {origin_info['feed']}",
