@@ -30,7 +30,7 @@ logger = file_logger('firedetections', 'firedetections.log')
 # API endpoint for advanced fire detections
 FIRMS_CSV_BASE_TEMPLATE = "https://firms.modaps.eosdis.nasa.gov/usfs/api/area/csv/{key}/{source}/{bbox}/1/"
 FIRMS_CSV_SOURCES = [
-    "VIIRS_SNPP_NRT",
+    # VIIRS_SNPP_NRT removed: NASA ceased Suomi NPP data delivery on 2026-11-02 (NOAA-20/21 replace it).
     "VIIRS_NOAA20_NRT",
     "VIIRS_NOAA21_NRT",
     "MODIS_NRT",
