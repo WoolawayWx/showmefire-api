@@ -1,13 +1,13 @@
 """Which process runs which scheduled job.
 
 `show-me-fire-api` used to run every APScheduler job inside the web process, so every deploy killed whatever long job
-(forecast_v1, the hourly HRRR build, archives...) happened to be running. Jobs are now split into two groups:
+(forecast_v1, the hourly HRRR build, archives...) happened to be running. Jobs are now split into groups:
 
   api    quick jobs, and jobs that keep in-memory state the web routes serve (station/timeseries/RAWS feeds, AFDs, alerts,
          drift state, pushes, purges, fire-detection ingest, WildCAD and NIFC listings, the watchdog). They stay in the API.
-  heavy  long-running or CPU/disk/R2-heavy jobs (forecast_v1, HRRR hourly, RTMA, graphics, archiving, verification,
-         retraining). They run in the scheduler worker container (`python -m core.scheduler_worker`), which an API deploy
-         does not touch.
+  heavy  long-running or CPU/disk/R2-heavy jobs (HRRR hourly, RTMA, graphics, archiving, verification, retraining). They
+         run in the scheduler worker container (`python -m core.scheduler_worker`), which an API deploy does not touch.
+  forecast  forecast_v1 only (a run takes hours): its own worker container, so it is restarted far less often.
 
 `SMF_SCHEDULER_GROUPS` picks the groups a process runs: `api,heavy` (the default, so dev, tests and an unsplit production
 behave exactly as before), `api`, or `heavy`. JOB_GROUPS is the single source of truth: a test fails when a registered job
@@ -21,12 +21,17 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-API, HEAVY = "api", "heavy"
-ALL_GROUPS = (API, HEAVY)
+API, HEAVY, FORECAST = "api", "heavy", "forecast"
+ALL_GROUPS = (API, HEAVY, FORECAST)
+# Groups that run in a worker container of their own (not in the web process), each with its own heartbeat file.
+WORKER_GROUPS = (HEAVY, FORECAST)
+
+# forecast_v1 runs for hours. It has its own group (and container) so that restarting the other heavy jobs, which finish in
+# minutes, never has to wait for it. In a deployment that has not split it out, run `--groups heavy,forecast` in the one worker.
+FORECAST_JOBS = {"run_forecast_v1_shadow", "prune_forecast_v1_hot_storage", "forecast_v1_admin_requests"}
 
 HEAVY_JOBS = {
-    # forecast_v1 and the HRRR / RTMA / MRMS pipelines
-    "run_forecast_v1_shadow", "prune_forecast_v1_hot_storage", "forecast_v1_admin_requests",
+    # the HRRR / RTMA / MRMS pipelines
     "hrrr_hourly_forecast", "rtma_spread_rate_pipeline", "refresh_rtma_analysis", "refresh_testbed_rtma",
     "end_of_day_rtma_peak", "capture_latest_mrms", "update_seasonal_fuel_state",
     # graphics that render in the process pool and upload to R2
@@ -57,7 +62,8 @@ API_JOBS = {
     "drift_check", "forecast_watchdog", "scheduler_worker_watch", "long_run_watch",
 }
 
-JOB_GROUPS: dict[str, str] = {**{job: API for job in API_JOBS}, **{job: HEAVY for job in HEAVY_JOBS}}
+JOB_GROUPS: dict[str, str] = {**{job: API for job in API_JOBS}, **{job: HEAVY for job in HEAVY_JOBS},
+                              **{job: FORECAST for job in FORECAST_JOBS}}
 
 # Jobs registered only when an env flag is on (so the full list needs those flags forced on).
 CONDITIONAL_FLAGS = {
@@ -68,7 +74,7 @@ CONDITIONAL_FLAGS = {
 
 
 def groups_from_env(value: str | None = None) -> set[str]:
-    """`SMF_SCHEDULER_GROUPS` ("api", "heavy" or "api,heavy"; default both). Unknown names are ignored with a warning."""
+    """`SMF_SCHEDULER_GROUPS` (any of "api", "heavy", "forecast", comma separated; default all). Unknown names are ignored with a warning."""
     raw = os.getenv("SMF_SCHEDULER_GROUPS", "api,heavy") if value is None else value
     groups = {part.strip().lower() for part in raw.split(",") if part.strip()}
     unknown = groups - set(ALL_GROUPS)

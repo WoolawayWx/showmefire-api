@@ -1,6 +1,8 @@
 """The heavy scheduler worker: APScheduler without the web server.
 
-    python -m core.scheduler_worker --groups heavy        # run the long jobs (forecast_v1, HRRR, RTMA, archives...)
+    python -m core.scheduler_worker --groups heavy        # the heavy jobs (HRRR, RTMA, graphics, archives...)
+    python -m core.scheduler_worker --groups forecast     # forecast_v1 alone (a run takes hours): its own container
+    python -m core.scheduler_worker --groups heavy,forecast  # both in one worker (the unsplit setup)
     python -m core.scheduler_worker --groups heavy --list # print the jobs that would run, then exit
 
 An API deploy restarts only the API container, so these jobs keep running. See core/job_groups.py for which jobs run
@@ -28,7 +30,7 @@ from apscheduler.events import (
     EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED, EVENT_JOB_SUBMITTED,
 )
 
-from core.job_groups import ALL_GROUPS, HEAVY, groups_from_env
+from core.job_groups import ALL_GROUPS, FORECAST, HEAVY, groups_from_env
 
 logger = logging.getLogger("scheduler_worker")
 
@@ -117,13 +119,13 @@ async def run(groups: set[str]) -> None:
     scheduler = scheduler_module.create_scheduler()
     running = RunningJobs()
     running.attach(scheduler)
-    if HEAVY in groups:
+    if FORECAST in groups:
         from services.forecast_v1_job import reconcile_orphaned_run
 
         logger.info("Start-up reconciliation of an interrupted forecast_v1 run: %s", reconcile_orphaned_run())
     scheduler_module.start_scheduler_jobs(scheduler, groups)
 
-    from services.scheduler_heartbeat import write_heartbeat
+    from services.scheduler_heartbeat import heartbeat_path_for, write_heartbeat
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -136,7 +138,7 @@ async def run(groups: set[str]) -> None:
     async def heartbeat_loop() -> None:
         while True:
             try:
-                write_heartbeat(describe(scheduler, groups, running, started_at))
+                write_heartbeat(describe(scheduler, groups, running, started_at), heartbeat_path_for(groups))
             except Exception:  # noqa: BLE001
                 logger.warning("Could not write the scheduler heartbeat", exc_info=True)
             await asyncio.sleep(HEARTBEAT_SECONDS)

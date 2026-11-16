@@ -22,9 +22,22 @@ from services.product_health import PROJECT_DIR, STATUS_DIR, Product, plan_alert
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_PATH = STATUS_DIR / "scheduler_heavy.json"
+HEARTBEAT_PATH = STATUS_DIR / "scheduler_heavy.json"   # the heavy worker; the forecast worker writes next to it
+FORECAST_HEARTBEAT_NAME = "scheduler_forecast.json"
+LABELS = {"heavy": ("scheduler_heavy", "Heavy scheduler worker", "show-me-fire-scheduler"),
+          "forecast": ("scheduler_forecast", "Forecast scheduler worker", "show-me-fire-forecast")}
 STATE_PATH = PROJECT_DIR / "data" / "current_conditions" / "scheduler_worker_state.json"
 STALE_AFTER_MINUTES = 5
+
+
+def forecast_heartbeat_path() -> Path:
+    return HEARTBEAT_PATH.with_name(FORECAST_HEARTBEAT_NAME)
+
+
+def heartbeat_path_for(groups) -> Path:
+    """Where a worker running `groups` writes its heartbeat: the heavy file when it runs the heavy group (a combined worker
+    `heavy,forecast` included, which keeps working with the old single-worker setup), else the forecast file."""
+    return HEARTBEAT_PATH if "heavy" in groups or "forecast" not in groups else forecast_heartbeat_path()
 
 
 def write_heartbeat(payload: dict[str, Any], path: Path | None = None) -> None:
@@ -51,26 +64,56 @@ def heartbeat_age_minutes(now: datetime | None = None, path: Path | None = None)
     return ((now or datetime.now(timezone.utc)).timestamp() - mtime) / 60
 
 
-def worker_status(now: datetime | None = None) -> dict[str, Any] | None:
-    """The worker's heartbeat when this process hands the heavy group to it and the heartbeat is fresh, else None."""
-    if not _split_here():
+def _claims(group: str) -> list[tuple[float, dict[str, Any]]]:
+    """(age in minutes, payload) of every heartbeat file whose worker runs `group`, freshest first."""
+    out = []
+    for native, path in (("heavy", HEARTBEAT_PATH), ("forecast", forecast_heartbeat_path())):
+        payload = read_heartbeat(path)
+        age = heartbeat_age_minutes(path=path)
+        # A beat that names no groups is taken to run the group its file is named for.
+        if payload is not None and age is not None and group in (payload.get("groups") or [native]):
+            out.append((age, payload))
+    return sorted(out, key=lambda item: item[0])
+
+
+def group_age_minutes(group: str) -> float | None:
+    """Minutes since the worker that runs `group` last reported, or None when none ever has."""
+    claims = _claims(group)
+    return claims[0][0] if claims else None
+
+
+def worker_status(now: datetime | None = None, group: str = "heavy") -> dict[str, Any] | None:
+    """The heartbeat of the worker running `group` when this process hands that group to it and the beat is fresh."""
+    if not _split_here(group):
         return None
-    age = heartbeat_age_minutes(now)
-    if age is None or age > STALE_AFTER_MINUTES:
+    claims = _claims(group)
+    if not claims or claims[0][0] > STALE_AFTER_MINUTES:
         return None
-    return read_heartbeat()
+    return claims[0][1]
+
+
+def merged_jobs() -> list[dict[str, Any]]:
+    """Every worker's job list (id + next run), for pages that show the schedule of jobs that run elsewhere."""
+    jobs: list[dict[str, Any]] = []
+    for path in (HEARTBEAT_PATH, forecast_heartbeat_path()):
+        jobs += (read_heartbeat(path) or {}).get("jobs") or []
+    return jobs
 
 
 def products() -> list[Product]:
-    return [Product("scheduler_heavy", "Heavy scheduler worker", [os.path.relpath(HEARTBEAT_PATH, PROJECT_DIR)],
-                    STALE_AFTER_MINUTES, "show-me-fire-scheduler")]
+    out = []
+    for group, (key, label, source) in LABELS.items():
+        path = HEARTBEAT_PATH if group == "heavy" else forecast_heartbeat_path()
+        if heartbeat_age_minutes(path=path) is not None:
+            out.append(Product(key, label, [os.path.relpath(path, PROJECT_DIR)], STALE_AFTER_MINUTES, source))
+    return out
 
 
-def _split_here() -> bool:
-    """True when this process does NOT run the heavy group (so the worker is a separate container)."""
-    from core.job_groups import HEAVY, groups_from_env
+def _split_here(group: str = "heavy") -> bool:
+    """True when this process does NOT run `group` (so a worker container is expected to)."""
+    from core.job_groups import groups_from_env
 
-    return HEAVY not in groups_from_env()
+    return group not in groups_from_env()
 
 
 def _send(message: str, detail: str = "") -> bool:
@@ -91,23 +134,27 @@ def _send(message: str, detail: str = "") -> bool:
 
 
 def run_watch(now: datetime | None = None) -> list[tuple[str, str]]:
-    """Alert when the heavy worker's heartbeat goes stale / recovers. Returns the alerts sent."""
+    """Alert when a worker's heartbeat goes stale / recovers. Returns the alerts sent."""
     now = now or datetime.now(timezone.utc)
-    if not _split_here():
+    rows = []
+    for group, (key, label, source) in LABELS.items():
+        if not _split_here(group):
+            continue
+        age = group_age_minutes(group)
+        if age is None:
+            continue   # no worker has ever run this group: nothing to watch yet
+        problems = [f"no heartbeat for {age:.0f} min (expected every minute)"] if age > STALE_AFTER_MINUTES else []
+        rows.append({"key": key, "label": label, "source": source, "status": "stale" if problems else "ok", "problems": problems})
+    if not rows:
         return []
-    age = heartbeat_age_minutes(now)
-    if age is None:
-        return []   # no worker has ever run: nothing to watch yet
-    problems = [f"no heartbeat for {age:.0f} min (expected every minute)"] if age > STALE_AFTER_MINUTES else []
-    report = {"products": [{"key": "scheduler_heavy", "label": "Heavy scheduler worker", "source": "show-me-fire-scheduler",
-                            "status": "stale" if problems else "ok", "problems": problems}]}
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         state = {}
-    alerts, new_state = plan_alerts(report, state, now)
+    alerts, new_state = plan_alerts({"products": rows}, state, now)
     for message, detail in alerts:
-        _send(message, detail + " Forecast jobs are not running." if problems else detail)
+        stale = any(row["problems"] for row in rows if row["label"] in message)
+        _send(message, detail + " Its jobs are not running." if stale else detail)
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(new_state, indent=2), encoding="utf-8")
     return alerts

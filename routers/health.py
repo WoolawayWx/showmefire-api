@@ -96,16 +96,24 @@ def check_scheduler(request: Request) -> CheckResult:
         if not scheduler.running:
             return CheckStatus.error, "scheduler instance present but not running"
         job_count = len(scheduler.get_jobs())
-        from services.scheduler_heartbeat import STALE_AFTER_MINUTES, _split_here, heartbeat_age_minutes
+        from services.scheduler_heartbeat import LABELS, STALE_AFTER_MINUTES, _split_here, group_age_minutes
 
-        if _split_here():   # the heavy jobs live in the scheduler worker: it must be heartbeating too
-            age = heartbeat_age_minutes()
+        # Jobs that live in a worker container: each such worker must be heartbeating too.
+        worst, notes = CheckStatus.ok, []
+        for group, (_key, label, _source) in LABELS.items():
+            if not _split_here(group):
+                continue
+            age = group_age_minutes(group)
             if age is None:
-                return CheckStatus.degraded, f"running, {job_count} jobs scheduled; the heavy scheduler worker has never reported"
+                if group == "heavy":   # a deployment that never split out the forecast worker has no forecast heartbeat
+                    worst, notes = CheckStatus.degraded, notes + [f"the {label.lower()} has never reported"]
+                continue
             if age > STALE_AFTER_MINUTES:
-                return CheckStatus.error, f"running, {job_count} jobs scheduled; heavy scheduler worker silent for {age:.0f} min"
-            return CheckStatus.ok, f"running, {job_count} jobs scheduled; heavy scheduler worker alive"
-        return CheckStatus.ok, f"running, {job_count} jobs scheduled"
+                worst, notes = CheckStatus.error, notes + [f"{label.lower()} silent for {age:.0f} min"]
+            else:
+                notes.append(f"{label.lower()} alive")
+        suffix = ("; " + "; ".join(notes)) if notes else ""
+        return worst, f"running, {job_count} jobs scheduled{suffix}"
 
     return _timed("scheduler", _run)
 

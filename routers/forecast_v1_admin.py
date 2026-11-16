@@ -55,11 +55,11 @@ def _schedule_status() -> dict:
         next_cycle += timedelta(days=1)
     next_eligible = next_cycle + timedelta(hours=minimum_age)
     central = ZoneInfo("America/Chicago")
-    from core.job_groups import HEAVY, groups_from_env
+    from core.job_groups import FORECAST, groups_from_env
     from services.scheduler_heartbeat import worker_status
 
-    worker = worker_status()   # set when the heavy scheduler worker (a separate container) is alive
-    local = os.getenv("run_sch", "false").lower() == "true" and HEAVY in groups_from_env()
+    worker = worker_status(group=FORECAST)   # set when the worker running forecast_v1 (a separate container) is alive
+    local = os.getenv("run_sch", "false").lower() == "true" and FORECAST in groups_from_env()
     return {
         "schedulerEnabled": local or worker is not None,
         "forecastEnabled": os.getenv("SMF_FORECAST_V1_ENABLED", "false").lower() == "true"

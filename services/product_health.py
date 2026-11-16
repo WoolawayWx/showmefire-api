@@ -131,8 +131,7 @@ def active_products() -> list[Product]:
             products += wildcad_health.products()
         from services import scheduler_heartbeat
 
-        if scheduler_heartbeat.heartbeat_age_minutes() is not None:
-            products += scheduler_heartbeat.products()
+        products += scheduler_heartbeat.products()   # one per worker that has ever reported
     except Exception:  # noqa: BLE001 - a broken optional check must not break the endpoint
         pass
     return products

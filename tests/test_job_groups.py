@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
 from core import job_groups
-from core.job_groups import ALL_GROUPS, API, CONDITIONAL_FLAGS, HEAVY, JOB_GROUPS, GroupFilteredScheduler, groups_from_env
+from core.job_groups import ALL_GROUPS, API, CONDITIONAL_FLAGS, FORECAST, HEAVY, JOB_GROUPS, GroupFilteredScheduler, groups_from_env
 
 
 def _register(groups):
@@ -24,13 +24,17 @@ class JobGroupTests(unittest.TestCase):
         self.assertEqual(set(JOB_GROUPS) - set(registered.registered), set(), "stale ids in core/job_groups.py")
         self.assertEqual(len(registered.registered), len(set(registered.registered)), "a job id was registered twice")
 
-    def test_the_two_groups_split_the_jobs_with_nothing_lost_or_shared(self):
+    def test_the_groups_split_the_jobs_with_nothing_lost_or_shared(self):
         everything = set(_register(set(ALL_GROUPS)).registered)
         api_only = set(_register({API}).registered)
         heavy_only = set(_register({HEAVY}).registered)
+        forecast_only = set(_register({FORECAST}).registered)
         self.assertEqual(api_only & heavy_only, set())
-        self.assertEqual(api_only | heavy_only, everything)
-        self.assertIn("run_forecast_v1_shadow", heavy_only)
+        self.assertEqual(api_only & forecast_only, set())
+        self.assertEqual(heavy_only & forecast_only, set())
+        self.assertEqual(api_only | heavy_only | forecast_only, everything)
+        self.assertIn("run_forecast_v1_shadow", forecast_only)     # the multi-hour run is alone in its group
+        self.assertNotIn("run_forecast_v1_shadow", heavy_only)
         self.assertIn("hrrr_hourly_forecast", heavy_only)
         self.assertIn("fetch_synoptic", api_only)          # feeds the API serves from memory stay in the API
         self.assertIn("forecast_watchdog", api_only)       # still alerts if the worker is dead
@@ -44,7 +48,8 @@ class JobGroupTests(unittest.TestCase):
     def test_groups_from_env(self):
         self.assertEqual(groups_from_env(""), set(ALL_GROUPS))            # nothing set: everything (unsplit)
         self.assertEqual(groups_from_env("heavy"), {HEAVY})
-        self.assertEqual(groups_from_env(" API , heavy "), set(ALL_GROUPS))
+        self.assertEqual(groups_from_env(" API , heavy , forecast"), set(ALL_GROUPS))
+        self.assertEqual(groups_from_env("heavy,forecast"), {HEAVY, FORECAST})
         self.assertEqual(groups_from_env("bogus"), set(ALL_GROUPS))        # never "run nothing" by typo
         with patch.dict(os.environ, {"SMF_SCHEDULER_GROUPS": "api"}):
             self.assertEqual(groups_from_env(), {API})
@@ -67,7 +72,8 @@ class JobGroupTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"SMF_FORECAST_V1_ENABLED": "false"}):
             jobs = {job["id"]: job for job in describe_all_jobs()}
-            self.assertEqual(jobs["run_forecast_v1_shadow"]["group"], HEAVY)
+            self.assertEqual(jobs["run_forecast_v1_shadow"]["group"], FORECAST)
+            self.assertEqual(jobs["hrrr_hourly_forecast"]["group"], HEAVY)
             self.assertEqual(jobs["fetch_synoptic"]["group"], API)
             self.assertEqual(os.environ["SMF_FORECAST_V1_ENABLED"], "false")   # restored
 

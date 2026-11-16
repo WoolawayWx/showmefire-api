@@ -206,10 +206,10 @@ def get_model_schedule(request: Request, token: Optional[str] = None):
         })
     # Model jobs the heavy scheduler worker runs (not in this process's scheduler any more).
     from core.scheduler import describe_all_jobs
-    from services.scheduler_heartbeat import read_heartbeat
+    from services.scheduler_heartbeat import merged_jobs
 
     present = {row["id"] for row in jobs}
-    next_runs = {item["id"]: item.get("next_run_at") for item in ((read_heartbeat() or {}).get("jobs") or [])}
+    next_runs = {item["id"]: item.get("next_run_at") for item in merged_jobs()}
     for job in describe_all_jobs():
         meta = MODEL_RELEVANT_JOBS.get(job["id"])
         if meta is None or job["id"] in present:

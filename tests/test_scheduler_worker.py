@@ -114,3 +114,59 @@ class HeartbeatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForecastWorkerHeartbeatTests(unittest.TestCase):
+    """The forecast worker has its own heartbeat file; a combined `heavy,forecast` worker covers both groups."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.heavy = root / "scheduler_heavy.json"
+        self.forecast = root / "scheduler_forecast.json"
+        self.patches = [
+            patch.object(scheduler_heartbeat, "HEARTBEAT_PATH", self.heavy),
+            patch.object(scheduler_heartbeat, "STATE_PATH", root / "state.json"),
+            patch.dict(os.environ, {"SMF_SCHEDULER_GROUPS": "api"}),
+        ]
+        for item in self.patches:
+            item.start()
+
+    def tearDown(self):
+        for item in self.patches:
+            item.stop()
+        self.temporary.cleanup()
+
+    def _age(self, path, minutes):
+        when = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).timestamp()
+        os.utime(path, (when, when))
+
+    def test_each_worker_writes_its_own_file_and_a_combined_worker_the_heavy_one(self):
+        self.assertEqual(scheduler_heartbeat.heartbeat_path_for({"heavy"}), self.heavy)
+        self.assertEqual(scheduler_heartbeat.heartbeat_path_for({"forecast"}), self.forecast)
+        self.assertEqual(scheduler_heartbeat.heartbeat_path_for({"heavy", "forecast"}), self.heavy)
+
+    def test_status_is_per_group_and_a_combined_worker_answers_for_both(self):
+        scheduler_heartbeat.write_heartbeat({"groups": ["heavy", "forecast"], "jobs": []}, self.heavy)
+        self.assertIsNotNone(scheduler_heartbeat.worker_status(group="heavy"))
+        self.assertIsNotNone(scheduler_heartbeat.worker_status(group="forecast"))
+        scheduler_heartbeat.write_heartbeat({"groups": ["heavy"], "jobs": []}, self.heavy)
+        self.assertIsNone(scheduler_heartbeat.worker_status(group="forecast"))        # heavy alone does not run forecast_v1
+        scheduler_heartbeat.write_heartbeat({"groups": ["forecast"], "jobs": [{"id": "run_forecast_v1_shadow"}]}, self.forecast)
+        self.assertIsNotNone(scheduler_heartbeat.worker_status(group="forecast"))
+        self.assertEqual([j["id"] for j in scheduler_heartbeat.merged_jobs()], ["run_forecast_v1_shadow"])
+
+    def test_a_silent_forecast_worker_alerts_on_its_own(self):
+        scheduler_heartbeat.write_heartbeat({"groups": ["heavy"], "jobs": []}, self.heavy)
+        scheduler_heartbeat.write_heartbeat({"groups": ["forecast"], "jobs": []}, self.forecast)
+        with patch.object(scheduler_heartbeat, "_send"):
+            self.assertEqual(scheduler_heartbeat.run_watch(), [])
+            self._age(self.forecast, 12)
+            alerts = scheduler_heartbeat.run_watch()
+        self.assertEqual([m for m, _ in alerts], ["Forecast scheduler worker is stale"])
+
+    def test_no_forecast_alert_when_no_forecast_worker_has_ever_reported(self):
+        scheduler_heartbeat.write_heartbeat({"groups": ["heavy"], "jobs": []}, self.heavy)
+        with patch.object(scheduler_heartbeat, "_send") as send:
+            self.assertEqual(scheduler_heartbeat.run_watch(), [])
+        send.assert_not_called()
