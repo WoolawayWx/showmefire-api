@@ -30,6 +30,22 @@ STATE_PATH = PROJECT_DIR / "data" / "current_conditions" / "scheduler_worker_sta
 STALE_AFTER_MINUTES = 5
 
 
+def push_status_heartbeat(groups) -> bool:
+    """Tell the external status Worker (status.showmefire.org) that the heavy scheduler is alive, so it can alert when the
+    forecast jobs stop even if this whole server is down. Off unless STATUS_HEARTBEAT_URL and STATUS_HEARTBEAT_TOKEN are set;
+    only the heavy group sends it. Never raises."""
+    url, token = os.getenv("STATUS_HEARTBEAT_URL", "").strip(), os.getenv("STATUS_HEARTBEAT_TOKEN", "").strip()
+    if not url or not token or "heavy" not in groups:
+        return False
+    try:
+        import httpx
+
+        return httpx.post(url, headers={"authorization": f"Bearer {token}"}, timeout=5.0).status_code == 200
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Status heartbeat not delivered: %s", exc)
+        return False
+
+
 def forecast_heartbeat_path() -> Path:
     return HEARTBEAT_PATH.with_name(FORECAST_HEARTBEAT_NAME)
 

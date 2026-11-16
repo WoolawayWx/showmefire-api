@@ -42,6 +42,8 @@ HEAVY_JOBS = {
     # verification, monitoring and retraining
     "verify_latest_beta_forecast", "verify_v5_shadow", "verify_v4_shadow", "fire_danger_tracking",
     "post_promotion_monitor", "retrain_detection_confidence",
+    # copies of the pages' API data on the CDN for the website to fall back on (reads the API over HTTP)
+    "publish_fallback_snapshots",
 }
 
 API_JOBS = {

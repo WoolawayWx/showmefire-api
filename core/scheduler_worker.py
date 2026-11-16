@@ -129,7 +129,7 @@ async def run(groups: set[str]) -> None:
         logger.info("Start-up reconciliation of an interrupted forecast_v1 run: %s", reconcile_orphaned_run())
     scheduler_module.start_scheduler_jobs(scheduler, groups)
 
-    from services.scheduler_heartbeat import heartbeat_path_for, write_heartbeat
+    from services.scheduler_heartbeat import heartbeat_path_for, push_status_heartbeat, write_heartbeat
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -143,6 +143,7 @@ async def run(groups: set[str]) -> None:
         while True:
             try:
                 write_heartbeat(describe(scheduler, groups, running, started_at), heartbeat_path_for(groups))
+                await asyncio.to_thread(push_status_heartbeat, groups)
             except Exception:  # noqa: BLE001
                 logger.warning("Could not write the scheduler heartbeat", exc_info=True)
             await asyncio.sleep(HEARTBEAT_SECONDS)

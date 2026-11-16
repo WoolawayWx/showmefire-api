@@ -452,6 +452,13 @@ async def scheduler_worker_watch_job():
     await asyncio.to_thread(run_watch)
 
 
+async def publish_fallback_snapshots_job():
+    """Saves copies of the pages' main API data to the CDN so the website can show them if the API is down."""
+    from services import fallback_snapshots
+
+    await asyncio.to_thread(fallback_snapshots.run)
+
+
 async def long_run_watch_job():
     """Alerts staff once when a long job (forecast_v1, ensemble, outlook...) runs far past its normal duration."""
     await asyncio.to_thread(job_runs.check_overruns)
@@ -1155,6 +1162,18 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
         minutes=5,
         seconds=20,
         id='scheduler_worker_watch',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Runs in the heavy worker (a different process from the API) and reads the API over HTTP, so a hung API leaves the last copy
+    # in place instead of taking the publisher down with it. See services/fallback_snapshots.py.
+    scheduler.add_job(
+        publish_fallback_snapshots_job,
+        'interval',
+        minutes=5,
+        seconds=10,
+        id='publish_fallback_snapshots',
         max_instances=1,
         coalesce=True,
     )

@@ -170,3 +170,13 @@ class ForecastWorkerHeartbeatTests(unittest.TestCase):
         with patch.object(scheduler_heartbeat, "_send") as send:
             self.assertEqual(scheduler_heartbeat.run_watch(), [])
         send.assert_not_called()
+
+
+class StatusHeartbeatTests(unittest.TestCase):
+    def test_off_without_config_and_for_non_heavy_groups_and_never_raises(self):
+        with patch.dict(os.environ, {"STATUS_HEARTBEAT_URL": "", "STATUS_HEARTBEAT_TOKEN": ""}):
+            self.assertFalse(scheduler_heartbeat.push_status_heartbeat({"heavy"}))
+        env = {"STATUS_HEARTBEAT_URL": "http://127.0.0.1:9/x", "STATUS_HEARTBEAT_TOKEN": "t"}
+        with patch.dict(os.environ, env):
+            self.assertFalse(scheduler_heartbeat.push_status_heartbeat({"forecast"}))   # only heavy sends
+            self.assertFalse(scheduler_heartbeat.push_status_heartbeat({"heavy"}))      # unreachable: False, no exception
