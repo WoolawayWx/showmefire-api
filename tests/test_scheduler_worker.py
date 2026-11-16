@@ -180,3 +180,14 @@ class StatusHeartbeatTests(unittest.TestCase):
         with patch.dict(os.environ, env):
             self.assertFalse(scheduler_heartbeat.push_status_heartbeat({"forecast"}))   # only heavy sends
             self.assertFalse(scheduler_heartbeat.push_status_heartbeat({"heavy"}))      # unreachable: False, no exception
+
+
+class GitShaTests(unittest.TestCase):
+    def test_a_checkout_beats_the_baked_value_and_the_baked_value_beats_unknown(self):
+        with patch.dict(os.environ, {"SMF_GIT_SHA": "baked123"}):
+            real = scheduler_worker._git_sha()
+            self.assertNotEqual(real, "baked123")          # this test runs from a git checkout
+            with patch("os.path.exists", return_value=False):
+                self.assertEqual(scheduler_worker._git_sha(), "baked123")
+        with patch.dict(os.environ, {"SMF_GIT_SHA": ""}), patch("os.path.exists", return_value=False):
+            self.assertEqual(scheduler_worker._git_sha(), "unknown")

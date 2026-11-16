@@ -39,15 +39,19 @@ DEFAULT_STOP_WAIT_SECONDS = 25 * 60
 
 
 def _git_sha() -> str:
-    """The commit this worker runs: the SMF_GIT_SHA baked into the image when set, else the checkout's (a bind-mounted /app)."""
+    """The commit this worker runs. A bind-mounted checkout (a `.git` next to the code) is the truth; the SMF_GIT_SHA baked into
+    an image is only right for containers whose code lives in the image (forecast, worker-long), and is stale for the others."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.exists(os.path.join(root, ".git")):
+        try:
+            sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=3,
+                                 cwd=root).stdout.strip()
+            if sha:
+                return sha
+        except Exception:  # noqa: BLE001
+            pass
     baked = os.getenv("SMF_GIT_SHA", "").strip()
-    if baked and baked != "unknown":
-        return baked
-    try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=3,
-                              cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
-        return "unknown"
+    return baked if baked else "unknown"
 
 
 class RunningJobs:
