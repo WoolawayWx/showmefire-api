@@ -202,6 +202,13 @@ guard_collect_long() {
             LONG_REASONS+=("forecast worker job '$id' is running")
         done < <(jq -r '(.running_jobs // [])[]' "$LONG_STATE" 2>/dev/null)
     fi
+    # Before the cutover the OLD scheduler container still runs forecast-v1 (its heartbeat lists it): starting the forecast
+    # container now would start a second run, so treat that run as busy too.
+    local HEAVY_BEAT=$REPO/data/current_conditions/status/scheduler_heavy.json
+    if [ -f "$HEAVY_BEAT" ] && [ $(( now_epoch - $(stat -c %Y "$HEAVY_BEAT") )) -lt 300 ] \
+       && jq -e '(.running_jobs // []) | index("run_forecast_v1_shadow")' "$HEAVY_BEAT" >/dev/null 2>&1; then
+        LONG_REASONS+=("forecast-v1 is running in the scheduler container (old layout)")
+    fi
     lead=$(( GUARD_LEAD_MIN * 60 ))
     for t in $LONG_DAILY_UTC; do
         for day in today tomorrow; do
