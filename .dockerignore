@@ -1,6 +1,8 @@
-venv/
-.venv/
-.venv311/
+# Any virtualenv or backup of one (the server once had venv.py312.bak in the build context: ~GBs copied into the image).
+venv*/
+.venv*/
+*.bak
+.locks/
 __pycache__/
 .git/
 .env
