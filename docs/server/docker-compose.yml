@@ -1,6 +1,9 @@
 services:
   backend:
-    build: ./showmefire-api
+    build:
+      context: ./showmefire-api
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}   # deploy.sh exports it; recorded in the image for the long containers' heartbeat
     image: showmefire-api:latest
     container_name: show-me-fire-api
     # Web API + the quick in-process scheduler jobs (stations, alerts, pushes, fire detections, WildCAD...).
@@ -102,9 +105,48 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  forecast:
+    # forecast_v1 alone (a run takes hours). Runs the pinned image `showmefire-api:long`, which `deploy.sh` moves to the newest
+    # build only when no run is in progress, so deploys never wait on or interrupt it. Runbook: showmefire-api/docs/long_jobs.md.
+    image: showmefire-api:long
+    container_name: show-me-fire-forecast
+    depends_on:
+      - backend
+    command: ["python", "-m", "core.scheduler_worker", "--groups", "forecast"]
+    mem_limit: 10g
+    memswap_limit: 10g
+    stop_grace_period: 30m
+    environment:
+      - SMF_SCHEDULER_GROUPS=forecast
+      - SMF_START_CRON=0
+      - SMF_DOWNLOAD_MODOT_ROADS=0
+      - SMF_METRICS_ENABLED=0
+      - SMF_SCHEDULER_STOP_WAIT_SECONDS=1500
+    volumes:
+      # Code is baked into the image (no ./showmefire-api:/app mount), so a `git pull` cannot change files under a run that
+      # lasts hours. These are the repo-relative paths that change at runtime and must stay shared with the other containers:
+      - ./showmefire-api/logs:/app/logs          # the admin Logs page reads these
+      - ./showmefire-api/.locks:/app/.locks      # forecast/maps lock files shared with `worker` (flock across containers)
+      - ./showmefire-api/models:/app/models      # model registry (config.json): a promotion must reach these containers
+      - ./showmefire-api/images:/app/images
+      - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/gis:/app/gis
+      - /mnt/adrive/showmefire-data/archive:/app/archive
+      - /mnt/adrive/showmefire-data/cache:/app/cache
+      - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      - /mnt/adrive/showmefire-data/files:/app/files
+    env_file:
+      - ./showmefire-api/.env
+    healthcheck:
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(stat -c %Y /app/data/current_conditions/status/scheduler_forecast.json) )) -lt 300"]
+      interval: 1m
+      start_period: 5m
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   worker:
-    # Same image/volumes as backend, but runs only cron (forecasts.sh,
-    # forecasts_09z.sh, maps.sh, validateForecast.sh, ...). Reaches the API at
+    # Same image/volumes as backend, but runs only the quick cron jobs (maps.sh, validateForecast.sh,
+    # create_empty_outlook_maps.sh); forecasts and the outlook are in `worker-long`. Reaches the API at
     # http://backend:8000 (see scripts/worker-entrypoint.sh).
     image: showmefire-api:latest
     container_name: show-me-fire-worker
@@ -115,6 +157,7 @@ services:
     mem_limit: 8g
     memswap_limit: 8g
     environment:
+      - SMF_CRON_SET=short   # the long cron jobs run in `worker-long`
       - SMF_GIS_PUBLISH_DIR=/app/gis
       - SMF_GIS_RESOLUTION_METERS=3000
       - SMF_GIS_RETENTION_DAYS=30
@@ -122,6 +165,40 @@ services:
       - /mnt/adrive/showmefire-data/gis:/app/gis
       - ./showmefire-api:/app
       - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/archive:/app/archive
+      - /mnt/adrive/showmefire-data/cache:/app/cache
+      - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      - /mnt/adrive/showmefire-data/files:/app/files
+    env_file:
+      - ./showmefire-api/.env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker-long:
+    # Cron jobs that run for minutes to hours: the 12z and 09z forecasts, ensemble fire danger, the seven-day outlook.
+    # Same pinned image rules as `forecast` above. The quick cron jobs stay in `worker`.
+    image: showmefire-api:long
+    container_name: show-me-fire-worker-long
+    depends_on:
+      - backend
+    entrypoint: ["/bin/sh", "/app/scripts/worker-entrypoint.sh"]
+    command: ["cron", "-f"]
+    mem_limit: 8g
+    memswap_limit: 8g
+    environment:
+      - SMF_CRON_SET=long
+      - SMF_GIS_PUBLISH_DIR=/app/gis
+      - SMF_GIS_RESOLUTION_METERS=3000
+      - SMF_GIS_RETENTION_DAYS=30
+    volumes:
+      # Code is baked into the image (no ./showmefire-api:/app mount), so a `git pull` cannot change files under a run that
+      # lasts hours. These are the repo-relative paths that change at runtime and must stay shared with the other containers:
+      - ./showmefire-api/logs:/app/logs          # the admin Logs page reads these
+      - ./showmefire-api/.locks:/app/.locks      # forecast/maps lock files shared with `worker` (flock across containers)
+      - ./showmefire-api/models:/app/models      # model registry (config.json): a promotion must reach these containers
+      - ./showmefire-api/images:/app/images
+      - ./showmefire-api/data:/app/data
+      - /mnt/adrive/showmefire-data/gis:/app/gis
       - /mnt/adrive/showmefire-data/archive:/app/archive
       - /mnt/adrive/showmefire-data/cache:/app/cache
       - /mnt/adrive/showmefire-data/data_archive:/app/data_archive

@@ -8,6 +8,7 @@
 #   ./deploy.sh --api-only restart only the backend, no wait (the heavy jobs live in the scheduler container)
 #   ./deploy.sh --all      restart backend, worker and scheduler, with the full guard
 #   ./deploy.sh --force    skip the safety guard (emergencies only; kills running jobs)
+#   ./deploy.sh --long     only move the long-job containers (forecast, worker-long) to the newest code, if none is mid-run
 #
 # Which container needs what (the repo is bind-mounted at /app in all of them):
 #   backend    runs the web API and the quick scheduler jobs; Python code is read once at start, so any code change restarts it.
@@ -15,6 +16,11 @@
 #              tests or docs changed, because it may import it. Restarting it kills a running forecast-v1 run.
 #   worker     runs cron; every cron job starts a fresh Python process, so it picks up new code by itself. Restarted only when
 #              its own entrypoint changes, or after a rebuild / compose / .env change. Restarting it kills running cron jobs.
+#   forecast, worker-long (optional; docs/long_jobs.md) run forecast-v1 and the long cron jobs from the pinned image
+#              `showmefire-api:long` with the code baked in. A deploy never restarts them: after the normal deploy this script
+#              builds the new image and moves them onto it only when none of their jobs is running (otherwise it records
+#              .long-pending and prints what is blocking; run `./deploy.sh --long` later). They can therefore lag the API by a
+#              few hours; never longer than the run in progress.
 # A Dockerfile/requirements change (rebuild) or a docker-compose.yml/.env change (recreate) affects every container.
 # Without a scheduler container (an unsplit deployment) the backend also runs the heavy jobs, so restarting it is guarded too.
 # Env: GUARD_WAIT_MIN (default 90) = how long to wait before giving up; GUARD_LEAD_MIN (default 10)
@@ -26,11 +32,12 @@ ASSUME_YES=false
 for arg in "$@"; do
     case "$arg" in
         --check) MODE=check ;;
+        --long) MODE=long ;;
         --force) MODE=force ;;
         --api-only) FORCE_SCOPE=api ;;
         --all) FORCE_SCOPE=all ;;
         --yes|-y) ASSUME_YES=true ;;
-        *) echo "Unknown option: $arg (use --check, --yes, --api-only, --all or --force)"; exit 2 ;;
+        *) echo "Unknown option: $arg (use --check, --long, --yes, --api-only, --all or --force)"; exit 2 ;;
     esac
 done
 ROOT=~/showmefire
@@ -39,6 +46,11 @@ STATE_FILE=$ROOT/.deploy-config.sha256   # checksum of .env + docker-compose.yml
 PENDING_FILE=$ROOT/.deploy-pending       # set when code was pulled but containers were not restarted (line 1: action, line 2: services)
 GUARD_WAIT_MIN=${GUARD_WAIT_MIN:-90}
 GUARD_LEAD_MIN=${GUARD_LEAD_MIN:-10}
+LONG_PENDING_FILE=$ROOT/.long-pending    # set when the long containers are behind the newest code (line 1: the commit)
+# Are forecast-v1 and the long cron jobs in containers of their own? (compose services `forecast` and `worker-long`)
+HAS_LONG=false
+if (cd "$ROOT" && docker compose config --services 2>/dev/null) | grep -qx forecast \
+   && (cd "$ROOT" && docker compose config --services 2>/dev/null) | grep -qx worker-long; then HAS_LONG=true; fi
 # ---------------------------------------------------------------- guard
 # Frequent jobs that simply run again minutes later; everything else in the worker is a daily job
 # that would be lost for the day if killed.
@@ -51,6 +63,10 @@ HEAVY_STATE=$REPO/data/current_conditions/status/scheduler_heavy.json
 SAFE_FORECAST_PHASES="queued preparing acquiring_sources"
 # Daily job start times (UTC HH:MM). empty_outlook_maps is scheduled in America/Chicago.
 DAILY_UTC="04:30 06:40 12:05 13:00 15:00"
+# Daily jobs that run in the long containers (12z/09z forecasts, ensemble). When those are separate they no longer matter
+# for restarting the backend, scheduler or worker, only for moving the long containers (guard_collect_long).
+LONG_DAILY_UTC="12:05 13:00 15:00"
+[ "$HAS_LONG" = true ] && DAILY_UTC="04:30 06:40"
 DAILY_CHICAGO="02:00"
 # What the guard looks at, set from the restart plan (all on for --check and for a rebuild/recreate):
 GUARD_CRON=true      # cron jobs running in the worker
@@ -70,7 +86,7 @@ guard_collect() {
         done < <(docker exec show-me-fire-worker sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null \
                  | awk '$1=="/bin/bash" && $2 ~ /run_job\.sh$/ {print $3}' | sort -u)
     fi
-    if [ "$GUARD_HEAVY" = true ]; then
+    if [ "$GUARD_HEAVY" = true ] && [ "$HAS_LONG" = false ]; then
         # 2. forecast-v1 run (in the scheduler container once it exists, otherwise in the backend): the job file must say
         #    running/queued AND have been updated recently (a run killed by an earlier restart stops updating and is
         #    treated as stale). These are files on the host, so this works whichever container runs the job.
@@ -99,6 +115,8 @@ guard_collect() {
         cutoff=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
         staging=$(sqlite3 -readonly "$REPO/data/showmefire.db" "SELECT count(*) FROM forecast_runs WHERE status='staging' AND created_at_utc > '$cutoff';" 2>/dev/null || echo 0)
         [ "${staging:-0}" -gt 0 ] && GUARD_REASONS+=("$staging forecast-v1 run(s) still staging in the database")
+    fi
+    if [ "$GUARD_HEAVY" = true ]; then
         # 2b. Jobs running right now in the scheduler container (ignore a heartbeat file that has gone stale).
         if [ -f "$HEAVY_STATE" ]; then
             local beat_age hjob hskip hi
@@ -140,9 +158,127 @@ guard_print() {
     local r
     for r in "${GUARD_REASONS[@]}"; do echo "  - $r"; done
 }
+# ---------------------------------------------------------------- long containers
+# The long containers run a pinned image, so the question is only "may I stop them now?": no forecast-v1 run in progress
+# (same rules as the old guard), no long cron job running, no long daily job about to start.
+LONG_STATE=$REPO/data/current_conditions/status/scheduler_forecast.json
+LONG_REASONS=()
+guard_collect_long() {
+    LONG_REASONS=()
+    local now_epoch id ignored skip job_file status updated age phase cutoff staging t day start delta lead
+    now_epoch=$(date +%s)
+    if docker inspect -f '{{.State.Running}}' show-me-fire-worker-long 2>/dev/null | grep -q true; then
+        while read -r id; do
+            [ -z "$id" ] && continue
+            skip=false
+            for ignored in $IGNORED_JOBS; do [ "$id" = "$ignored" ] && skip=true; done
+            $skip || LONG_REASONS+=("long cron job '$id' is running")
+        done < <(docker exec show-me-fire-worker-long sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null \
+                 | awk '$1=="/bin/bash" && $2 ~ /run_job\.sh$/ {print $3}' | sort -u)
+    fi
+    job_file=$REPO/data/forecast-v1/admin-job.json
+    if [ -f "$job_file" ]; then
+        status=$(jq -r '.status // "idle"' "$job_file" 2>/dev/null || echo idle)
+        updated=$(jq -r '.updated_at // .started_at // empty' "$job_file" 2>/dev/null || true)
+        if [ "$status" = "running" ] || [ "$status" = "queued" ]; then
+            phase=$(jq -r '.phase // "?"' "$job_file" 2>/dev/null || echo "?")
+            case " $SAFE_FORECAST_PHASES " in
+                *" $phase "*) ;;
+                *)
+                    if [ -n "$updated" ] && age=$(( now_epoch - $(date -d "$updated" +%s 2>/dev/null || echo 0) )) && [ "$age" -lt 2700 ]; then
+                        LONG_REASONS+=("forecast-v1 run is $status (phase '$phase', updated $((age/60)) min ago)")
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+    cutoff=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+    staging=$(sqlite3 -readonly "$REPO/data/showmefire.db" "SELECT count(*) FROM forecast_runs WHERE status='staging' AND created_at_utc > '$cutoff';" 2>/dev/null || echo 0)
+    [ "${staging:-0}" -gt 0 ] && LONG_REASONS+=("$staging forecast-v1 run(s) still staging in the database")
+    if [ -f "$LONG_STATE" ] && [ $(( now_epoch - $(stat -c %Y "$LONG_STATE") )) -lt 300 ]; then
+        while read -r id; do
+            [ -z "$id" ] && continue
+            [ "$id" = forecast_v1_admin_requests ] && continue
+            LONG_REASONS+=("forecast worker job '$id' is running")
+        done < <(jq -r '(.running_jobs // [])[]' "$LONG_STATE" 2>/dev/null)
+    fi
+    lead=$(( GUARD_LEAD_MIN * 60 ))
+    for t in $LONG_DAILY_UTC; do
+        for day in today tomorrow; do
+            start=$(date -u -d "$day $t" +%s)
+            delta=$(( start - now_epoch ))
+            if [ "$delta" -ge 0 ] && [ "$delta" -le "$lead" ]; then
+                LONG_REASONS+=("long daily job due at $t UTC (in $((delta/60)) min)")
+            fi
+        done
+    done
+}
+# Build the current code into the pinned `long` image and restart the two long containers on it. Returns 1 (and records
+# .long-pending) when something is running; the old containers keep running untouched.
+promote_long() {
+    [ "$HAS_LONG" = true ] || return 0
+    local sha running_sha
+    sha=$(git -C "$REPO" rev-parse --short HEAD)
+    running_sha=$(docker inspect -f '{{index .Config.Labels "smf.git_sha"}}' show-me-fire-forecast 2>/dev/null || true)
+    # A newer commit only matters to the long containers when it changed code they import (not routers/, main.py, docs, tests).
+    if [ -n "$running_sha" ] && [ "$running_sha" != "$sha" ] && [ ! -f "$LONG_PENDING_FILE" ]; then
+        local changed relevant
+        if changed=$(git -C "$REPO" diff --name-only "$running_sha" "$sha" 2>/dev/null); then
+            relevant=$(echo "$changed" | grep -vE '^(docs/|tests/|routers/|main\.py$|.*\.md$)' || true)
+        else
+            relevant=UNKNOWN      # the running commit is not in this checkout: assume it matters
+        fi
+        if [ -z "$relevant" ]; then
+            echo "Long containers: $running_sha -> $sha changed nothing they use; leaving them running."
+            return 0
+        fi
+    fi
+    if [ "$running_sha" = "$sha" ] && [ "$(docker inspect -f '{{.State.Running}}' show-me-fire-forecast 2>/dev/null)" = true ] \
+       && [ "$(docker inspect -f '{{.State.Running}}' show-me-fire-worker-long 2>/dev/null)" = true ]; then
+        echo "Long containers already run $sha."
+        rm -f "$LONG_PENDING_FILE"
+        return 0
+    fi
+    guard_collect_long
+    if [ ${#LONG_REASONS[@]} -gt 0 ]; then
+        echo "Long containers (forecast, worker-long) NOT moved to $sha: they are busy:"
+        for r in "${LONG_REASONS[@]}"; do echo "  - $r"; done
+        echo "$sha" > "$LONG_PENDING_FILE"
+        echo "They keep running their current code. Run ./deploy.sh --long when they are idle."
+        return 1
+    fi
+    echo "Building the long-job image for $sha..."
+    (cd "$ROOT" && GIT_SHA="$sha" docker compose build backend) || { echo "ERROR: image build failed; long containers left as they are."; return 1; }
+    # Keep the previous pinned image for a one-command rollback (docker tag showmefire-api:long-previous showmefire-api:long).
+    docker tag showmefire-api:long showmefire-api:long-previous 2>/dev/null || true
+    docker tag showmefire-api:latest showmefire-api:long
+    (cd "$ROOT" && docker compose up -d --no-deps forecast worker-long)
+    rm -f "$LONG_PENDING_FILE"
+    sleep 15
+    local c
+    for c in show-me-fire-forecast show-me-fire-worker-long; do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != true ]; then
+            echo "ERROR: $c is not running after the move. Roll back: docker tag showmefire-api:long-previous showmefire-api:long && docker compose up -d --no-deps forecast worker-long"
+            docker logs --tail 30 "$c" 2>&1 || true
+            return 1
+        fi
+    done
+    echo "Long containers now run $sha."
+}
+if [ "$MODE" = long ]; then
+    if [ "$HAS_LONG" = false ]; then echo "No forecast/worker-long services in docker-compose.yml; nothing to do."; exit 0; fi
+    git -C "$REPO" fetch -q 2>/dev/null || true
+    promote_long
+    exit $?
+fi
 # ---------------------------------------------------------------- --check
 if [ "$MODE" = check ]; then
     guard_collect
+    if [ "$HAS_LONG" = true ]; then
+        guard_collect_long
+        if [ ${#LONG_REASONS[@]} -eq 0 ]; then echo "Long containers (forecast, worker-long): idle, could be moved now."
+        else echo "Long containers (forecast, worker-long) are busy (a deploy leaves them alone):"; for r in "${LONG_REASONS[@]}"; do echo "  - $r"; done; fi
+    fi
     if [ ${#GUARD_REASONS[@]} -eq 0 ]; then
         echo "SAFE: nothing is running that a restart would interrupt."
         exit 0
@@ -194,6 +330,7 @@ if [ -f "$PENDING_FILE" ]; then
 fi
 if [ "$ACTION" = none ]; then
     echo "No new commits pulled; nothing to deploy."
+    promote_long || true      # finishes a long-container move that an earlier deploy found busy
     exit 0
 fi
 # ---------------------------------------------------------------- plan: which containers?
@@ -335,16 +472,22 @@ else
     echo "Safe to restart."
 fi
 # ---------------------------------------------------------------- apply
+# A normal deploy must never recreate the long containers (that would kill a run in progress): they are moved by promote_long.
+NON_LONG_SERVICES=""
+if [ "$HAS_LONG" = true ]; then
+    NON_LONG_SERVICES=$(cd "$ROOT" && docker compose config --services | grep -vxE 'forecast|worker-long' | tr '\n' ' ')
+fi
+export GIT_SHA=$(git -C "$REPO" rev-parse --short HEAD)
 case "$ACTION" in
     rebuild)
         echo "Dependency/Dockerfile changes -- full rebuild."
-        docker compose up -d --build
+        docker compose up -d --build $NON_LONG_SERVICES
         # Drop build cache untouched for a week; recent layers stay so the next rebuild is still fast.
         docker builder prune -f --filter until=168h || echo "Build cache prune failed (non-fatal)."
         ;;
     recreate)
         echo ".env or docker-compose.yml changed -- recreating containers so the new config is applied."
-        docker compose up -d
+        docker compose up -d $NON_LONG_SERVICES
         ;;
     restart)
         SERVICES=""
@@ -402,4 +545,6 @@ if [ "$FAILED" = true ]; then
     echo "Deployment FINISHED WITH ERRORS -- see above."
     exit 1
 fi
+# The long containers are moved only if idle; a busy one is not a failed deploy.
+promote_long || true
 echo "Deployment complete!"

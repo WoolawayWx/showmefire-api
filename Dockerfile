@@ -193,6 +193,11 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # App source last: it changes on every deploy, so everything above stays cached.
+# The code a container runs is whatever was baked in at build time. The git checkout is not in the image (.dockerignore),
+# so the commit is recorded for the scheduler worker's heartbeat and the admin pages: `docker build --build-arg GIT_SHA=...`.
+ARG GIT_SHA=unknown
+ENV SMF_GIT_SHA=${GIT_SHA}
+LABEL smf.git_sha=${GIT_SHA}
 COPY . .
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
