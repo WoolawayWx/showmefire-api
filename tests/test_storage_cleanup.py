@@ -179,3 +179,42 @@ def test_archive_folder_stops_starting_files_after_its_time_budget(tmp_path, mon
     folder = _legacy(tmp_path, monkeypatch, files=3)
     summary = sc.archive_folder(folder, "p", s3=FakeS3(), log=lambda _: None, max_seconds=-1)
     assert summary["stopped_early"] and summary["uploaded"] == 0
+
+
+def test_archive_folder_with_several_workers_matches_one_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    folder = tmp_path / "legacy"
+    folder.mkdir()
+    for index in range(12):
+        (folder / f"2026012{index:02d}.zip").write_bytes(bytes([index]) * (10 + index))
+    s3 = FakeS3()
+
+    summary = sc.archive_folder(folder, "legacy-archive/day", s3=s3, log=lambda _: None, workers=4)
+    assert summary["uploaded"] == 12 and not summary["failed"] and summary["deleted"] == 0
+    manifest = s3.json("legacy-archive/day/manifest.json")["files"]
+    assert len(manifest) == 12                       # no entry lost to a race on the shared manifest
+    assert all(s3.objects[f"legacy-archive/day/{name}"] == (folder / name).read_bytes() for name in manifest)
+
+    again = sc.archive_folder(folder, "legacy-archive/day", s3=s3, delete=True, log=lambda _: None, workers=4)
+    assert again["already_verified"] == 12 and again["uploaded"] == 0 and again["deleted"] == 12
+    assert not any(folder.iterdir())
+
+
+def test_a_failure_with_workers_keeps_that_file_and_finishes_the_rest(tmp_path, monkeypatch):
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    folder = tmp_path / "legacy"
+    folder.mkdir()
+    for name in ("a.zip", "b.zip", "c.zip"):
+        (folder / name).write_bytes(name.encode() * 5)
+    s3 = FakeS3()
+    real = s3.upload_file
+
+    def flaky(path, bucket, key, ExtraArgs=None):
+        if key.endswith("b.zip"):
+            raise RuntimeError("connection reset")
+        return real(path, bucket, key, ExtraArgs=ExtraArgs)
+
+    s3.upload_file = flaky
+    summary = sc.archive_folder(folder, "p", s3=s3, delete=True, log=lambda _: None, workers=3)
+    assert summary["uploaded"] == 2 and len(summary["failed"]) == 1 and "b.zip" in summary["failed"][0]
+    assert [p.name for p in folder.iterdir()] == ["b.zip"]          # only the failed file is kept

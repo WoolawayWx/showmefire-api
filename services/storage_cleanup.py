@@ -196,10 +196,15 @@ def report(base: Optional[Path] = None) -> dict:
 # --- archive a folder to R2, then (optionally) delete it locally -------------------------------------
 
 def archive_folder(folder: Path, r2_prefix: str, delete: bool = False, s3=None, log=print,
-                   max_seconds: Optional[float] = None) -> dict:
+                   max_seconds: Optional[float] = None, workers: int = 1) -> dict:
     """Upload every file under ``folder`` to ``r2_prefix/<relative path>``, verify by reading it back.
 
-    ``max_seconds`` stops starting new files after that long (a later run carries on), so a scheduled run ends."""
+    ``max_seconds`` stops starting new files after that long (a later run carries on), so a scheduled run ends.
+    ``workers`` files are processed at once: each one hashes, uploads and reads back in turn, so with one worker the link sits
+    idle during every hash and read-back; with several, uploads and read-backs overlap. The manifest is only written under a lock."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     from services import day_archive
 
     if s3 is None:
@@ -212,33 +217,48 @@ def archive_folder(folder: Path, r2_prefix: str, delete: bool = False, s3=None, 
     files = sorted(p for p in folder.rglob("*") if p.is_file())
     summary = {"files": len(files), "uploaded": 0, "already_verified": 0, "deleted": 0, "failed": [], "stopped_early": False}
     started = time.monotonic()
-    for index, path in enumerate(files, 1):
+    lock = threading.Lock()   # guards `manifest`, `summary` and the manifest upload
+
+    def one(index: int, path: Path) -> None:
         if max_seconds is not None and time.monotonic() - started > max_seconds:
-            summary["stopped_early"] = True
-            break
+            with lock:
+                summary["stopped_early"] = True
+            return
         rel = path.relative_to(folder).as_posix()
         key = f"{prefix}/{rel}"
         size = path.stat().st_size
         try:
             sha = day_archive.sha256_file(path)
-            known = manifest["files"].get(rel)
+            with lock:
+                known = manifest["files"].get(rel)
             if known and known["sha256"] == sha and known["size"] == size:
-                summary["already_verified"] += 1
+                with lock:
+                    summary["already_verified"] += 1
             else:
                 s3.upload_file(str(path), day_archive.bucket(), key,
                                ExtraArgs={"Metadata": {"sha256": sha}, "ContentType": "application/octet-stream"})
                 day_archive.verify_remote(s3, key, size, sha)
-                manifest["files"][rel] = {"key": key, "size": size, "sha256": sha,
-                                          "verified_at": datetime.now(timezone.utc).isoformat()}
-                day_archive._put_json(s3, manifest_key, manifest)
-                summary["uploaded"] += 1
+                with lock:
+                    manifest["files"][rel] = {"key": key, "size": size, "sha256": sha,
+                                              "verified_at": datetime.now(timezone.utc).isoformat()}
+                    day_archive._put_json(s3, manifest_key, manifest)
+                    summary["uploaded"] += 1
             if delete:
                 path.unlink()
-                summary["deleted"] += 1
+                with lock:
+                    summary["deleted"] += 1
             log(f"[{index}/{len(files)}] {rel} ({size / GB:.2f} GB) verified{' and deleted' if delete else ''}")
         except Exception as error:  # noqa: BLE001 - keep the local file, carry on with the rest
-            summary["failed"].append(f"{rel}: {error}")
+            with lock:
+                summary["failed"].append(f"{rel}: {error}")
             log(f"[{index}/{len(files)}] {rel} FAILED, kept locally: {error}")
+
+    if workers <= 1:
+        for index, path in enumerate(files, 1):
+            one(index, path)
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="archive") as pool:
+            list(pool.map(lambda item: one(*item), enumerate(files, 1)))
     return summary
 
 
@@ -251,13 +271,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     archive.add_argument("folder", type=Path)
     archive.add_argument("--r2-prefix", required=True, help="e.g. legacy-archive/data_archive_day")
     archive.add_argument("--delete", action="store_true", help="delete each local file once its R2 copy verified")
+    archive.add_argument("--workers", type=int, default=1, help="files processed at once (uploads and read-backs overlap)")
     args = parser.parse_args(argv)
     if args.command == "report":
         print(json.dumps(report(), indent=2))
     elif args.command == "run":
         print(json.dumps(run(), indent=2))
     else:
-        summary = archive_folder(args.folder, args.r2_prefix, delete=args.delete)
+        summary = archive_folder(args.folder, args.r2_prefix, delete=args.delete, workers=max(1, args.workers))
         print(json.dumps(summary, indent=2))
         return 1 if summary["failed"] else 0
     return 0
