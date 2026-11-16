@@ -102,7 +102,7 @@ def test_overview_marks_an_interval_job_overdue_when_it_stops_running(db, logs):
 
 
 def test_old_runs_are_pruned(db):
-    job_runs.record_run("old", "ok", time.time() - 30 * 86400, 1.0)
+    job_runs.record_run("old", "ok", time.time() - 90 * 86400, 1.0)
     job_runs.record_run("new", "ok", time.time(), 1.0)
     assert job_runs.prune_runs() == 1
     assert set(job_runs.job_summaries()) == {"new"}

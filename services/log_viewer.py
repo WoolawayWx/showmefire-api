@@ -544,6 +544,20 @@ def overview(scheduler=None) -> Dict[str, Any]:
             "unscheduled": True,
         })
 
+    # How long runs normally take, and any run in progress now (job_runs.duration_stats / running_now).
+    try:
+        durations = job_runs.duration_stats()
+        in_progress = {run["job"]: run for run in job_runs.running_now()}
+        for job in jobs:
+            stats = durations.get(job["id"])
+            job["duration"] = stats
+            run = in_progress.get(job["id"])
+            if run:
+                limit = job_runs.overrun_threshold_s(stats or {})
+                job["running"] = {**run, "overrunning": bool(limit and run["elapsed_s"] > limit)}
+    except Exception:  # noqa: BLE001 - the Logs page must load even if this fails
+        pass
+
     order = {"error": 0, "overdue": 1, "warning": 2, "ok": 3, "never": 4}
     jobs.sort(key=lambda j: (order.get(j["state"], 5), j["label"].lower()))
     states: Dict[str, int] = {}

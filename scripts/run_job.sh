@@ -31,6 +31,8 @@ export JOB_SUMMARY_FILE
 trap 'rm -f "$JOB_SUMMARY_FILE"' EXIT
 
 started=$(date +%s)
+# Mark the run as in progress (visible on the Logs page while a long job runs); never blocks or fails the job.
+(cd "$PROJECT_DIR" && PYTHONPATH="$PROJECT_DIR" "$PYTHON" -m services.job_runs start "$JOB_ID" --started "$started") >/dev/null 2>&1 || true
 echo "=== [$JOB_ID] started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 /bin/bash "$@"
 rc=$?

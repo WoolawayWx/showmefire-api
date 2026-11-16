@@ -452,6 +452,11 @@ async def scheduler_worker_watch_job():
     await asyncio.to_thread(run_watch)
 
 
+async def long_run_watch_job():
+    """Alerts staff once when a long job (forecast_v1, ensemble, outlook...) runs far past its normal duration."""
+    await asyncio.to_thread(job_runs.check_overruns)
+
+
 async def wildcad_incidents_job():
     from services.wildcad import poll_incidents_job
 
@@ -1150,6 +1155,17 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
         minutes=5,
         seconds=20,
         id='scheduler_worker_watch',
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Runs in the API so it still fires when a worker container is the thing that is stuck.
+    scheduler.add_job(
+        long_run_watch_job,
+        'interval',
+        minutes=10,
+        seconds=40,
+        id='long_run_watch',
         max_instances=1,
         coalesce=True,
     )
