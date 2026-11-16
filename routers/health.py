@@ -193,13 +193,16 @@ def _run_readiness(request: Request) -> JSONResponse:
 
 
 @router.get("/health")
-def health_liveness(request: Request, verbose: bool = False):
+async def health_liveness(request: Request, verbose: bool = False):
     """Fast liveness probe - no dependency checks. For LB/uptime pings.
 
-    Pass ?verbose=true for a full readiness check (same as /health/ready).
+    `async` on purpose: it answers from the event loop and never queues behind the request threadpool, so a wedged pool
+    (stuck reads) cannot make a probe look healthy-but-slow, and a blocked event loop makes it fail as it should.
+    Pass ?verbose=true for a full readiness check (same as /health/ready); that one runs in the threadpool.
     """
     if verbose:
-        return _run_readiness(request)
+        from starlette.concurrency import run_in_threadpool
+        return await run_in_threadpool(_run_readiness, request)
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),

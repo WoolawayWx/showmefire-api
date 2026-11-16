@@ -35,9 +35,31 @@ services:
       - "5001:8000"
     env_file:
       - ./showmefire-api/.env
+    labels:
+      - autoheal=true   # the `autoheal` service below restarts this container when it goes unhealthy
+    healthcheck:
+      # /health is `async def` (routers/health.py) so it answers from the event loop: a hung loop or a process spinning
+      # at 100% CPU fails it, which `restart: unless-stopped` alone never notices (issue #46).
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://localhost:8000/health >/dev/null"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  autoheal:
+    # Docker marks a container unhealthy but never restarts it; this does, for containers labelled autoheal=true.
+    image: willfarrell/autoheal:latest
+    container_name: show-me-fire-autoheal
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+      - AUTOHEAL_START_PERIOD=150
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
   scheduler:
     # Same image/volumes as backend, but runs only the heavy APScheduler jobs (forecast-v1, hourly HRRR, RTMA,
     # precipitation/burn-ban graphics, archives, verification, retraining, storage cleanup): no web server.

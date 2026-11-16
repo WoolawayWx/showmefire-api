@@ -104,6 +104,8 @@ def get_point(cycle: str, lat: float = Query(..., ge=-90, le=90), lon: float = Q
     result = store.point_series(cycle, lat, lon)
     if result is None:
         raise HTTPException(status_code=404, detail="Unknown cycle")
+    if result.get("error") == "unavailable":
+        raise HTTPException(status_code=503, detail="Forecast data is temporarily unavailable", headers={"Retry-After": "30"})
     if result.get("error"):
         raise HTTPException(status_code=404, detail="Point is outside the forecast grid")
     result["label"] = manifest["label"]

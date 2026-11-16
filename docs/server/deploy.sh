@@ -380,6 +380,21 @@ for name in $CONTAINERS; do
             FAILED=true
         else
             echo "  $name: running"
+            # The API must also answer HTTP (a container can be "running" yet hung, issue #46). Compose maps it to :5001.
+            if [ "$name" = "show-me-fire-api" ]; then
+                API_OK=false
+                for attempt in 1 2 3 4 5 6 7 8; do
+                    if curl -fsS -m 5 "http://localhost:5001/health" >/dev/null 2>&1; then API_OK=true; break; fi
+                    sleep 5
+                done
+                if [ "$API_OK" = true ]; then
+                    echo "  $name: /health answers"
+                else
+                    echo "ERROR: $name is running but /health does not answer. Last log lines:"
+                    docker logs --tail 30 "$name" 2>&1 || true
+                    FAILED=true
+                fi
+            fi
         fi
     fi
 done

@@ -13,7 +13,9 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -260,8 +262,6 @@ def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None
 
     `names` limits it to those elements (unknown names are left out): each element read decompresses its whole grid for
     every lead, so a caller that needs a few (the burn check needs 5 of ~28) should say which."""
-    import xarray as xr
-
     path = nc_path(cycle, root)
     if not path.is_file():
         # A cycle still being filled in has no NetCDF copy yet (it is written when the cycle finishes): read the Zarr store.
@@ -270,7 +270,42 @@ def point_series(cycle: str, lat: float, lon: float, root: Optional[Path] = None
         if manifest is None or manifest.get("complete", True) or not zarr_dir.is_dir():
             return None
         return live_store.point_series(zarr_dir, manifest, lat, lon, MAX_POINT_DISTANCE_KM, names=names)
-    with xr.open_dataset(path) as ds:
+    # The NetCDF copy is replaced by another process (the heavy worker) while we read it, and HDF5 is not thread-safe. A read
+    # therefore runs one at a time, on its own small pool with a deadline (never on the request pool, where a stuck read would
+    # also starve /health), retries a transient HDF error, and gives up with {"error": "unavailable"} rather than raising.
+    names = list(names) if names is not None else None
+    for attempt in range(NC_READ_ATTEMPTS):
+        try:
+            return _nc_executor().submit(_read_nc_point, path, cycle, lat, lon, names).result(timeout=NC_READ_TIMEOUT_S)
+        except FutureTimeout:
+            logger.error("hrrr_hourly NetCDF read timed out after %ss (%s)", NC_READ_TIMEOUT_S, path.name)
+            break  # the worker thread may still be stuck: do not queue more behind it
+        except (RuntimeError, OSError, KeyError) as exc:
+            logger.warning("hrrr_hourly NetCDF read failed (%s, attempt %d/%d): %s", path.name, attempt + 1,
+                           NC_READ_ATTEMPTS, exc)
+            time.sleep(0.2 * (attempt + 1))
+    return {"error": "unavailable"}
+
+
+NC_READ_ATTEMPTS = 3
+NC_READ_TIMEOUT_S = 8.0
+_NC_LOCK = threading.Lock()
+_NC_POOL: ThreadPoolExecutor | None = None
+_NC_POOL_LOCK = threading.Lock()
+
+
+def _nc_executor() -> ThreadPoolExecutor:
+    global _NC_POOL
+    with _NC_POOL_LOCK:
+        if _NC_POOL is None:
+            _NC_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hrrr-nc")
+        return _NC_POOL
+
+
+def _read_nc_point(path: Path, cycle: str, lat: float, lon: float, names: Optional[list[str]]) -> dict:
+    import xarray as xr
+
+    with _NC_LOCK, xr.open_dataset(path, cache=False) as ds:
         glat, glon = ds["latitude"].values, ds["longitude"].values
         dy = np.radians(glat - lat)
         dx = np.radians(glon - lon) * np.cos(np.radians(lat))

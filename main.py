@@ -102,6 +102,15 @@ configure_logging(log_file="api.log")
 
 logger = logging.getLogger(__name__)
 
+# Hang diagnostics: `docker kill -s USR1 show-me-fire-api` dumps every thread's stack to stderr (docker logs) without
+# stopping the process, so a future 100%-CPU hang can be read before the restart. Also dumps on SIGSEGV/SIGABRT.
+import faulthandler
+import signal as _signal
+
+faulthandler.enable()
+if hasattr(_signal, "SIGUSR1"):
+    faulthandler.register(_signal.SIGUSR1, all_threads=True)
+
 from services.system_alerts import install_discord_log_handler, notify_system_issue
 
 # Forwards any ERROR+ log record app-wide to the Discord staff-alert channel -
