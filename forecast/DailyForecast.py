@@ -2040,6 +2040,7 @@ def generate_complete_forecast():
     fm_cmap = LinearSegmentedColormap.from_list('fm_enhanced', 
                                                 list(zip(positions, colors)), 
                                                 N=512)
+    fm_levels = np.linspace(0, 30, 512)  # regional fuel-moisture maps (the definition was lost in 0f6f72e)
     
     # Create discrete bins: 1% below 15%, 3% above 15%
     bounds = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,18,21,24,27,30]

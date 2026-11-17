@@ -26,6 +26,13 @@ else
     PYTHON="python3"
 fi
 
+# Container environment saved by worker-entrypoint.sh (cron does not pass it on). Existing .env values still win in Python
+# because load_dotenv does not override, so this only fills in what a container without a .env would otherwise lack.
+if [ -f /etc/smf_container_env.sh ]; then
+    # shellcheck disable=SC1091
+    . /etc/smf_container_env.sh
+fi
+
 JOB_SUMMARY_FILE="$(mktemp)"
 export JOB_SUMMARY_FILE
 trap 'rm -f "$JOB_SUMMARY_FILE"' EXIT

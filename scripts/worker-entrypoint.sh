@@ -23,4 +23,10 @@ echo "cron set: ${SMF_CRON_SET:-all}: $(ls /etc/cron.d | tr '\n' ' ')"
 ( while true; do /opt/venv/bin/python /app/scripts/localhost_forward.py; sleep 2; done ) \
     >> /app/logs/worker_forward.log 2>&1 &
 
+# cron starts its jobs with an almost empty environment, so the variables from `env_file` (R2 keys, API tokens...) never
+# reach them. Containers that bind-mount the repo get them from /app/.env (load_dotenv), but the pinned long image has no
+# .env (.dockerignore), so a forecast could not upload to the CDN. Save the container environment where run_job.sh finds it.
+export -p | grep -v -E '^export (PATH|HOME|PWD|OLDPWD|SHLVL|_|TZ|HOSTNAME|TERM|SHELL|LOGNAME|USER)=' > /etc/smf_container_env.sh || true
+chmod 600 /etc/smf_container_env.sh || true
+
 exec "$@"
