@@ -28,6 +28,12 @@ fi
 # Set up PATH
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
+# cron gives jobs an almost empty environment. Pick up the container's settings (SMF_FIRE_ESCAPE_ENABLED, ...) before any step
+# checks them: containers with the code baked in (worker-long) have no /app/.env for Python to fall back on, and a switch
+# that reads as unset silently skips its step (fire escape maps went stale on 2026-11-17 this way).
+# shellcheck source=container_env.sh
+. "$SCRIPT_DIR/container_env.sh"
+
 # Create logs directory if it doesn't exist
 mkdir -p "$PROJECT_DIR/logs"
 
@@ -148,8 +154,9 @@ fi
 # HRRR file the forecast above just cached, published to the Testbed. Advisory only and off unless
 # SMF_FIRE_ESCAPE_ENABLED is set (the script then prints why it skipped and exits 0). It runs here, before the
 # beta exports below, so it reads production's cache and none of the beta overrides; its exit code is ignored.
-echo "=== Fire escape shadow maps ===" >> "$LOG_FILE" 2>&1
-"$PYTHON" "$PROJECT_DIR/scripts/run_fire_escape.py" >> "$LOG_FILE" 2>&1 ||   echo "WARNING: fire escape shadow maps failed at $(date) (advisory only, nothing depends on it)" >> "$LOG_FILE" 2>&1
+# run_fire_escape.py exits 0 when the job is off or ran, and 3 when it was on but could not run (no bundle, no HRRR file, ...);
+# that is recorded as a degraded stage, so a skipped day raises an alert instead of leaving only a line in this log.
+run_step "Fire escape shadow maps" "$PROJECT_DIR/scripts/run_fire_escape.py" degraded || true
 
 # Beta must never be able to touch production's own state - without these,
 # DailyForecast_ModelFD.py falls back to its own unsafe defaults (writes

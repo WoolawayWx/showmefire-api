@@ -6,8 +6,9 @@
 Today's maps are published to the Testbed (behind its acknowledgement); a run for another date is only written
 to the output folder unless --publish is given.
 
-Does nothing unless SMF_FIRE_ESCAPE_ENABLED is on or --force is given. Never exits non-zero for a day it
-cannot do: it prints the reason, so a cron line after the daily forecast cannot break that forecast.
+Does nothing (exit 0) unless SMF_FIRE_ESCAPE_ENABLED is on or --force is given. When it is on but the day cannot
+be done it prints the reason and exits 3, which scripts/forecasts.sh records as a degraded stage (an alert); the
+forecast itself never depends on this step.
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ from services import fire_escape
 from services.fire_escape import job
 
 
+EXIT_COULD_NOT_RUN = 3
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--date", type=date.fromisoformat, default=None, help="local valid date, YYYY-MM-DD")
@@ -47,8 +51,9 @@ def main() -> int:
         return 0
     day = args.date or datetime.now(ZoneInfo("America/Chicago")).date()
     publish = args.publish or args.date is None
-    print(json.dumps(job.run(day, args.hrrr, args.bundle, args.out, render_maps=not args.no_maps, publish=publish), indent=1))
-    return 0
+    result = job.run(day, args.hrrr, args.bundle, args.out, render_maps=not args.no_maps, publish=publish)
+    print(json.dumps(result, indent=1))
+    return 0 if result.get("status") == "ok" else EXIT_COULD_NOT_RUN
 
 
 if __name__ == "__main__":
