@@ -353,10 +353,11 @@ def upload_forecast_files(files_to_upload=None, path_prefix=None):
                 ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=3600'}
             )
             
-            # Upload to Latest
+            # Upload to Latest. no-cache = the browser keeps its copy but revalidates (ETag; a tiny 304 when unchanged) on
+            # every load, so pages always show the newest run without re-downloading images that did not change.
             s3.upload_file(
                 str(file_path), BUCKET_NAME, latest_key,
-                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
+                ExtraArgs={'ContentType': content_type, 'CacheControl': 'no-cache'}
             )
             
             print(f" [OK] {filename} -> R2")
