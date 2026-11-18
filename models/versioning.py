@@ -402,6 +402,16 @@ def validate_promotion_candidate(model_type, candidate):
     return blockers
 
 
+def _announce_live_change(model_type, previous, new):
+    """After the registry is saved: tell GitHub which release is live now (best effort, see live_marker.py).
+    Wrapped so that nothing in here can ever make a promotion or rollback fail."""
+    try:
+        from models.live_marker import mark_live_release
+        mark_live_release(model_type, new, previous)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def promote(model_type, version=None):
     """Promote the beta candidate (or a specific matching version) to stable.
 
@@ -455,6 +465,7 @@ def promote(model_type, version=None):
     if legacy_filename:
         shutil.copy2(API_DIR / promoted["file"], MODELS_DIR / legacy_filename)
 
+    _announce_live_change(model_type, previous_stable, promoted)
     return promoted["version"]
 
 
@@ -510,6 +521,7 @@ def rollback(model_type, version=None):
     legacy = _LEGACY_STATIC_FILENAMES.get(model_type)
     if legacy:
         shutil.copy2(API_DIR / target["file"], MODELS_DIR / legacy)
+    _announce_live_change(model_type, current, target)
     return target["version"]
 
 
