@@ -13,7 +13,7 @@ RESEND_ENDPOINT = "https://api.resend.com/emails"
 RESEND_API_BASE = "https://api.resend.com"
 
 
-def _resend_request(method: str, path: str, payload: dict | None = None) -> dict:
+def _resend_request(method: str, path: str, payload: dict | None = None, *, idempotency_key: str | None = None) -> dict:
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("Resend API configuration is incomplete")
@@ -21,6 +21,8 @@ def _resend_request(method: str, path: str, payload: dict | None = None) -> dict
         "headers": {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         "timeout": 15,
     }
+    if idempotency_key:
+        kwargs["headers"]["Idempotency-Key"] = idempotency_key
     if payload is not None:
         kwargs["json"] = payload
     response = requests.request(method, f"{RESEND_API_BASE}{path}", **kwargs)

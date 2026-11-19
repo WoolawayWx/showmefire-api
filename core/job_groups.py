@@ -47,6 +47,7 @@ HEAVY_JOBS = {
 }
 
 API_JOBS = {
+    "maintain_contact_tickets",
     # live feeds whose results the API serves from memory, and the jobs that read those feeds
     "fetch_synoptic", "fetch_timeseries", "fetch_raws_stations", "fetch_buffer_stations", "fetch_station_precip",
     "fetch_station_et", "refresh_testbed_observations", "publish_gis_observations", "record_station_history",

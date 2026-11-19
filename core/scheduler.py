@@ -673,6 +673,9 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
     """Register the jobs of the enabled groups (core/job_groups.py; default SMF_SCHEDULER_GROUPS, i.e. both) without
     starting anything. Returns the filtering wrapper so callers can see what was registered and skipped."""
     scheduler = GroupFilteredScheduler(scheduler, groups if groups is not None else groups_from_env())
+    from services.contact import maintain as maintain_contact_tickets
+    scheduler.add_job(maintain_contact_tickets, "interval", minutes=5, id="maintain_contact_tickets",
+                      max_instances=1, coalesce=True)
     scheduler.add_job(fetch_synoptic_data, 'interval', minutes=5, id='fetch_synoptic')
     scheduler.add_job(fetchtimeseriesdata, 'interval', minutes=5, seconds=60, id='fetch_timeseries')
     scheduler.add_job(fetch_and_store_raws_stations, 'interval', minutes=5, id='fetch_raws_stations')
