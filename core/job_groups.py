@@ -33,7 +33,7 @@ FORECAST_JOBS = {"run_forecast_v1_shadow", "prune_forecast_v1_hot_storage", "for
 HEAVY_JOBS = {
     # the HRRR / RTMA / MRMS pipelines
     "hrrr_hourly_forecast", "rtma_spread_rate_pipeline", "refresh_rtma_analysis", "refresh_testbed_rtma",
-    "end_of_day_rtma_peak", "capture_latest_mrms", "update_seasonal_fuel_state",
+    "end_of_day_rtma_peak", "capture_latest_mrms", "capture_models", "update_seasonal_fuel_state",
     # graphics that render in the process pool and upload to R2
     "publish_hourly_precipitation_graphics", "publish_precipitation_graphics", "refresh_burn_ban_static_map_daily",
     # archiving and exports
