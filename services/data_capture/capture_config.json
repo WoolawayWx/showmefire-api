@@ -1,0 +1,95 @@
+{
+  "_comment": "Capture-only collection of every model we may train on (services/data_capture/capture.py). Files land in the SAME folders and names the training PC uses (cache/<model>/<prefix>_YYYYMMDD_HHz_fNN-NN.nc), go into the nightly day bundle, and are pruned locally after keep_days. Field patterns are re.search'd against the idx descriptor ':VAR:LEVEL:FORECAST:EXTRA' (verified against real idx files 2026-11-18). Download sizes are full-domain fields before the Missouri crop.",
+  "keep_days": 14,
+  "lookback_hours": 30,
+  "models": {
+    "rrfs": {
+      "kind": "grib",
+      "label": "RRFS deterministic 13 km (North America)",
+      "dir": "cache/rrfs",
+      "prefix": "rrfs",
+      "url": "https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.{date}/{hh}/rrfs.t{hh}z.2dfld.13km.f{fxx:03d}.na.grib2",
+      "cycles": [0, 6, 12, 18],
+      "leads": {"start": 1, "end": 48, "step": 1},
+      "latency_hours": 3.5,
+      "required": ["t2m", "r2", "u10", "v10"],
+      "searches": {
+        "t2m": "^:TMP:2 m above ground:\\d+ hour fcst:?$",
+        "d2m": "^:DPT:2 m above ground:\\d+ hour fcst:?$",
+        "r2": "^:RH:2 m above ground:\\d+ hour fcst:?$",
+        "u10": "^:UGRD:10 m above ground:\\d+ hour fcst:?$",
+        "v10": "^:VGRD:10 m above ground:\\d+ hour fcst:?$",
+        "gust": "^:GUST:surface:\\d+ hour fcst:?$",
+        "tcc": "^:TCDC:entire atmosphere \\(considered as a single layer\\):\\d+ hour fcst:?$",
+        "dswrf": "^:DSWRF:surface:\\d+ hour fcst:?$",
+        "apcp": "^:APCP:surface:\\d+-\\d+ hour acc fcst:?$"
+      }
+    },
+    "gefs_mean": {
+      "kind": "grib",
+      "label": "GEFS ensemble mean 0.25 deg",
+      "dir": "cache/gefs",
+      "prefix": "gefs_mean",
+      "url": "https://noaa-gefs-pds.s3.amazonaws.com/gefs.{date}/{hh}/atmos/pgrb2sp25/geavg.t{hh}z.pgrb2s.0p25.f{fxx:03d}",
+      "cycles": [0, 12],
+      "leads": {"start": 6, "end": 168, "step": 6},
+      "latency_hours": 6,
+      "required": ["t2m", "r2"],
+      "searches": {
+        "t2m": "^:TMP:2 m above ground:\\d+ hour fcst:ens mean$",
+        "d2m": "^:DPT:2 m above ground:\\d+ hour fcst:ens mean$",
+        "r2": "^:RH:2 m above ground:\\d+ hour fcst:ens mean$",
+        "u10": "^:UGRD:10 m above ground:\\d+ hour fcst:ens mean$",
+        "v10": "^:VGRD:10 m above ground:\\d+ hour fcst:ens mean$",
+        "gust": "^:GUST:surface:\\d+ hour fcst:ens mean$",
+        "apcp": "^:APCP:surface:\\d+-\\d+ hour acc fcst:ens mean$"
+      }
+    },
+    "gefs_spread": {
+      "kind": "grib",
+      "label": "GEFS ensemble spread 0.25 deg",
+      "dir": "cache/gefs",
+      "prefix": "gefs_spread",
+      "url": "https://noaa-gefs-pds.s3.amazonaws.com/gefs.{date}/{hh}/atmos/pgrb2sp25/gespr.t{hh}z.pgrb2s.0p25.f{fxx:03d}",
+      "cycles": [0, 12],
+      "leads": {"start": 6, "end": 168, "step": 6},
+      "latency_hours": 6,
+      "required": ["t2m"],
+      "searches": {
+        "t2m": "^:TMP:2 m above ground:\\d+ hour fcst:ens std dev$",
+        "d2m": "^:DPT:2 m above ground:\\d+ hour fcst:ens std dev$",
+        "r2": "^:RH:2 m above ground:\\d+ hour fcst:ens std dev$",
+        "u10": "^:UGRD:10 m above ground:\\d+ hour fcst:ens std dev$",
+        "v10": "^:VGRD:10 m above ground:\\d+ hour fcst:ens std dev$",
+        "gust": "^:GUST:surface:\\d+ hour fcst:ens std dev$"
+      }
+    },
+    "nbm": {
+      "kind": "grib",
+      "label": "National Blend of Models (CONUS core)",
+      "dir": "cache/nbm",
+      "prefix": "nbm",
+      "url": "https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.{date}/{hh}/core/blend.t{hh}z.core.f{fxx:03d}.co.grib2",
+      "cycles": [13],
+      "leads": {"start": 3, "end": 72, "step": 3},
+      "latency_hours": 2.5,
+      "alternate_row_scan": true,
+      "required": ["t2m", "r2"],
+      "searches": {
+        "t2m": "^:TMP:2 m above ground:\\d+ hour fcst:?$",
+        "d2m": "^:DPT:2 m above ground:\\d+ hour fcst:?$",
+        "r2": "^:RH:2 m above ground:\\d+ hour fcst:?$",
+        "wind10": "^:WIND:10 m above ground:\\d+ hour fcst:?$",
+        "wdir10": "^:WDIR:10 m above ground:\\d+ hour fcst:?$",
+        "gust10": "^:GUST:10 m above ground:\\d+ hour fcst:?$",
+        "tcc": "^:TCDC:surface:\\d+ hour fcst:?$",
+        "apcp": "^:APCP:surface:\\d+-\\d+ hour acc fcst:?$"
+      }
+    },
+    "mrms": {
+      "kind": "mrms",
+      "label": "MRMS hourly radar precipitation",
+      "dir": "cache/mrms"
+    }
+  }
+}

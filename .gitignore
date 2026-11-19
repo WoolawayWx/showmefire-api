@@ -59,3 +59,4 @@ maps/shapefiles/MO_MoDOT_Roads_Arcs/*
 /config/*.local.json
 docker-compose.dev.yml
 keys/
+cdn_upload_state.json

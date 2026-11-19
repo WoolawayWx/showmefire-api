@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models.versioning import register_trained_model
+from models.versioning import get_model_entry, register_trained_model
 
 # gbm is deliberately absent: the risk-fusion guard can legitimately set
 # weight=0 (GLM-only ships with no gbm.json at all - see v5_guard.py's
@@ -195,6 +195,44 @@ def _verify_spatial_assets(files, declarations):
     return resolved
 
 
+def verified_identity(model_type, claimed, file_sha=None, asset_shas=None):
+    """The identity a release claims (metadata.json), after checking it against the downloaded bytes.
+
+    An identity contains the first 8 hex digits of the model's checksum, so a release whose files do not match its own name
+    (a corrupted download, or one model's files uploaded under another's tag) is refused instead of imported under a wrong
+    name. Returns None when the release carries no identity (published before identities existed)."""
+    if not claimed:
+        return None
+    from models import identity as model_identity
+    match = model_identity.IDENTITY_RE.match(claimed)
+    if not match or match["family"] != model_type:
+        raise ImportValidationError(f"Release identity {claimed!r} is not a valid {model_type} identity")
+    actual = model_identity.bundle_sha256(asset_shas) if asset_shas else file_sha
+    if not actual or actual[:8] != match["sha8"]:
+        raise ImportValidationError(
+            f"Release identity {claimed!r} does not match the downloaded files (their checksum starts {str(actual)[:8]}); refusing to import")
+    return claimed
+
+
+def already_registered(model_type, file_sha=None, asset_shas=None):
+    """The version this exact artifact is already registered under (stable, beta or history), or None.
+
+    Importing the same release twice used to register a second beta with identical bytes (fuel_moisture 1.0.1-beta.1 and
+    beta.2 share sha 7dd24676...), which made the version history unreadable. Identity is the checksum, not the tag."""
+    entry = get_model_entry(model_type)
+    records = [entry.get("stable"), entry.get("beta"), *reversed(entry.get("history") or [])]
+    for record in records:
+        if not record:
+            continue
+        if file_sha and record.get("sha256") == file_sha:
+            return record.get("version")
+        if asset_shas and record.get("assets"):
+            registered = {role: (asset or {}).get("sha256") for role, asset in record["assets"].items()}
+            if registered == asset_shas:
+                return record.get("version")
+    return None
+
+
 def import_release(model_type, tag, repo, bump="patch", timeout=None):
     """Returns the assigned beta version string.
 
@@ -247,12 +285,24 @@ def import_release(model_type, tag, repo, bump="patch", timeout=None):
                 resolved = _verify_generic_multiasset(files_by_name, declarations, set(declarations))
             assets = {role: {"path": resolved[role], **{key: value for key, value in declaration.items() if key not in ("file", "filename", "sha256")}}
                       for role, declaration in declarations.items()}
+            asset_shas = {role: _sha256(resolved[role]) for role in declarations}
+            identity = verified_identity(model_type, meta.get("identity"), asset_shas=asset_shas)
+            existing = already_registered(model_type, asset_shas=asset_shas)
+            if existing:
+                print(f"\nRelease {tag!r} is already registered here as {model_type} {existing} (same checksums) - nothing imported.")
+                return existing
             version = register_trained_model(model_type=model_type, performance=performance, bump=bump,
-                                             channel="beta", assets=assets, metadata=candidate_metadata)
+                                             channel="beta", assets=assets, metadata=candidate_metadata, identity=identity)
         else:
             if len(model_files) > 1: raise ImportValidationError(f"Expected exactly one model file asset, found {len(model_files)}")
+            file_sha = _sha256(model_files[0])
+            identity = verified_identity(model_type, meta.get("identity"), file_sha=file_sha)
+            existing = already_registered(model_type, file_sha=file_sha)
+            if existing:
+                print(f"\nRelease {tag!r} is already registered here as {model_type} {existing} (same checksum) - nothing imported.")
+                return existing
             version = register_trained_model(model_type=model_type, source_path=model_files[0], performance=performance,
-                                             bump=bump, channel="beta", metadata=candidate_metadata)
+                                             bump=bump, channel="beta", metadata=candidate_metadata, identity=identity)
 
     print(f"\nImported release {tag!r} -> registered as {model_type} beta version {version} on this server.")
     print(f"Review it, then promote with: python pipelines/promote_model.py --model {model_type} --version {version}")

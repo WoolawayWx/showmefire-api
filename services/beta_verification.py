@@ -120,14 +120,37 @@ def load_latest_beta_verification() -> dict | None:
         return None
 
 
+PRODUCTION_FORECAST_DIR = ARCHIVE_RAW_DATA_DIR.parent / "forecasts"
+_RUN_HOUR = re.compile(r"_(20\d{6})_(\d{2})\.json$")
+
+
+def _production_forecast(production_dir: Path, beta_path: Path, compact_date: str) -> Path | None:
+    """The production (public) forecast for the same day and run as the beta file, else the same day's 12z, else any run
+    that day. This is the real "stable": the beta file's own `fire_danger` is just its own score rounded down."""
+    production_dir = Path(production_dir)
+    match = _RUN_HOUR.search(beta_path.name)
+    hours = [match.group(2)] if match else []
+    for hour in [*hours, "12"]:
+        candidate = production_dir / f"station_forecasts_{compact_date}_{hour}.json"
+        if candidate.is_file():
+            return candidate
+    same_day = sorted(production_dir.glob(f"station_forecasts_{compact_date}_*.json"))
+    same_day = [path for path in same_day if _RUN_HOUR.search(path.name)]          # not *_model_shadow_* or *_beta_*
+    return same_day[-1] if same_day else None
+
+
 def run_beta_verification(
     target_date: str | None = None,
     *,
     forecast_dir: Path = BETA_FORECAST_ROOT / "archive" / "forecasts",
     observations_dir: Path = ARCHIVE_RAW_DATA_DIR,
     output_root: Path = BETA_VERIFICATION_ROOT,
+    production_dir: Path = PRODUCTION_FORECAST_DIR,
 ) -> dict:
-    """Score beta and stable forecast outputs without modifying production state."""
+    """Score the beta scorer against the PRODUCTION forecast on the same station-hours, without modifying production.
+
+    "Stable" used to be the beta forecast file's own `fire_danger` field, which in experimental mode is `int()` of the
+    beta score - so the comparison was rounding vs flooring the same number, not beta vs what the public saw."""
     forecast_path, compact_date = _select_forecast(Path(forecast_dir), target_date)
     observation_path = Path(observations_dir) / f"raw_data_{compact_date}.json"
     if not observation_path.exists():
@@ -165,6 +188,18 @@ def run_beta_verification(
     merged["beta_score"] = scores
     merged["beta_category"] = categories
 
+    production_path = _production_forecast(Path(production_dir), forecast_path, compact_date)
+    if production_path is not None:
+        production = get_forecast_dataframe(_load_json(production_path), start, end)
+        production = production[["stid", "timestamp", "pred_fire_danger"]].rename(columns={"pred_fire_danger": "stable_fire_danger"})
+        # Both sides are scored on exactly the same station-hours.
+        merged = pd.merge(merged.drop(columns=["pred_fire_danger"]), production, on=["stid", "timestamp"], how="inner")
+        if merged.empty:
+            raise RuntimeError(f"The beta forecast and the production forecast {production_path.name} share no station-hours.")
+    else:
+        merged = merged.drop(columns=["pred_fire_danger"]).assign(stable_fire_danger=np.nan)
+    merged = merged.rename(columns={"stable_fire_danger": "pred_fire_danger"})
+
     stable = _ordinal_metrics(merged["pred_fire_danger"], merged["obs_fire_danger"])
     beta = _ordinal_metrics(merged["beta_category"], merged["obs_fire_danger"])
     beta_continuous = _ordinal_metrics(merged["beta_score"], merged["obs_fire_danger"])
@@ -180,7 +215,10 @@ def run_beta_verification(
         "minimum_support": MINIMUM_SUPPORT,
         "record_count": int(len(merged)),
         "stations_count": int(merged["stid"].nunique()),
-        "sources": {"forecast": forecast_path.name, "observations": observation_path.name},
+        "sources": {"forecast": forecast_path.name, "observations": observation_path.name,
+                    "stable_forecast": production_path.name if production_path else None},
+        "stable_source": ("production forecast" if production_path else
+                          "unavailable: no production forecast file for this day, so there is nothing to compare against"),
         "stable": stable,
         "beta": beta,
         "beta_continuous": beta_continuous,

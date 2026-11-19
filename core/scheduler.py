@@ -20,6 +20,7 @@ from services.archive_bundler import run_end_of_day_archive, run_ngfs_raw_archiv
 from services import map_archive
 from services import day_archive, full_obs_archive
 from services.hrrr_hourly import scheduler_job as hrrr_hourly_job
+from services.data_capture import scheduler_job as data_capture_job
 from services.rtma_capture import cleanup_rtma_cache, fetch_rtma, latest_complete_hour, spread_rate_poll_minutes
 from services.mrms_capture import cleanup_mrms_cache, fetch_mrms, mrms_enabled
 from services.mobile_push import check_push_receipts, deliver_scheduled_forecasts, purge_delivery_records
@@ -931,6 +932,16 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
         'cron',
         minute='*/3',
         id='hrrr_hourly_forecast',
+        max_instances=1,
+        coalesce=True
+    )
+    # Capture-only copies of every model we may train on (RRFS, GEFS, NBM, MRMS) - services/data_capture. Each tick does a
+    # bounded amount of work in a low-priority subprocess and skips entirely when free disk is under 5 GB.
+    scheduler.add_job(
+        data_capture_job.run_scheduled,
+        'cron',
+        minute='7,27,47',
+        id='capture_models',
         max_instances=1,
         coalesce=True
     )

@@ -55,6 +55,10 @@ class BetaVerificationTests(unittest.TestCase):
         (observations / "raw_data_20260711.json").write_text(
             json.dumps(observation_payload), encoding="utf-8"
         )
+        production = root / "production" / "archive" / "forecasts"
+        production.mkdir(parents=True)
+        (production / "station_forecasts_20260711_12.json").write_text(json.dumps(forecast_payload), encoding="utf-8")
+        self.production = production
         return forecasts, observations, output
 
     def test_report_scores_beta_and_writes_only_to_testbed_output(self):
@@ -69,6 +73,7 @@ class BetaVerificationTests(unittest.TestCase):
                     forecast_dir=forecasts,
                     observations_dir=observations,
                     output_root=output,
+                    production_dir=self.production,
                 )
 
             self.assertEqual(report["date"], "2026-07-11")
@@ -95,8 +100,57 @@ class BetaVerificationTests(unittest.TestCase):
                     forecast_dir=forecasts,
                     observations_dir=observations,
                     output_root=output,
+                    production_dir=self.production,
                 )
             self.assertFalse(output.exists())
+
+    def _run(self, forecasts, observations, output):
+        with patch.object(beta_verification, "MINIMUM_SUPPORT", 1):
+            return beta_verification.run_beta_verification(forecast_dir=forecasts, observations_dir=observations,
+                                                           output_root=output, production_dir=self.production)
+
+    def _rewrite_production(self, change):
+        path = self.production / "station_forecasts_20260711_12.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        change(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_stable_is_the_production_forecast_not_the_beta_files_own_category(self):
+        with TemporaryDirectory() as directory:
+            forecasts, observations, output = self._write_inputs(Path(directory))
+            # The public forecast said Low (0) at 17Z where the beta file's own field says 3 and the observation is 3.
+            self._rewrite_production(lambda p: p["stations"]["TEST"]["forecasts"][1].update(fire_danger=0))
+            report = self._run(forecasts, observations, output)
+            self.assertEqual(report["stable"]["exact_match_rate"], 0.5)
+            self.assertEqual(report["beta"]["exact_match_rate"], 1.0)
+            self.assertEqual(report["sources"]["stable_forecast"], "station_forecasts_20260711_12.json")
+            self.assertEqual(report["stable_source"], "production forecast")
+
+    def test_both_sides_are_scored_on_the_same_station_hours(self):
+        with TemporaryDirectory() as directory:
+            forecasts, observations, output = self._write_inputs(Path(directory))
+            self._rewrite_production(lambda p: p["stations"]["TEST"].update(forecasts=p["stations"]["TEST"]["forecasts"][1:]))
+            report = self._run(forecasts, observations, output)
+            self.assertEqual(report["record_count"], 1)
+            self.assertEqual((report["stable"]["count"], report["beta"]["count"]), (1, 1))
+
+    def test_no_production_forecast_is_reported_not_faked(self):
+        with TemporaryDirectory() as directory:
+            forecasts, observations, output = self._write_inputs(Path(directory))
+            (self.production / "station_forecasts_20260711_12.json").unlink()
+            report = self._run(forecasts, observations, output)
+            self.assertEqual(report["stable"]["count"], 0)
+            self.assertIsNone(report["delta"]["mae"])
+            self.assertIn("unavailable", report["stable_source"])
+            self.assertEqual(report["beta"]["count"], 2)
+
+    def test_a_shadow_file_is_never_taken_as_the_production_forecast(self):
+        with TemporaryDirectory() as directory:
+            forecasts, observations, output = self._write_inputs(Path(directory))
+            source = self.production / "station_forecasts_20260711_12.json"
+            source.rename(self.production / "station_forecasts_model_shadow_20260711_12.json")
+            report = self._run(forecasts, observations, output)
+            self.assertIsNone(report["sources"]["stable_forecast"])
 
 
 class BetaIsolationTests(unittest.TestCase):

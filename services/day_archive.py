@@ -248,6 +248,14 @@ for _name in SOURCE_COMPONENTS:
 FILE_COMPONENTS["rtma"] = collect_rtma
 FILE_COMPONENTS["derived"] = collect_derived
 
+# Models kept by services/data_capture (capture-only, nothing on the site reads them yet). Their folders and names already
+# match the training PC's layout, so the bundle restores straight into training. They are deliberately NOT in
+# archive_store.SOURCES: the per-file versioned archive would store and upload them a second time.
+CAPTURE_COMPONENTS = {"rrfs": "cache/rrfs", "gefs": "cache/gefs", "nbm": "cache/nbm", "mrms": "cache/mrms"}
+for _name, _rel in CAPTURE_COMPONENTS.items():
+    FILE_COMPONENTS[_name] = (lambda day, ts, _r=_rel: _source_files(_r, day, ts))
+PRUNABLE = PRUNABLE | set(CAPTURE_COMPONENTS)
+
 
 def map_zip_days(day: str) -> list[str]:
     """Map zips are named by the worker clock's (UTC) day; a Central day spans two of them."""

@@ -29,6 +29,11 @@ def monitor(model_type="fuel_moisture", history_path=API_DIR / "reports" / "vali
         return {"action": "none", "reason": "promotion timestamp unavailable"}
     if datetime.now() - promoted > timedelta(days=7):
         return {"action": "none", "reason": "post-promotion window complete"}
+    if stable.get("rollback_from"):
+        # rollback() stamps promoted_at = now, which would restart this window with the model we just rolled back FROM as
+        # the "previous" baseline - and a regression against that could roll back again, ping-ponging between the two.
+        # A restored model is the known-good one: the guardrail guards promotions, not restorations.
+        return {"action": "none", "reason": "stable is a rollback target; the guardrail does not restart"}
     previous = next((record for record in reversed(entry.get("history", []))
                      if record.get("channel") == "stable" and record.get("version") != stable.get("version")), None)
     if forecast_job_failed:

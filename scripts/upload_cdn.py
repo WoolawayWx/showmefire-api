@@ -26,6 +26,7 @@ FOLDERS_TO_UPLOAD = [
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from services.cdn_thumbnails import make_thumbnail, thumbnails_enabled
+from services.cdn_upload_state import UploadState, state_path
 
 def upload_to_cdn(files, dest_keys, content_types=None, cache_controls=None):
     """
@@ -204,7 +205,7 @@ def get_r2_client():
         region_name='auto'
     )
 
-def _upload_thumbnail(s3, file_path, path_prefix=None):
+def _upload_thumbnail(s3, file_path, path_prefix=None, state=None):
     """Upload the small WebP copy of a PNG next to its latest/ file (see services/cdn_thumbnails.py).
 
     Does nothing unless CDN_THUMBNAILS is on. Only the latest/ copy is uploaded (not the dated
@@ -218,10 +219,14 @@ def _upload_thumbnail(s3, file_path, path_prefix=None):
             if thumbnail is None:
                 return
             key = f"{path_prefix.rstrip('/')}/latest/{thumbnail.name}" if path_prefix else f"latest/{thumbnail.name}"
+            if state is not None and state.unchanged(key, thumbnail):
+                return
             s3.upload_file(
                 str(thumbnail), BUCKET_NAME, key,
                 ExtraArgs={'ContentType': 'image/webp', 'CacheControl': 'max-age=300'}
             )
+            if state is not None:
+                state.remember(key, thumbnail)
             print(f" [OK] {thumbnail.name} -> {key}")
     except Exception as e:
         print(f" [INFO] Thumbnail for {Path(file_path).name} skipped: {e}")
@@ -239,6 +244,7 @@ def upload_quarter_hour_files(files_to_upload=None, path_prefix=None):
         return
 
     s3 = get_r2_client()
+    state = UploadState(state_path(PROJECT_ROOT))
     timestamp_path = get_quarter_hour_path()
     
     # Apply prefix if provided
@@ -274,17 +280,23 @@ def upload_quarter_hour_files(files_to_upload=None, path_prefix=None):
                 ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=3600'}
             )
             
-            # Upload to Latest
-            s3.upload_file(
-                str(file_path), BUCKET_NAME, latest_key,
-                ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
-            )
+            # Upload to Latest, unless it is byte-identical to what is already there (every write is a billed operation)
+            if not state.unchanged(latest_key, file_path):
+                s3.upload_file(
+                    str(file_path), BUCKET_NAME, latest_key,
+                    ExtraArgs={'ContentType': content_type, 'CacheControl': 'max-age=300'}
+                )
+                state.remember(latest_key, file_path)
             
             print(f" [OK] {filename} -> R2")
-            _upload_thumbnail(s3, file_path, path_prefix)
+            _upload_thumbnail(s3, file_path, path_prefix, state)
         except Exception as e:
             print(f" [FAILED] {filename}: {e}")
     
+    state.save()
+    if state.skipped:
+        print(f" [INFO] {state.skipped} unchanged latest/ file(s) not re-uploaded")
+
     # Generate and upload timeline JSON
     try:
         cdn_base_url = os.getenv('CDN_BASE_URL', 'https://cdn.showmefire.org')
@@ -318,6 +330,7 @@ def upload_forecast_files(files_to_upload=None, path_prefix=None):
         return
 
     s3 = get_r2_client()
+    state = UploadState(state_path(PROJECT_ROOT))
     forecast_path = get_forecast_path()
     
     # Apply prefix if provided
@@ -355,15 +368,18 @@ def upload_forecast_files(files_to_upload=None, path_prefix=None):
             
             # Upload to Latest. no-cache = the browser keeps its copy but revalidates (ETag; a tiny 304 when unchanged) on
             # every load, so pages always show the newest run without re-downloading images that did not change.
-            s3.upload_file(
-                str(file_path), BUCKET_NAME, latest_key,
-                ExtraArgs={'ContentType': content_type, 'CacheControl': 'no-cache'}
-            )
+            if not state.unchanged(latest_key, file_path):
+                s3.upload_file(
+                    str(file_path), BUCKET_NAME, latest_key,
+                    ExtraArgs={'ContentType': content_type, 'CacheControl': 'no-cache'}
+                )
+                state.remember(latest_key, file_path)
             
             print(f" [OK] {filename} -> R2")
-            _upload_thumbnail(s3, file_path, path_prefix)
+            _upload_thumbnail(s3, file_path, path_prefix, state)
         except Exception as e:
             print(f" [FAILED] {filename}: {e}")
+    state.save()
 
 # Backwards compatibility - keep original function name
 def run_upload(files_to_upload=None):

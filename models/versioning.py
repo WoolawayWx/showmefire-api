@@ -181,7 +181,7 @@ def next_version(model_type, bump="patch", beta=False):
 
 
 def register_trained_model(model_type, source_path=None, performance=None, bump="patch", channel="beta", assets=None,
-                           metadata=None, live_pointer_env=None):
+                           metadata=None, live_pointer_env=None, identity=None):
     """Register a freshly trained model artifact under the given channel.
 
     Copies `source_path` into models/versions/ under an immutable, versioned
@@ -235,6 +235,16 @@ def register_trained_model(model_type, source_path=None, performance=None, bump=
         record["sha256"] = _sha256(versioned_path)
     if asset_records:
         record["assets"] = asset_records
+    # The name that means the same thing on every machine (models/identity.py). An imported model passes the identity from
+    # its release so both sides use the identical string; otherwise it is built from the artifact's checksum.
+    from models import identity as model_identity
+    if identity:
+        record["identity"] = identity
+    elif asset_records:
+        record["identity"] = model_identity.identity_from_assets(
+            model_type, {role: asset["sha256"] for role, asset in asset_records.items()}, now)
+    elif versioned_path:
+        record["identity"] = model_identity.make_identity(model_type, record["sha256"], now)
 
     entry[channel] = record
     entry.setdefault("history", []).append({**record, "channel": channel, "recorded_at": now})
@@ -408,6 +418,12 @@ def _announce_live_change(model_type, previous, new):
     try:
         from models.live_marker import mark_live_release
         mark_live_release(model_type, new, previous)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from models.live_record import publish_live_record
+        artifact = (API_DIR / new["file"]) if new and new.get("file") else None
+        publish_live_record(model_type, new, previous, artifact_path=artifact)
     except Exception:  # noqa: BLE001
         pass
 

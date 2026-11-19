@@ -142,6 +142,13 @@
       "invalidates": [
         "fire_escape"
       ]
+    },
+    {
+      "name": "model_identity",
+      "api_path": "models/identity.py",
+      "training_path": "models/identity.py",
+      "sha256": "602b270a6231547ba71c7438894ba0b01352e8aa2a0f7dffd92f12de11c8daf4",
+      "invalidates": []
     }
   ]
 }

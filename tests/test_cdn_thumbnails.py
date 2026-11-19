@@ -148,6 +148,7 @@ class UploaderIntegrationTests(unittest.TestCase):
         self.png = _map_like_png(Path(self._tmp.name) / "mo-rh.png", size=(1600, 900))
         self.s3 = FakeS3()
         self.patches = [
+            mock.patch.dict(os.environ, {"CDN_UPLOAD_STATE": str(Path(self._tmp.name) / "upload_state.json")}),   # never the real one
             mock.patch.object(self.module, "R2_ACCESS_KEY_ID", "k"),
             mock.patch.object(self.module, "R2_SECRET_ACCESS_KEY", "s"),
             mock.patch.object(self.module, "R2_ACCOUNT_ID", "a"),
@@ -213,7 +214,8 @@ class UploaderIntegrationTests(unittest.TestCase):
                 super().upload_file(filename, bucket, key, ExtraArgs)
 
         self.s3 = FailingThumbUpload()
-        with mock.patch.dict(os.environ, {"CDN_THUMBNAILS": "1"}):
+        # a fresh upload-state file: the same PNG is no longer "unchanged" (a repeat of identical bytes skips latest/ by design)
+        with mock.patch.dict(os.environ, {"CDN_THUMBNAILS": "1", "CDN_UPLOAD_STATE": str(Path(self._tmp.name) / "second_state.json")}):
             self.module.upload_quarter_hour_files([self.png], path_prefix="test")
         self.assertEqual(len(self.s3.uploads), 2, "both PNG copies still went up")
 

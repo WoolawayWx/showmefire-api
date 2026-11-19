@@ -97,17 +97,30 @@ def run_shadow(frame, stable_predictions, return_beta: bool = False):
         logger.exception("Beta shadow inference failed; stable output is unchanged")
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with LOG_PATH.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
-                                     "failed": True, "error": str(exc)}) + "\n")
+            # beta_version lets the evidence check attribute a failure to the candidate it happened to (rows written before
+            # this field existed have none and are not blamed on any later candidate).
+            stream.write(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(), "failed": True,
+                                     "beta_version": beta.get("version"), "error": str(exc)}) + "\n")
         if _state["consecutive_failures"] >= MAX_CONSECUTIVE_FAILURES:
             _state["enabled"] = False
     return (stable_predictions, None) if return_beta else stable_predictions
 
 
-def evaluate_shadow_evidence(path=LOG_PATH, minimum_days=30, minimum_elevated_samples=1):
+def evaluate_shadow_evidence(path=LOG_PATH, minimum_days=30, minimum_elevated_samples=1, beta_version=None):
+    """Shadow evidence for ONE candidate.
+
+    With `beta_version`, only rows logged for that version count. Before, every row from every beta that ever ran was pooled,
+    so one failure from an old candidate blocked every later one forever, and days "accumulated" by a previous beta counted
+    for the new one. Failure rows from before the version was recorded (no `beta_version`) are reported as
+    `unattributed_failures` but are not charged to any candidate. Without `beta_version` the old pooled behaviour remains
+    (kept for callers that really want the whole log)."""
     records = []
     if Path(path).exists():
         records = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    unattributed = 0
+    if beta_version is not None:
+        unattributed = sum(1 for r in records if r.get("failed") and not r.get("beta_version"))
+        records = [r for r in records if r.get("beta_version") == beta_version]
     successful = [record for record in records if not record.get("failed")]
     dates = {record["timestamp"][:10] for record in successful}
     failures = sum(bool(record.get("failed")) for record in records)
@@ -115,10 +128,13 @@ def evaluate_shadow_evidence(path=LOG_PATH, minimum_days=30, minimum_elevated_sa
     evidence = {"days": len(dates), "runs": len(successful), "failures": failures,
                 "elevated_samples": elevated,
                 "passed": len(dates) >= minimum_days and failures == 0 and elevated >= minimum_elevated_samples}
+    if beta_version is not None:
+        evidence.update(beta_version=beta_version, unattributed_failures=unattributed)
     return evidence
 
 
 def record_shadow_gate(path=LOG_PATH, minimum_days=30, minimum_elevated_samples=1):
-    evidence = evaluate_shadow_evidence(path, minimum_days, minimum_elevated_samples)
+    current = (get_model_entry("fuel_moisture").get("beta") or {}).get("version")      # evidence for THIS candidate only
+    evidence = evaluate_shadow_evidence(path, minimum_days, minimum_elevated_samples, beta_version=current)
     update_beta_metadata("fuel_moisture", {"shadow": evidence})
     return evidence
