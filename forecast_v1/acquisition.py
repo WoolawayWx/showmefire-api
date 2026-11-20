@@ -574,6 +574,27 @@ def _fetch_member(
     return canonical.load()
 
 
+def acquire_fields(
+    spec: AcquisitionSpec,
+    cycle: datetime,
+    member: str | int | None,
+    cache_dir: str | Path,
+    *,
+    fast_herbie_factory: Callable | None = None,
+) -> xr.Dataset:
+    """Fetch one member of a source as a clipped, Missouri-buffer dataset, skipping the forecast-v1 contract.
+
+    Returns the canonical native-name fields (`t2m` K, `r2` %, `u10`, `v10`, `gust`, `apcp` run total) on a `time`
+    valid-time axis with projected `x`/`y` and 2-D `latitude`/`longitude`. Unlike `acquire_source` it neither requires
+    the full forecast-v1 variable set nor normalizes units, so a lighter job (forecast/ExtendedForecast.py) can ask for
+    just the handful of fields and lead hours it uses.
+    """
+    if fast_herbie_factory is None:
+        from herbie import FastHerbie
+        fast_herbie_factory = FastHerbie
+    return _fetch_member(spec, cycle, member, Path(cache_dir), fast_herbie_factory)
+
+
 def _gefs_intervals(source: xr.DataArray, cycle: datetime, *, average: bool) -> list[tuple[int, int, xr.DataArray]]:
     """Split GEFS 6-hour-reset buckets into (start, end, value) lead intervals.
 
