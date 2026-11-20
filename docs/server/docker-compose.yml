@@ -94,6 +94,9 @@ services:
       - /mnt/adrive/showmefire-data/archive:/app/archive
       - /mnt/adrive/showmefire-data/cache:/app/cache
       - /mnt/adrive/showmefire-data/data_archive:/app/data_archive
+      # The old hand-made daily zips. `legacy_archive` (hourly) re-verifies each one against R2 and deletes the local copy.
+      # Remove this line once the folder is empty.
+      - /mnt/adrive/showmefire-data/data_archive_day:/app/legacy-archive
       - /mnt/adrive/showmefire-data/files:/app/files
     env_file:
       - ./showmefire-api/.env

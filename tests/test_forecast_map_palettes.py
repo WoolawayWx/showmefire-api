@@ -46,8 +46,11 @@ def test_tables_match_the_day_1_maps():
     assert list(rh.colors) == _day1_list("rh_colors") and list(rh.levels) == _day1_list("rh_levels")
     wind = palettes.style_for("wind_speed_10m")
     assert list(wind.colors) == _day1_list("wind_colors") and list(wind.levels) == _day1_list("wind_levels")
+    # Precipitation has one shared table (core/precip_palette.py); Day 1 reads it too, so they cannot drift.
+    from core.precip_palette import load_qpf_palette
     rain = palettes.style_for("precipitation_increment")
-    assert list(rain.colors) == _day1_list("rain_colors") and list(rain.levels) == _day1_list("rain_levels")
+    assert rain.colors == load_qpf_palette().colors and rain.levels == load_qpf_palette().levels
+    assert "load_qpf_palette()" in DAILY_FORECAST.read_text(encoding="utf-8")
 
 
 def test_values_are_converted_to_the_units_the_day_1_maps_show():

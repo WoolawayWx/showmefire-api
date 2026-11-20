@@ -53,6 +53,7 @@ from core.fire_danger import calculate_fire_danger as canonical_fire_danger, met
 from core.beta_fire_danger import score_fire_danger
 from core.domain import crop as crop_to_missouri
 from core.temperature_palette import load_wsi_temperature_palette
+from core.precip_palette import load_qpf_palette
 from models.features import LEGACY_FEATURES, validate_feature_contract
 from services.hrrr_readiness import default_availability_lag_hours
 from services.model_shadow import run_shadow
@@ -2035,28 +2036,28 @@ def generate_complete_forecast():
         logger.info("Generating rainfall forecast map...")
         try:
             # Use a blue colormap for precipitation
-            rain_colors = ['#FFFFFF', '#E0F0FF', '#B0D4FF', '#6AB4FF', '#0080FF', '#0050D0', '#003080']
-            rain_levels = [0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
-            rain_cmap = ListedColormap(rain_colors)
-            rain_norm = BoundaryNorm(rain_levels, len(rain_colors))
+            qpf = load_qpf_palette()  # AccuWeather QPF table (core/precip_palette.py)
+            rain_levels = list(qpf.levels)
+            rain_cmap = qpf.cmap()
+            rain_norm = qpf.norm()
             
             fig, ax = create_base_map(extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
             print(total_precip_smooth)
             # Plot precipitation
             cs = ax.contourf(lon, lat, total_precip_smooth, 
-                           levels=rain_levels, cmap=rain_cmap, norm=rain_norm,
+                           levels=rain_levels, cmap=rain_cmap, norm=rain_norm, extend="max",
                            transform=data_crs, alpha=0.8, zorder=7, antialiased=True)
             
             # Add contour lines
             ax.contour(lon, lat, total_precip_smooth, transform=data_crs,
-                      levels=rain_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                      levels=list(qpf.line_levels), colors='black', linewidths=0.3, alpha=0.2, zorder=8)
             
             add_boundaries(ax, data_crs, PROJECT_DIR)
             
             cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
             cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
-            cbar.set_ticks(rain_levels)
-            cbar.set_ticklabels([f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in rain_levels])
+            cbar.set_ticks(list(qpf.ticks))
+            cbar.set_ticklabels(list(qpf.tick_labels))
             
             ax.set_anchor('W')
             plt.subplots_adjust(left=0.05)
@@ -2537,19 +2538,19 @@ def generate_complete_forecast():
                     if total_precip_smooth is not None:
                         reg_precip = np.where(reg_mask, total_precip_smooth, np.nan)
                         fig, ax = create_base_map(reg_extent, map_crs, data_crs, pixelw, pixelh, mapdpi)
-                        rain_colors = ['#FFFFFF', '#E0F0FF', '#B0D4FF', '#6AB4FF', '#0080FF', '#0050D0', '#003080']
-                        rain_levels = [0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
-                        rain_cmap = ListedColormap(rain_colors)
-                        rain_norm = BoundaryNorm(rain_levels, len(rain_colors))
-                        cs = ax.contourf(lon, lat, reg_precip, levels=rain_levels, cmap=rain_cmap, norm=rain_norm, transform=data_crs, alpha=0.8, zorder=7, antialiased=True)
-                        ax.contour(lon, lat, reg_precip, transform=data_crs, levels=rain_levels[1:-1], colors='black', linewidths=0.3, alpha=0.2, zorder=8)
+                        qpf = load_qpf_palette()  # AccuWeather QPF table (core/precip_palette.py)
+                        rain_levels = list(qpf.levels)
+                        rain_cmap = qpf.cmap()
+                        rain_norm = qpf.norm()
+                        cs = ax.contourf(lon, lat, reg_precip, levels=rain_levels, cmap=rain_cmap, norm=rain_norm, extend="max", transform=data_crs, alpha=0.8, zorder=7, antialiased=True)
+                        ax.contour(lon, lat, reg_precip, transform=data_crs, levels=list(qpf.line_levels), colors='black', linewidths=0.3, alpha=0.2, zorder=8)
                         
                         add_region_overlay(ax, reg_extent)
                         
                         cax = fig.add_axes([0.02, 0.08, 0.02, 0.6])
                         cbar = plt.colorbar(cs, cax=cax, label='Total Precipitation (inches)')
-                        cbar.set_ticks(rain_levels)
-                        cbar.set_ticklabels([f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in rain_levels])
+                        cbar.set_ticks(list(qpf.ticks))
+                        cbar.set_ticklabels(list(qpf.tick_labels))
                         ax.set_anchor('W')
                         plt.subplots_adjust(left=0.05)
                         

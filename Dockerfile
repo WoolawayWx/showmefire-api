@@ -152,6 +152,15 @@ RUN echo "TZ=UTC" > /etc/cron.d/ensemble12z \
     && echo "" >> /etc/cron.d/ensemble12z \
     && chmod 0644 /etc/cron.d/ensemble12z
 
+# Day 2 / Day 3 fire danger (beta, Testbed only; forecast/ExtendedForecast.py). Runs after every model run that can feed it:
+# Day 2 from the 06z/12z/18z HRRR (blended with the same run's RRFS), Day 3 from the 12z/18z RRFS. HRRR's last needed hour is out
+# ~4 h after the cycle (10:30, 16:30, 22:30Z) and RRFS's ~7 h after (19:30, 01:30Z); the script waits up to 150 minutes for a run that is
+# still publishing and does nothing if the newest run is already built, so the five ticks never repeat work. Also scores earlier runs.
+RUN echo "TZ=UTC" > /etc/cron.d/extendedforecast \
+    && echo "30 1,10,16,19,22 * * * root /bin/bash /app/scripts/run_job.sh extended_forecast /app/scripts/extended_forecast.sh >> /app/logs/cron_extended.log 2>&1" >> /etc/cron.d/extendedforecast \
+    && echo "" >> /etc/cron.d/extendedforecast \
+    && chmod 0644 /etc/cron.d/extendedforecast
+
 # The seven-day fire outlook worker (services/fire_outlook/, scripts/fire_outlook.sh). A tick every 30 minutes (at :07 and :37 so it
 # never lands on the */15 map refresh) finds the latest 00Z/12Z GEFS cycle, and does nothing unless SMF_FIRE_OUTLOOK_ENABLED=true.
 # GEFS 00Z/12Z is complete about 5 hours after the cycle (~05:00Z and ~17:00Z); a run takes ~10-15 minutes. The script takes its own

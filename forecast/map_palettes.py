@@ -1,7 +1,8 @@
 """House color tables for the public Missouri forecast maps, keyed by forecast-v1 variable name.
 
 The levels, colors, tick labels and legend text are copied from the Day 1 maps in forecast/DailyForecast.py (which still
-holds its own copies; change both together) so that a color means the same thing on Day 1, Day 2 and Day 3. Probability
+holds its own copies; change both together, except precipitation, whose table lives in
+core/precip_palette.py for every map) so that a color means the same thing on Day 1, Day 2 and Day 3. Probability
 maps use the ensemble fire danger ramps. Data arrive in forecast-v1 units (degC, m/s, mm), so every style carries the
 conversion to the units the Day 1 maps show (degF, knots, inches).
 
@@ -34,6 +35,7 @@ class FieldStyle:
     line_levels: Optional[tuple] = None          # faint contour lines drawn over the fill, as on the Day 1 maps
     legend: str = ""                             # threshold text added above the standard description
     min_shown: Optional[float] = None            # values below this are left unfilled (probability maps)
+    over_color: Optional[str] = None             # color for values above the top level (with extend="max")
 
     def build(self):
         """(colormap, norm) for this style; norm is None where the colormap's own range is the levels."""
@@ -47,6 +49,8 @@ class FieldStyle:
 
             return load_wsi_temperature_palette()[0], None
         cmap = ListedColormap(self.colors)
+        if self.over_color:
+            cmap.set_over(self.over_color)
         return cmap, BoundaryNorm(self.levels, len(self.colors))
 
 
@@ -59,7 +63,6 @@ FUEL_MOISTURE_STOPS = (
 _RH_LEVELS = (0, 15, 25, 35, 50, 65, 100)
 _WIND_LEVELS = (0, 10, 15, 20, 25, 30)
 _WIND_COLORS = ("#90EE90", "#FFED4E", "#FFA500", "#FF6347", "#FF0000", "#8B0000")
-_RAIN_LEVELS = (0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
 _SWE_LEVELS = tuple(round(i * 0.1, 1) for i in range(26))
 
 
@@ -128,11 +131,13 @@ def style_for(variable: str) -> Optional[FieldStyle]:
             extend="both", line_levels=tuple(range(10, 90, 10)),
             legend="Temperature influences fire behavior:\nHigher temperatures increase fuel dryness\nand fire spread rates.")
     if variable == "precipitation_increment":
+        from core.precip_palette import load_qpf_palette
+
+        qpf = load_qpf_palette()             # AccuWeather QPF table, shared by every precipitation map
         return FieldStyle(
-            "Total Precipitation (inches)", _RAIN_LEVELS, lambda mm: mm * MM_TO_INCHES,
-            ("#FFFFFF", "#E0F0FF", "#B0D4FF", "#6AB4FF", "#0080FF", "#0050D0", "#003080"), ticks=_RAIN_LEVELS,
-            tick_labels=tuple(f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in _RAIN_LEVELS),
-            alpha=0.8, line_levels=_RAIN_LEVELS[1:-1],
+            "Total Precipitation (inches)", qpf.levels, lambda mm: mm * MM_TO_INCHES, qpf.colors, ticks=qpf.ticks,
+            tick_labels=qpf.tick_labels, extend="max", over_color=qpf.over,
+            alpha=0.8, line_levels=qpf.line_levels,
             legend='Precipitation reduces fire danger by:\n- Increasing fuel moisture\n- Raising relative humidity\n'
                    '- Potentially preventing ignition\n\n> 0.5": Significant fire danger reduction\n> 1.0": Major impact on fire activity')
     if variable == "snow_water_equivalent":

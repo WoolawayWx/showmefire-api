@@ -6,8 +6,13 @@ needs, so a run takes a very long time, and its Day 2/3 graphics do not look lik
 
 This job takes Day 1's logic and runs it on the next two days with only the fields it uses:
 
-    Day 2  HRRR  f28-f39   (the same 12z run, the same 16z-03z afternoon window, one day later)
-    Day 3  RRFS  f52-f63   (13 km, so it is regridded to 3 km for drawing)
+    Day 2  HRRR blended with RRFS  (fixed 70/30; 06z/12z/18z runs, e.g. f28-f39 of the 12z run: the 16z-03z afternoon,
+                                    one day later)
+    Day 3  RRFS  f52-f63   (12z run; 18z gives f46-f57. 13 km, so it is regridded to 3 km for drawing)
+
+Each run also saves what every model said at the observation stations, and scores earlier runs against the
+observations (forecast/extended_verify.py). The scores say what recent-performance blend weights would be; they are
+reported, not applied.
 
 It reuses, unchanged: the stable fuel-moisture model and its features (DailyForecast.predict_fm_grid), the wind
 reduction factor, the fire-danger rule with its seasonal softening, the SNODAS snow mask, and the maps' house style
@@ -34,7 +39,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +65,10 @@ DISPLAY_SPACING_M = 3000          # grid the maps are drawn on; coarser sources 
 SMOOTH_SIGMA = 1.5                # Day 1's summary-map smoothing, in 3 km cells
 EXTENT = (-95.8, -89.1, 35.8, 40.8)
 PIXEL_W, PIXEL_H, MAP_DPI = 2048, 1152, 144
+# A 26 pt bold title is about 26 px per character at this size and ends at the right edge, so past ~44 characters its left end
+# reaches the state's northeast corner. Longer titles break onto two lines (same subtitle drop the ensemble maps use).
+TITLE_WRAP_CHARS = 44
+TWO_LINE_SUBTITLE_Y = 0.84
 
 
 class SourceNotReady(RuntimeError):
@@ -74,12 +83,25 @@ class DayConfig:
     end: int              # last mapped forecast hour (inclusive)
     min_cycle_age_hours: float
     source_label: str
+    max_lead: int = 48    # last forecast hour this model run publishes (HRRR's extended runs stop at f48)
 
 
+# `start`/`end` here are the 12z run's hours. Other cycles shift them: see config_for().
+# RRFS's longest lead is set conservatively (only f63 has been confirmed for the 12z run); raise
+# SMF_EXTENDED_RRFS_MAX_LEAD once longer leads are confirmed and the 00z/06z runs can feed Day 3 as well.
 DAYS = {
-    2: DayConfig(2, "hrrr", 28, 39, float(os.getenv("SMF_EXTENDED_HRRR_MIN_AGE_HOURS", "4")), "HRRR Model Forecast (3 km)"),
-    3: DayConfig(3, "rrfs", 52, 63, float(os.getenv("SMF_EXTENDED_RRFS_MIN_AGE_HOURS", "7")), "RRFS Model Forecast (13 km)"),
+    2: DayConfig(2, "hrrr", 28, 39, float(os.getenv("SMF_EXTENDED_HRRR_MIN_AGE_HOURS", "4")), "HRRR Model Forecast (3 km)", 48),
+    3: DayConfig(3, "rrfs", 52, 63, float(os.getenv("SMF_EXTENDED_RRFS_MIN_AGE_HOURS", "7")), "RRFS Model Forecast (13 km)",
+                 int(os.getenv("SMF_EXTENDED_RRFS_MAX_LEAD", "63"))),
 }
+SYNOPTIC_HOURS = (0, 6, 12, 18)   # the runs HRRR extends past f18 and RRFS publishes in its 13 km product
+WINDOW_START_UTC = 16             # the mapped window opens at 16z (10:00 CST) on the target date
+# The maps show conditions in the PEAK_HOURS-long stretch of that window where the model's own danger is highest, chosen
+# fresh for each run, not the extremes of the whole window. (The wider window is still modelled: it is the history the
+# fuel-moisture model needs, and the rain map's 24 h.)
+PEAK_HOURS = int(os.getenv("SMF_EXTENDED_PEAK_HOURS", "2"))
+# Fixed HRRR share of the Day 2 blend. The recent-performance (adaptive) weights are only reported, not applied yet.
+DAY2_HRRR_WEIGHT = float(os.getenv("SMF_EXTENDED_DAY2_HRRR_WEIGHT", "0.7"))
 
 # One query per level group so a cfgrib problem with one group cannot drop the others. DPT is only the fallback for
 # a product that has no RH message (forecast_v1's canonicalizer derives RH from it).
@@ -93,13 +115,70 @@ SEARCHES = (
 # ----------------------------------------------------------------------------------------------------------------
 # Time helpers
 # ----------------------------------------------------------------------------------------------------------------
-def latest_cycle(now: datetime | None = None, *, min_age_hours: float = 4.0) -> datetime:
-    """Newest 12z cycle that is at least `min_age_hours` old (its f39/f63 take hours to publish)."""
+def config_for(day: int, cycle_hour: int) -> DayConfig | None:
+    """Day `day`'s window for a run at `cycle_hour` z, or None if that run cannot reach it.
+
+    The window is the afternoon of (the run's UTC date + day - 1), 16z to 03z, so the hours shift with the cycle:
+    Day 2 is f34-45 from 06z, f28-39 from 12z and f22-33 from 18z (00z would need f40-51, past HRRR's f48)."""
+    base = DAYS[day]
+    start = WINDOW_START_UTC + 24 * (day - 1) - cycle_hour
+    end = start + (base.end - base.start)
+    return None if start < 0 or end > base.max_lead else replace(base, start=start, end=end)
+
+
+def cycle_hours(day: int) -> tuple[int, ...]:
+    """The cycles (UTC hours) that can produce this day."""
+    return tuple(hour for hour in SYNOPTIC_HOURS if config_for(day, hour) is not None)
+
+
+def latest_cycle(now: datetime | None = None, *, min_age_hours: float = 4.0, hours: tuple[int, ...] = (12,)) -> datetime:
+    """Newest cycle among `hours` (UTC) that is at least `min_age_hours` old (its last lead takes hours to publish)."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    candidate = current.replace(hour=12, minute=0, second=0, microsecond=0)
-    if current < candidate + timedelta(hours=min_age_hours):
-        candidate -= timedelta(days=1)
-    return candidate
+    for days_back in range(0, 3):
+        day = (current - timedelta(days=days_back)).replace(minute=0, second=0, microsecond=0)
+        for hour in sorted(hours, reverse=True):
+            candidate = day.replace(hour=hour)
+            if candidate + timedelta(hours=min_age_hours) <= current:
+                return candidate
+    raise ValueError("no cycle is old enough")
+
+
+def choose_peak_block(risk: list, rh: list, inside: np.ndarray, hours: int = 2) -> int:
+    """Index of the first hour of the `hours`-long stretch where Missouri's danger is highest.
+
+    Each hourly step is scored by the state-wide mean danger category (0-4) over cells inside Missouri, with the
+    state-wide mean RH as the tie-break (drier is higher), so an all-Low day still gets its driest stretch."""
+    inside = np.asarray(inside, dtype=bool)
+    scores = []
+    for hourly_risk, hourly_rh in zip(risk, rh):
+        usable = inside & np.isfinite(hourly_risk)
+        mean_risk = float(np.mean(hourly_risk[usable])) if usable.any() else 0.0
+        dry = inside & np.isfinite(hourly_rh)
+        mean_rh = float(np.mean(hourly_rh[dry])) if dry.any() else 50.0
+        scores.append(mean_risk * 1000.0 + (100.0 - mean_rh))
+    hours = max(1, min(hours, len(scores)))
+    totals = [sum(scores[i:i + hours]) for i in range(len(scores) - hours + 1)]
+    return int(np.argmax(totals))
+
+
+def peak_label(cycle: datetime, first_lead: int, hours: int = 2) -> str:
+    """'3:00 PM-4:00 PM CT': the local valid times of the peak block's hourly steps."""
+    first = (cycle + timedelta(hours=first_lead)).astimezone(LOCAL_TZ)
+    last = (cycle + timedelta(hours=first_lead + hours - 1)).astimezone(LOCAL_TZ)
+    clock = lambda t: f"{t:%I:%M %p}".lstrip("0")
+    return f"{clock(first)}–{clock(last)} CT"
+
+
+def missouri_mask(lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+    """Cells inside Missouri (all True if the boundary file cannot be read, so scoring still works)."""
+    try:
+        import geopandas as gpd
+        import shapely
+        border = gpd.read_file(PROJECT_DIR / "maps/shapefiles/MO_State_Boundary/MO_State_Boundary.shp").to_crs("EPSG:4326")
+        return np.asarray(shapely.contains_xy(border.geometry.iloc[0].buffer(0.01), lon, lat), dtype=bool)
+    except Exception as error:
+        logger.warning("Missouri boundary unavailable for peak-hour selection (%s); using the whole grid", error)
+        return np.ones(lon.shape, dtype=bool)
 
 
 def window_label(cycle: datetime, cfg: DayConfig) -> tuple[str, datetime]:
@@ -155,8 +234,11 @@ def _spec(cfg: DayConfig, leads: tuple[int, ...]):
 
 
 def source_leads(cfg: DayConfig) -> tuple[int, ...]:
-    """Every lead from one before the warm-up (rain is a run total, so the first lead only anchors the difference)."""
-    return tuple(range(cfg.start - WARMUP_HOURS - 1, cfg.end + 1))
+    """Every lead from one before the warm-up (rain is a run total, so the first lead only anchors the difference).
+
+    A run that opens the window early (18z Day 2 starts at f22) has fewer than 24 hours before it; the warm-up is
+    then cut at f00 and the run is flagged `short_warmup`."""
+    return tuple(range(max(0, cfg.start - WARMUP_HOURS - 1), cfg.end + 1))
 
 
 def precip_name(ds: xr.Dataset) -> str | None:
@@ -229,6 +311,76 @@ def load_source_waiting(cfg: DayConfig, cycle: datetime, cache_dir: Path, wait_m
                 raise
             logger.info("Day %d: source not ready (%s); retrying in 5 minutes", cfg.day, str(error)[:200])
             time.sleep(300)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Day 2 blend: HRRR (3 km) mixed with RRFS (13 km) before the fuel-moisture model and rule run once
+# ----------------------------------------------------------------------------------------------------------------
+def _frac_index(coord: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Fractional array index of `values` along a monotonic coordinate; NaN outside its range."""
+    index = np.arange(len(coord), dtype="float64")
+    if coord[0] > coord[-1]:
+        coord, index = coord[::-1], index[::-1]
+    out = np.interp(values, coord, index)
+    out[(values < coord.min()) | (values > coord.max())] = np.nan
+    return out
+
+
+def regrid_like(partner: xr.Dataset, names: list[str], lon: np.ndarray, lat: np.ndarray) -> dict[str, np.ndarray]:
+    """Bilinear (time, y, x) fields of `partner` at the given lon/lat points. NaN outside its domain."""
+    import pyproj
+    from scipy.ndimage import map_coordinates
+    px, py = pyproj.Transformer.from_crs("EPSG:4326", partner.attrs["crs"], always_xy=True).transform(lon, lat)
+    fx = _frac_index(np.asarray(partner.x.values, dtype="float64"), np.asarray(px, dtype="float64"))
+    fy = _frac_index(np.asarray(partner.y.values, dtype="float64"), np.asarray(py, dtype="float64"))
+    outside = ~(np.isfinite(fx) & np.isfinite(fy))
+    coords = np.array([np.where(outside, 0.0, fy), np.where(outside, 0.0, fx)])
+    out = {}
+    for name in names:
+        source = np.asarray(partner[name].values, dtype="float64")
+        grid = np.empty((source.shape[0], *lon.shape))
+        for t in range(source.shape[0]):
+            grid[t] = map_coordinates(source[t], coords, order=1, mode="nearest")
+            grid[t][outside] = np.nan
+        out[name] = grid
+    return out
+
+
+def blend_sources(primary: xr.Dataset, partner: xr.Dataset, weight: float) -> xr.Dataset:
+    """`primary`'s grid with temperature, RH, wind speed and run-total rain mixed with `partner`'s.
+
+    weight is the primary's share. Wind is mixed as SPEED (averaging u and v components would shrink it wherever the
+    two disagree on direction) and stored as u10 = speed, v10 = 0, which is all the model and rule use. Where the
+    partner has no value (outside its domain, or a bad cell) the primary is kept unchanged."""
+    lon, lat = native_lonlat(primary)
+    partner = partner.sel(time=primary.time)
+    rain_p, rain_q = precip_name(primary), precip_name(partner)
+    names = ["t2m", "r2", "u10", "v10", *([rain_q] if rain_q else [])]
+    other = regrid_like(partner, names, lon, lat)
+
+    def mix(a, b):
+        a = np.asarray(a, dtype="float64")
+        return np.where(np.isfinite(b), weight * a + (1.0 - weight) * b, a)
+
+    out = primary.copy(deep=True)
+    for name in ("t2m", "r2"):
+        out[name] = (out[name].dims, mix(primary[name].values, other[name]), out[name].attrs)
+    speed = mix(np.hypot(primary.u10.values, primary.v10.values), np.hypot(other["u10"], other["v10"]))
+    out["u10"] = (out.u10.dims, speed, out.u10.attrs)
+    out["v10"] = (out.v10.dims, np.zeros_like(speed), out.v10.attrs)
+    if rain_p and rain_q:
+        out[rain_p] = (out[rain_p].dims, mix(primary[rain_p].values, other[rain_q]), out[rain_p].attrs)
+    return out
+
+
+def load_rrfs_partner(cfg: DayConfig, cycle: datetime, cache_dir: Path, wait_minutes: float) -> xr.Dataset | None:
+    """The same run's RRFS fields for this day's hours, or None (the day is then HRRR alone and says so)."""
+    partner_cfg = replace(cfg, source="rrfs", source_label="RRFS Model Forecast (13 km)")
+    try:
+        return load_source_waiting(partner_cfg, cycle, cache_dir, wait_minutes)
+    except Exception as error:
+        logger.warning("Day %d: RRFS is not available for the blend (%s); using HRRR alone", cfg.day, str(error)[:200])
+        return None
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -350,7 +502,12 @@ def run_hours(ds: xr.Dataset, cfg: DayConfig, cycle: datetime, day1) -> dict:
         raise SourceNotReady(f"Day {cfg.day}: {len(mapped['risk'])} of {cfg.end - cfg.start + 1} mapped hours were produced")
 
     last24 = np.sum(p_hist[-WARMUP_HOURS:], axis=0) if contract_ok else np.nanmax(np.stack(mapped["precip"]), axis=0)
-    stack = {name: np.stack(values) for name, values in mapped.items()}
+    # Conditions are summarised over the PEAK_HOURS where Missouri's danger is highest, not the whole window.
+    first = choose_peak_block(mapped["risk"], mapped["rh"], missouri_mask(lon, lat), PEAK_HOURS)
+    last = first + max(1, min(PEAK_HOURS, len(mapped["risk"]))) - 1
+    stack = {name: np.stack(values[first:last + 1]) for name, values in mapped.items()}
+    first_lead, last_lead = cfg.start + first, cfg.start + last
+    logger.info("Day %d peak block: f%03d-f%03d (%s)", cfg.day, first_lead, last_lead, peak_label(cycle, first_lead, last - first + 1))
     return {
         "peak_risk": np.nanmax(stack["risk"], axis=0),
         "min_fm": np.nanmin(stack["fm"], axis=0),
@@ -360,13 +517,25 @@ def run_hours(ds: xr.Dataset, cfg: DayConfig, cycle: datetime, day1) -> dict:
         "precip_mm": last24 if has_precip else None,
         "snow_mask": snow_mask,
         "lon": lon, "lat": lat,
-        "flags": [flag for flag, bad in (("precipitation_missing", not has_precip), ("snow_cover_missing", swe is None)) if bad],
+        "peak_block": {"first_lead": first_lead, "last_lead": last_lead, "hours": last - first + 1,
+                       "local": peak_label(cycle, first_lead, last - first + 1)},
+        "flags": [flag for flag, bad in (("precipitation_missing", not has_precip), ("snow_cover_missing", swe is None),
+                                         ("short_warmup", cfg.start - min(leads) - 1 < WARMUP_HOURS)) if bad],
     }
 
 
 # ----------------------------------------------------------------------------------------------------------------
 # Drawing grid: interpolate coarse sources up to 3 km, smooth like Day 1, crop and mask to Missouri
 # ----------------------------------------------------------------------------------------------------------------
+EDGE_PAD_CELLS = 2                # coarse cells of edge values added around a coarse source before it is interpolated up
+
+
+def _extend_axis(coord: np.ndarray, cells: int) -> np.ndarray:
+    """An ascending, evenly spaced coordinate extended by `cells` steps at each end."""
+    step = float(coord[1] - coord[0])
+    return np.concatenate([coord[0] - step * np.arange(cells, 0, -1), coord, coord[-1] + step * np.arange(1, cells + 1)])
+
+
 def to_display_grid(fields: dict[str, np.ndarray], ds: xr.Dataset, lon: np.ndarray, lat: np.ndarray):
     """Return (fields, lon, lat) on a grid no coarser than 3 km. A 13 km source drawn as-is gives blocky contours."""
     x = np.asarray(ds.x.values, dtype="float64")
@@ -374,14 +543,20 @@ def to_display_grid(fields: dict[str, np.ndarray], ds: xr.Dataset, lon: np.ndarr
     if abs(x[1] - x[0]) <= 1.25 * DISPLAY_SPACING_M:
         return fields, lon, lat
     import pyproj
-    new_x = np.arange(x.min(), x.max() + 1, DISPLAY_SPACING_M)
-    new_y = np.arange(y.min(), y.max() + 1, DISPLAY_SPACING_M)
+    # Linear interpolation only covers the area between the outermost cell CENTRES, and the source was clipped close to
+    # the state, so on its own the data stopped short of Missouri's border (a ragged edge the width of a coarse cell). The
+    # grid is extended by EDGE_PAD_CELLS cells, repeating the edge values, so the data reaches past the border.
+    order_y, order_x = np.argsort(y), np.argsort(x)
+    padded_x, padded_y = _extend_axis(x[order_x], EDGE_PAD_CELLS), _extend_axis(y[order_y], EDGE_PAD_CELLS)
+    new_x = np.arange(padded_x.min(), padded_x.max() + 1, DISPLAY_SPACING_M)
+    new_y = np.arange(padded_y.min(), padded_y.max() + 1, DISPLAY_SPACING_M)
     out = {}
     for name, grid in fields.items():
         if grid is None:
             out[name] = None
             continue
-        array = xr.DataArray(np.asarray(grid, dtype="float64"), dims=("y", "x"), coords={"y": y, "x": x}).sortby("y")
+        values = np.pad(np.asarray(grid, dtype="float64")[np.ix_(order_y, order_x)], EDGE_PAD_CELLS, mode="edge")
+        array = xr.DataArray(values, dims=("y", "x"), coords={"y": padded_y, "x": padded_x})
         out[name] = array.interp(x=new_x, y=new_y, method="linear").values
     new_lon, new_lat = pyproj.Transformer.from_crs(ds.attrs["crs"], "EPSG:4326", always_xy=True).transform(
         *np.meshgrid(new_x, new_y))
@@ -417,6 +592,7 @@ def prepare_maps(result: dict, ds: xr.Dataset) -> dict:
     inside = shapely.contains_xy(border.geometry.iloc[0].buffer(0.01), lon, lat)
     smooth = {name: np.where(inside, grid, np.nan) for name, grid in smooth.items()}
     smooth["lon"], smooth["lat"], smooth["inside"] = lon, lat, inside
+    smooth["peak_label"] = (result.get("peak_block") or {}).get("local")
     return smooth
 
 
@@ -429,6 +605,15 @@ def _fm_cmap():
              (0.30, "#FF8C00"), (0.333, "#FFA500"), (0.367, "#FFB347"), (0.40, "#FFD700"), (0.50, "#FFED4E"),
              (0.60, "#F0E68C"), (0.70, "#C8E6C9"), (0.80, "#81C784"), (0.90, "#4CAF50"), (1.0, "#2E7D32")]
     return LinearSegmentedColormap.from_list("fm_enhanced", stops, N=512)
+
+
+def map_title(day: int, title: str) -> tuple[str, bool]:
+    """('Missouri Day N <title>', False), or the same broken after the day number (and True) when it is too long to sit
+    right-aligned without running left over the state."""
+    full = f"Missouri Day {day} {title}"
+    if len(full) <= TITLE_WRAP_CHARS:
+        return full, False
+    return f"Missouri Day {day}\n{title}", True
 
 
 def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> list[Path]:
@@ -446,8 +631,11 @@ def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> 
     map_crs = ccrs.LambertConformal(central_longitude=-92.45, central_latitude=38.3)
     lon, lat = grids["lon"], grids["lat"]
     run_stamp = pd.Timestamp(cycle.replace(tzinfo=None))
-    hours, start_local = window_label(cycle, cfg)
+    window_hours, start_local = window_label(cycle, cfg)
+    hours = grids.get("peak_label") or window_hours                                          # what the map descriptions quote
     subtitle = f"Day {cfg.day} (BETA) | Model Run: {cycle:%Y-%m-%d %HZ} | Valid: {start_local:%Y-%m-%d}"
+    # On its own line: added to the line above it, the subtitle ran left over the state's northeast corner.
+    peak_line = f"\nPeak {PEAK_HOURS} hours: {hours}" if grids.get("peak_label") else ""
     source = (f"Data Source: {cfg.source_label}, f{cfg.start}–f{cfg.end} | ShowMeFire ML Model\n"
               "BETA: not started from current observations; skill falls with lead time.\n"
               "For More Info, Visit ShowMeFire.org")
@@ -455,7 +643,8 @@ def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> 
     written: list[Path] = []
 
     def draw(key: str, title: str, field: str, colorbar_label: str, description: str, *, levels, cmap, norm=None,
-             ticks=None, ticklabels=None, alpha=0.7, extend="neither", lines=None, transform=None, dotted=None) -> None:
+             ticks=None, ticklabels=None, alpha=0.7, extend="neither", lines=None, transform=None, dotted=None,
+             show_peak=True) -> None:
         data = grids[field]
         if transform:
             data = transform(data)
@@ -477,7 +666,12 @@ def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> 
             cbar.set_ticklabels(ticklabels)
         ax.set_anchor("W")
         plt.subplots_adjust(left=0.05)
-        add_title_and_branding(fig, f"Missouri Day {cfg.day} {title}", subtitle, f"{description}\n\n{source}", run_stamp, SCRIPT_DIR)
+        # The title is right-aligned, so a long one runs left over the state's northeast corner. Break it after the day
+        # number instead of shrinking it or moving the map; the subtitle drops to clear the second line.
+        full_title, wrapped = map_title(cfg.day, title)
+        add_title_and_branding(fig, full_title, subtitle + (peak_line if show_peak else ""), f"{description}\n\n{source}",
+                               run_stamp, SCRIPT_DIR,
+                               subtitle_y=TWO_LINE_SUBTITLE_Y if wrapped else 0.90)
         path = out_dir / f"mo-forecast-day{cfg.day}-{key}.png"
         fig.savefig(path, dpi=MAP_DPI, bbox_inches=None, pad_inches=0)
         plt.close(fig)
@@ -533,15 +727,15 @@ def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> 
         levels=temp_levels_f, cmap=temp_cmap, extend="both", lines=np.arange(10, 90, 10), ticks=temp_levels_f,
         transform=lambda c: c * 9 / 5 + 32))
     if "precip_in" in grids:
-        rain_levels = [0, 0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0]
+        from core.precip_palette import load_qpf_palette
+        qpf = load_qpf_palette()             # AccuWeather QPF table, shared by every precipitation map
         jobs.append(lambda: draw(
             "rainfall", "Forecast Precipitation", "precip_in", "24-Hour Precipitation (inches)",
             f"24-Hour Precipitation Ending {(cycle + timedelta(hours=cfg.end)).astimezone(LOCAL_TZ):%H}:00 CT\n\n"
             "Precipitation reduces fire danger by:\n• Increasing fuel moisture\n• Raising relative humidity\n• Potentially preventing ignition\n\n"
             "> 0.5\": Significant fire danger reduction\n> 1.0\": Major impact on fire activity",
-            levels=rain_levels, cmap=ListedColormap(["#FFFFFF", "#E0F0FF", "#B0D4FF", "#6AB4FF", "#0080FF", "#0050D0", "#003080"]),
-            norm=BoundaryNorm(rain_levels, 7), alpha=0.8, lines=rain_levels[1:-1], ticks=rain_levels,
-            ticklabels=[f'{x:.2f}" / {x * 25.4:.1f} mm' if x < 1 else f'{x:.1f}" / {x * 25.4:.0f} mm' for x in rain_levels]))
+            levels=list(qpf.levels), cmap=qpf.cmap(), norm=qpf.norm(), alpha=0.8, extend="max",
+            lines=list(qpf.line_levels), ticks=list(qpf.ticks), ticklabels=list(qpf.tick_labels), show_peak=False))
     for job in jobs:
         try:
             job()
@@ -553,7 +747,8 @@ def render_maps(grids: dict, cfg: DayConfig, cycle: datetime, out_dir: Path) -> 
 # ----------------------------------------------------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------------------------------------------------
-def summarize(grids: dict, result: dict, cfg: DayConfig, cycle: datetime, images: list[Path], seconds: float) -> dict:
+def summarize(grids: dict, result: dict, cfg: DayConfig, cycle: datetime, images: list[Path], seconds: float,
+              blend: dict | None = None) -> dict:
     inside = grids["inside"]
     peak = grids["peak_risk"][inside]
     hours, start_local = window_label(cycle, cfg)
@@ -561,11 +756,13 @@ def summarize(grids: dict, result: dict, cfg: DayConfig, cycle: datetime, images
     return {
         "day": cfg.day,
         "beta": True,
-        "source": cfg.source,
+        "source": cfg.source if not blend else "hrrr+rrfs",
+        "blend": blend,
         "cycle_utc": cycle.isoformat().replace("+00:00", "Z"),
         "forecast_hours": [cfg.start, cfg.end],
         "valid_local_date": f"{start_local:%Y-%m-%d}",
         "window_local": hours,
+        "peak_block": result.get("peak_block"),
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "runtime_seconds": round(seconds, 1),
         "percent_of_state_elevated_or_higher": share(2),
@@ -596,13 +793,70 @@ def update_manifest(out_dir: Path, summaries: list[dict]) -> None:
         logger.warning("testbed manifest update failed (non-fatal): %s", error)
 
 
-def run_day(cfg: DayConfig, cycle: datetime, out_dir: Path, cache_dir: Path, *, wait_minutes: float, render: bool, day1) -> dict:
+def record_snapshots(models: dict[str, xr.Dataset], cfg: DayConfig, cycle: datetime, root: Path | None,
+                     peak: dict | None = None) -> None:
+    """Save what each model said at the observation stations (for scoring later). Never allowed to break a forecast."""
+    try:
+        from forecast import extended_verify as verify
+        stations = verify.station_list()
+        root = root or verify.default_root()
+        shots = {}
+        for model, data in models.items():
+            lon, lat = native_lonlat(data)
+            shots[model] = verify.snapshot(data, (cfg.start, cfg.end), cycle, stations, day=cfg.day, model=model, lon=lon,
+                                           lat=lat, precip_increments=precip_increments, precip_name=precip_name)
+        attrs = {"peak_start_lead": peak["first_lead"], "peak_end_lead": peak["last_lead"]} if peak else None
+        written = verify.record(shots, root, cfg.day, cycle, attrs)
+        verify.prune_snapshots(root, datetime.now(timezone.utc))
+        logger.info("Day %d: saved %d station snapshot(s) for scoring (%s)", cfg.day, len(written),
+                    ", ".join(f"{p.stat().st_size / 1024:.1f} KB" for p in written))
+    except Exception as error:
+        logger.warning("Day %d: could not save station snapshots (non-fatal): %s", cfg.day, error)
+
+
+def run_scoring(root: Path | None = None) -> None:
+    """Score matured snapshots and refresh summary.json (including the shadow blend weights). Non-fatal."""
+    try:
+        from forecast import extended_verify as verify
+        root = root or verify.default_root()
+        scored = verify.score_matured(root, verify.hourly_provider())
+        summary = verify.write_summary(root)
+        weights = summary["weights_day2"]
+        logger.info("Verification: scored %d new snapshot(s); shadow Day 2 HRRR share %.2f (%s, not applied)", scored,
+                    weights["overall"], weights.get("reason") or "from recent performance")
+    except Exception as error:
+        logger.warning("Verification scoring skipped (non-fatal): %s", error)
+
+
+def run_day(cfg: DayConfig, cycle: datetime, out_dir: Path, cache_dir: Path, *, wait_minutes: float, render: bool, day1,
+            blend: bool = True, verify_root: Path | None = None, verify: bool = True) -> dict:
     started = time.time()
     ds = load_source_waiting(cfg, cycle, cache_dir, wait_minutes)
-    result = run_hours(ds, cfg, cycle, day1)
-    grids = prepare_maps(result, ds)
+    model_ds, blend_info, extra_flags = ds, None, []
+    models = {cfg.source: ds}
+    if blend and cfg.day == 2 and cfg.source == "hrrr":
+        partner = load_rrfs_partner(cfg, cycle, cache_dir, wait_minutes)
+        if partner is None:
+            extra_flags.append("rrfs_blend_missing")
+        else:
+            try:
+                share = min(1.0, max(0.0, DAY2_HRRR_WEIGHT))
+                model_ds = blend_sources(ds, partner, share)
+                models.update(rrfs=partner, blend=model_ds)
+                blend_info = {"hrrr": round(share, 3), "rrfs": round(1 - share, 3), "weights": "fixed"}
+                cfg = replace(cfg, source_label=f"HRRR {share:.0%} / RRFS {1 - share:.0%} Blend (3 km)")
+                logger.info("Day %d: blended HRRR %.0f%% / RRFS %.0f%%", cfg.day, share * 100, (1 - share) * 100)
+            except Exception as error:
+                logger.warning("Day %d: blend failed (%s); using HRRR alone", cfg.day, error, exc_info=True)
+                model_ds = ds
+                extra_flags.append("blend_failed")
+    result = run_hours(model_ds, cfg, cycle, day1)
+    result["flags"] = [*result["flags"], *extra_flags]
+    if verify:
+        record_snapshots(models, cfg, cycle, verify_root, result.get("peak_block"))
+    grids = prepare_maps(result, model_ds)
     images = render_maps(grids, cfg, cycle, out_dir) if render else []
-    summary = summarize(grids, result, cfg, cycle, images, time.time() - started)
+    summary = summarize(grids, result, cfg, cycle, images, time.time() - started, blend_info)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"extended-forecast-day{cfg.day}.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     logger.info("Day %d done in %.0f s: %d maps, %s%% of the state Elevated+", cfg.day, summary["runtime_seconds"],
@@ -622,10 +876,13 @@ def default_dirs() -> tuple[Path, Path]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--day", type=int, action="append", choices=sorted(DAYS), help="Day to build (repeatable; default both)")
-    parser.add_argument("--cycle", help="12z cycle, e.g. 2026-11-19T12 (default: newest old enough)")
+    parser.add_argument("--cycle", help="model run, e.g. 2026-11-19T12 (default: the newest run that can produce the day and is old enough)")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--wait-minutes", type=float, default=0.0, help="keep retrying while the model run is still publishing")
     parser.add_argument("--no-render", action="store_true", help="calculate and summarize only")
+    parser.add_argument("--force", action="store_true", help="rebuild a day even if its newest run is already published")
+    parser.add_argument("--no-blend", action="store_true", help="Day 2 from HRRR alone (no RRFS blend)")
+    parser.add_argument("--no-verify", action="store_true", help="do not save station snapshots or score earlier ones")
     args = parser.parse_args(argv)
 
     from core.logging_setup import UtcFormatter
@@ -637,21 +894,45 @@ def main(argv: list[str] | None = None) -> int:
 
     default_out, cache_dir = default_dirs()
     out_dir = args.out_dir or default_out
-    day1 = _day1()
-    summaries, failures = [], []
+    day1 = None                      # loading the model is slow; skip it entirely when every day is already up to date
+    summaries, failures, skipped = [], [], 0
     for number in args.day or sorted(DAYS):
-        cfg = DAYS[number]
+        base = DAYS[number]
         cycle = (datetime.fromisoformat(args.cycle).replace(tzinfo=timezone.utc) if args.cycle
-                 else latest_cycle(min_age_hours=cfg.min_cycle_age_hours))
+                 else latest_cycle(min_age_hours=base.min_cycle_age_hours, hours=cycle_hours(number)))
+        cfg = config_for(number, cycle.hour)
+        if cfg is None:
+            failures.append(number)
+            logger.error("Day %d cannot be built from the %s run (supported run hours: %s UTC)", number, f"{cycle:%Y-%m-%d %HZ}",
+                         ", ".join(f"{h:02d}" for h in cycle_hours(number)))
+            continue
+        if not args.force and already_done(out_dir, number, cycle):
+            skipped += 1
+            logger.info("Day %d is already built from the %s run; nothing to do (--force to rebuild)", number, f"{cycle:%Y-%m-%d %HZ}")
+            continue
         try:
-            summaries.append(run_day(cfg, cycle, out_dir, cache_dir, wait_minutes=args.wait_minutes,
-                                     render=not args.no_render, day1=day1))
+            day1 = day1 or _day1()
+            summaries.append(run_day(cfg, cycle, out_dir, cache_dir, wait_minutes=args.wait_minutes, render=not args.no_render,
+                                     day1=day1, blend=not args.no_blend, verify=not args.no_verify))
         except Exception as error:
             failures.append(number)
             logger.error("Day %d failed: %s", number, error, exc_info=True)
     if summaries and not args.no_render:
         update_manifest(out_dir, summaries)
-    return 0 if summaries else 1
+    if not args.no_verify:
+        run_scoring()
+    return 0 if (summaries or skipped) and not (failures and not summaries) else 1
+
+
+def already_done(out_dir: Path, day: int, cycle: datetime) -> bool:
+    """True when this day's published summary is from this run and was not a degraded (HRRR-only) result."""
+    try:
+        existing = json.loads((out_dir / f"extended-forecast-day{day}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    flags = existing.get("flags") or []
+    return (existing.get("cycle_utc") == cycle.isoformat().replace("+00:00", "Z")
+            and "rrfs_blend_missing" not in flags and "blend_failed" not in flags)
 
 
 if __name__ == "__main__":

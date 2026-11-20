@@ -381,6 +381,10 @@ class FireReportRejection(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
 
+class WildcadLinkRequest(BaseModel):
+    incident_id: int = Field(gt=0)
+
+
 class RecurringSourceConfirmation(BaseModel):
     label: str = Field(default="", max_length=200)
     source_type: str = Field(default="unknown", max_length=50)
@@ -1146,6 +1150,39 @@ def admin_reject_incident_feedback(feedback_id: int, actor: str = Depends(REPORT
 
 
 # --- Admin: moderation ---
+
+@router.get("/api/admin/fires/wildcad")
+def admin_list_wildcad(
+    _admin: str = Depends(REPORTS_VIEW),
+    linked: Literal["all", "linked", "unlinked"] = "unlinked",
+    q: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    radius_km: Optional[float] = None,
+    limit: int = 100,
+):
+    """Browse the locally cached WildCAD records, including rows with no SMF incident."""
+    from services.wildcad import list_for_admin
+    return {"success": True, "reports": list_for_admin(linked=linked, query=q, latitude=latitude,
+                                                        longitude=longitude, radius_km=radius_km, limit=limit)}
+
+
+@router.post("/api/admin/fires/wildcad/{incident_key}/link")
+def admin_link_wildcad(
+    incident_key: str,
+    payload: WildcadLinkRequest,
+    _admin: str = Depends(REPORTS_MODERATE),
+):
+    """Attach one cached WildCAD record to an existing SMF incident."""
+    from services.wildcad import link_to_incident
+    try:
+        dispatch = link_to_incident(incident_key, payload.incident_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if "already attached" in str(exc) else 422, detail=str(exc))
+    return {"success": True, "dispatch": dispatch, "incident_id": payload.incident_id}
+
 
 @router.get("/api/admin/fires/reports")
 def admin_list_fire_reports(

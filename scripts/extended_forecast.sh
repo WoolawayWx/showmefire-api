@@ -3,13 +3,14 @@
 # Day 2 and Day 3 fire danger forecast (BETA) for the 12z cycle - see forecast/ExtendedForecast.py and
 # docs/extended_forecast.md.
 #
-# Day 2 reads HRRR f28-f39 and Day 3 reads RRFS f52-f63 of the 12z run. HRRR's f39 is out about 2-3 h after the cycle
-# and RRFS's f63 about 5-6 h after, so this is started once the daily forecast is done and the script itself keeps
-# retrying (--wait-minutes) until each run has published the hours it needs. Advisory only: nothing depends on it, it
-# holds the forecast lock only while it runs so maps.sh yields CPU, and it writes nothing Day 1 reads.
+# Day 2 is HRRR blended with RRFS (06z/12z/18z runs), Day 3 is RRFS (12z/18z runs); the script picks the newest run that
+# can produce each day and is old enough, skips a day whose newest run is already built, and keeps retrying
+# (--wait-minutes) while a run is still publishing. It also saves station snapshots and scores earlier ones (see
+# docs/extended_forecast.md). Advisory only: nothing depends on it, it holds the forecast lock only while it runs so
+# maps.sh yields CPU, and it writes nothing Day 1 reads.
 #
-# Not scheduled yet. To schedule it, add to the Dockerfile cron block next to ensemble_12z:
-#   echo "30 15 * * * root /bin/bash /app/scripts/run_job.sh extended_forecast /app/scripts/extended_forecast.sh >> /app/logs/cron_extended.log 2>&1"
+# Scheduled in the Dockerfile at 01:30, 10:30, 16:30, 19:30 and 22:30 UTC (HRRR is ready ~4 h after its cycle, RRFS ~7 h):
+#   30 1,10,16,19,22 * * * root /bin/bash /app/scripts/run_job.sh extended_forecast /app/scripts/extended_forecast.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

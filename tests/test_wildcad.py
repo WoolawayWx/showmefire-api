@@ -171,6 +171,20 @@ class IngestTests(WildcadBase):
         self.assertEqual(len(stored), 20)                                           # all kept for staff
         self.assertEqual(sum(1 for row in stored if row["incident_id"] is not None), 1)
 
+    def test_staff_can_list_and_attach_an_orphan_dispatch_record(self):
+        wildcad.poll("incidents", NOW, fetch=FakeFeed())
+        target_id = self.rows("SELECT id FROM fire_incidents LIMIT 1")[0]["id"]
+        orphan = next(row for row in self.rows("SELECT incident_key, incident_id FROM wildcad_incidents")
+                      if row["incident_id"] is None)
+        listed = wildcad.list_for_admin(linked="unlinked", query=orphan["incident_key"].split(":")[1])
+        self.assertTrue(any(row["incident_key"] == orphan["incident_key"] for row in listed))
+        wildcad.link_to_incident(orphan["incident_key"], target_id)
+        linked = self.rows("SELECT incident_id, event_id FROM wildcad_incidents WHERE incident_key = ?",
+                           orphan["incident_key"])[0]
+        self.assertEqual(linked["incident_id"], target_id)
+        self.assertIsNotNone(linked["event_id"])
+        self.assertEqual(self.rows("SELECT incident_id FROM fire_events WHERE id = ?", linked["event_id"])[0]["incident_id"], target_id)
+
     def test_updates_dedupe_on_number_and_year_and_do_not_re_alert(self):
         wildcad.poll("incidents", NOW, fetch=FakeFeed())
         body = json.loads(_body("incidents.json"))

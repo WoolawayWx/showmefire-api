@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -722,6 +723,95 @@ def dispatch_for(incident_id: int) -> dict[str, Any] | None:
         "out_at": row["out_at"],
         "last_updated": row["last_seen_at"],
     }
+
+
+def list_for_admin(*, linked: str = "unlinked", query: str | None = None,
+                   latitude: float | None = None, longitude: float | None = None,
+                   radius_km: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    """List the local dispatch cache for staff without exposing raw payloads or IC names."""
+    clauses = []
+    params: list[Any] = []
+    if linked == "linked":
+        clauses.append("incident_id IS NOT NULL")
+    elif linked == "unlinked":
+        clauses.append("incident_id IS NULL")
+    if query and query.strip():
+        needle = f"%{query.strip().lower()}%"
+        clauses.append("""(LOWER(name) LIKE ? OR LOWER(inc_num) LIKE ? OR LOWER(dispatch_unit) LIKE ?
+                         OR LOWER(county_name) LIKE ? OR LOWER(incident_key) LIKE ?)""")
+        params.extend([needle] * 5)
+    if latitude is not None and longitude is not None and radius_km is not None:
+        radius = max(1.0, min(float(radius_km), 200.0))
+        lat_delta = radius / 111.0
+        lon_delta = radius / max(20.0, 111.0 * abs(math.cos(math.radians(float(latitude)))))
+        clauses.append("latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+        params.extend([float(latitude) - lat_delta, float(latitude) + lat_delta,
+                       float(longitude) - lon_delta, float(longitude) + lon_delta])
+    safe_limit = max(1, min(int(limit), 500))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _connect() as connection:
+        rows = connection.execute(
+            f"""SELECT id, incident_key, center, inc_num, year, dispatch_unit, name, incident_type,
+                       acres, latitude, longitude, county_fips, county_name, reported_at, contained_at,
+                       controlled_at, out_at, incident_id, event_id, last_seen_at
+                FROM wildcad_incidents {where}
+                ORDER BY COALESCE(reported_at, last_seen_at) DESC, id DESC LIMIT ?""",
+            (*params, safe_limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def link_to_incident(incident_key: str, incident_id: int) -> dict[str, Any]:
+    """Attach a cached dispatch row to an existing SMF incident.
+
+    This is deliberately staff-only at the router boundary. It also makes an
+    event member when an orphan dispatch row was kept without becoming an
+    eligible incident during ingestion.
+    """
+    from core.database import get_fire_incident
+
+    if not get_fire_incident(incident_id):
+        raise ValueError("Fire incident not found")
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM wildcad_incidents WHERE incident_key = ?", (incident_key,)).fetchone()
+        if row is None:
+            raise LookupError("WildCAD incident not found")
+        dispatch = dict(row)
+        if dispatch["incident_id"] is not None and int(dispatch["incident_id"]) != int(incident_id):
+            raise ValueError("WildCAD incident is already attached to another incident")
+        event_id = dispatch["event_id"]
+        if event_id is None:
+            if dispatch["latitude"] is None or dispatch["longitude"] is None:
+                raise ValueError("WildCAD incident has no location and cannot be attached")
+            occurred_at = dispatch["reported_at"] or dispatch["last_seen_at"] or datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """INSERT INTO fire_events
+                   (source, external_id, status, verification_tier, latitude, longitude, county_fips, county_name,
+                    occurred_at, acres, cause_category, description, official_source_system, official_source_ref)
+                   VALUES (?, ?, 'pending', 'official_source_confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (SOURCE, dispatch["incident_key"], dispatch["latitude"], dispatch["longitude"],
+                 dispatch["county_fips"], dispatch["county_name"], occurred_at, dispatch["acres"],
+                 "wildfire", dispatch["name"] or "", SYSTEM_NAME,
+                 f"{dispatch['dispatch_unit'] or dispatch['center']}-{dispatch['inc_num']}"),
+            )
+            event_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.execute("UPDATE fire_events SET incident_id = ? WHERE id = ?", (incident_id, event_id))
+        connection.execute(
+            "UPDATE wildcad_incidents SET event_id = ?, incident_id = ?, last_seen_at = ? WHERE incident_key = ?",
+            (event_id, incident_id, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), incident_key),
+        )
+        connection.execute(
+            "UPDATE wildcad_resources SET incident_id = ? WHERE dispatch_unit = ? AND inc_num = ?",
+            (incident_id, dispatch["dispatch_unit"], dispatch["inc_num"]),
+        )
+        incident_history.record(
+            connection, incident_id, "dispatch",
+            f"Staff attached WildCAD incident {dispatch['inc_num']} ({dispatch['name'] or 'unnamed'})",
+            occurred_at=datetime.now(timezone.utc),
+            data={"incident_key": incident_key, "event_id": event_id},
+            dedupe_key=f"dispatch:{incident_key}:staff-attached:{incident_id}",
+        )
+    return dispatch_for(incident_id) or {"incident_key": incident_key, "incident_id": incident_id}
 
 
 def official_sources_for(incident_id: int, nifc: dict[str, Any] | None) -> list[dict[str, Any]]:
