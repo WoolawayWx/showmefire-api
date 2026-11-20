@@ -39,8 +39,14 @@ SPC_BASE = "https://www.spc.noaa.gov/products/outlook"
 PRODUCT_URLS = {
     "spc_cat": f"{SPC_BASE}/day1otlk_cat.nolyr.geojson",
     "spc_tor": f"{SPC_BASE}/day1otlk_torn.nolyr.geojson",
+    "spc_tor_cig": f"{SPC_BASE}/day1otlk_cigtorn.nolyr.geojson",
     "spc_wind": f"{SPC_BASE}/day1otlk_wind.nolyr.geojson",
+    "spc_wind_cig": f"{SPC_BASE}/day1otlk_cigwind.nolyr.geojson",
     "spc_hail": f"{SPC_BASE}/day1otlk_hail.nolyr.geojson",
+    "spc_hail_cig": f"{SPC_BASE}/day1otlk_cighail.nolyr.geojson",
+    "spc_fire": "https://mapservices.weather.noaa.gov/vector/rest/services/fire_weather/SPC_firewx/MapServer/1/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson",
+    "spc_fire_dry_thunderstorm": "https://mapservices.weather.noaa.gov/vector/rest/services/fire_weather/SPC_firewx/MapServer/2/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson",
+    "wpc_rainfall": "https://www.wpc.ncep.noaa.gov/exper/eromap/geojson/Day1_Latest.geojson",
 }
 USDM_URL = "https://droughtmonitor.unl.edu/data/json/usdm_current.json"
 PRODUCT_IDS = set(PRODUCT_URLS) | {"spc_four_panel", "mo_alerts", "usdm"}
@@ -61,6 +67,11 @@ _usdm_cache: dict = {"at": 0.0, "payload": None}
 CONUS_EXTENT = (-125.0, -66.5, 24.0, 50.0)
 MISSOURI_EXTENT = (-95.9, -89.0, 35.8, 40.8)
 FALLBACK_COLORS = {2: "#78c878", 5: "#8b4726", 10: "#ffc77d", 15: "#ffff00", 30: "#ff0000", 45: "#ff00ff", 60: "#912cee"}
+CIG_COLORS = {
+    "spc_tor_cig": {1: "#f59e0b", 2: "#dc2626", 3: "#7f1d1d"},
+    "spc_wind_cig": {1: "#facc15", 2: "#f97316", 3: "#b91c1c"},
+    "spc_hail_cig": {1: "#22c55e", 2: "#15803d"},
+}
 WEB_MERCATOR_LIMIT = 85.05112878
 WEB_MERCATOR_RADIUS = 6378137.0
 BASEMAP_LAYERS = {
@@ -148,6 +159,12 @@ def _property(row, *names, default=None):
 
 
 def _color(row):
+    product_id = str(_property(row, "_product_id", default=""))
+    if product_id in CIG_COLORS:
+        try:
+            return CIG_COLORS[product_id].get(int(float(_property(row, "dn", default=0))), "#d1d5db")
+        except (TypeError, ValueError):
+            return "#d1d5db"
     event = str(_property(row, "event", default="")).lower()
     if "tornado warning" in event:
         return "#dc2626"
@@ -174,6 +191,17 @@ def _legend_entries(frames):
         for _, row in frame.iterrows():
             value = _property(row, "dn", default=0)
             label = _property(row, "label", "label2", "event")
+            if not label:
+                product_id = str(_property(row, "_product_id", default=""))
+                cig_labels = {
+                    "spc_tor_cig": {1: "CIG1 — EF2+ tornado", 2: "CIG2 — EF3+ tornado", 3: "CIG3 — EF4+ tornado"},
+                    "spc_wind_cig": {1: "CIG1 — 65 kt+ wind", 2: "CIG2 — bow echo/derecho", 3: "CIG3 — high-end derecho"},
+                    "spc_hail_cig": {1: "CIG1 — 2+ inch hail", 2: "CIG2 — 3.5+ inch hail"},
+                }
+                try:
+                    label = cig_labels.get(product_id, {}).get(int(float(value)))
+                except (TypeError, ValueError):
+                    label = None
             if not label:
                 try:
                     label = f"{int(float(value))}%"
@@ -471,7 +499,9 @@ def _render_sources(config: dict):
         else:
             source = USDM_URL if product_id == "usdm" else PRODUCT_URLS[product_id]
             payload = fetch_spc_product(product_id)
-        payloads.append(payload); urls.append(source); frames.append(_as_frame(payload))
+        frame = _as_frame(payload)
+        frame["_product_id"] = product_id
+        payloads.append(payload); urls.append(source); frames.append(frame)
     return product_ids, payloads, urls, frames
 
 
@@ -552,7 +582,13 @@ def render_graphic(config: dict) -> dict:
     tile_count = base_tile_count + reference_tile_count
     reference_boundaries = _reference_boundaries()
     fig = plt.figure(figsize=(WIDTH / DPI, HEIGHT / DPI), dpi=DPI, facecolor=background_color)
-    labels = {"spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_wind": "Day 1 Wind", "spc_hail": "Day 1 Hail", "mo_alerts": "Missouri Weather Alerts", "usdm": "U.S. Drought Monitor"}
+    labels = {
+        "spc_cat": "Day 1 Categorical", "spc_tor": "Day 1 Tornado", "spc_tor_cig": "Day 1 Tornado CIG",
+        "spc_wind": "Day 1 Wind", "spc_wind_cig": "Day 1 Wind CIG", "spc_hail": "Day 1 Hail",
+        "spc_hail_cig": "Day 1 Hail CIG", "spc_fire": "Day 1 Fire Weather",
+        "spc_fire_dry_thunderstorm": "Day 1 Dry Thunderstorm", "wpc_rainfall": "Day 1 Excessive Rainfall",
+        "mo_alerts": "Missouri Weather Alerts", "usdm": "U.S. Drought Monitor",
+    }
     for product_id, frame, position in zip(product_ids, frames, positions):
         panel_title = labels[product_id] if config["product_id"] == "spc_four_panel" else ""
         _draw_frame(fig.add_axes(position), frame, panel_title, extent, basemap, reference_overlay,

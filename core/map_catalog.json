@@ -227,6 +227,216 @@
               "file": "mo-advisory-wind.png"
             }
           ]
+        },
+        {
+          "id": "outlooks-day1",
+          "title": "National Outlooks: Day 1",
+          "maps": [
+            {
+              "key": "outlook-day1-severe",
+              "title": "SPC Day 1 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day1-severe.png"
+            },
+            {
+              "key": "outlook-day1-tornado",
+              "title": "SPC Day 1 Tornado Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Tornado Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day1-tornado.png"
+            },
+            {
+              "key": "outlook-day1-wind",
+              "title": "SPC Day 1 Damaging Wind Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Damaging Wind Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day1-wind.png"
+            },
+            {
+              "key": "outlook-day1-hail",
+              "title": "SPC Day 1 Hail Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Hail Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day1-hail.png"
+            },
+            {
+              "key": "outlook-day1-fire",
+              "title": "SPC Day 1 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day1-fire.png"
+            },
+            {
+              "key": "outlook-day1-drythunder",
+              "title": "SPC Day 1 Dry Thunderstorm Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 1 Dry Thunderstorm Outlook.",
+              "file": "mo-noaa-outlook-day1-drythunder.png"
+            },
+            {
+              "key": "outlook-day1-rainfall",
+              "title": "WPC Day 1 Excessive Rainfall Outlook",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center WPC Day 1 Excessive Rainfall Outlook.",
+              "file": "mo-noaa-outlook-day1-rainfall.png"
+            }
+          ]
+        },
+        {
+          "id": "outlooks-day2",
+          "title": "National Outlooks: Day 2",
+          "maps": [
+            {
+              "key": "outlook-day2-severe",
+              "title": "SPC Day 2 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day2-severe.png"
+            },
+            {
+              "key": "outlook-day2-tornado",
+              "title": "SPC Day 2 Tornado Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Tornado Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day2-tornado.png"
+            },
+            {
+              "key": "outlook-day2-wind",
+              "title": "SPC Day 2 Damaging Wind Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Damaging Wind Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day2-wind.png"
+            },
+            {
+              "key": "outlook-day2-hail",
+              "title": "SPC Day 2 Hail Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Hail Outlook, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day2-hail.png"
+            },
+            {
+              "key": "outlook-day2-fire",
+              "title": "SPC Day 2 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day2-fire.png"
+            },
+            {
+              "key": "outlook-day2-drythunder",
+              "title": "SPC Day 2 Dry Thunderstorm Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 2 Dry Thunderstorm Outlook.",
+              "file": "mo-noaa-outlook-day2-drythunder.png"
+            },
+            {
+              "key": "outlook-day2-rainfall",
+              "title": "WPC Day 2 Excessive Rainfall Outlook",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center WPC Day 2 Excessive Rainfall Outlook.",
+              "file": "mo-noaa-outlook-day2-rainfall.png"
+            }
+          ]
+        },
+        {
+          "id": "outlooks-day3",
+          "title": "National Outlooks: Day 3",
+          "maps": [
+            {
+              "key": "outlook-day3-severe",
+              "title": "SPC Day 3 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 3 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day3-severe.png"
+            },
+            {
+              "key": "outlook-day3-severe-prob",
+              "title": "SPC Day 3 Severe Weather Probability",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 3 Severe Weather Probability, with the conditional intensity areas hatched on top.",
+              "file": "mo-noaa-outlook-day3-severe-prob.png"
+            },
+            {
+              "key": "outlook-day3-fire",
+              "title": "SPC Day 3 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 3 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day3-fire.png"
+            },
+            {
+              "key": "outlook-day3-drythunder",
+              "title": "SPC Day 3 Dry Thunderstorm Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 3 Dry Thunderstorm Outlook.",
+              "file": "mo-noaa-outlook-day3-drythunder.png"
+            },
+            {
+              "key": "outlook-day3-rainfall",
+              "title": "WPC Day 3 Excessive Rainfall Outlook",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center WPC Day 3 Excessive Rainfall Outlook.",
+              "file": "mo-noaa-outlook-day3-rainfall.png"
+            }
+          ]
+        },
+        {
+          "id": "outlooks-day4-8",
+          "title": "National Outlooks: Days 4–8",
+          "maps": [
+            {
+              "key": "outlook-day4-severe",
+              "title": "SPC Day 4 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 4 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day4-severe.png"
+            },
+            {
+              "key": "outlook-day5-severe",
+              "title": "SPC Day 5 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 5 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day5-severe.png"
+            },
+            {
+              "key": "outlook-day6-severe",
+              "title": "SPC Day 6 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 6 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day6-severe.png"
+            },
+            {
+              "key": "outlook-day7-severe",
+              "title": "SPC Day 7 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 7 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day7-severe.png"
+            },
+            {
+              "key": "outlook-day8-severe",
+              "title": "SPC Day 8 Severe Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 8 Severe Weather Outlook.",
+              "file": "mo-noaa-outlook-day8-severe.png"
+            },
+            {
+              "key": "outlook-day4-fire",
+              "title": "SPC Day 4 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 4 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day4-fire.png"
+            },
+            {
+              "key": "outlook-day5-fire",
+              "title": "SPC Day 5 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 5 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day5-fire.png"
+            },
+            {
+              "key": "outlook-day6-fire",
+              "title": "SPC Day 6 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 6 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day6-fire.png"
+            },
+            {
+              "key": "outlook-day7-fire",
+              "title": "SPC Day 7 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 7 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day7-fire.png"
+            },
+            {
+              "key": "outlook-day8-fire",
+              "title": "SPC Day 8 Fire Weather Outlook",
+              "description": "Map of Missouri showing the NOAA Storm Prediction Center SPC Day 8 Fire Weather Outlook.",
+              "file": "mo-noaa-outlook-day8-fire.png"
+            },
+            {
+              "key": "outlook-day4-rainfall",
+              "title": "WPC Day 4 Excessive Rainfall Outlook",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center WPC Day 4 Excessive Rainfall Outlook.",
+              "file": "mo-noaa-outlook-day4-rainfall.png"
+            },
+            {
+              "key": "outlook-day5-rainfall",
+              "title": "WPC Day 5 Excessive Rainfall Outlook",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center WPC Day 5 Excessive Rainfall Outlook.",
+              "file": "mo-noaa-outlook-day5-rainfall.png"
+            }
+          ]
         }
       ]
     },

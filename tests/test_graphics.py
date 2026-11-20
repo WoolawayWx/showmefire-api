@@ -52,7 +52,11 @@ class GraphicsTests(unittest.TestCase):
             graphic_renderer.PRODUCT_URLS["spc_cat"],
             "https://www.spc.noaa.gov/products/outlook/day1otlk_cat.nolyr.geojson",
         )
-        self.assertTrue(all(url.endswith(".nolyr.geojson") for url in graphic_renderer.PRODUCT_URLS.values()))
+        # The SPC severe-weather outlooks are the published .nolyr.geojson files; the fire weather layers come from NOAA's
+        # map service (f=geojson) and the rainfall outlook from WPC's own GeoJSON file. Every source must be GeoJSON.
+        spc_severe = {key: url for key, url in graphic_renderer.PRODUCT_URLS.items() if key.startswith("spc_") and "fire" not in key}
+        self.assertTrue(spc_severe and all(url.endswith(".nolyr.geojson") for url in spc_severe.values()))
+        self.assertTrue(all("geojson" in url for url in graphic_renderer.PRODUCT_URLS.values()))
 
     def test_gis_renderer_produces_exact_jpeg(self):
         with patch.object(graphic_renderer, "_fetch", return_value=SAMPLE_GEOJSON), patch.object(
