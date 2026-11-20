@@ -300,6 +300,31 @@ def load_source(cfg: DayConfig, cycle: datetime, cache_dir: Path) -> xr.Dataset:
     return ds
 
 
+def _forecast_lock_fd() -> int | None:
+    """fd 8 when it is the forecast lock scripts/forecast_lock.sh opened for us (None when run by hand)."""
+    try:
+        held = os.fstat(8)
+        lock = PROJECT_DIR / ".locks" / "showmefire-forecast.lock"
+        return 8 if (held.st_ino, held.st_dev) == (lock.stat().st_ino, lock.stat().st_dev) else None
+    except OSError:
+        return None
+
+
+def _sleep_without_forecast_lock(seconds: float) -> None:
+    """Sleep with the forecast lock released. Waiting for a model run does no work, and holding the lock makes maps.sh
+    skip every 15-minute cycle, so the maps went stale for the whole wait. Retake the lock before real work resumes."""
+    import fcntl
+    fd = _forecast_lock_fd()
+    if fd is None:
+        time.sleep(seconds)
+        return
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    try:
+        time.sleep(seconds)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
 def load_source_waiting(cfg: DayConfig, cycle: datetime, cache_dir: Path, wait_minutes: float) -> xr.Dataset:
     """load_source, retrying every 5 minutes while the model run is still publishing, up to `wait_minutes`."""
     deadline = time.time() + wait_minutes * 60
@@ -310,7 +335,7 @@ def load_source_waiting(cfg: DayConfig, cycle: datetime, cache_dir: Path, wait_m
             if time.time() >= deadline:
                 raise
             logger.info("Day %d: source not ready (%s); retrying in 5 minutes", cfg.day, str(error)[:200])
-            time.sleep(300)
+            _sleep_without_forecast_lock(300)
 
 
 # ----------------------------------------------------------------------------------------------------------------
