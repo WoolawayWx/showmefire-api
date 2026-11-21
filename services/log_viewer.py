@@ -79,6 +79,8 @@ CRON_JOBS: Dict[str, Dict[str, Any]] = {
                                   "description": "Joins outlook forecasts with later observations into the training records (windows are verified 6 hours after they end)."},
     "verification": {"label": "Nightly verification", "schedule": "Daily, 04:30 UTC", "every_s": 86400, "log": "valForecast.log",
                      "description": "Scores the day's forecasts against observations and builds the verification reports."},
+    "extended_forecast": {"label": "Extended forecast", "schedule": "Five times a day (01:30, 10:30, 16:30, 19:30, 22:30 UTC)", "every_s": 9 * 3600, "log": "extended_forecast_YYYYMMDD.log",
+                          "description": "Builds the Day 2/3 extended forecast, waiting for the model run it needs (up to 150 minutes)."},
     "empty_outlook_maps": {"label": "Blank outlook maps", "schedule": "Daily, 02:00 Central", "every_s": 86400, "log": "create_empty_outlook_maps.log",
                            "description": "Resets the day 2/3 outlook graphics for the new day."},
 }
@@ -464,6 +466,16 @@ def _state(last: Optional[Dict[str, Any]], every_s: Optional[float], now: float)
     return last["status"]
 
 
+def _diagnosis(summary: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Likely cause and fix (services.job_health.HINTS) for a job whose latest run failed; None otherwise."""
+    last = summary.get("last") or {}
+    if last.get("status") != "error":
+        return None
+    from services.job_health import diagnose
+
+    return diagnose(last.get("message"))
+
+
 def overview(scheduler=None) -> Dict[str, Any]:
     now = time.time()
     summaries = job_runs.job_summaries()
@@ -531,6 +543,7 @@ def overview(scheduler=None) -> Dict[str, Any]:
             "schedule": meta["schedule"], "next_run_at": None, "paused": False, "log": meta["log"],
             "state": _state(summary.get("last"), meta["every_s"], now),
             "last": summary.get("last"), "last_failure": summary.get("last_failure"), "window": summary.get("window"),
+            "diagnosis": _diagnosis(summary),
         })
 
     # Jobs with history that are no longer scheduled (removed, or the scheduler is off in this process).
@@ -542,6 +555,7 @@ def overview(scheduler=None) -> Dict[str, Any]:
             "schedule": None, "next_run_at": None, "paused": False, "log": "api.log",
             "state": summary["last"]["status"] if summary.get("last") else "never",
             "last": summary.get("last"), "last_failure": summary.get("last_failure"), "window": summary.get("window"),
+            "diagnosis": _diagnosis(summary),
             "unscheduled": True,
         })
 

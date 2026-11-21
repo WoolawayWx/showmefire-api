@@ -62,7 +62,7 @@ API_JOBS = {
     "wildcad_incidents", "wildcad_resources", "wildcad_health", "recurring_source_detector", "burn_ban_maintenance",
     "ground_cover_shadow",
     # fills in-process state that routers read (drift_monitor._state); alerts if the heavy worker dies
-    "drift_check", "forecast_watchdog", "scheduler_worker_watch", "long_run_watch",
+    "drift_check", "forecast_watchdog", "scheduler_worker_watch", "long_run_watch", "job_health_watch",
 }
 
 JOB_GROUPS: dict[str, str] = {**{job: API for job in API_JOBS}, **{job: HEAVY for job in HEAVY_JOBS},

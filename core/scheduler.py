@@ -465,6 +465,13 @@ async def long_run_watch_job():
     await asyncio.to_thread(job_runs.check_overruns)
 
 
+async def job_health_watch_job():
+    """Alerts staff when a job keeps failing or a cron script stops running, with the likely cause and fix."""
+    from services import job_health
+
+    await asyncio.to_thread(job_health.check_jobs)
+
+
 async def wildcad_incidents_job():
     from services.wildcad import poll_incidents_job
 
@@ -1199,6 +1206,14 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
         minutes=10,
         seconds=40,
         id='long_run_watch',
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        job_health_watch_job,
+        'interval',
+        minutes=15,
+        id='job_health_watch',
         max_instances=1,
         coalesce=True,
     )

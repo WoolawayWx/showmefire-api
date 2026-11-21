@@ -29,6 +29,9 @@ logger = file_logger('firedetections', 'firedetections.log')
 
 # API endpoint for advanced fire detections
 FIRMS_CSV_BASE_TEMPLATE = "https://firms.modaps.eosdis.nasa.gov/usfs/api/area/csv/{key}/{source}/{bbox}/1/"
+# Detections older than this are dropped rather than carried over when a fetch comes back empty (FIRMS serves one day).
+PREVIOUS_MAX_AGE_HOURS = 24
+
 FIRMS_CSV_SOURCES = [
     # VIIRS_SNPP_NRT removed: NASA ceased Suomi NPP data delivery on 2026-11-02 (NOAA-20/21 replace it).
     "VIIRS_NOAA20_NRT",
@@ -316,6 +319,7 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
 
     merged_features: List[Dict[str, Any]] = []
     per_source_counts: Dict[str, int] = {}
+    failed_sources: List[str] = []
 
     for source in FIRMS_CSV_SOURCES:
         source_url = FIRMS_CSV_BASE_TEMPLATE.format(
@@ -337,6 +341,7 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
 
         except requests.exceptions.RequestException as exc:
             per_source_counts[source] = 0
+            failed_sources.append(source)
             # The map key is part of the URL, and requests' errors quote the URL.
             logger.error('FIRMS CSV request failed for %s: %s', source, str(exc).replace(modis_key, '[redacted]'))
 
@@ -356,6 +361,8 @@ def fetch_firms_24h_detections() -> Dict[str, Any]:
         'features': unique_features,
         'metadata': {
             'fetched_at': fetch_time,
+            'features_as_of': fetch_time,
+            'failed_sources': failed_sources,
             'source': 'FIRMS CSV /usfs/api/area/csv',
             'products': FIRMS_CSV_SOURCES,
             'product_counts': per_source_counts,
@@ -385,17 +392,30 @@ def save_detections(data, suffix=''):
                 existing_data = json.load(f)
 
             existing_features = existing_data.get('features', []) if isinstance(existing_data, dict) else []
-            if isinstance(existing_features, list) and existing_features:
+            existing_meta = existing_data.get('metadata') if isinstance(existing_data, dict) and isinstance(existing_data.get('metadata'), dict) else {}
+            # FIRMS only returns the last day, so detections older than that are not "current": keep them through a
+            # short gap, never indefinitely (they were being served for 24 days while the key was rejected).
+            as_of = existing_meta.get('features_as_of') or existing_meta.get('fetched_at')
+            age_hours = None
+            try:
+                age_hours = (datetime.utcnow() - datetime.fromisoformat(str(as_of).replace('Z', ''))).total_seconds() / 3600
+            except (TypeError, ValueError):
+                pass
+            metadata = data.get('metadata') if isinstance(data.get('metadata'), dict) else {}
+            if isinstance(existing_features, list) and existing_features and age_hours is not None and age_hours <= PREVIOUS_MAX_AGE_HOURS:
                 data = dict(data) if isinstance(data, dict) else {'type': 'FeatureCollection'}
                 data['features'] = existing_features
 
-                metadata = data.get('metadata') if isinstance(data.get('metadata'), dict) else {}
                 metadata['used_previous_features'] = True
                 metadata['previous_feature_count'] = len(existing_features)
+                metadata['features_as_of'] = as_of
                 metadata['fallback_reason'] = 'Fetched dataset contained zero features'
                 data['metadata'] = metadata
 
                 # Normal whenever nothing is burning, so not a warning; main() reports it in the run summary.
+            elif isinstance(existing_features, list) and existing_features:
+                metadata['dropped_stale_previous'] = len(existing_features)
+                data['metadata'] = metadata
         except Exception as e:
             logger.warning(f"Unable to reuse existing detections from {output_path}: {e}")
     
@@ -426,6 +446,8 @@ def main():
         outcome = 'NOT saved (see error above)'
     elif metadata.get('used_previous_features'):  # set by save_detections on this same metadata dict
         outcome = f"none fetched; kept the previous {metadata.get('previous_feature_count')}"
+    elif metadata.get('dropped_stale_previous'):
+        outcome = f"none fetched; dropped {metadata['dropped_stale_previous']} detections older than {PREVIOUS_MAX_AGE_HOURS} h"
     else:
         outcome = f'saved {mo_count}'
     logger.info(
@@ -436,6 +458,12 @@ def main():
         outcome,
         run_duration_sec,
     )
+
+    failed = metadata.get('failed_sources') or []
+    if len(failed) >= len(FIRMS_CSV_SOURCES):
+        # Every request failed: that is an outage (bad key, NASA down), not a quiet day. Raise so the run is recorded as
+        # failed instead of looking like "none fetched; kept the previous N".
+        raise RuntimeError(f"All {len(failed)} FIRMS requests failed ({', '.join(failed)}); see firedetections.log")
 
     return mo_data
 
