@@ -184,6 +184,10 @@ def get_incident_v2(slug: str):
         raise HTTPException(status_code=404, detail="Incident not found")
     detail = _incident_v2(incident)
     detail["history"] = list_history(incident["id"])
+    # A second opinion beside the confidence score ("is it a field burn?"); detail only, since it samples ground cover.
+    from services.cropland_burn import assess as assess_cropland_burn
+
+    detail["cropland_burn"] = assess_cropland_burn(incident, list_fire_incident_members(incident["id"]))
     detail["resources"] = public_resources(incident["id"])
     # Wind is a live external lookup, so it belongs on the single-incident
     # detail (opened on demand from the map popup), never the 500-item list.

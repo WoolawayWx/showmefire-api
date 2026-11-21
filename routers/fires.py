@@ -443,6 +443,12 @@ class FireIncidentFeedback(BaseModel):
     source: Optional[Literal["website", "mobile"]] = None
 
 
+class CroplandBurnAnswer(BaseModel):
+    """The answer to "We think this is a cropland burn - are we right?"."""
+    answer: Literal["yes", "no"]
+    source: Optional[Literal["website", "mobile"]] = None
+
+
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
     if not bbox:
         return None
@@ -1024,6 +1030,9 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
         submitter_region=(request.headers.get("cf-region-code") or "").strip()[:16] or None if TRUST_PROXY_HEADERS else None,
         user_agent=(request.headers.get("user-agent") or "").strip()[:200] or None,
     )
+    # "Unsure" is kept for the review workspace but never pings Discord or staff phones.
+    if payload.classification == "unsure":
+        return {"success": True, "message": "Thanks—your fire information was received."}
     fields = [
         {"name": "Classification", "value": payload.classification.replace("_", " ")},
         {"name": "Incident", "value": slug},
@@ -1057,6 +1066,35 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     else:
         notify_staff_alert(**alert)
     return {"success": True, "message": "Thanks—your fire information was received."}
+
+
+@router.post("/api/fires/incidents/{slug}/cropland-answer", status_code=201)
+def answer_cropland_burn_prompt(slug: str, payload: CroplandBurnAnswer, request: Request):
+    """Yes/No to "We think this is a cropland burn". Both answers teach the cropland-burn model (services/cropland_burn.py)
+    straight away. Yes also files the usual public feedback as a controlled burn tagged `cropland` (it waits for staff review
+    like any feedback, but sends no staff alert); No files nothing, and the client then opens the regular options."""
+    from services import cropland_burn
+
+    incident = get_public_fire_incident(slug)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Fire incident not found")
+    if not incident.get("county_fips"):
+        raise HTTPException(status_code=422, detail="Feedback is only accepted for incidents in Missouri.")
+    ip_hash = _ip_bucket_key(_client_ip(request))
+    quota = consume_fire_submission_quota(f"incident-feedback:{ip_hash}", datetime.now(timezone.utc), 10, 20)
+    if not quota["allowed"]:
+        raise HTTPException(status_code=429, detail="Too many feedback submissions. Please try again later.")
+    members = list_fire_incident_members(incident["id"])
+    result = cropland_burn.record_answer(incident, members, payload.answer == "yes", "public", ip_hash)
+    if result["recorded"] and payload.answer == "yes":
+        create_fire_incident_feedback(
+            incident["id"], "controlled_burn", "Cropland burn confirmed from the cropland-burn prompt.", "", ip_hash,
+            submission_source=payload.source, burn_type=cropland_burn.CROPLAND_BURN_TYPE,
+            submitter_country=(request.headers.get("cf-ipcountry") or "").strip()[:8] or None if TRUST_PROXY_HEADERS else None,
+            submitter_region=(request.headers.get("cf-region-code") or "").strip()[:16] or None if TRUST_PROXY_HEADERS else None,
+            user_agent=(request.headers.get("user-agent") or "").strip()[:200] or None,
+        )
+    return {"success": True, "recorded": result["recorded"], "message": "Thanks—that helps us get better at this."}
 
 
 def _format_confidence_factors(factors: dict) -> str:

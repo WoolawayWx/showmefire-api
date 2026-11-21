@@ -56,9 +56,11 @@ FEEDBACK_AS = {
 FEEDBACK_OUTCOME = {"pending": "awaiting review", "approved": "approved", "rejected": "not accepted"}
 
 
-def feedback_summary(classification: str, status: str) -> str:
+def feedback_summary(classification: str, status: str, burn_type: str | None = None) -> str:
     """"Public feedback submitted as a controlled burn, awaiting review" (the comment is never included)."""
-    return f"Public feedback submitted as {FEEDBACK_AS.get(classification, 'something else')}, {FEEDBACK_OUTCOME[status]}"
+    kind = "a cropland burn" if classification == "controlled_burn" and burn_type == "cropland" \
+        else FEEDBACK_AS.get(classification, "something else")
+    return f"Public feedback submitted as {kind}, {FEEDBACK_OUTCOME[status]}"
 
 
 REPORT_SUMMARY = {
@@ -263,10 +265,10 @@ def _sync_one(connection: sqlite3.Connection, incident: dict[str, Any], now: dat
     # Public feedback: one entry each, following its review status (never notes or contact details; the category
     # is only shown once staff approved it).
     for row in connection.execute(
-        "SELECT id, classification, status, created_at FROM fire_incident_feedback WHERE incident_id = ?", (incident_id,),
+        "SELECT id, classification, status, created_at, burn_type FROM fire_incident_feedback WHERE incident_id = ?", (incident_id,),
     ).fetchall():
         status = row["status"] if row["status"] in STATUSES else "pending"
-        summary = feedback_summary(row["classification"], status)
+        summary = feedback_summary(row["classification"], status, row["burn_type"])
         data = {"classification": row["classification"]}
         if upsert_status_entry(connection, incident_id, "feedback", summary, occurred_at=row["created_at"],
                                status=status, dedupe_key=f"feedback:{row['id']}", data=data):

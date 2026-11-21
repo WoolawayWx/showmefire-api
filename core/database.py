@@ -630,6 +630,8 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("submitter_country", "TEXT"),
         ("submitter_region", "TEXT"),
         ("user_agent", "TEXT"),
+        # Finer kind of a controlled_burn answer ('cropland' = a field/crop-residue burn); NULL = not specified.
+        ("burn_type", "TEXT"),
     ):
         if name not in feedback_columns:
             cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
@@ -4486,6 +4488,7 @@ def create_fire_incident_feedback(
     submitter_country: Optional[str] = None,
     submitter_region: Optional[str] = None,
     user_agent: Optional[str] = None,
+    burn_type: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=15) as conn:
@@ -4493,10 +4496,10 @@ def create_fire_incident_feedback(
         cursor.execute(
             """INSERT INTO fire_incident_feedback
                (incident_id, classification, note, contact, submitter_ip_hash, submission_source, status_reason,
-                submitter_country, submitter_region, user_agent)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                submitter_country, submitter_region, user_agent, burn_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (incident_id, classification, note, contact, ip_hash, submission_source,
-             FEEDBACK_STATUS_REASONS["pending"], submitter_country, submitter_region, user_agent),
+             FEEDBACK_STATUS_REASONS["pending"], submitter_country, submitter_region, user_agent, burn_type),
         )
         conn.commit()
         return {"id": cursor.lastrowid, "incident_id": incident_id, "classification": classification}
@@ -4526,7 +4529,7 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at, "
-            "submission_source, status_reason, submitter_country, submitter_region, user_agent, "
+            "submission_source, status_reason, submitter_country, submitter_region, user_agent, burn_type, "
             "substr(submitter_ip_hash, 1, 8) AS submitter_ref "
             "FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
             (incident_id,),
