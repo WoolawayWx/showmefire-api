@@ -151,6 +151,23 @@ def test_only_moderation_alerts_become_pushes(env, monkeypatch):
     assert staff_push.content_for({"alert_type": "burn_ban", "title": "Burn ban", "admin_path": "/admin/burn-bans"})["url"] == "/staff/burn-bans"
 
 
+def test_an_alert_can_pick_its_own_screen_and_image_but_only_ones_we_chose(env, monkeypatch):
+    signed_in()
+    sent = capture(monkeypatch)
+    alert = {"alert_type": "incident_feedback", "title": "Fire incident feedback: Controlled burn in Butler",
+             "admin_path": "/admin/fires",
+             "push_extra": {"url": "/staff/incidents/12", "image_url": "https://api.example/images/fire-incidents/a.png"}}
+    assert staff_push.dispatch(alert, background=False) is True
+    message = sent[0][0]
+    assert message["body"] == "Controlled burn in Butler"
+    assert message["data"]["url"] == "/staff/incidents/12"
+    assert message["richContent"] == {"image": "https://api.example/images/fire-incidents/a.png"}
+    assert message["ttl"] == 24 * 3600
+    # A url outside the staff screens or a non-https image is ignored, never used.
+    bad = staff_push.content_for({**alert, "push_extra": {"url": "https://evil.example/x", "image_url": "http://x/y.png"}})
+    assert bad["url"] == "/staff/incidents" and "image_url" not in bad
+
+
 def test_it_is_off_unless_switched_on_and_never_runs_in_the_sandbox(env, monkeypatch):
     signed_in()
     sent = capture(monkeypatch)

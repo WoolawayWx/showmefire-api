@@ -138,6 +138,7 @@ def list_feedback_candidate_incidents(now: datetime | None = None) -> list[dict]
                 "smf_number": incident.get("smf_number"),
                 "latitude": incident.get("centroid_latitude"),
                 "longitude": incident.get("centroid_longitude"),
+                "detection_count": incident.get("detection_count"),
             })
     return result
 

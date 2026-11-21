@@ -184,6 +184,7 @@ class CroplandAnswerEndpointTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self._feedback_rows()], ["unsure"])
         self.assertEqual(self.http.post(url, json={"classification": "controlled_burn"}).status_code, 201)
         self.alerts.assert_called_once()
+        self.assertEqual(self.alerts.call_args.kwargs["title"], "Fire incident feedback: Controlled burn in New Madrid")
 
     def test_timeline_says_cropland_burn(self):
         self.http.post(f"/api/fires/incidents/{self.slug}/cropland-answer", json={"answer": "yes"})

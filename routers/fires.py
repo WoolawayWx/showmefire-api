@@ -449,6 +449,21 @@ class CroplandBurnAnswer(BaseModel):
     source: Optional[Literal["website", "mobile"]] = None
 
 
+_FEEDBACK_ALERT_LABEL = {"confirmed_fire": "Confirmed fire", "controlled_burn": "Controlled burn",
+                         "not_a_fire": "Not a fire", "unsure": "Not sure"}
+
+
+def _feedback_push_extra(incident_id: int) -> dict:
+    """Where the staff push for new incident feedback should open, and the incident's map graphic when it has one."""
+    from services.mobile_push import _incident_graphic_url
+
+    extra: dict = {"url": f"/staff/incidents/{incident_id}"}
+    image = _incident_graphic_url(incident_id)
+    if image:
+        extra["image_url"] = image
+    return extra
+
+
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
     if not bbox:
         return None
@@ -1053,10 +1068,14 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
         logger.warning("Failed to score incident feedback %s for staff alert", feedback_record.get("id"), exc_info=True)
     alert = dict(
         alert_type="incident_feedback",
-        title=f"Fire incident feedback: {incident.get('county_name') or slug}",
+        # Classification first so the Discord title and the staff push body ("Controlled burn in Butler") say what was
+        # reported. It is one of a fixed set of choices, never free text, so it is safe in a push.
+        title=f"Fire incident feedback: {_FEEDBACK_ALERT_LABEL.get(payload.classification, 'Feedback')} in {incident.get('county_name') or slug}",
         description=note,
         fields=fields,
         admin_path="/admin/fires",
+        # For the staff push only: open this incident's review screen, and show its map graphic on Android.
+        push_extra=_feedback_push_extra(incident["id"]),
     )
     from ai import clef
     from ai.clef_tasks import send_staff_alert_with_clef

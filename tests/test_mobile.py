@@ -337,6 +337,60 @@ class MobilePushTests(unittest.TestCase):
         self.assertEqual(message["richContent"]["image"], "https://api.example/images/mo-forecastfiredanger.png?v=42")
         self.assertTrue(message["mutableContent"])
 
+    def _delivered_message(self, event_type, **kwargs):
+        subscription = {"installation_id": "x", "expo_push_token": "ExpoPushToken[abc]", "app_version": "1.4.0",
+                        "forecast_title_counties": set()}
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "t1"}]) as sender:
+            mobile_push._deliver_event(event_type, f"{event_type}:test", [subscription], "Title", "Body", "/x", **kwargs)
+        return sender.call_args.args[0][0]
+
+    def test_pushes_expire_and_detection_prompts_expire_sooner(self):
+        detection = self._delivered_message("fire_detection")
+        forecast = self._delivered_message("forecast")
+        self.assertEqual(detection["ttl"], 6 * 3600)
+        self.assertEqual(forecast["ttl"], 24 * 3600)
+
+    def test_subtitle_category_and_image_are_passed_through_only_when_given(self):
+        plain = self._delivered_message("sitrep")
+        self.assertNotIn("subtitle", plain)
+        self.assertNotIn("richContent", plain)
+        rich = self._delivered_message(
+            "fire_detection", subtitle="Butler County · 5 satellite detections",
+            image_url="https://api.example/images/fire-incidents/abc.png", category_id=mobile_push.FIRE_LISTING_MAP_CATEGORY)
+        self.assertEqual(rich["subtitle"], "Butler County · 5 satellite detections")
+        self.assertEqual(rich["categoryId"], "fire-listing-map")
+        self.assertEqual(rich["richContent"], {"image": "https://api.example/images/fire-incidents/abc.png"})
+
+    def test_a_point_still_gets_the_map_category_when_none_is_named(self):
+        message = self._delivered_message("fire_detection", extra_data={"latitude": 36.5, "longitude": -90.4})
+        self.assertEqual(message["categoryId"], mobile_push.FIRE_DETECTION_MAP_CATEGORY)
+
+    def test_incident_graphic_url_only_when_the_graphic_exists(self):
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            connection.execute("INSERT INTO fire_incidents (id, centroid_latitude, centroid_longitude, first_detected_at, "
+                               "last_detected_at, detection_count, public_slug, graphic_filename) VALUES "
+                               "(901, 36, -90, 'a', 'b', 1, 'withimg', 'withimg.png'), "
+                               "(902, 36, -90, 'a', 'b', 1, 'noimg', NULL)")
+        self.assertTrue(mobile_push._incident_graphic_url(901).endswith("/images/fire-incidents/withimg.png"))
+        self.assertIsNone(mobile_push._incident_graphic_url(902))
+        self.assertIsNone(mobile_push._incident_graphic_url(None))
+
+    def test_detection_prompt_subtitle_never_reveals_the_cropland_guess(self):
+        mobile_push.upsert_subscription(
+            installation_id="22222222-2222-4222-8222-222222222222", expo_push_token="ExpoPushToken[detect]", platform="ios",
+            app_version="1.4.0", forecast=False, sitrep=False, fire_weather=False, fire_detection=True,
+            county_fips=["29019"], local_forecast_titles=False, forecast_not_before=None)
+        incident = {"incident_id": 5, "incident_slug": "abc", "county_fips": "29019", "county_name": "Boone",
+                    "confidence_label": "high", "detection_count": 4, "latitude": 38.9, "longitude": -92.3}
+        mobile_push.record_event("fire_detection:baseline:v2", "fire_detection", {})
+        with patch.object(mobile_push, "_send_batch", return_value=[{"status": "ok", "id": "t"}]) as sender, \
+                patch.object(mobile_push, "_in_feedback_quiet_hours", return_value=False):
+            mobile_push.notify_feedback_candidates([incident])
+        self.assertTrue(sender.called, "the detection prompt was not sent at all")
+        message = sender.call_args.args[0][0]
+        self.assertEqual(message["subtitle"], "Boone County · 4 satellite detections")
+        self.assertNotIn("crop", str(message).lower())
+
     def test_local_forecast_titles_share_the_statewide_push_batch(self):
         self.register()
         self.register("local", local_titles=True, counties=["29019", "29001", "29003", "29005"])

@@ -301,6 +301,31 @@ def _channel_for(event_type: str, app_version: str) -> str:
 # Notification action category the app registers at runtime (src/notifications/push.ts); it has one
 # "Open in Maps" button. Apps that don't know the id simply show the notification without buttons.
 FIRE_DETECTION_MAP_CATEGORY = "fire-detection-map"
+# Same idea for official listings (NIFC / dispatch): "Open in Maps" only, since "not a fire" makes no sense there.
+FIRE_LISTING_MAP_CATEGORY = "fire-listing-map"
+
+# How long Expo/APNs/FCM keep trying to deliver a push to a phone that is off or offline. A detection prompt is useless
+# hours later; everything else stays good for a day.
+PUSH_TTL_SECONDS = {"fire_detection": 6 * 3600}
+DEFAULT_PUSH_TTL_SECONDS = 24 * 3600
+
+
+def _incident_graphic_url(incident_id: int | None) -> str | None:
+    """The incident's map graphic, when one has been made by now (it is rendered by a job, so a brand-new incident may not
+    have one yet and then the push simply goes without an image). Android shows it in the notification."""
+    if not incident_id:
+        return None
+    try:
+        base = os.getenv("PUBLIC_API_BASE_URL", "https://api.showmefire.org").rstrip("/")
+        with _connect() as connection:
+            row = connection.execute(
+                "SELECT public_slug, graphic_filename FROM fire_incidents WHERE id = ?", (incident_id,)
+            ).fetchone()
+        if row and row["public_slug"] and row["graphic_filename"]:
+            return f"{base}/images/fire-incidents/{quote(row['public_slug'], safe='')}.png"
+    except Exception:  # noqa: BLE001 - an image is a nicety, never a reason not to notify
+        logger.info("could not look up the graphic for incident %s", incident_id, exc_info=True)
+    return None
 
 
 def _valid_coordinate(latitude: Any, longitude: Any) -> tuple[float | None, float | None]:
@@ -379,6 +404,8 @@ def send_mobile_event(
     image_url: str | None = None,
     all_counties: bool = False,
     forecast_county_danger: dict[str, tuple[int, str]] | None = None,
+    subtitle: str | None = None,
+    category_id: str | None = None,
 ) -> int:
     if is_sandbox():  # reviewer sandbox: nothing is recorded or sent
         return 0
@@ -410,6 +437,7 @@ def send_mobile_event(
     return _deliver_event(
         event_type, event_key, subscriptions, title, body, url,
         extra_data=extra_data, image_url=image_url, forecast_county_danger=forecast_county_danger,
+        subtitle=subtitle, category_id=category_id,
     )
 
 
@@ -417,6 +445,7 @@ def _deliver_event(
     event_type: str, event_key: str, subscriptions: list[dict[str, Any]], title: str, body: str, url: str,
     *, extra_data: dict[str, Any] | None = None, image_url: str | None = None,
     forecast_county_danger: dict[str, tuple[int, str]] | None = None,
+    subtitle: str | None = None, category_id: str | None = None,
 ) -> int:
     unregistered = 0
     sent = 0
@@ -434,8 +463,13 @@ def _deliver_event(
                 "priority": "high" if event_type == "fire_weather" else "default",
                 "channelId": _channel_for(event_type, item["app_version"]),
                 "data": {"url": url, "eventType": event_type, **(extra_data or {})},
+                "ttl": PUSH_TTL_SECONDS.get(event_type, DEFAULT_PUSH_TTL_SECONDS),
             }
-            if event_type == "fire_detection" and (extra_data or {}).get("latitude") is not None:
+            if subtitle:
+                message["subtitle"] = subtitle[:100]  # iOS only; Android ignores it
+            if category_id:
+                message["categoryId"] = category_id
+            elif event_type == "fire_detection" and (extra_data or {}).get("latitude") is not None:
                 message["categoryId"] = FIRE_DETECTION_MAP_CATEGORY
             if image_url:
                 message["richContent"] = {"image": image_url}
@@ -588,6 +622,8 @@ def process_fire_weather_alerts(alerts: list[dict[str, Any]]) -> int:
             url=f"/alert/{quote(alert_id, safe='')}",
             county_fips=alert.get("countyFips") or [],
             extra_data={"alertId": alert_id},
+            # The area on a second line, when the body is the headline (otherwise the body already is the area).
+            subtitle=str(alert["areaDescription"]) if alert.get("headline") and alert.get("areaDescription") else None,
         )
     return sent
 
@@ -640,6 +676,12 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
         if latitude is not None:
             extra_data["latitude"] = latitude
             extra_data["longitude"] = longitude
+        # Deliberately NOT the cropland model's guess: this push asks for a label, and telling people what we expect
+        # would bias the answers the models learn from.
+        detections = incident.get("detection_count")
+        subtitle_parts = [f"{county_name} County"] if county_name else []
+        if isinstance(detections, int) and detections > 0:
+            subtitle_parts.append(f"{detections} satellite {'detection' if detections == 1 else 'detections'}")
         delivered = send_mobile_event(
             event_type="fire_detection",
             event_key=f"fire_detection:{incident_id}",
@@ -648,6 +690,8 @@ def notify_feedback_candidates(incidents: list[dict[str, Any]], now: datetime | 
             url=f"/detections/{quote(slug, safe='')}/feedback" if slug else "/map",
             county_fips=[county_fips] if county_fips else [],
             extra_data=extra_data,
+            image_url=_incident_graphic_url(incident_id),
+            subtitle=" · ".join(subtitle_parts) or None,
         )
         sent += delivered
         _note_incident_push(incident_id, f"fire_detection:{incident_id}", delivered,
@@ -713,12 +757,12 @@ def notify_official_listing(now: datetime | None = None) -> int:
                     AND i.public_slug IS NOT NULL"""
         nifc = connection.execute(
             "SELECT 'nifc' AS source, s.irwin_id AS ref, s.incident_id, s.name, s.acres, s.first_seen_at, i.public_slug, "
-            "i.smf_number, i.county_fips, i.county_name " + base.format(table="fire_incident_official", extra="s.ended_at IS NULL"),
+            "i.smf_number, i.county_fips, i.county_name, i.centroid_latitude, i.centroid_longitude " + base.format(table="fire_incident_official", extra="s.ended_at IS NULL"),
             (cutoff,),
         ).fetchall()
         dispatch = connection.execute(
             "SELECT 'wildcad' AS source, s.incident_key AS ref, s.incident_id, s.name, s.acres, s.first_seen_at, i.public_slug, "
-            "i.smf_number, i.county_fips, i.county_name " + base.format(table="wildcad_incidents", extra="s.out_at IS NULL"),
+            "i.smf_number, i.county_fips, i.county_name, i.centroid_latitude, i.centroid_longitude " + base.format(table="wildcad_incidents", extra="s.out_at IS NULL"),
             (cutoff,),
         ).fetchall()
     by_incident: dict[int, list[Any]] = {}
@@ -736,6 +780,12 @@ def notify_official_listing(now: datetime | None = None) -> int:
         else:
             title, body = f"Forest Service is working the {name}", f"Listed {where}{size}. Tap to see what we know about it."
         event_key = f"fire_detection:official:incident:{incident_id}"
+        extra_data = {"incidentSlug": first["public_slug"], "smfNumber": first["smf_number"], "official": True}
+        latitude, longitude = _valid_coordinate(first["centroid_latitude"], first["centroid_longitude"])
+        if latitude is not None:
+            extra_data["latitude"] = latitude
+            extra_data["longitude"] = longitude
+        source_label = "Dispatch" if first["source"] == "wildcad" else "U.S. Forest Service"
         delivered = send_mobile_event(
             event_type="fire_detection",
             event_key=event_key,
@@ -743,7 +793,10 @@ def notify_official_listing(now: datetime | None = None) -> int:
             body=body,
             url=f"/incidents/{quote(first['public_slug'], safe='')}",
             county_fips=[first["county_fips"]] if first["county_fips"] else [],
-            extra_data={"incidentSlug": first["public_slug"], "smfNumber": first["smf_number"], "official": True},
+            extra_data=extra_data,
+            image_url=_incident_graphic_url(incident_id),
+            subtitle=f"{source_label} · {first['county_name']} County" if first["county_name"] else source_label,
+            category_id=FIRE_LISTING_MAP_CATEGORY if latitude is not None else None,
         )
         sent += delivered
         what = "dispatch" if first["source"] == "wildcad" else "the Forest Service"

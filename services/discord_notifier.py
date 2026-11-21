@@ -295,6 +295,7 @@ def notify_staff_alert(*, background: bool = True, **kwargs: Any) -> bool:
         staff_push.dispatch(kwargs)
     except Exception:  # noqa: BLE001
         logger.warning("Staff push could not be started", exc_info=True)
+    kwargs.pop("push_extra", None)  # only the push uses it
     try:
         payload = build_staff_alert_payload(**kwargs)
     except Exception as exc:

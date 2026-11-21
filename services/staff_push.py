@@ -196,8 +196,14 @@ def eligible_devices(now: Optional[float] = None) -> List[Dict[str, Any]]:
 
 # ----------------------------------------------------------------------------------------------- sending
 
-def send(alert_type: str, title: str, body: str, url: str, event_key: Optional[str] = None) -> int:
-    """Push one alert to every eligible device. Returns how many were accepted by Expo. Never raises."""
+# A staff alert is good for a day; after that the queue shows it anyway.
+PUSH_TTL_SECONDS = 24 * 3600
+
+
+def send(alert_type: str, title: str, body: str, url: str, event_key: Optional[str] = None,
+         image_url: Optional[str] = None) -> int:
+    """Push one alert to every eligible device. Returns how many were accepted by Expo. Never raises.
+    `image_url` (an incident's map graphic) is shown in the notification on Android."""
     if is_sandbox():
         return 0
     try:
@@ -213,6 +219,8 @@ def send(alert_type: str, title: str, body: str, url: str, event_key: Optional[s
             messages = [{
                 "to": device["expo_token"], "title": title[:100], "body": body[:200], "sound": "default", "priority": "high",
                 "channelId": CHANNEL, "data": {"url": url, "eventType": "staff_alert", "kind": alert_type},
+                "ttl": PUSH_TTL_SECONDS,
+                **({"richContent": {"image": image_url}, "mutableContent": True} if image_url else {}),
             } for device in batch]
             tickets = _send_batch(messages)
             with _tx() as conn:
@@ -248,7 +256,16 @@ def content_for(alert: Dict[str, Any]) -> Optional[Dict[str, str]]:
     place = re.sub(r"\s+", " ", place)[:60]
     match = re.search(spec["id_pattern"], str(alert.get("admin_path") or "")) if spec["id_pattern"] else None
     url = f"{spec['route']}/{match.group(1)}" if match else spec["route"]
-    return {"alert_type": alert_type, "title": spec["title"], "body": place or "Open the app to review", "url": url}
+    # The alert's own code may know better than the type's generic route (the exact item) and has a map image to show;
+    # both are chosen by us, never copied from the report.
+    extra = alert.get("push_extra") if isinstance(alert.get("push_extra"), dict) else {}
+    override = str(extra.get("url") or "")
+    if override.startswith("/staff/") and ".." not in override:
+        url = override
+    content = {"alert_type": alert_type, "title": spec["title"], "body": place or "Open the app to review", "url": url}
+    if str(extra.get("image_url") or "").startswith("https://"):
+        content["image_url"] = str(extra["image_url"])
+    return content
 
 
 def dispatch(alert: Dict[str, Any], *, background: bool = True) -> bool:
@@ -260,7 +277,7 @@ def dispatch(alert: Dict[str, Any], *, background: bool = True) -> bool:
         content = content_for(alert)
         if content is None:
             return False
-        args = (content["alert_type"], content["title"], content["body"], content["url"])
+        args = (content["alert_type"], content["title"], content["body"], content["url"], None, content.get("image_url"))
         if background:
             threading.Thread(target=send, args=args, daemon=True).start()
         else:
