@@ -3,6 +3,7 @@ import time
 from uuid import uuid4
 
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -139,3 +140,38 @@ def test_resolved_tickets_and_email_copies_are_purged_after_90_days(env):
     with contact.connect() as conn:
         assert [r[0] for r in conn.execute('SELECT ticket_id FROM contact_tickets')] == [keep]
         assert conn.execute('SELECT COUNT(*) FROM contact_email_outbox WHERE ticket_id = ?', (old,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('status,provider_body,expected', [
+    (403, {'name': 'validation_error', 'message': 'The private.example domain is not verified. Please verify your domain.'}, 'sender_domain_unverified'),
+    (403, {'message': 'You can only send testing emails to private@example.org'}, 'sender_in_testing_mode'),
+    (401, {'name': 'validation_error', 'message': 'Invalid key: private-secret'}, 'validation_error'),
+    (429, {'name': 'rate_limit_exceeded'}, 'rate_limit_exceeded'),
+    (500, {'name': 'private@example.org', 'message': 'private-secret'}, 'provider_http_error'),
+    (502, ['private@example.org'], 'provider_http_error'),
+    (503, None, 'provider_http_error'),
+])
+def test_provider_failures_log_actionable_reason_without_private_data(env, monkeypatch, caplog, status, provider_body, expected):
+    import json
+    client, sent = env
+    response = requests.Response()
+    response.status_code = status
+    response._content = json.dumps(provider_body).encode() if provider_body is not None else b'not json: private-secret'
+    def fail(*args, **kwargs):
+        raise requests.HTTPError('private-secret private@example.org', response=response)
+    monkeypatch.setattr(contact.graphics_email, '_resend_request', fail)
+    result = client.post('/v1/contact', json=body())
+    assert result.status_code == 201 and result.json()['email_status'] == 'pending'
+    assert f'reason={expected} http_status={status}' in caplog.text
+    assert 'private-secret' not in caplog.text and 'private@example.org' not in caplog.text
+    assert 'private.example' not in caplog.text
+
+
+@pytest.mark.parametrize('exc,expected', [
+    (requests.Timeout('private-secret'), 'provider_timeout'),
+    (requests.ConnectionError('private-secret'), 'provider_connection_error'),
+    (ValueError('private-secret'), 'invalid_provider_response'),
+    (RuntimeError('private-secret'), 'delivery_error'),
+])
+def test_transport_failure_diagnostics_are_safe(env, exc, expected):
+    assert contact.delivery_failure(exc) == (expected, None)

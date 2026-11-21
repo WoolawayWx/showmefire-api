@@ -1822,6 +1822,32 @@ def init_database():
     if "direct_recipients_json" not in bulletin_columns:
         cursor.execute("ALTER TABLE bulletins ADD COLUMN direct_recipients_json TEXT NOT NULL DEFAULT '[]'")
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_bulletins_status_created ON bulletins(status, created_at DESC)')
+    # Newsletter web archive (services/newsletter_web.py): every sent newsletter is public unless an admin hides it.
+    if "web_hidden" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN web_hidden INTEGER NOT NULL DEFAULT 0")
+    # Feature articles (services/articles.py): structured blocks, not HTML. Separate from `posts` (staff discussion posts).
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            subtitle TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            author_name TEXT NOT NULL DEFAULT '',
+            hero_json TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            blocks_json TEXT NOT NULL DEFAULT '[]',
+            seo_title TEXT NOT NULL DEFAULT '',
+            seo_description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+            published_at TIMESTAMP,
+            created_by TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_articles_status_published ON articles(status, published_at DESC)')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS newsletter_subscribers (
             email TEXT PRIMARY KEY,

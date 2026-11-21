@@ -25,6 +25,10 @@ SELECT kind, COUNT(*) FROM contact_email_outbox WHERE sent_at IS NULL GROUP BY k
 SELECT COUNT(*) FROM contact_tickets WHERE resolved_at < unixepoch() - 90 * 86400;
 ```
 
+Delivery warnings include a fixed `reason` and `http_status`, without logging addresses, API keys, messages, or raw provider errors. For `sender_domain_unverified`, verify the exact sending domain in Resend. For `sender_in_testing_mode`, configure a verified sender. For 401/403, also check API key validity and sender-domain permissions; for 429, check rate limits and quotas. `provider_timeout` and `provider_connection_error` indicate network failures. Other provider errors can be inspected in the Resend dashboard logs.
+
+The sender is saved inside each outbox payload when the ticket is created. Changing `CONTACT_EMAIL_FROM` changes new tickets only. Verifying the queued sender's domain allows the existing payload to retry unchanged. If a queued payload must be corrected, first confirm from provider logs that it was rejected and never accepted; changing a previously accepted payload under the same idempotency key can cause a 409 conflict. Do not reset timestamps or idempotency keys blindly.
+
 ## Resolution and retention
 
 Ticket correspondence happens by email; keep the ticket ID in reply subjects. This change does not add an admin ticket inbox. Mark a ticket resolved using a parameterized statement from a trusted database maintenance session:

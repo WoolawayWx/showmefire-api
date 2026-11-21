@@ -135,9 +135,18 @@ def send_bulletin_email(
     text_body: str,
     manage_url: str,
     attachments: list[dict] | None = None,
+    web_url: str | None = None,
 ) -> str:
-    """Send one targeted bulletin while preserving the newsletter footer."""
+    """Send one targeted bulletin while preserving the newsletter footer.
+
+    `web_url`, when given, adds a small "View in your browser" line above the message (the newsletter web archive page)."""
     sender, reply_to = _sender_settings()
+    if web_url:
+        html_body = (
+            '<p style="font-size:12px;color:#64748b;text-align:center;margin:0 0 12px">'
+            f'Trouble reading this? <a href="{html.escape(web_url, quote=True)}">View it in your browser</a>.</p>'
+        ) + html_body
+        text_body = f"View in your browser: {web_url}\n\n{text_body}"
     html_footer = (
         '<p style="font-size:12px;color:#64748b">'
         'Manage your Show Me Fire email preferences: '

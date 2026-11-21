@@ -48,7 +48,10 @@ SCHEMA = [
        BEGIN SELECT RAISE(ABORT, 'moderation_audit is append-only'); END""",
 ]
 
-SUBJECT_TYPES = ("fire_event", "fire_incident", "incident_feedback", "burn_ban", "site_feedback", "recurring_source")
+# "article" and "newsletter" are editorial, not moderation: publishing, unpublishing and deleting articles, and hiding a
+# newsletter from the web archive, so the log shows who put what on the public site.
+SUBJECT_TYPES = ("fire_event", "fire_incident", "incident_feedback", "burn_ban", "site_feedback", "recurring_source",
+                 "article", "newsletter")
 MAX_JSON_CHARS = 40000
 
 

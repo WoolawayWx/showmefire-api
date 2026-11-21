@@ -39,13 +39,18 @@ AUDIT_VIEW = "audit.view"
 PUSH_RECEIVE = "push.receive"
 ACCOUNTS_MANAGE = "accounts.manage"
 HOMEPAGE_CARD_MANAGE = "homepage_card.manage"
+# Articles (services/articles.py): staff write drafts, owner/admin publish. The newsletter web archive is shown by default;
+# hiding or restoring a newsletter there is admin-level.
+ARTICLES_WRITE = "articles.write"
+ARTICLES_PUBLISH = "articles.publish"
+NEWSLETTER_ARCHIVE_MANAGE = "newsletter_archive.manage"
 
 MODEL_TRAINING_VIEW = "model_training.view"
 MODEL_TRAINING_RUN = "model_training.run"
 
 ALL_PERMISSIONS = frozenset({
     MODEL_TRAINING_VIEW, MODEL_TRAINING_RUN,
-    HOMEPAGE_CARD_MANAGE,
+    HOMEPAGE_CARD_MANAGE, ARTICLES_WRITE, ARTICLES_PUBLISH, NEWSLETTER_ARCHIVE_MANAGE,
     STAFF_ACCESS, REPORTS_VIEW, REPORTS_MODERATE, BURNBANS_VIEW, BURNBANS_MODERATE, AUDIT_VIEW, PUSH_RECEIVE, ACCOUNTS_MANAGE,
 })
 _VIEW = {STAFF_ACCESS, REPORTS_VIEW, BURNBANS_VIEW, AUDIT_VIEW}
@@ -54,7 +59,8 @@ _MODERATE = {REPORTS_MODERATE, BURNBANS_MODERATE}
 ROLE_PERMISSIONS: dict[str, frozenset] = {
     "owner": ALL_PERMISSIONS,
     "admin": ALL_PERMISSIONS - {ACCOUNTS_MANAGE},
-    "staff": ALL_PERMISSIONS - {ACCOUNTS_MANAGE, HOMEPAGE_CARD_MANAGE, MODEL_TRAINING_VIEW, MODEL_TRAINING_RUN},
+    "staff": ALL_PERMISSIONS - {ACCOUNTS_MANAGE, HOMEPAGE_CARD_MANAGE, MODEL_TRAINING_VIEW, MODEL_TRAINING_RUN,
+                                ARTICLES_PUBLISH, NEWSLETTER_ARCHIVE_MANAGE},
     # Partners can look but not act.
     "partner": frozenset(_VIEW | {PUSH_RECEIVE}),
     # App-store reviewers get the same screens and actions as staff, against demo data only (core/sandbox.py), and no real push.

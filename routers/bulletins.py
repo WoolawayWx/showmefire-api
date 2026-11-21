@@ -39,6 +39,7 @@ from services.graphics_email import (
     set_audience_contact_unsubscribed,
     upsert_audience_contact,
 )
+from services import newsletter_web
 from services.mobile_content import county_catalog
 
 router = APIRouter(tags=["bulletins"])
@@ -420,6 +421,7 @@ def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
                 bulletin["text_body"],
                 manage_url,
                 attachments,
+                web_url=newsletter_web.web_url(bulletin),
             )
             sent += 1
         return mark_bulletin_sent(bulletin_id, f"targeted:{sent}")

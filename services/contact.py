@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
+import requests
 
 from core.database import get_db_path
 from services import graphics_email
@@ -113,6 +114,43 @@ def create(request_id: str, fields: dict, ip: str) -> str:
     return ticket_id
 
 
+def delivery_failure(exc: Exception) -> tuple[str, int | None]:
+    """Return actionable diagnostics without logging provider text, addresses or credentials."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        response = exc.response
+        status = response.status_code
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        # Inspect provider text only to choose a fixed label. Never return the text itself.
+        message = str(body.get("message", "")).lower()
+        if "domain is not verified" in message or "verify your domain" in message:
+            return "sender_domain_unverified", status
+        if "only send testing emails" in message:
+            return "sender_in_testing_mode", status
+        known_codes = {
+            "validation_error", "restricted_api_key", "invalid_api_key", "missing_api_key",
+            "rate_limit_exceeded", "daily_quota_exceeded", "monthly_quota_exceeded",
+            "invalid_idempotent_request", "concurrent_idempotent_requests", "application_error",
+            "authentication_error", "authorization_error", "unprocessable_entity", "api_error",
+            "invalid_idempotency_key",
+        }
+        code = body.get("name")
+        return (code if isinstance(code, str) and code in known_codes else "provider_http_error"), status
+    if isinstance(exc, requests.Timeout):
+        return "provider_timeout", None
+    if isinstance(exc, requests.ConnectionError):
+        return "provider_connection_error", None
+    if not configured():
+        return "email_configuration_missing", None
+    if isinstance(exc, ValueError):
+        return "invalid_provider_response", None
+    return "delivery_error", None
+
+
 def deliver(ticket_id: str) -> bool:
     """Claim each email before sending. A crash releases its lease after two minutes.
 
@@ -134,9 +172,11 @@ def deliver(ticket_id: str) -> bool:
             result = graphics_email._resend_request("POST", "/emails", json.loads(row["payload"]),
                                                      idempotency_key=f"contact/{ticket_id}/{kind}")
             if not result.get("id"):
-                raise RuntimeError("No email ID returned")
-        except Exception:
-            logger.warning("Contact email pending: ticket=%s kind=%s", ticket_id, kind)
+                raise ValueError("No email ID returned")
+        except Exception as exc:
+            reason, status = delivery_failure(exc)
+            logger.warning("Contact email pending: ticket=%s kind=%s reason=%s http_status=%s",
+                           ticket_id, kind, reason, status if status is not None else "none")
             with connect() as conn:
                 conn.execute("UPDATE contact_email_outbox SET next_attempt_at = ? WHERE ticket_id = ? AND kind = ?",
                              (time.time() + 300, ticket_id, kind))
