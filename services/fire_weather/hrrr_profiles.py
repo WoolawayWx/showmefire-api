@@ -69,12 +69,20 @@ def _idx_url(run: datetime, product: str) -> str:
     return f"{AWS}/hrrr.{run:%Y%m%d}/conus/hrrr.t{run:%H}z.wrf{product}f{FORECAST_HOUR:02d}.grib2.idx"
 
 
+def _head_status(url: str) -> int:
+    """HTTP status of a HEAD request; 0 when AWS is slow or unreachable (treated as not yet published)."""
+    try:
+        return requests.head(url, headers=HEADERS, timeout=20).status_code
+    except requests.exceptions.RequestException:
+        return 0
+
+
 def available_hours(hours_back: int = 6, now: Optional[datetime] = None,
                     head: Callable[[str], int] | None = None) -> list[datetime]:
     """Valid hours from the last `hours_back` hours through the current or next
     hour whose prs AND sfc files are published (their .idx exists), oldest first."""
     now = (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
-    head = head or (lambda url: requests.head(url, headers=HEADERS, timeout=20).status_code)
+    head = head or _head_status
     hours = []
     for back in range(hours_back, -2, -1):  # -1: the next hour's file can appear just before it starts
         valid = now - timedelta(hours=back)

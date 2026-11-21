@@ -47,7 +47,15 @@ fi
 	|| echo "WARN: Combined verification artifacts failed for $TODAY_DASH" >&2
 
 "$PYTHON" forecast/endOfDayReport.py
-"$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta
+# The beta (ModelFD) forecast archive only exists on days a beta candidate ran. Without today's file, endOfDayReport
+# would raise "Missing data files" and abort the script before the model-shadow and 09z verification below.
+HAS_BETA=false
+if compgen -G "archive/forecasts/station_forecasts_beta_${TODAY_COMPACT}_*.json" > /dev/null; then
+	HAS_BETA=true
+	"$PYTHON" forecast/endOfDayReport.py --forecast-glob "station_forecasts_beta_*.json" --report-suffix beta
+else
+	echo "WARN: No beta station forecast archive for $TODAY_DASH; skipping beta verification." >&2
+fi
 
 # Ground-truth shadow verification (registry beta fuel_moisture model, see
 # services/shadow_ground_truth.py). Only produced by DailyForecast.py when a
@@ -83,7 +91,7 @@ if [[ ! -f "$SUMMARY_FILE" ]]; then
 	exit 1
 fi
 
-if [[ ! -f "$SUMMARY_FILE_BETA" ]]; then
+if [[ "$HAS_BETA" == true && ! -f "$SUMMARY_FILE_BETA" ]]; then
 	echo "ERROR: Missing beta validation summary: $SUMMARY_FILE_BETA" >&2
 	exit 1
 fi
@@ -100,6 +108,8 @@ print(int(summary.get('record_count', 0) or 0))
 PY
 )
 
+RECORD_COUNT_BETA=0
+if [[ "$HAS_BETA" == true ]]; then
 RECORD_COUNT_BETA=$("$PYTHON" - "$SUMMARY_FILE_BETA" <<'PY'
 import json
 import sys
@@ -111,13 +121,14 @@ with open(summary_path, 'r') as f:
 print(int(summary.get('record_count', 0) or 0))
 PY
 )
+fi
 
 if [[ "$RECORD_COUNT" -le 0 ]]; then
 	echo "ERROR: Validation produced zero overlapping records." >&2
 	exit 1
 fi
 
-if [[ "$RECORD_COUNT_BETA" -le 0 ]]; then
+if [[ "$HAS_BETA" == true && "$RECORD_COUNT_BETA" -le 0 ]]; then
 	echo "ERROR: Beta validation produced zero overlapping records." >&2
 	exit 1
 fi
@@ -127,7 +138,7 @@ if [[ ! -f "$VERIFICATION_CSV" ]]; then
 	exit 1
 fi
 
-if [[ ! -f "$VERIFICATION_CSV_BETA" ]]; then
+if [[ "$HAS_BETA" == true && ! -f "$VERIFICATION_CSV_BETA" ]]; then
 	echo "ERROR: Missing beta compatibility CSV: $VERIFICATION_CSV_BETA" >&2
 	exit 1
 fi

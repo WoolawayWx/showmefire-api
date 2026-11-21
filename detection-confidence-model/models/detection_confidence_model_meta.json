@@ -1,0 +1,37 @@
+{
+  "feature_names": [
+    "frp_log",
+    "bright_diff",
+    "bright_t7_norm",
+    "pixel_area_log",
+    "quality_flag",
+    "raw_confidence",
+    "solar_zenith_norm",
+    "satellite_zenith_norm",
+    "is_day",
+    "cropland_frac",
+    "water_frac",
+    "is_ngfs",
+    "is_viirs",
+    "is_modis",
+    "fuel_model_fbfm40",
+    "canopy_cover_frac"
+  ],
+  "training_samples": 5000,
+  "positive_samples": 1247,
+  "eval": {
+    "evaluated": true,
+    "method": "grouped_cv",
+    "folds": 5,
+    "samples": 5000,
+    "positives": 1247,
+    "negatives": 3753,
+    "groups": 376,
+    "auc": 0.8807481681054514,
+    "pr_auc": 0.7339695536811486,
+    "brier": 0.11175627526798416,
+    "logloss": 0.36891270910962004,
+    "baseline_auc": 0.5037325926481482,
+    "auc_lift": 0.37701557545730324
+  }
+}
