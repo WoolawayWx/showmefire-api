@@ -424,8 +424,6 @@ async def ingest_fire_detections_job():
         await _render_in_pool(refresh_incident_graphics)
         from services.incident_shape_extractor import refresh_incident_shapes
         await asyncio.to_thread(refresh_incident_shapes)
-        from services.fire_confidence import refresh_confidence_shapes
-        await asyncio.to_thread(refresh_confidence_shapes)
         try:
             from services.fire_confidence import list_feedback_candidate_incidents
             from services.mobile_push import notify_feedback_candidates

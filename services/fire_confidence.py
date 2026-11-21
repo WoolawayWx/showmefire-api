@@ -1,16 +1,10 @@
 """Small, explainable confidence model for grouped satellite fire detections."""
 from __future__ import annotations
 
-import json
 import math
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 
-from core.config import GIS_DIR
 from core.database import get_db_path, list_fire_incidents, list_fire_incident_members
-
-OUTPUT_PATH = Path(GIS_DIR) / "fire_incident_confidence.geojson"
 
 
 def _raw_confidence(value) -> float:
@@ -67,33 +61,6 @@ def _score(features: list[float]) -> tuple[float, str, str]:
     return round(score, 3), label, method
 
 
-def _circle(lon: float, lat: float, radius_km: float, steps: int = 24) -> list[list[float]]:
-    points = []
-    for index in range(steps + 1):
-        angle = 2 * math.pi * index / steps
-        points.append([lon + radius_km * math.cos(angle) / (111.32 * max(0.2, math.cos(math.radians(lat)))), lat + radius_km * math.sin(angle) / 110.574])
-    return points
-
-
-def build_confidence_geojson() -> dict:
-    features = []
-    for incident in list_fire_incidents(limit=500):
-        members = list_fire_incident_members(incident["id"])
-        from services.incident_confidence import score_incident, use_v2
-        if use_v2():
-            result = score_incident(incident, members)
-            score, label, method = round(result["score"] / 100, 3), result["label"], result["method"]
-        else:
-            score, label, method = _score(_features(incident, members))
-        radius = min(3.0, max(0.5, 0.45 + len(members) * 0.08))
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Polygon", "coordinates": [_circle(float(incident["centroid_longitude"]), float(incident["centroid_latitude"]), radius)]},
-            "properties": {"incident_id": incident["id"], "incident_slug": incident.get("public_slug"), "confidence_score": score, "confidence_label": label, "model": method, "radius_km": round(radius, 2), "detection_count": len(members)},
-        })
-    return {"type": "FeatureCollection", "features": features, "metadata": {"generated_at": datetime.now(timezone.utc).isoformat(), "model": "fire-confidence-v1"}}
-
-
 FEEDBACK_CANDIDATE_LABELS = {"moderate", "high"}
 FEEDBACK_CANDIDATE_MAX_AGE_HOURS = 12
 
@@ -104,7 +71,7 @@ def list_feedback_candidate_incidents(now: datetime | None = None) -> list[dict]
     teaches the models the most; high still surfaces likely real fires. Only
     incidents first seen in the last FEEDBACK_CANDIDATE_MAX_AGE_HOURS, so a
     prompt held over quiet hours never goes out for a stale incident. Scores
-    with the same v1/v2 dispatch as build_confidence_geojson/fires_v2, so the
+    with the same v1/v2 dispatch as fires_v2, so the
     label matches what the app shows."""
     from services.incident_confidence import score_incident, use_v2
 
@@ -141,12 +108,3 @@ def list_feedback_candidate_incidents(now: datetime | None = None) -> list[dict]
                 "detection_count": incident.get("detection_count"),
             })
     return result
-
-
-def refresh_confidence_shapes() -> dict:
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = build_confidence_geojson()
-    temporary = OUTPUT_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    os.replace(temporary, OUTPUT_PATH)
-    return {"feature_count": len(payload["features"]), "path": str(OUTPUT_PATH)}

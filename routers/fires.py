@@ -1002,14 +1002,10 @@ def list_public_fire_detection_footprints_geojson(response: Response, limit: int
 
 
 @router.get("/api/fires/incidents-confidence.geojson")
-def get_public_fire_incident_confidence_shapes(response: Response):
-    """Confidence circles/polygons for GIS clients and the public map."""
-    from core.config import GIS_DIR
-    path = GIS_DIR / "fire_incident_confidence.geojson"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Confidence shapes are not available yet")
-    response.headers["Cache-Control"] = "public, max-age=60"
-    return FileResponse(path, media_type="application/geo+json")
+def get_public_fire_incident_confidence_shapes():
+    """Removed: the confidence circles were sized by detection count only, so their area said nothing about a fire. The
+    confidence score and label are still on every incident (`/api/v2/fires/incidents`)."""
+    raise HTTPException(status_code=410, detail="Confidence circles were removed. Use incident_confidence on /api/v2/fires/incidents.")
 
 
 @router.get("/api/fires/incidents/{slug}")
@@ -1673,12 +1669,10 @@ def admin_refresh_fire_incident_graphics(
 
 @router.post("/api/admin/fires/incidents/reanalyze")
 def admin_reanalyze_fire_incidents(incident_id: Optional[int] = None, _admin: str = Depends(REPORTS_MODERATE)):
-    """Re-run confidence scoring and regenerate graphics after data changes."""
-    from services.fire_confidence import refresh_confidence_shapes
+    """Regenerate incident graphics after data changes (confidence is scored on read, so there is nothing else to refresh)."""
     from services.fire_incident_graphics import refresh_incident_graphics
     graphic_result = refresh_incident_graphics(incident_id=incident_id, force=True)
-    confidence_result = refresh_confidence_shapes()
-    return {"success": True, "graphics": graphic_result, "confidence": confidence_result}
+    return {"success": True, "graphics": graphic_result}
 
 
 @router.get("/api/admin/fires/incidents/review-state")

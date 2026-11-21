@@ -1,23 +1,17 @@
-"""Extracts a real, irregular shape for a fire incident from the GOES-19
-NGFS Microphysics RGB composite - the same family of technique radar
-storm-cell identification (SCIT/TITAN-style) uses on a reflectivity field:
-threshold to a mask, connected-component-label contiguous regions, keep
-only the ones anchored by a real return (here: a real satellite detection),
-then trace the contour into a polygon.
+"""One outline per fire incident: where the incident's satellite detections cover.
 
-This is unsupervised/algorithmic by design - there is no labeled fire-
-perimeter dataset in this system to train against. The color threshold
-below is a documented starting heuristic (env-tunable), not a calibrated
-one: live probes of the tile server during development confirmed the
-product's clear-sky/land background is a consistent, saturated cool cyan
-(blue channel pinned ~255, green ~200-220, red low-to-mid), but no
-currently-hot pixel was available to sample at that time. Tune
-FIRE_SHAPE_BLUE_MAX/FIRE_SHAPE_RED_RATIO_MIN once a live fire is visible
-in the composite.
+It is the union of every member detection's real pixel footprint (NGFS/GOES keeps one) or, for detections that carry none
+(VIIRS/MODIS points), a small circle sized to that sensor's pixel, smoothed so corners are rounded and nearby pieces join
+into a single contiguous polygon. It is an outline of where the satellite pixels landed, NOT the fire's perimeter: pixel
+positions are only good to a few hundred metres (GOES ~2 km).
 
-The tile endpoint has no time parameter - it only ever serves the current
-composite, so shapes can only be computed near real-time for currently
-active incidents, never backfilled.
+There used to be a second step that thresholded the NGFS Microphysics satellite image to add hot pixels. It was never
+calibrated, could not be backfilled (the tile server only serves the current composite) and, measured on production
+incidents with real GOES footprints, changed the area in only about one case in ten (median ratio 1.00x), so it was
+removed.
+
+The shape is used by the app's map and incident screen, the incident graphic, the ground-cover sampling area and the
+cropland-burn model.
 """
 from __future__ import annotations
 
@@ -26,8 +20,6 @@ import logging
 import math
 import os
 
-import numpy as np
-from affine import Affine
 from shapely.affinity import scale, translate
 from shapely.geometry import Point
 from shapely.geometry import shape as shapely_shape
@@ -42,25 +34,15 @@ from core.database import (
 
 logger = logging.getLogger(__name__)
 
-MICROPHYSICS_TILE_URL = "https://re-ngfs.ssec.wisc.edu/api/image?products=G19-C-NGFSMicrophysics-TC&x={x}&y={y}&z={z}"
-
-# Same MIN_DETECTIONS gate fire_incident_graphics.py uses - a lone detection
-# isn't worth an imagery fetch/analysis pass.
+# A lone detection is not worth an outline of its own (same gate fire_incident_graphics.py uses).
 MIN_DETECTIONS = int(os.getenv("FIRE_SHAPE_MIN_DETECTIONS", "5"))
-IMAGE_SIZE = int(os.getenv("FIRE_SHAPE_IMAGE_SIZE", "300"))
-
-# Fire/hot-signature threshold against the confirmed cool-cyan background -
-# see module docstring. Deliberately env-tunable, not hardcoded.
-BLUE_MAX = int(os.getenv("FIRE_SHAPE_BLUE_MAX", "200"))
-RED_RATIO_MIN = float(os.getenv("FIRE_SHAPE_RED_RATIO_MIN", "1.1"))
 
 # Approximate half-pixel-size buffer (km) for a detection with no stored
 # footprint polygon - VIIRS (~375m nominal pixel) and MODIS (~1km nominal
 # pixel) point detections don't carry a footprint_geojson the way NGFS
 # detections do, so they're represented as a small buffered circle instead,
 # letting them still contribute area to the merged incident shape rather
-# than being ignored. Same degree-conversion approach fire_confidence.py's
-# _circle() already uses.
+# than being ignored.
 POINT_BUFFER_KM = {"ngfs": 1.0, "viirs": 0.2, "modis": 0.5}
 DEFAULT_POINT_BUFFER_KM = 0.3
 
@@ -78,38 +60,6 @@ MAX_SMOOTHING_DOUBLINGS = 6
 # Running count of convex-hull fallbacks (see _merge_to_single_polygon); reset
 # and reported by refresh_incident_shapes.
 hull_fallbacks = 0
-
-
-def extract_hot_mask(rgb: np.ndarray) -> np.ndarray:
-    """Boolean mask of pixels that break the product's cool-cyan background
-    pattern - candidate fire/hot-signature pixels."""
-    red = rgb[:, :, 0].astype(np.float32)
-    blue = rgb[:, :, 2].astype(np.float32)
-    return (blue < BLUE_MAX) & (red > blue * RED_RATIO_MIN)
-
-
-def _pixel_transform(extent: tuple[float, float, float, float], width: int, height: int) -> Affine:
-    """extent = (min_lon, max_lon, min_lat, max_lat), matching
-    graphic_renderer._basemap's convention. Linear lon/lat mapping is
-    accurate enough at incident scale (a few km across)."""
-    min_lon, max_lon, min_lat, max_lat = extent
-    x_res = (max_lon - min_lon) / width
-    y_res = (max_lat - min_lat) / height
-    return Affine(x_res, 0, min_lon, 0, -y_res, max_lat)
-
-
-def _lonlat_to_pixel(lon: float, lat: float, extent, width: int, height: int) -> tuple[int, int]:
-    min_lon, max_lon, min_lat, max_lat = extent
-    px = int((lon - min_lon) / (max_lon - min_lon) * width)
-    py = int((max_lat - lat) / (max_lat - min_lat) * height)
-    return px, py
-
-
-def _incident_extent(members: list[dict]) -> tuple[float, float, float, float]:
-    lats = [float(m["latitude"]) for m in members]
-    lons = [float(m["longitude"]) for m in members]
-    margin = max(0.01, max(max(lats) - min(lats), max(lons) - min(lons)) * 0.6)
-    return (min(lons) - margin, max(lons) + margin, min(lats) - margin, max(lats) + margin)
 
 
 def _merge_to_single_polygon(combined, incident_id=None):
@@ -143,7 +93,7 @@ def _point_buffer_polygon(lat: float, lon: float, radius_km: float):
     """A small ellipse approximating a circle of radius_km around (lat, lon),
     in degrees - longitude is stretched by 1/cos(lat) so it reads as a
     circle on a real map despite the projection, same approach
-    fire_confidence.py's _circle() uses for confidence-area rings."""
+    the old confidence rings used."""
     lat_deg = radius_km / 110.574
     lon_deg = radius_km / max(0.0001, 111.32 * math.cos(math.radians(lat)))
     circle = Point(0, 0).buffer(1.0, quad_segs=12)
@@ -175,62 +125,16 @@ def _member_polygons(members: list[dict]) -> list:
 
 
 def compute_incident_shape(incident: dict, members: list[dict]) -> dict | None:
-    """Returns a single GeoJSON Polygon geometry dict (always one contiguous
-    polygon, never a MultiPolygon - see _merge_to_single_polygon) combining
-    every member detection - real pixel footprints, buffered point
-    detections (VIIRS/MODIS), and (when available) the NGFS Microphysics
-    imagery analysis - into one rounded-corner shape for the whole incident,
-    rather than a point/footprint/circle per individual detection. This is
-    the incident's one "parent" shape: everything else (per-detection rows,
-    the ML confidence score, the pixel footprints themselves) is still
-    stored and queryable exactly as before, this just gives the incident a
-    single easy-to-display outline that already reflects all of it.
+    """Returns a single GeoJSON Polygon geometry dict (always one contiguous polygon, never a MultiPolygon - see
+    _merge_to_single_polygon) combining every member detection (real pixel footprints, and buffered points for
+    VIIRS/MODIS) into one rounded-corner outline for the whole incident. Everything else (the per-detection rows, the
+    confidence score, the pixel footprints themselves) is still stored and queryable exactly as before.
 
-    Returns None if there are no members at all or nothing could be
-    combined into a valid shape. Never raises."""
+    Returns None if there are no members or nothing could be combined into a valid shape. Never raises."""
     if not members:
         return None
-    ngfs_members = [m for m in members if m.get("source") == "ngfs"]
-
-    # The tile server only ever serves the *current* composite (see module
-    # docstring), so a detection from even a few scans ago may no longer
-    # show a hot signature by the time this runs - imagery is treated as an
-    # enhancement, not a hard requirement. The stored per-pixel footprints
-    # (always available for ngfs members) are the reliable fallback shape.
-    imagery_polygons: list = []
-    if ngfs_members:
-        try:
-            from scipy import ndimage
-            from rasterio import features as rio_features
-            from services.graphic_renderer import _basemap
-
-            extent = _incident_extent(members)
-            image, fetched = _basemap(extent, width=IMAGE_SIZE, height=IMAGE_SIZE, url_template=MICROPHYSICS_TILE_URL)
-            if fetched:
-                rgb = np.array(image.convert("RGB"))
-                mask = extract_hot_mask(rgb)
-                if mask.any():
-                    labeled, _ = ndimage.label(mask)
-                    seed_labels = set()
-                    for member in ngfs_members:
-                        px, py = _lonlat_to_pixel(float(member["longitude"]), float(member["latitude"]), extent, IMAGE_SIZE, IMAGE_SIZE)
-                        if 0 <= px < IMAGE_SIZE and 0 <= py < IMAGE_SIZE:
-                            label_id = labeled[py, px]
-                            if label_id:
-                                seed_labels.add(int(label_id))
-                    if seed_labels:
-                        seeded_mask = np.isin(labeled, list(seed_labels))
-                        transform = _pixel_transform(extent, IMAGE_SIZE, IMAGE_SIZE)
-                        imagery_polygons = [
-                            shapely_shape(geom) for geom, value in rio_features.shapes(
-                                seeded_mask.astype(np.uint8), mask=seeded_mask, transform=transform,
-                            )
-                        ]
-        except Exception:
-            logger.warning("incident_shape_extractor: imagery analysis failed for incident %s, falling back to footprints/points only", incident.get("id"), exc_info=True)
-
     try:
-        combined = unary_union(imagery_polygons + _member_polygons(members))
+        combined = unary_union(_member_polygons(members))
         if combined.is_empty:
             return None
         # Round sharp pixel-corner joints into curves and merge every piece
@@ -270,9 +174,7 @@ def _iter_incidents(incident_id: int | None):
 
 def refresh_incident_shapes(incident_id: int | None = None, force: bool = False) -> dict:
     """Recompute shapes only for incidents whose detection_count changed
-    since the last shape computation (or on force) - avoids re-fetching and
-    re-analyzing imagery for an incident that hasn't changed, same
-    compute-cost-conscious design as the recurring-source suppression."""
+    since the last shape computation (or on force)."""
     global hull_fallbacks
     hull_fallbacks = 0
     updated = 0
