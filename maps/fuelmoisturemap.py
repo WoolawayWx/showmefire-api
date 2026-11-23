@@ -43,7 +43,7 @@ def now_ct():
 
 load_dotenv()
 port = os.getenv('PORT', '8000')
-response = requests.get(f'http://localhost:{port}/stations/raws')
+response = requests.get(f'http://localhost:{port}/stations/raws', timeout=30)
 stations = response.json()['stations']
 
 points = []

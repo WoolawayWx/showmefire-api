@@ -10,7 +10,7 @@ def fetch_station_data(station_id, start_time, end_time):
 		'start': start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
 		'end': end_time.strftime('%Y-%m-%dT%H:%M:%SZ')
 	}
-	resp = requests.get(url, params=params)
+	resp = requests.get(url, params=params, timeout=30)
 	resp.raise_for_status()
 	return pd.DataFrame(resp.json())
 

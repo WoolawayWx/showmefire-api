@@ -108,7 +108,7 @@ load_dotenv()
 port = os.getenv('PORT', '8000')
 
 # --- Use RAWS endpoint for fuel moisture ---
-response = requests.get(f'http://localhost:{port}/stations/raws')
+response = requests.get(f'http://localhost:{port}/stations/raws', timeout=30)
 raws_stations = response.json()['stations']
 station_danger_summary = empty_station_fire_danger_summary(raws_stations)
 peak_running_grid = None
