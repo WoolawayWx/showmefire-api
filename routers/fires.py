@@ -249,9 +249,12 @@ class FireReportCreate(BaseModel):
     longitude: float = Field(ge=MO_LON_MIN, le=MO_LON_MAX)
     occurred_at: str = Field(min_length=8, max_length=40)
     occurred_at_precision: Literal["minute", "hour", "day"] = "minute"
-    acres: float = Field(gt=0, le=100000)
+    # "structure" = a building fire. Acres and fuel types describe a wildland fire, so they are only required for
+    # "wildland" (the default, which is what older clients send).
+    fire_type: Literal["wildland", "structure"] = "wildland"
+    acres: Optional[float] = Field(default=None, gt=0, le=100000)
     acres_is_estimate: bool = True
-    fuel_types: List[str] = Field(min_length=1, max_length=6)
+    fuel_types: List[str] = Field(default_factory=list, max_length=6)
     description: str = Field(min_length=20, max_length=4000)
     out_of_ordinary: str = Field(default="", max_length=2000)
     reporter_contact: str = Field(min_length=1, max_length=120)
@@ -285,6 +288,15 @@ class FireReportCreate(BaseModel):
         if unknown:
             raise ValueError(f"unknown fuel type(s): {', '.join(unknown)}")
         return value
+
+    @model_validator(mode="after")
+    def _require_wildland_fields(self):
+        if self.fire_type == "wildland":
+            if self.acres is None:
+                raise ValueError("acres is required for a wildland fire")
+            if not self.fuel_types:
+                raise ValueError("fuel_types is required for a wildland fire")
+        return self
 
     @field_validator("description")
     @classmethod
@@ -437,6 +449,8 @@ SATELLITE_EVENT_SOURCES = {"modis", "viirs", "ngfs"}
 
 class FireIncidentFeedback(BaseModel):
     classification: Literal["confirmed_fire", "controlled_burn", "not_a_fire", "unsure"]
+    # Optional: what kind of fire it is. Older clients never send it (stored as NULL).
+    fire_type: Optional[Literal["wildland", "structure", "vehicle", "debris", "other"]] = None
     note: str = Field(default="", max_length=2000)
     contact: str = Field(default="", max_length=120)
     # Which client sent it. Optional so older clients keep working (stored as NULL).
@@ -702,6 +716,7 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
         occurred_at_precision=payload.occurred_at_precision,
         acres=payload.acres,
         acres_is_estimate=payload.acres_is_estimate,
+        fire_type=payload.fire_type,
         fuel_types=payload.fuel_types,
         description=payload.description,
         out_of_ordinary=payload.out_of_ordinary,
@@ -726,13 +741,14 @@ def submit_fire_report(payload: FireReportCreate, request: Request, background_t
     from ai.report_features import extract_and_store
     alert = dict(
         alert_type="fire_report",
-        title=f"New fire report: {county_name + ' County' if county_name else 'Missouri'}",
+        title=f"New {'structure fire' if payload.fire_type == 'structure' else 'fire'} report: {county_name + ' County' if county_name else 'Missouri'}",
         description=payload.description,
         fields=[
             {"name": "Location", "value": address_text or f"{payload.latitude:.4f}, {payload.longitude:.4f}", "inline": False},
-            {"name": "Acres", "value": f"{'~' if payload.acres_is_estimate else ''}{payload.acres:g}"},
+            {"name": "Type", "value": payload.fire_type},
+            {"name": "Acres", "value": f"{'~' if payload.acres_is_estimate else ''}{payload.acres:g}" if payload.acres is not None else "n/a"},
             {"name": "Occurred", "value": payload.occurred_at},
-            {"name": "Fuel", "value": ", ".join(payload.fuel_types)},
+            {"name": "Fuel", "value": ", ".join(payload.fuel_types) or "n/a"},
             {"name": "Reporter", "value": (payload.reporter_relationship or "").replace("_", " ")},
             {"name": "Unusual", "value": payload.out_of_ordinary, "inline": False},
         ],
@@ -1036,7 +1052,7 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
     feedback_record = create_fire_incident_feedback(
         incident["id"], payload.classification, note,
         _clean_text(payload.contact, required=False, field="contact"), ip_hash,
-        submission_source=payload.source,
+        submission_source=payload.source, fire_type=payload.fire_type,
         submitter_country=(request.headers.get("cf-ipcountry") or "").strip()[:8] or None if TRUST_PROXY_HEADERS else None,
         submitter_region=(request.headers.get("cf-region-code") or "").strip()[:16] or None if TRUST_PROXY_HEADERS else None,
         user_agent=(request.headers.get("user-agent") or "").strip()[:200] or None,
@@ -1048,6 +1064,8 @@ def submit_public_fire_incident_feedback(slug: str, payload: FireIncidentFeedbac
         {"name": "Classification", "value": payload.classification.replace("_", " ")},
         {"name": "Incident", "value": slug},
     ]
+    if payload.fire_type:
+        fields.insert(1, {"name": "Fire type", "value": payload.fire_type})
     # Score it inline so staff see *why* the review queue would trust (or
     # distrust) this submission straight from the Discord alert, without
     # having to open the admin page first - same heuristic

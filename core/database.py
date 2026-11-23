@@ -380,6 +380,8 @@ def _ensure_fire_event_tables(cursor: sqlite3.Cursor) -> None:
         ("reported_fire_status", "TEXT"),
         ("reported_structures_threatened", "INTEGER"),
         ("reported_responders_on_scene", "INTEGER"),
+        # 'wildland' (default / NULL on older rows) or 'structure' for a building fire report.
+        ("fire_type", "TEXT"),
     ):
         if column_name not in fire_events_columns:
             cursor.execute(f"ALTER TABLE fire_events ADD COLUMN {column_name} {column_type}")
@@ -632,6 +634,8 @@ def _ensure_fire_incident_tables(cursor: sqlite3.Cursor) -> None:
         ("user_agent", "TEXT"),
         # Finer kind of a controlled_burn answer ('cropland' = a field/crop-residue burn); NULL = not specified.
         ("burn_type", "TEXT"),
+        # Optional answer to "What type of fire?" (wildland / structure / vehicle / debris / other); NULL = not given.
+        ("fire_type", "TEXT"),
     ):
         if name not in feedback_columns:
             cursor.execute(f"ALTER TABLE fire_incident_feedback ADD COLUMN {name} {definition}")
@@ -3037,7 +3041,7 @@ _ADMIN_EVENT_COLUMNS = _PUBLIC_EVENT_COLUMNS + (
     "label_revision", "revised_at", "parent_event_id",
     "reporter_contact", "submitter_ip_hash",
     "reporter_name", "reporter_org", "address_text", "reporter_relationship",
-    "reported_fire_status", "reported_structures_threatened", "reported_responders_on_scene",
+    "reported_fire_status", "reported_structures_threatened", "reported_responders_on_scene", "fire_type",
     "consent_version", "captcha_verdict",
     "moderated_by", "moderated_at", "pii_purged_at",
     "first_seen_at", "last_seen_at",
@@ -3269,7 +3273,7 @@ def create_fire_report(
     longitude: float,
     occurred_at: str,
     occurred_at_precision: str,
-    acres: float,
+    acres: Optional[float],
     acres_is_estimate: bool,
     fuel_types: List[str],
     description: str,
@@ -3290,6 +3294,7 @@ def create_fire_report(
     reported_fire_status: Optional[str] = None,
     reported_structures_threatened: Optional[bool] = None,
     reported_responders_on_scene: Optional[bool] = None,
+    fire_type: str = "wildland",
 ) -> Dict:
     """Insert a public, anonymous fire report as status='pending'."""
     db_path = get_db_path()
@@ -3305,8 +3310,8 @@ def create_fire_report(
                 acres, acres_is_estimate, description, out_of_ordinary,
                 reporter_contact, reporter_name, reporter_org, address_text, reporter_relationship,
                 submitter_ip_hash, upload_token_hash, consent_version, captcha_verdict,
-                reported_fire_status, reported_structures_threatened, reported_responders_on_scene
-            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reported_fire_status, reported_structures_threatened, reported_responders_on_scene, fire_type
+            ) VALUES ('user_submission', 'pending', 'unverified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             latitude, longitude, county_fips, county_name,
             occurred_at, occurred_at_precision, occurred_at_tz_offset_minutes,
@@ -3316,6 +3321,7 @@ def create_fire_report(
             reported_fire_status,
             None if reported_structures_threatened is None else int(reported_structures_threatened),
             None if reported_responders_on_scene is None else int(reported_responders_on_scene),
+            fire_type or "wildland",
         ))
         event_id = cursor.lastrowid
         _set_fire_event_fuels(cursor, event_id, fuel_types)
@@ -4508,6 +4514,7 @@ def create_fire_incident_feedback(
     submitter_region: Optional[str] = None,
     user_agent: Optional[str] = None,
     burn_type: Optional[str] = None,
+    fire_type: Optional[str] = None,
 ) -> Dict:
     db_path = get_db_path()
     with sqlite3.connect(db_path, timeout=15) as conn:
@@ -4515,10 +4522,10 @@ def create_fire_incident_feedback(
         cursor.execute(
             """INSERT INTO fire_incident_feedback
                (incident_id, classification, note, contact, submitter_ip_hash, submission_source, status_reason,
-                submitter_country, submitter_region, user_agent, burn_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                submitter_country, submitter_region, user_agent, burn_type, fire_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (incident_id, classification, note, contact, ip_hash, submission_source,
-             FEEDBACK_STATUS_REASONS["pending"], submitter_country, submitter_region, user_agent, burn_type),
+             FEEDBACK_STATUS_REASONS["pending"], submitter_country, submitter_region, user_agent, burn_type, fire_type),
         )
         conn.commit()
         return {"id": cursor.lastrowid, "incident_id": incident_id, "classification": classification}
@@ -4548,7 +4555,7 @@ def list_fire_incident_feedback(incident_id: int) -> List[Dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, incident_id, classification, note, contact, status, reviewed_by, reviewed_at, created_at, "
-            "submission_source, status_reason, submitter_country, submitter_region, user_agent, burn_type, "
+            "submission_source, status_reason, submitter_country, submitter_region, user_agent, burn_type, fire_type, "
             "substr(submitter_ip_hash, 1, 8) AS submitter_ref "
             "FROM fire_incident_feedback WHERE incident_id = ? ORDER BY created_at DESC",
             (incident_id,),
