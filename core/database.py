@@ -1192,6 +1192,25 @@ def real_db_path():
     # 2. Fallback: Calculate path relative to this file (works for local dev)
     # core/database.py -> parent=core -> parent=root -> data/showmefire.db
     return Path(__file__).resolve().parent.parent / 'data' / 'showmefire.db'
+
+
+DEFAULT_BUSY_TIMEOUT_SECONDS = 15
+
+
+def connect(path=None, *, timeout: float = DEFAULT_BUSY_TIMEOUT_SECONDS, **kwargs) -> sqlite3.Connection:
+    """The one way application code opens the SQLite database.
+
+    A 15 s busy timeout (plain `sqlite3.connect` waits only 5 s, so a write burst from a scheduler job surfaced as
+    "database is locked" in a request) and `synchronous=NORMAL`, which is safe in WAL mode and makes commits cheaper.
+    `path` is whatever the caller resolved (callers keep their own `get_db_path`, which tests patch); None means the
+    current database. Extra keyword arguments (isolation_level, uri...) go to `sqlite3.connect`.
+    """
+    connection = sqlite3.connect(get_db_path() if path is None else path, timeout=timeout, **kwargs)
+    try:
+        connection.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError:
+        pass   # a read-only or in-memory handle: the default is fine
+    return connection
     
 def _migrate_forecasts_off_legacy_valid_time_unique(conn: sqlite3.Connection) -> None:
     """Rebuild `forecasts` if it still carries the original single-column
@@ -7773,7 +7792,7 @@ def list_graphic_only_recipients(forecast_date: str) -> List[Dict]:
 
 
 def claim_newsletter_delivery(email: str, county_fips: str, forecast_date: str) -> bool:
-    conn = sqlite3.connect(get_db_path(), isolation_level=None)
+    conn = connect(get_db_path(), isolation_level=None)
     try:
         cursor = conn.execute(
             '''INSERT OR IGNORE INTO newsletter_deliveries

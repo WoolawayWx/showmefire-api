@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.security import require_admin
 
@@ -44,7 +45,7 @@ def parse_youtube_id(value: str) -> Optional[str]:
 
 
 def _row() -> dict:
-    with sqlite3.connect(get_db_path()) as connection:
+    with connect_db(get_db_path()) as connection:
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT * FROM home_video WHERE id = 1").fetchone()
     return dict(row) if row else {
@@ -110,7 +111,7 @@ class HomeVideoUpdate(BaseModel):
 def _save(email: str, **fields) -> None:
     current = _row()
     merged = {**current, **fields}
-    with sqlite3.connect(get_db_path()) as connection:
+    with connect_db(get_db_path()) as connection:
         connection.execute(
             """INSERT INTO home_video (id, enabled, source, youtube_id, filename, title, caption, expires_at, updated_by, updated_at)
                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from ai.briefing import DANGER_LABELS
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.sandbox import is_sandbox
 
@@ -36,7 +37,7 @@ FEEDBACK_CHANNEL_MIN_APP_VERSION = (1, 2, 0)
 
 @contextmanager
 def _connect():
-    connection = sqlite3.connect(get_db_path())
+    connection = connect_db(get_db_path())
     connection.row_factory = sqlite3.Row
     try:
         yield connection

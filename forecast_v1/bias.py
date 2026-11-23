@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import xarray as xr
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from .contracts import CORRECTION_LIMITS, LOCAL_TIMEZONE, correction_multiplier, utc_rfc3339
 from .repository import ensure_schema
@@ -70,7 +71,7 @@ def _error_sums(database: Path, cycle: datetime) -> tuple[dict, dict]:
     parameters = (*window, *QUERIED_VARIABLES)
     blocks: dict[tuple[str, str, int], list[float]] = {}
     buckets: dict[tuple[str, str], list[float]] = {}
-    with sqlite3.connect(database) as connection:
+    with connect_db(database) as connection:
         hourly = connection.execute(
             f"""SELECT v.variable, v.lead_bucket, substr(v.valid_time_utc, 1, 13),
                        SUM(v.error - COALESCE(a.residual, 0)), COUNT(*),

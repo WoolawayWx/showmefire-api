@@ -42,6 +42,7 @@ import io
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.precipitation import (PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION,
                                 decode_forecast_precipitation,
@@ -819,7 +820,7 @@ def process_forecast_with_observations(
     station_indices = []
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_db(db_path)
         # Check if table exists first
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='station_grid_indices'")
@@ -1122,7 +1123,7 @@ def process_forecast_with_observations(
             
             if forecast_rows and env_bool('FORECAST_WRITE_DATABASE', True):
                 try:
-                    conn = sqlite3.connect(db_path)
+                    conn = connect_db(db_path)
                     conn.executemany('''
                         INSERT OR REPLACE INTO station_forecasts 
                         (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms,

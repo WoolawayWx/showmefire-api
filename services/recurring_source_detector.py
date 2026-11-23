@@ -16,6 +16,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from core.database import connect as connect_db
 from core.database import (
     create_recurring_source_candidate,
     find_recurring_source_near,
@@ -67,7 +68,7 @@ def run_recurring_source_scan() -> dict:
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
     db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path)
     conn.row_factory = sqlite3.Row
     try:
         cells = _grid_cells(conn.cursor(), cutoff_iso)

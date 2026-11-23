@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.security import require_admin
 
@@ -51,7 +52,7 @@ def fuel_sensor_status(recent_limit: int = 100, _admin: str = Depends(require_ad
     recent_limit = max(1, min(recent_limit, 500))
     stale_after_minutes = max(5, int(os.getenv("SMF_FUEL_SENSOR_STALE_MINUTES", "20")))
     try:
-        connection = sqlite3.connect(get_db_path())
+        connection = connect_db(get_db_path())
         connection.row_factory = sqlite3.Row
         latest_rows = connection.execute(
             """

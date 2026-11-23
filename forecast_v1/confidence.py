@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from .adapters import SourceCube
 from .contracts import HORIZON_HOURS, weights_for_lead
@@ -122,7 +123,7 @@ def load_previous_forecast(
     database = Path(db_path or get_db_path())
     if not database.exists():
         return None
-    with sqlite3.connect(database) as connection:
+    with connect_db(database) as connection:
         row = connection.execute(
             """SELECT a.local_path FROM forecast_assets a
                JOIN forecast_runs r ON r.run_id=a.run_id
@@ -145,7 +146,7 @@ def rolling_verification(
     if not database.exists():
         return xr.full_like(template, np.nan, dtype="float32")
     cutoff = (cycle.astimezone(timezone.utc) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
-    with sqlite3.connect(database) as connection:
+    with connect_db(database) as connection:
         eligible_buckets = {
             bucket for bucket, samples, stations in connection.execute(
                 """SELECT lead_bucket,COUNT(*) AS samples,COUNT(DISTINCT station_id) AS stations

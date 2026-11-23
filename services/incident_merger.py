@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from shapely.ops import transform, unary_union
 from shapely.strtree import STRtree
 
+from core.database import connect as connect_db
 from core.database import _parse_occurred_at, get_db_path
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,7 @@ def merge_touching_incidents(
     incidents active recently (the scheduled call); None considers all active
     incidents (the one-off cleanup). Returns a summary; with dry_run nothing
     is written."""
-    conn = sqlite3.connect(get_db_path())
+    conn = connect_db(get_db_path())
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     summary = {"considered": 0, "groups": [], "oversized": [], "merged_away": 0, "dry_run": dry_run}
@@ -334,7 +335,7 @@ def split_oversized_incidents(
     new incident. Returns a summary; with dry_run nothing is written."""
     import secrets
 
-    conn = sqlite3.connect(get_db_path())
+    conn = connect_db(get_db_path())
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     summary = {"examined": 0, "split": [], "dry_run": dry_run}

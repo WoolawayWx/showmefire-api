@@ -6,6 +6,7 @@ from typing import Annotated
 
 from pydantic import AnyHttpUrl, BaseModel, StringConstraints, field_validator
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 
 
@@ -28,7 +29,7 @@ class HomepageCardSettings(HomepageCardContent):
 
 
 def get_homepage_card_settings() -> HomepageCardSettings:
-    with closing(sqlite3.connect(get_db_path())) as connection:
+    with closing(connect_db(get_db_path())) as connection:
         row = connection.execute(
             "SELECT enabled, title, message, button_label, url FROM homepage_card WHERE id = 1"
         ).fetchone()
@@ -39,7 +40,7 @@ def get_homepage_card_settings() -> HomepageCardSettings:
 
 
 def save_homepage_card(settings: HomepageCardSettings) -> None:
-    with closing(sqlite3.connect(get_db_path())) as connection, connection:
+    with closing(connect_db(get_db_path())) as connection, connection:
         connection.execute(
             "UPDATE homepage_card SET enabled = ?, title = ?, message = ?, button_label = ?, url = ? WHERE id = 1",
             (settings.enabled, settings.title, settings.message, settings.buttonLabel, str(settings.url)),

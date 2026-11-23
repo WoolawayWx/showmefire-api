@@ -11,6 +11,7 @@ import json
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.database import connect as connect_db
 from core.database import get_db_path
 from services.synoptic import fetch_historical_station_data
 
@@ -48,7 +49,7 @@ async def fetch_and_store_observations():
             logger.warning("No station data returned from Synoptic API.")
             return
 
-        conn = sqlite3.connect(get_db_path())
+        conn = connect_db(get_db_path())
         cursor = conn.cursor()
         
         count = 0
@@ -123,7 +124,7 @@ def analyze_forecast_verification():
         logger.error(f"Database not found at {db_path}")
         return
 
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path)
     
     # Analyze various metrics
     # We join on nearest hour or exact match. 

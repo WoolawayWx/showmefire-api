@@ -15,6 +15,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.security import require_admin
 from services.mobile_content import county_catalog
@@ -115,7 +116,7 @@ def send_notification(payload: ManualNotification, email: str = Depends(require_
         extra_data={"manual": True},
         all_counties=True,
     )
-    with sqlite3.connect(get_db_path()) as connection:
+    with connect_db(get_db_path()) as connection:
         connection.execute(
             """INSERT INTO manual_notifications
                (event_key, channel, title, body, url, county_fips_json, recipients, sent, sent_by)
@@ -136,7 +137,7 @@ def notification_stats(days: int = 30, recent: int = 25, _admin: str = Depends(r
 
 @router.get("/history")
 def notification_history(limit: int = 50, _admin: str = Depends(require_admin)):
-    with sqlite3.connect(get_db_path()) as connection:
+    with connect_db(get_db_path()) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             "SELECT id, channel, title, body, url, county_fips_json, recipients, sent, sent_by, created_at "

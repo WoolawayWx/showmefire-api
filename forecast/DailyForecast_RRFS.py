@@ -45,6 +45,7 @@ from pathlib import Path
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.database import connect as connect_db
 from core.database import get_db_path
 from core.precipitation import (PRECIPITATION_CONTRACT_SHA256, PRECIPITATION_CONTRACT_VERSION,
                                 decode_forecast_precipitation,
@@ -696,7 +697,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
     station_indices = []
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_db(db_path)
         indices_df = pd.read_sql("SELECT * FROM station_grid_indices", conn)
         print(f"indices_df: ")
         if not indices_df.empty:
@@ -917,7 +918,7 @@ def process_forecast_with_observations(ds_full, lon, lat, port='8000', run_date=
             
             if forecast_rows:
                 try:
-                    conn = sqlite3.connect(db_path)
+                    conn = connect_db(db_path)
                     conn.executemany('''
                         INSERT OR REPLACE INTO station_forecasts 
                         (station_id, valid_time, forecast_run_time, temp_c, rel_humidity, wind_speed_ms,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+from core.database import connect as connect_db
 from core.database import get_db_path, list_fire_incidents, list_fire_incident_members
 
 
@@ -34,7 +35,7 @@ def _score(features: list[float]) -> tuple[float, str, str]:
     try:
         import sqlite3
         from sklearn.linear_model import LogisticRegression
-        with sqlite3.connect(get_db_path()) as conn:
+        with connect_db(get_db_path()) as conn:
             rows = conn.execute(
                 """SELECT e.cause_category, e.confidence, e.frp, e.incident_id, e.status
                    FROM fire_events e WHERE e.incident_id IS NOT NULL

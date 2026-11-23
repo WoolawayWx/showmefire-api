@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 
 
@@ -172,7 +173,7 @@ def ensure_schema(db_path: str | Path | None = None) -> None:
     if path in _schema_ready and path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with connect_db(path) as connection:
         connection.executescript(SCHEMA_SQL)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(forecast_runs)")}
         if "source_diagnostics_json" not in columns:
@@ -184,7 +185,7 @@ def ensure_schema(db_path: str | Path | None = None) -> None:
 
 @contextmanager
 def transaction(db_path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(db_path or get_db_path())
+    connection = connect_db(db_path or get_db_path())
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     try:

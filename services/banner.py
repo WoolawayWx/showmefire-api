@@ -2,6 +2,7 @@ import sqlite3
 import logging
 from typing import Optional
 from pydantic import BaseModel
+from core.database import connect as connect_db
 from core.database import get_db_path
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ class BannerData(BaseModel):
 
 def load_banner_config() -> BannerData:
     try:
-        conn = sqlite3.connect(get_db_path())
+        conn = connect_db(get_db_path())
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
@@ -36,7 +37,7 @@ def load_banner_config() -> BannerData:
 
 def save_banner_config(banner: BannerData):
     try:
-        conn = sqlite3.connect(get_db_path())
+        conn = connect_db(get_db_path())
         cursor = conn.cursor()
         
         cursor.execute("""

@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from core.database import connect as connect_db
 from core.database import get_db_path
 from .repository import ensure_schema
 
@@ -84,7 +85,7 @@ def persist_station_observations(
     )
     assignments += ",network=excluded.network,source=excluded.source,qc_state=excluded.qc_state,"
     assignments += "qc_reasons_json=excluded.qc_reasons_json,ingested_at_utc=excluded.ingested_at_utc"
-    with sqlite3.connect(database) as connection:
+    with connect_db(database) as connection:
         connection.executemany(
             f"INSERT INTO station_observations_v2 ({','.join(columns)}) "
             f"VALUES ({','.join('?' for _ in columns)}) "
@@ -108,7 +109,7 @@ def update_forecast_verification(
     ensure_schema(database)
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     cutoff = current - timedelta(hours=2)
-    with sqlite3.connect(database) as connection:
+    with connect_db(database) as connection:
         connection.row_factory = sqlite3.Row
         forecasts = connection.execute(
             """SELECT h.*,r.model_version,r.config_version FROM station_forecast_hours h
