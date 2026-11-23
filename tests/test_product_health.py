@@ -65,7 +65,9 @@ class AlertPlanTests(unittest.TestCase):
 
     def test_alert_once_then_remind_then_recover(self):
         alerts, state = self.cph.plan_alerts(self.report("stale"), {}, self.now)
-        self.assertEqual([a[0] for a in alerts], ["Radar maps is stale"])
+        self.assertEqual(alerts, [])                                   # first strike: noted, not announced
+        alerts, state = self.cph.plan_alerts(self.report("stale"), state, self.now + timedelta(minutes=15))
+        self.assertEqual([a[0] for a in alerts], ["Radar maps is stale"])   # second strike
         alerts, state = self.cph.plan_alerts(self.report("stale"), state, self.now + timedelta(hours=1))
         self.assertEqual(alerts, [])  # no repeat within the reminder window
         alerts, state = self.cph.plan_alerts(self.report("stale"), state, self.now + timedelta(hours=7))
@@ -73,6 +75,17 @@ class AlertPlanTests(unittest.TestCase):
         alerts, state = self.cph.plan_alerts(self.report("ok"), state, self.now + timedelta(hours=8))
         self.assertEqual([a[0] for a in alerts], ["Radar maps recovered"])
         self.assertEqual(state, {})
+
+    def test_a_blip_that_clears_before_the_second_check_is_silent(self):
+        alerts, state = self.cph.plan_alerts(self.report("stale"), {}, self.now)
+        alerts += self.cph.plan_alerts(self.report("ok"), state, self.now + timedelta(minutes=15))[0]
+        self.assertEqual(alerts, [])                                   # no alert, and no "recovered" either
+
+    def test_a_product_inside_its_grace_window_is_not_even_noted(self):
+        report = self.report("stale")
+        report["products"][0]["within_grace"] = True
+        alerts, state = self.cph.plan_alerts(report, {}, self.now)
+        self.assertEqual((alerts, state), ([], {}))
 
 
 class VerificationTests(unittest.TestCase):

@@ -144,23 +144,35 @@ def active_products() -> list[Product]:
 
 
 def plan_alerts(report: dict, state: dict, now: datetime) -> tuple[list[tuple[str, str]], dict]:
-    """(alerts to send as (message, detail), new state)."""
+    """(alerts to send as (message, detail), new state).
+
+    Two-strike rule: a product that turns stale is only noted ("pending") on the first check that sees it; staff are told
+    when the NEXT check still finds it stale, so a one-off blip that clears by itself never alerts (and never sends a
+    "recovered" message either). Products inside their `grace_minutes` window are not noted at all.
+    """
     alerts, new_state = [], {}
     for product in report["products"]:
         key, label = product["key"], product["label"]
         previous = state.get(key)
+        alerted = bool(previous and previous.get("alerted"))
         if product["status"] == "ok":
-            if previous:
+            if alerted:
                 alerts.append((f"{label} recovered", f"{label} is updating normally again."))
             continue
-        if product.get("within_grace") and not previous:
-            continue   # late, but inside the grace window: say nothing yet (a later check alerts if it is still late)
+        if product.get("within_grace") and not alerted:
+            continue   # late, but inside the grace window: say nothing yet
+        if previous is None:
+            new_state[key] = {"pending": now.isoformat()}   # first strike
+            continue
         detail = f"{label} ({product['source']}): " + "; ".join(product["problems"])
-        last_sent = datetime.fromisoformat(previous["alerted"]) if previous else None
-        if last_sent is None or (now - last_sent).total_seconds() >= REMINDER_HOURS * 3600:
-            verb = "still stale" if previous else "is stale"
-            alerts.append((f"{label} {verb}", detail))
-            new_state[key] = {"alerted": now.isoformat(), "since": (previous or {}).get("since", now.isoformat())}
+        if not alerted:   # second strike: still stale on the next check
+            alerts.append((f"{label} is stale", detail))
+            new_state[key] = {"alerted": now.isoformat(), "since": previous.get("pending", now.isoformat())}
+            continue
+        last_sent = datetime.fromisoformat(previous["alerted"])
+        if (now - last_sent).total_seconds() >= REMINDER_HOURS * 3600:
+            alerts.append((f"{label} still stale", detail))
+            new_state[key] = {"alerted": now.isoformat(), "since": previous.get("since", now.isoformat())}
         else:
             new_state[key] = previous
     return alerts, new_state

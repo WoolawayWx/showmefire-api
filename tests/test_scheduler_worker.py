@@ -84,6 +84,7 @@ class HeartbeatTests(unittest.TestCase):
         with patch.object(scheduler_heartbeat, "_send") as send:
             self.assertEqual(scheduler_heartbeat.run_watch(), [])
             self._age(12)
+            self.assertEqual(scheduler_heartbeat.run_watch(), [])          # first strike: noted only
             first = scheduler_heartbeat.run_watch()
             self.assertEqual([message for message, _ in first], ["Heavy scheduler worker is stale"])
             self.assertEqual(scheduler_heartbeat.run_watch(), [])          # no repeat inside the reminder window
@@ -162,6 +163,7 @@ class ForecastWorkerHeartbeatTests(unittest.TestCase):
         with patch.object(scheduler_heartbeat, "_send"):
             self.assertEqual(scheduler_heartbeat.run_watch(), [])
             self._age(self.forecast, 12)
+            self.assertEqual(scheduler_heartbeat.run_watch(), [])          # first strike: noted only
             alerts = scheduler_heartbeat.run_watch()
         self.assertEqual([m for m, _ in alerts], ["Forecast scheduler worker is stale"])
 
