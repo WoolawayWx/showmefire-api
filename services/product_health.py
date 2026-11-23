@@ -28,6 +28,9 @@ class Product:
     max_age_minutes: float
     source: str = ""
     extra: Optional[Callable[[], list[str]]] = field(default=None, repr=False)  # extra problems, if any
+    # Extra minutes past max_age_minutes before STAFF are alerted. The product still reports "stale" (health endpoint,
+    # status) the moment it passes max_age_minutes; only the alert waits, so a one-cycle blip never pages anyone.
+    grace_minutes: float = 0
 
 
 def _fire_weather_problems() -> list[str]:
@@ -76,7 +79,7 @@ PRODUCTS = [
     Product("fire_weather", "HRRR fire-weather maps", [_status("fire_weather_maps.json")], 120, "HRRR on AWS",
             extra=_fire_weather_problems),
     Product("soundings", "Balloon soundings", ["data/soundings/processed.json"], 45, "IEM RAOB, CW3E",
-            extra=_sounding_problems),
+            extra=_sounding_problems, grace_minutes=30),
     Product("eddi", "EDDI", [_status("drought_eddi.checked")] + [_status(f"eddi_{s}.signature")
                                                                for s in ("1wk", "2wk", "1mo", "3mo")],
             180, "NOAA PSL"),
@@ -111,12 +114,15 @@ def check_product(product: Product, now: Optional[datetime] = None) -> dict:
     problems = []
     if age > product.max_age_minutes:
         problems.append(f"not updated for {age:.0f} min (expected every {product.max_age_minutes:.0f})")
+    age_only = len(problems) == 1
     if product.extra:
         try:
             problems += product.extra()
         except Exception as exc:  # noqa: BLE001 - a broken check must not break the endpoint
             problems.append(f"check failed: {exc}")
-    return {**result, "status": "stale" if problems else "ok",
+    # Only a lateness-only problem can sit inside the grace window; anything else (a failed extra check) alerts at once.
+    within_grace = age_only and len(problems) == 1 and age <= product.max_age_minutes + product.grace_minutes
+    return {**result, "status": "stale" if problems else "ok", "within_grace": within_grace,
             "last_update": datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "age_minutes": round(age, 1), "problems": problems}
 
@@ -147,6 +153,8 @@ def plan_alerts(report: dict, state: dict, now: datetime) -> tuple[list[tuple[st
             if previous:
                 alerts.append((f"{label} recovered", f"{label} is updating normally again."))
             continue
+        if product.get("within_grace") and not previous:
+            continue   # late, but inside the grace window: say nothing yet (a later check alerts if it is still late)
         detail = f"{label} ({product['source']}): " + "; ".join(product["problems"])
         last_sent = datetime.fromisoformat(previous["alerted"]) if previous else None
         if last_sent is None or (now - last_sent).total_seconds() >= REMINDER_HOURS * 3600:

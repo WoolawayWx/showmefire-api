@@ -387,6 +387,7 @@ def poll(kind: str, now: datetime | None = None, client: httpx.Client | None = N
         return {"kind": kind, "requested": True, "ok": False, "status": status, "blocked": True}
     if status == 304:
         _record_success(kind, now, status, headers)
+        _write_heartbeat(kind, now)   # "not modified" is a good answer: the feed is alive, it just has nothing new
         return {"kind": kind, "requested": True, "ok": True, "changed": False}
     if status != 200:
         _record_failure(kind, now, status, f"HTTP {status}", retry_after=_retry_after(headers))
@@ -457,17 +458,25 @@ def _alert(kind: str, message: str, *, blocked: bool = False) -> None:
 
 # --------------------------------------------------------------------------- applying incidents
 
-def _eligible(incident: dict[str, Any], now: datetime) -> str | None:
-    """Return the cause category when this dispatch record should be a fire incident, else None."""
+def _fire_cause(incident: dict[str, Any]) -> str | None:
+    """"wildfire" / "prescribed" for a fire-type dispatch record, None for every other kind of call."""
     kind = incident["incident_type"].lower()
     if kind in WILDFIRE_TYPES:
-        cause = "wildfire"
-    elif any(word in f" {kind}" for word in PRESCRIBED_WORDS):
-        cause = "prescribed"
-    else:
-        return None
+        return "wildfire"
+    if any(word in f" {kind}" for word in PRESCRIBED_WORDS):
+        return "prescribed"
+    return None
+
+
+def _in_missouri_box(incident: dict[str, Any]) -> bool:
     lat, lon = incident["latitude"], incident["longitude"]
-    if lat is None or lon is None or not (MO_BOUNDS[0] <= lat <= MO_BOUNDS[1] and MO_BOUNDS[2] <= lon <= MO_BOUNDS[3]):
+    return lat is not None and lon is not None and MO_BOUNDS[0] <= lat <= MO_BOUNDS[1] and MO_BOUNDS[2] <= lon <= MO_BOUNDS[3]
+
+
+def _eligible(incident: dict[str, Any], now: datetime) -> str | None:
+    """Return the cause category when this dispatch record should be a fire incident, else None."""
+    cause = _fire_cause(incident)
+    if cause is None or not _in_missouri_box(incident):
         return None
     if now - incident["reported_at"] > timedelta(days=RECENT_DAYS):
         return None
@@ -514,16 +523,19 @@ def apply_incidents(incidents: list[dict[str, Any]], now: datetime) -> dict[str,
         first_run = connection.execute("SELECT 1 FROM mobile_push_events WHERE event_key = ?", (BASELINE_KEY,)).fetchone() is None
         known = {row["incident_key"]: dict(row) for row in connection.execute("SELECT * FROM wildcad_incidents")}
 
-    created = updated = linked = 0
+    created = updated = linked = skipped = 0
     for incident in incidents:
         key = incident["incident_key"]
         before = known.get(key)
-        cause = _eligible(incident, now)
+        # Only Missouri fires are kept (MOMOC also dispatches Iowa and every non-fire call). A record we already track as
+        # an incident keeps updating even if dispatch retypes it.
         county_fips = county_name = None
-        if cause is not None:
-            county_fips, county_name = _county(incident)
-            if county_fips is None:
-                cause = None   # inside the coarse box but not a Missouri county (Iowa, Arkansas...)
+        if _fire_cause(incident) is not None and _in_missouri_box(incident):
+            county_fips, county_name = _county(incident)   # None for Iowa, Arkansas... inside the coarse box
+        if county_fips is None and (before is None or before["incident_id"] is None):
+            skipped += 1
+            continue
+        cause = _eligible(incident, now) if county_fips is not None else None
         event_id, incident_id = (before or {}).get("event_id"), (before or {}).get("incident_id")
         if cause is not None:
             event_id, incident_id = _ingest_event(incident, cause, county_fips, county_name)
@@ -572,7 +584,7 @@ def apply_incidents(incidents: list[dict[str, Any]], now: datetime) -> dict[str,
                     connection.execute("UPDATE fire_events SET acres = ? WHERE id = ?", (incident["acres"], event_id))
     if first_run:
         record_event(BASELINE_KEY, "fire_detection", {"seeded": len(incidents)})
-    return {"created": created, "updated": updated, "linked": linked}
+    return {"created": created, "updated": updated, "linked": linked, "skipped": skipped}
 
 
 def _diff_and_record(connection: sqlite3.Connection, before: dict[str, Any], incident: dict[str, Any],

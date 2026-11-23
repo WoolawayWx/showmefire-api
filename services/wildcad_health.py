@@ -1,7 +1,8 @@
 """Staleness and problem alerts for the WildCAD feed (services/wildcad.py).
 
 * Heartbeat files are written only after a *successful* fetch, so "stale" means "no good data", not "no attempt".
-* Each feed counts as stale after 20 minutes (four missed 5-minute cycles); this is judged by `services/product_health`
+* Each feed counts as stale after 20 minutes (four missed 5-minute cycles) but staff are only alerted after 40 (a grace
+  window, since one failed request plus the back-off already costs 15-25 minutes); this is judged by `services/product_health`
   (so it also shows in GET /health/products) and alerted by `run_health_check`, run every 5 minutes by the scheduler.
 * An alert goes out when a feed turns stale, again every 6 hours while it stays stale, and once when it recovers.
   Blocks (HTTP 403/429) and unreadable payloads alert immediately through `alert_problem`, once per outage.
@@ -20,6 +21,7 @@ from services.product_health import PROJECT_DIR, STATUS_DIR, Product, check_all,
 logger = logging.getLogger(__name__)
 
 STALE_AFTER_MINUTES = 20
+ALERT_GRACE_MINUTES = 20   # staff hear about it at 40 min: single failed cycles and back-off (5/10/20 min) are routine
 STATE_PATH = PROJECT_DIR / "data" / "current_conditions" / "wildcad_health_state.json"
 PROBLEM_REMINDER_HOURS = 6
 LABELS = {"incidents": "WildCAD incidents", "resources": "WildCAD resources"}
@@ -38,7 +40,7 @@ def write_heartbeat(kind: str, now: datetime) -> None:
 def products() -> list[Product]:
     return [
         Product(f"wildcad_{kind}", label, [os.path.relpath(heartbeat_path(kind), PROJECT_DIR)], STALE_AFTER_MINUTES,
-                "MOMOC WildCAD-E")
+                "MOMOC WildCAD-E", grace_minutes=ALERT_GRACE_MINUTES)
         for kind, label in LABELS.items()
     ]
 

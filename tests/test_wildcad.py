@@ -167,9 +167,12 @@ class IngestTests(WildcadBase):
     def test_a_dispatch_record_with_no_satellite_starts_an_incident_and_non_fires_do_not(self):
         wildcad.poll("incidents", NOW, fetch=FakeFeed())
         self.assertEqual(len(self.rows("SELECT id FROM fire_incidents")), 1)       # Rockhouse only
-        stored = self.rows("SELECT name, incident_id FROM wildcad_incidents ORDER BY name")
-        self.assertEqual(len(stored), 20)                                           # all kept for staff
+        stored = self.rows("SELECT name, incident_id, incident_type, county_fips FROM wildcad_incidents ORDER BY name")
+        self.assertGreaterEqual(len(stored), 1)
         self.assertEqual(sum(1 for row in stored if row["incident_id"] is not None), 1)
+        for row in stored:                                                          # only Missouri fires are stored at all
+            self.assertTrue(wildcad._fire_cause({"incident_type": row["incident_type"]}))
+            self.assertTrue(row["county_fips"])
 
     def test_staff_can_list_and_attach_an_orphan_dispatch_record(self):
         wildcad.poll("incidents", NOW, fetch=FakeFeed())
@@ -246,13 +249,34 @@ class HealthAndPushTests(WildcadBase):
             self._heartbeat(kind, NOW)
         with patch.object(wildcad_health, "send") as send:
             self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=10)), [])            # fresh enough
-            first = wildcad_health.run_health_check(NOW + timedelta(minutes=25))                         # 4+ cycles missed
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=25)), [])            # late, inside the grace window
+            first = wildcad_health.run_health_check(NOW + timedelta(minutes=45))                         # still late after the grace
             self.assertEqual(sorted(message for message, _ in first), ["WildCAD incidents is stale", "WildCAD resources is stale"])
-            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=30)), [])           # no repeat
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=50)), [])           # no repeat
             self.assertEqual(send.call_count, 2)
-            self._heartbeat("incidents", NOW + timedelta(minutes=31))
-            recovered = wildcad_health.run_health_check(NOW + timedelta(minutes=32))
+            self._heartbeat("incidents", NOW + timedelta(minutes=51))
+            recovered = wildcad_health.run_health_check(NOW + timedelta(minutes=52))
             self.assertEqual([message for message, _ in recovered], ["WildCAD incidents recovered"])
+
+    def test_a_blip_that_recovers_inside_the_grace_window_sends_nothing(self):
+        from services import wildcad_health
+
+        for kind in wildcad.KINDS:
+            self._heartbeat(kind, NOW)
+        with patch.object(wildcad_health, "send") as send:
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=30)), [])
+            for kind in wildcad.KINDS:
+                self._heartbeat(kind, NOW + timedelta(minutes=33))
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=35)), [])   # no "recovered" either
+            send.assert_not_called()
+
+    def test_a_not_modified_answer_counts_as_alive(self):
+        from services import wildcad_health
+
+        with patch.object(wildcad_health, "write_heartbeat") as beat:
+            result = wildcad.poll("incidents", NOW, fetch=lambda *a, **k: (304, {"etag": "x"}, b""))
+        self.assertTrue(result["ok"])
+        beat.assert_called_once()
 
     def test_nothing_alerts_while_the_feed_is_switched_off(self):
         from services import wildcad_health
