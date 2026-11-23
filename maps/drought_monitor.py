@@ -115,6 +115,7 @@ def main() -> None:
     try:
         if OUT_PNG.is_file() and SIGNATURE_PATH.read_text() == signature:
             print("Drought Monitor unchanged since last render; skipping.")
+            SIGNATURE_PATH.touch()   # "checked, nothing new": the product-health check judges freshness by this file
             return
     except OSError:
         pass
