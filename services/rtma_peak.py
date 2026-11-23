@@ -321,7 +321,7 @@ def _render_png(
         logo = mpimg.imread(BytesIO(png_bytes), format="png")
         ax.add_artist(AnnotationBbox(OffsetImage(logo, zoom=0.03), (0.99, 0.01), frameon=False, xycoords="figure fraction", box_alignment=(1, 0)))
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
     fig.savefig(out_path, dpi=mapdpi, bbox_inches=None, pad_inches=0)
     plt.close(fig)
@@ -366,7 +366,7 @@ def _draw_logo(ax):
         logo = mpimg.imread(BytesIO(png_bytes), format="png")
         ax.add_artist(AnnotationBbox(OffsetImage(logo, zoom=0.03), (0.99, 0.01), frameon=False, xycoords="figure fraction", box_alignment=(1, 0)))
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
 
 def _export_generic_geotiff(

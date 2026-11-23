@@ -125,7 +125,7 @@ def run_shadow_for_forecast(
         try:
             rfs.record_skipped_run(str(exc))
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
         return False
 
 
@@ -227,5 +227,5 @@ def run_glm_shadow_for_forecast(
         try:
             rfgs.record_skipped_run(str(exc))
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
         return False

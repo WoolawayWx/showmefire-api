@@ -271,7 +271,7 @@ def fetch_rtma(run_dt: datetime, cache_dir: Path | None = None) -> Path:
                 if REQUIRED_RTMA_VARS.issubset(cached.data_vars) and not precipitation_missing:
                     return target
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
         target.unlink(missing_ok=True)
 
     # A single analysis does not need FastHerbie. FastHerbie always runs

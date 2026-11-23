@@ -284,7 +284,7 @@ def _add_branding(fig, ax, status: dict[str, str], updated_at: datetime) -> None
         )
         ax.add_artist(logo)
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
 
 def generate_fire_weather_alert_map(status: dict[str, str] | None = None) -> dict:

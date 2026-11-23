@@ -613,7 +613,7 @@ def save_raw_data_to_archive(days_back=1, archive_dir="archive/raw_data", states
         ignored = get_ignored_stations()
         api_response["STATION"] = [s for s in api_response.get("STATION", []) if (s.get("STID") or s.get("ID")) not in ignored]
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
     with open(filepath, 'w') as f:
         json.dump(api_response, f, indent=2)

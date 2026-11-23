@@ -629,7 +629,7 @@ def generate_spread_rate(
                 try:
                     discard_staging_root(gis_staging_root)
                 except Exception:
-                    pass
+                    logger.debug("ignored error", exc_info=True)
             logger.exception("Production real-time GIS publication failed; prior products retained")
             try:
                 from services.gis_publisher import mark_stale

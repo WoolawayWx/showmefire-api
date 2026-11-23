@@ -583,7 +583,7 @@ def record_failure(error: Exception) -> None:
         state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
         STATE_PATH.write_text(json.dumps(state, indent=2))
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
 
 def diagnostics() -> dict:

@@ -49,7 +49,7 @@ def _dedupe_seconds() -> float:
         if ttl_ms:
             return max(60.0, float(ttl_ms) / 1000.0)
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
     return _DEFAULT_DEDUPE_SECONDS
 
 

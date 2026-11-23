@@ -568,7 +568,7 @@ async def _params(request: Request) -> dict:
         try:
             params.update({k: v for k, v in (await request.form()).items() if isinstance(v, str)})
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
     return params
 
 

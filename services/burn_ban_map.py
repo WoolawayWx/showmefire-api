@@ -358,7 +358,7 @@ def _add_branding(fig, ax, active_count: int, updated_at: datetime) -> None:
         )
         ax.add_artist(logo)
     except Exception:
-        pass
+        logger.debug("ignored error", exc_info=True)
 
 
 def generate_burn_ban_map() -> dict:

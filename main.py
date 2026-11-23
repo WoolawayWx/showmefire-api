@@ -185,8 +185,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Server metrics did not start (non-fatal): %s", exc)
     
+    loop_monitor = None
+    try:
+        from core.loop_monitor import LoopMonitor
+
+        loop_monitor = LoopMonitor()
+        loop_monitor.start()
+    except Exception as exc:  # diagnostics are never worth failing a start-up over
+        logger.warning("Event-loop monitor did not start (non-fatal): %s", exc)
+
     yield
 
+    if loop_monitor:
+        loop_monitor.stop()
     stop_persistence()
     stop_server_metrics()
     
@@ -652,7 +663,7 @@ def admin_add_ignored(payload: dict, email: str = Depends(require_admin)):
             from core.ignored_stations import refresh_ignored_stations
             refresh_ignored_stations()
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
         return {"success": True, "stid": stid}
     except Exception as e:
         logger.error(f"Error adding ignored station {stid}: {e}")
@@ -675,7 +686,7 @@ def admin_remove_ignored(stid: str, email: str = Depends(require_admin)):
             from core.ignored_stations import refresh_ignored_stations
             refresh_ignored_stations()
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
         return {"success": True, "stid": stid}
     except Exception as e:
         logger.error(f"Error removing ignored station {stid}: {e}")
@@ -892,7 +903,7 @@ def public_opsbrief_info():
             if expires_dt <= now_utc:
                 return {"active": False, "url": None}
         except Exception:
-            pass
+            logger.debug("ignored error", exc_info=True)
 
     file_path = OPSBRIEF_DIR / Path(file_name).name
     if not file_path.exists():
