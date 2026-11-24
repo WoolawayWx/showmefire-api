@@ -264,7 +264,7 @@ def test_only_admins_can_hide_a_newsletter_and_the_public_route_obeys(client, db
 
 def test_browser_link_is_added_only_for_newsletters_that_will_be_public(monkeypatch):
     monkeypatch.setenv("PUBLIC_WEB_URL", "https://showmefire.org/")
-    assert newsletter_web.web_url({"id": 7, "audience_list_id": "show-me-fire-newsletter"}) == "https://showmefire.org/newsletters/7"
+    assert newsletter_web.web_url({"id": 7, "audience_list_id": "show-me-fire-newsletter"}) == "https://showmefire.org/comms/newsletters/7"
     assert newsletter_web.web_url({"id": 7, "audience_list_id": ""}) is None
     assert newsletter_web.web_url({"id": 7, "audience_list_id": "show-me-fire-briefing-packet"}) is None
 

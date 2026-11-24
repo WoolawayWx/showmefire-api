@@ -1853,6 +1853,15 @@ def init_database():
     # Scheduled send: a draft with scheduled_for set (UTC, "YYYY-MM-DDTHH:MM:SSZ") is sent by the
     # deliver_scheduled_bulletins job once that time has passed. It stays a draft until then (the status CHECK above
     # has no 'scheduled' value); any failed send clears it, so a failure is never retried automatically.
+    # Newsletters uploaded by an admin for the web archive (services/newsletter_web.py): source 'upload_pdf' (file at
+    # upload_path) or 'upload_html'; text_body holds the short description. They are status 'sent' (dated by sent_at),
+    # never emailed, and never listed in Email Studio. 'email' is every bulletin that was composed and sent.
+    if "source" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN source TEXT NOT NULL DEFAULT 'email'")
+    if "upload_path" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN upload_path TEXT")
+    if "upload_original_name" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN upload_original_name TEXT")
     if "scheduled_for" not in bulletin_columns:
         cursor.execute("ALTER TABLE bulletins ADD COLUMN scheduled_for TEXT")
     if "scheduled_by" not in bulletin_columns:
@@ -7565,7 +7574,7 @@ def list_bulletins() -> List[Dict]:
     conn.row_factory = sqlite3.Row
     try:
         results = []
-        for row in conn.execute("SELECT * FROM bulletins ORDER BY created_at DESC, id DESC").fetchall():
+        for row in conn.execute("SELECT * FROM bulletins WHERE source = 'email' ORDER BY created_at DESC, id DESC").fetchall():
             result = dict(row)
             try:
                 result["attachments"] = json.loads(result.pop("attachments_json") or "[]")

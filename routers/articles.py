@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from core.admin_auth import permissions
@@ -93,6 +94,16 @@ def public_newsletter(newsletter_id: int, response: Response):
     if item is None:
         raise HTTPException(status_code=404, detail="Newsletter not found")
     return {"success": True, "newsletter": item}
+
+
+@router.get("/api/newsletters/{newsletter_id}/pdf")
+def public_newsletter_pdf(newsletter_id: int):
+    found = newsletter_web.public_pdf(newsletter_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Newsletter not found")
+    path, name = found
+    return FileResponse(path, media_type="application/pdf", filename=name, content_disposition_type="inline",
+                        headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff"})
 
 
 # ------------------------------------------------------------------------------------------------------------- admin
@@ -192,3 +203,27 @@ def admin_set_newsletter_hidden(newsletter_id: int, payload: HiddenIn, email: st
         return {"success": True, "newsletter": newsletter_web.set_hidden(newsletter_id, payload.hidden, email)}
     except LookupError as error:
         raise _fail(error)
+
+
+@router.post("/api/admin/newsletter-archive/upload", status_code=201)
+async def admin_upload_newsletter(
+    title: str = Form(...), issue_date: str = Form(...), summary: str = Form(""), file: UploadFile = File(...),
+    email: str = Depends(permissions.require_permission(ARCHIVE)),
+):
+    """File a newsletter written elsewhere (a PDF or an HTML file) in the web archive. It is public straight away (hide it
+    from the archive page if that is not wanted) and is never emailed."""
+    content = await file.read(newsletter_web.PDF_MAX_BYTES + 1)
+    try:
+        return {"success": True, "newsletter": newsletter_web.create_upload(
+            title=title, issue_date=issue_date, summary=summary, filename=file.filename or "", content=content, actor=email)}
+    except newsletter_web.UploadError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.delete("/api/admin/newsletter-archive/{newsletter_id}")
+def admin_delete_uploaded_newsletter(newsletter_id: int, email: str = Depends(permissions.require_permission(ARCHIVE))):
+    try:
+        newsletter_web.delete_upload(newsletter_id, email)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="Only uploaded newsletters can be deleted; a newsletter that was emailed can be hidden.") from error
+    return {"success": True}
