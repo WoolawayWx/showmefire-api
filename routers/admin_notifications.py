@@ -10,6 +10,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from urllib.parse import urlsplit
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,11 +37,32 @@ APP_DESTINATIONS = {
 }
 
 
+WEB_HOSTS = {"showmefire.org", "www.showmefire.org"}
+
+
+def validate_web_url(value: str) -> str:
+    """A showmefire.org page the app opens in its in-app browser. https on our own host only, no credentials or port;
+    keep in step with `notificationWebUrl` in mobile/src/notifications/navigation.ts."""
+    value = value.strip()
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        raise ValueError("web_url is not a valid address")
+    if (parts.scheme != "https" or (parts.hostname or "") not in WEB_HOSTS or port is not None
+            or parts.username is not None or parts.password is not None):
+        raise ValueError("web_url must be an https://showmefire.org page")
+    return value
+
+
 class ManualNotification(BaseModel):
     channel: Literal["forecast", "sitrep", "fire_weather", "fire_detection", "general"]
     title: str = Field(min_length=1, max_length=100)
     body: str = Field(min_length=1, max_length=500)
     url: str = Field(default="/", max_length=200)
+    # Optional showmefire.org page (e.g. a newsletter) the app opens in its in-app browser when the alert is tapped.
+    # Sent as `webUrl` beside the normal `url`, so an app without support just opens `url` (Home).
+    web_url: Optional[str] = Field(default=None, max_length=500)
     # Empty = everyone subscribed to the channel (statewide). County-scoped
     # channels (fire_weather, fire_detection) otherwise need a county match.
     countyFips: list[str] = Field(default_factory=list, max_length=115)
@@ -61,6 +83,13 @@ class ManualNotification(BaseModel):
         if not value.startswith("/") or value.startswith("//"):
             raise ValueError("url must be an in-app path starting with a single '/'")
         return value
+
+    @field_validator("web_url")
+    @classmethod
+    def check_web_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return None
+        return validate_web_url(value)
 
     @field_validator("countyFips")
     @classmethod
@@ -113,7 +142,7 @@ def send_notification(payload: ManualNotification, email: str = Depends(require_
         body=payload.body,
         url=payload.url,
         county_fips=payload.countyFips,
-        extra_data={"manual": True},
+        extra_data={"manual": True, **({"webUrl": payload.web_url} if payload.web_url else {})},
         all_counties=True,
     )
     with connect_db(get_db_path()) as connection:
@@ -121,7 +150,7 @@ def send_notification(payload: ManualNotification, email: str = Depends(require_
             """INSERT INTO manual_notifications
                (event_key, channel, title, body, url, county_fips_json, recipients, sent, sent_by)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event_key, payload.channel, payload.title, payload.body, payload.url,
+            (event_key, payload.channel, payload.title, payload.body, payload.web_url or payload.url,
              json.dumps(payload.countyFips), recipients, sent, email),
         )
     logger.info("Manual notification by %s on %s: %d/%d accepted by Expo", email, payload.channel, sent, recipients)
