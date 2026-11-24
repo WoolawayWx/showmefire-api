@@ -744,6 +744,9 @@ def register_jobs(scheduler: AsyncIOScheduler, groups=None) -> GroupFilteredSche
     )
     scheduler.add_job(deliver_scheduled_forecasts, 'cron', second=0, id='deliver_scheduled_forecasts',
                       max_instances=1, coalesce=True)
+    from services.bulletin_send import deliver_scheduled_bulletins
+    scheduler.add_job(deliver_scheduled_bulletins, 'cron', second=15, id='deliver_scheduled_bulletins',
+                      max_instances=1, coalesce=True)
     scheduler.add_job(check_push_receipts, 'interval', minutes=15, id='check_mobile_push_receipts')
     # Staff push (services/staff_push.py) and the reviewer sandbox (core/sandbox_data.py) have their own jobs, apart from
     # the public push ones above. Each is a no-op while its feature is switched off.

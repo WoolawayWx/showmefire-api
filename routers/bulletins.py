@@ -1,10 +1,10 @@
 """FireWx bulletin signup, preference, and administrative endpoints."""
 from __future__ import annotations
 
-import base64
 import re
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
@@ -14,21 +14,19 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.database import (
     create_bulletin,
-    claim_bulletin_send,
     get_bulletin,
     get_newsletter_account_by_token,
     get_newsletter_preferences,
     get_db_path,
     add_bulletin_attachment,
-    list_active_newsletter_recipients,
     list_newsletter_subscribers,
     list_bulletins,
-    mark_bulletin_sent,
     remove_bulletin_attachment,
     replace_newsletter_preferences,
-    set_bulletin_error,
     unsubscribe_newsletter,
     update_newsletter_account,
+    schedule_bulletin,
+    unschedule_bulletin,
     update_bulletin,
     upsert_newsletter_subscriber,
 )
@@ -40,6 +38,7 @@ from services.graphics_email import (
     upsert_audience_contact,
 )
 from services import newsletter_web
+from services.bulletin_send import BulletinSendError, send_bulletin
 from services.mobile_content import county_catalog
 
 router = APIRouter(tags=["bulletins"])
@@ -375,59 +374,45 @@ def admin_delete_bulletin_attachment(
 
 @router.post("/api/admin/bulletins/{bulletin_id}/send")
 def admin_send_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
+    try:
+        return send_bulletin(bulletin_id)
+    except BulletinSendError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+class BulletinSchedule(BaseModel):
+    send_at: datetime  # must carry a timezone (the website sends UTC, e.g. 2026-12-01T14:00:00Z)
+
+    @field_validator("send_at")
+    @classmethod
+    def _needs_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("send_at must include a timezone")
+        return value.astimezone(timezone.utc)
+
+
+@router.put("/api/admin/bulletins/{bulletin_id}/schedule")
+def admin_schedule_bulletin(bulletin_id: int, payload: BulletinSchedule, admin: str = Depends(require_admin)):
+    """Send this draft at a set time (the scheduler checks every minute). Calling it again changes the time."""
+    if payload.send_at < datetime.now(timezone.utc) + timedelta(minutes=1):
+        raise HTTPException(status_code=422, detail="Choose a time at least a minute from now.")
     bulletin = get_bulletin(bulletin_id)
     if not bulletin:
         raise HTTPException(status_code=404, detail="Bulletin not found")
-    if bulletin["status"] != "draft":
-        raise HTTPException(status_code=409, detail="Bulletin has already been sent")
-    if not claim_bulletin_send(bulletin_id):
-        raise HTTPException(status_code=409, detail="Bulletin send is already in progress")
-    recipients = (
-        list_active_newsletter_recipients(bulletin["audience_list_id"])
-        if bulletin.get("audience_list_id")
-        else []
-    )
-    recipient_emails = {item["email"].strip().lower() for item in recipients}
-    for email in bulletin.get("direct_recipients", []):
-        if email not in recipient_emails:
-            recipients.append({"email": email, "manage_token": None})
-            recipient_emails.add(email)
-    if not recipients:
-        set_bulletin_error(bulletin_id, "No subscribers or direct recipients were provided.")
-        raise HTTPException(status_code=409, detail="There are no subscribers or direct recipients to send to.")
-    sent = 0
-    try:
-        attachments = []
-        for attachment in bulletin.get("attachments", []):
-            path = Path(attachment["path"])
-            if not path.is_file():
-                raise RuntimeError(f"Attachment is missing: {attachment['filename']}")
-            attachments.append({
-                "filename": attachment["filename"],
-                "content": base64.b64encode(path.read_bytes()).decode("ascii"),
-                "content_type": attachment["content_type"],
-            })
-        for recipient in recipients:
-            manage_base = os.getenv("PUBLIC_WEB_URL", "https://showmefire.org").rstrip("/")
-            manage_url = (
-                f"{manage_base}/comms/emails/manage?token={quote(recipient['manage_token'], safe='')}"
-                if recipient.get("manage_token")
-                else f"{manage_base}/comms/emails"
-            )
-            send_bulletin_email(
-                recipient["email"],
-                bulletin["subject"],
-                bulletin["html_body"],
-                bulletin["text_body"],
-                manage_url,
-                attachments,
-                web_url=newsletter_web.web_url(bulletin),
-            )
-            sent += 1
-        return mark_bulletin_sent(bulletin_id, f"targeted:{sent}")
-    except Exception as exc:
-        set_bulletin_error(bulletin_id, f"{exc} (sent {sent} of {len(recipients)})")
-        raise HTTPException(status_code=502, detail=f"Bulletin send failed after {sent} of {len(recipients)} recipients: {exc}") from exc
+    if not bulletin.get("audience_list_id") and not bulletin.get("direct_recipients"):
+        raise HTTPException(status_code=409, detail="Choose an email list or add direct recipients before scheduling.")
+    scheduled = schedule_bulletin(bulletin_id, payload.send_at.strftime("%Y-%m-%dT%H:%M:%SZ"), str(admin))
+    if not scheduled:
+        raise HTTPException(status_code=409, detail="Only a draft can be scheduled; this one has been sent or is sending.")
+    return scheduled
+
+
+@router.delete("/api/admin/bulletins/{bulletin_id}/schedule")
+def admin_unschedule_bulletin(bulletin_id: int, _admin: str = Depends(require_admin)):
+    bulletin = unschedule_bulletin(bulletin_id)
+    if not bulletin:
+        raise HTTPException(status_code=409, detail="Only a draft can be unscheduled.")
+    return bulletin
 
 
 @router.get("/api/admin/newsletter/preferences")

@@ -1850,6 +1850,13 @@ def init_database():
     # Newsletter web archive (services/newsletter_web.py): every sent newsletter is public unless an admin hides it.
     if "web_hidden" not in bulletin_columns:
         cursor.execute("ALTER TABLE bulletins ADD COLUMN web_hidden INTEGER NOT NULL DEFAULT 0")
+    # Scheduled send: a draft with scheduled_for set (UTC, "YYYY-MM-DDTHH:MM:SSZ") is sent by the
+    # deliver_scheduled_bulletins job once that time has passed. It stays a draft until then (the status CHECK above
+    # has no 'scheduled' value); any failed send clears it, so a failure is never retried automatically.
+    if "scheduled_for" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN scheduled_for TEXT")
+    if "scheduled_by" not in bulletin_columns:
+        cursor.execute("ALTER TABLE bulletins ADD COLUMN scheduled_by TEXT")
     # Feature articles (services/articles.py): structured blocks, not HTML. Separate from `posts` (staff discussion posts).
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS articles (
@@ -7694,10 +7701,53 @@ def set_bulletin_error(bulletin_id: int, error: str) -> None:
     conn = sqlite3.connect(get_db_path(), timeout=15)
     try:
         conn.execute(
-            "UPDATE bulletins SET status = 'draft', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE bulletins SET status = 'draft', last_error = ?, scheduled_for = NULL, scheduled_by = NULL, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (error[:2000], bulletin_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def schedule_bulletin(bulletin_id: int, send_at: str, scheduled_by: str = "") -> Optional[Dict]:
+    """Set (or change) when a draft goes out. None when it is not a draft any more."""
+    conn = connect(get_db_path())
+    try:
+        cursor = conn.execute(
+            "UPDATE bulletins SET scheduled_for = ?, scheduled_by = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = 'draft'",
+            (send_at, scheduled_by, bulletin_id),
+        )
+        conn.commit()
+        return get_bulletin(bulletin_id) if cursor.rowcount == 1 else None
+    finally:
+        conn.close()
+
+
+def unschedule_bulletin(bulletin_id: int) -> Optional[Dict]:
+    conn = connect(get_db_path())
+    try:
+        cursor = conn.execute(
+            "UPDATE bulletins SET scheduled_for = NULL, scheduled_by = NULL, updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = 'draft'",
+            (bulletin_id,),
+        )
+        conn.commit()
+        return get_bulletin(bulletin_id) if cursor.rowcount == 1 else None
+    finally:
+        conn.close()
+
+
+def list_due_scheduled_bulletin_ids(now_iso: str) -> List[int]:
+    conn = connect(get_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT id FROM bulletins WHERE status = 'draft' AND scheduled_for IS NOT NULL AND scheduled_for <= ? "
+            "ORDER BY scheduled_for, id",
+            (now_iso,),
+        ).fetchall()
+        return [row[0] for row in rows]
     finally:
         conn.close()
 

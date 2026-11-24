@@ -53,7 +53,7 @@ API_JOBS = {
     "fetch_station_et", "refresh_testbed_observations", "publish_gis_observations", "record_station_history",
     "fetch_afds", "fetch_active_mo_alerts", "refresh_spc_department_graphics", "refresh_usdm_department_graphics",
     # pushes, sandbox, admin auth and purges
-    "deliver_scheduled_forecasts", "check_mobile_push_receipts", "check_staff_push_receipts", "purge_staff_push_records",
+    "deliver_scheduled_forecasts", "deliver_scheduled_bulletins", "check_mobile_push_receipts", "check_staff_push_receipts", "purge_staff_push_records",
     "reset_idle_reviewer_sandbox", "purge_admin_auth_records", "purge_not_a_fire_incidents",
     "purge_mobile_push_delivery_records", "purge_fire_report_pii", "purge_feedback_throttle",
     "purge_spatial_fm_uncertainty_cache", "purge_old_logs",
