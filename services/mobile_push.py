@@ -81,6 +81,7 @@ def upsert_subscription(
     general: bool = False,
     local_forecast_titles: bool = False,
     forecast_not_before: str | None = None,
+    update_channel: str = "production",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as connection:
@@ -100,8 +101,8 @@ def upsert_subscription(
             INSERT INTO mobile_push_subscriptions (
                 installation_id, expo_push_token, platform, app_version,
                 forecast_enabled, local_forecast_titles, forecast_not_before, sitrep_enabled, fire_weather_enabled, fire_detection_enabled, general_enabled,
-                county_fips_json, enabled, created_at, updated_at, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                county_fips_json, update_channel, enabled, created_at, updated_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(installation_id) DO UPDATE SET
                 expo_push_token = excluded.expo_push_token,
                 platform = excluded.platform,
@@ -114,6 +115,7 @@ def upsert_subscription(
                 fire_detection_enabled = excluded.fire_detection_enabled,
                 general_enabled = excluded.general_enabled,
                 county_fips_json = excluded.county_fips_json,
+                update_channel = excluded.update_channel,
                 enabled = 1,
                 updated_at = excluded.updated_at,
                 last_seen_at = excluded.last_seen_at
@@ -131,6 +133,7 @@ def upsert_subscription(
                 int(fire_detection),
                 int(general),
                 json.dumps(sorted(set(county_fips))),
+                "preview" if update_channel == "preview" else "production",
                 now,
                 now,
                 now,
@@ -221,9 +224,11 @@ def record_event(event_key: str, event_type: str, payload: dict[str, Any]) -> bo
 
 def _eligible_subscriptions(
     event_type: str, county_fips: Iterable[str] | None = None, *, all_counties: bool = False,
+    testers_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Subscribers opted into `event_type`. County-scoped channels also need a
     county match unless `all_counties` (manual statewide broadcast) is set.
+    `testers_only` keeps only phones that report the preview update channel.
     fire_detection also skips installations that already got
     FEEDBACK_PROMPT_DAILY_CAP of them in the last 24 h."""
     county_set = set(county_fips or [])
@@ -238,6 +243,7 @@ def _eligible_subscriptions(
     with _connect() as connection:
         rows = connection.execute(
             f"SELECT installation_id, expo_push_token, county_fips_json, app_version, local_forecast_titles, forecast_not_before FROM mobile_push_subscriptions WHERE enabled = 1 AND {column} = 1"
+            + (" AND update_channel = 'preview'" if testers_only else "")
         ).fetchall()
         if event_type == "fire_detection":
             capped = {
@@ -407,13 +413,14 @@ def send_mobile_event(
     forecast_county_danger: dict[str, tuple[int, str]] | None = None,
     subtitle: str | None = None,
     category_id: str | None = None,
+    testers_only: bool = False,
 ) -> int:
     if is_sandbox():  # reviewer sandbox: nothing is recorded or sent
         return 0
     payload = {"title": title, "body": body, "url": url, **(extra_data or {})}
     if image_url:
         payload["imageUrl"] = image_url
-    subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties)
+    subscriptions = _eligible_subscriptions(event_type, county_fips, all_counties=all_counties, testers_only=testers_only)
     if event_type == "forecast":
         now = datetime.now(CHICAGO_TZ)
         clock = now.strftime("%H:%M")
@@ -933,6 +940,7 @@ def push_stats(days: int = 30, recent: int = 25) -> dict[str, Any]:
                       SUM(forecast_enabled) AS forecast, SUM(sitrep_enabled) AS sitrep,
                       SUM(fire_weather_enabled) AS fire_weather, SUM(fire_detection_enabled) AS fire_detection,
                       SUM(general_enabled) AS general,
+                      SUM(CASE WHEN update_channel = 'preview' THEN 1 ELSE 0 END) AS testers,
                       SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS new_7d,
                       SUM(CASE WHEN created_at >= datetime('now', ?) THEN 1 ELSE 0 END) AS new_in_period,
                       SUM(CASE WHEN last_seen_at >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS active_30d

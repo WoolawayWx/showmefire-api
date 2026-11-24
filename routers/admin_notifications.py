@@ -66,6 +66,8 @@ class ManualNotification(BaseModel):
     # Empty = everyone subscribed to the channel (statewide). County-scoped
     # channels (fire_weather, fire_detection) otherwise need a county match.
     countyFips: list[str] = Field(default_factory=list, max_length=115)
+    # Only phones whose app reports the preview update channel (testers), to try a push before sending it to everyone.
+    testers_only: bool = False
 
     @field_validator("title", "body")
     @classmethod
@@ -106,6 +108,7 @@ class AudienceRequest(BaseModel):
     """Just who would receive it: the audience count does not depend on the text, so a blank form must not be rejected."""
     channel: Literal["forecast", "sitrep", "fire_weather", "fire_detection", "general"]
     countyFips: list[str] = Field(default_factory=list, max_length=115)
+    testers_only: bool = False
 
     @field_validator("countyFips")
     @classmethod
@@ -116,7 +119,7 @@ class AudienceRequest(BaseModel):
 
 
 def _recipients(payload: "ManualNotification | AudienceRequest") -> list[dict]:
-    return _eligible_subscriptions(payload.channel, payload.countyFips, all_counties=True)
+    return _eligible_subscriptions(payload.channel, payload.countyFips, all_counties=True, testers_only=payload.testers_only)
 
 
 @router.get("/options")
@@ -157,6 +160,7 @@ def send_notification(payload: ManualNotification, email: str = Depends(require_
         county_fips=payload.countyFips,
         extra_data={"manual": True, **({"webUrl": payload.web_url} if payload.web_url else {})},
         all_counties=True,
+        testers_only=payload.testers_only,
     )
     with connect_db(get_db_path()) as connection:
         connection.execute(

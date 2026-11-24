@@ -1576,6 +1576,10 @@ def init_database():
         cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN local_forecast_titles INTEGER NOT NULL DEFAULT 0")
     if "general_enabled" not in subscription_columns:
         cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN general_enabled INTEGER NOT NULL DEFAULT 0")
+    if "update_channel" not in subscription_columns:
+        # 'preview' = the phone has the hidden "Preview updates" switch on (testers). Apps from before this was reported
+        # stay 'production' until they update.
+        cursor.execute("ALTER TABLE mobile_push_subscriptions ADD COLUMN update_channel TEXT NOT NULL DEFAULT 'production'")
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mobile_push_events (
             event_key TEXT PRIMARY KEY,

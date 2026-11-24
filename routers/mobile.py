@@ -45,6 +45,8 @@ class PushSubscriptionRequest(BaseModel):
     expoPushToken: str = Field(min_length=20, max_length=256)
     platform: Literal["ios", "android"]
     appVersion: str = Field(default="", max_length=64)
+    # Which over-the-air channel the phone follows; only "preview" (testers) is ever used, to aim a test push at them.
+    updateChannel: Literal["production", "preview"] = "production"
     preferences: NotificationPreferences
 
     @field_validator("expoPushToken")
@@ -94,6 +96,7 @@ def put_push_subscription(installation_id: UUID, payload: PushSubscriptionReques
         fire_detection=payload.preferences.fireDetection,
         general=payload.preferences.general,
         county_fips=payload.preferences.countyFips,
+        update_channel=payload.updateChannel,
     )
 
 

@@ -41,3 +41,27 @@ def test_audience_preview_needs_no_message_text():
     assert request.channel == "forecast" and request.countyFips == []
     with pytest.raises(ValidationError):
         AudienceRequest(channel="nope")
+
+
+def test_testers_only_audience(tmp_path, monkeypatch):
+    from core import database
+    from services import mobile_push
+
+    monkeypatch.setattr(database, "get_db_path", lambda: tmp_path / "t.db")
+    monkeypatch.setattr(mobile_push, "get_db_path", lambda: tmp_path / "t.db")
+    database.init_database()
+
+    def register(n, channel):
+        mobile_push.upsert_subscription(
+            installation_id=f"00000000-0000-0000-0000-00000000000{n}", expo_push_token=f"ExponentPushToken[tok{n}aaaaaaaaaaaa]",
+            platform="ios", app_version="1.2.0", forecast=True, sitrep=False, fire_weather=False, fire_detection=False,
+            county_fips=[], update_channel=channel,
+        )
+
+    register(1, "preview")
+    register(2, "production")
+    assert len(mobile_push._eligible_subscriptions("forecast", [], all_counties=True)) == 2
+    only = mobile_push._eligible_subscriptions("forecast", [], all_counties=True, testers_only=True)
+    assert [item["installation_id"][-1] for item in only] == ["1"]
+    register(1, "production")  # switch turned off
+    assert mobile_push._eligible_subscriptions("forecast", [], all_counties=True, testers_only=True) == []
