@@ -33,3 +33,11 @@ def test_web_url_blank_or_missing_is_none():
 def test_web_url_rejects_everything_else(bad):
     with pytest.raises(ValidationError):
         make(web_url=bad)
+
+
+def test_audience_preview_needs_no_message_text():
+    from routers.admin_notifications import AudienceRequest
+    request = AudienceRequest(channel="forecast", title="", body="", url="/", web_url="", countyFips=[])
+    assert request.channel == "forecast" and request.countyFips == []
+    with pytest.raises(ValidationError):
+        AudienceRequest(channel="nope")

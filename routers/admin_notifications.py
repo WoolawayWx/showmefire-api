@@ -102,7 +102,20 @@ class ManualNotification(BaseModel):
         return normalized
 
 
-def _recipients(payload: ManualNotification) -> list[dict]:
+class AudienceRequest(BaseModel):
+    """Just who would receive it: the audience count does not depend on the text, so a blank form must not be rejected."""
+    channel: Literal["forecast", "sitrep", "fire_weather", "fire_detection", "general"]
+    countyFips: list[str] = Field(default_factory=list, max_length=115)
+
+    @field_validator("countyFips")
+    @classmethod
+    def validate_counties(cls, values: list[str]) -> list[str]:
+        return ManualNotification.validate_counties(values)
+
+    model_config = {"extra": "ignore"}
+
+
+def _recipients(payload: "ManualNotification | AudienceRequest") -> list[dict]:
     return _eligible_subscriptions(payload.channel, payload.countyFips, all_counties=True)
 
 
@@ -123,7 +136,7 @@ def notification_options(_admin: str = Depends(require_admin)):
 
 
 @router.post("/preview")
-def preview_notification(payload: ManualNotification, _admin: str = Depends(require_admin)):
+def preview_notification(payload: AudienceRequest, _admin: str = Depends(require_admin)):
     """How many devices would receive this, so staff see the audience before sending."""
     return {"success": True, "recipients": len(_recipients(payload))}
 
