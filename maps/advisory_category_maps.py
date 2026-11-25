@@ -141,6 +141,52 @@ FILENAME_SUFFIXES = {
 }
 
 
+# Higher = more severe. Anything not listed is ranked by its suffix (see
+# _severity), so new NWS products still sort sensibly.
+EVENT_SEVERITY = {
+    "Tornado Warning": 100,
+    "Extreme Wind Warning": 95,
+    "Flash Flood Warning": 90,
+    "Blizzard Warning": 88,
+    "Ice Storm Warning": 87,
+    "Severe Thunderstorm Warning": 85,
+    "Red Flag Warning": 84,
+    "Excessive Heat Warning": 80,
+    "Extreme Heat Warning": 80,
+    "Extreme Cold Warning": 80,
+    "Winter Storm Warning": 75,
+}
+
+
+def _severity(event: str) -> int:
+    if event in EVENT_SEVERITY:
+        return EVENT_SEVERITY[event]
+    if "Warning" in event:
+        return 70
+    if "Watch" in event:
+        return 40
+    if "Advisory" in event:
+        return 20
+    return 10
+
+
+def _draw_order(feature) -> tuple:
+    event = (feature.get("properties") or {}).get("event", "")
+    return (_severity(event), event)
+
+
+MAP_BACKGROUND = "#E9E9E9"
+FILL_STRENGTH = 0.6
+
+
+def _opaque_color(hex_color: str) -> str:
+    """Blend a colour over the map background so an opaque fill looks like the old 60% one."""
+    fg = [int(hex_color[i:i + 2], 16) for i in (1, 3, 5)]
+    bg = [int(MAP_BACKGROUND[i:i + 2], 16) for i in (1, 3, 5)]
+    mixed = [round(f * FILL_STRENGTH + b * (1 - FILL_STRENGTH)) for f, b in zip(fg, bg)]
+    return "#%02X%02X%02X" % tuple(mixed)
+
+
 def _load_active_alerts() -> dict:
     for candidate in ACTIVE_ALERTS_CANDIDATES:
         if candidate.is_file():
@@ -155,32 +201,33 @@ def render_advisory_category(category: str, alerts_geojson: dict, out_png: Path,
     fig, ax, data_crs, map_crs, mapdpi = sp.generate_basemap()
     fallback_color = CATEGORY_COLORS[category]
     event_names = []
-    # Draw lower-priority (alphabetical) first; warnings sit on top of watches.
-    def _draw_order(feature):
-        event = (feature.get("properties") or {}).get("event", "")
-        return (0 if "Warning" not in event else 1, event)
+    # Most severe alert is drawn last so it wins where zones overlap. Fills are
+    # opaque (pre-blended toward the map background so they keep the same soft
+    # look as before) instead of transparent, so overlapping alerts never mix
+    # into a third colour.
     for feature in sorted(features, key=_draw_order):
         try:
             geometry = shape(feature["geometry"])
         except (KeyError, ValueError):
             continue
         event = (feature.get("properties") or {}).get("event", "Alert")
-        color = NWS_EVENT_COLORS.get(event, fallback_color)
+        color = _opaque_color(NWS_EVENT_COLORS.get(event, fallback_color))
         ax.add_geometries(
             [geometry], crs=data_crs, facecolor=color, edgecolor=color,
-            alpha=0.6, linewidth=1.5, zorder=7,
+            alpha=1.0, linewidth=1.5, zorder=7,
         )
         event_names.append(event)
+    sp.redraw_boundaries(ax, data_crs)
 
     label = CATEGORY_LABELS[category]
     if event_names:
         from matplotlib.patches import Patch
         handles = [
             Patch(
-                facecolor=NWS_EVENT_COLORS.get(name, fallback_color), edgecolor="none",
+                facecolor=_opaque_color(NWS_EVENT_COLORS.get(name, fallback_color)), edgecolor="none",
                 label=textwrap.fill(f"{name}: {EVENT_DESCRIPTIONS.get(name, 'Active NWS alert.')}", 44),
             )
-            for name in sorted(set(event_names))
+            for name in sorted(set(event_names), key=lambda n: -_severity(n))
         ]
         legend = fig.legend(
             handles=handles, loc="upper right", bbox_to_anchor=(0.99, 0.50),
