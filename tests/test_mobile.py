@@ -630,8 +630,9 @@ class MobileMapCatalogTests(unittest.TestCase):
     def test_catalog_file_is_valid_and_complete(self):
         catalog = self.maps.load_catalog()
         counts = {g["id"]: sum(len(s["maps"]) for s in g["sections"]) for g in catalog["groups"]}
-        self.assertEqual(len(counts), 7)
-        self.assertEqual(sum(counts.values()), 168)             # 137 + the 31 NOAA outlook maps
+        self.assertEqual(len(counts), 8)
+        self.assertEqual(sum(counts.values()), 178)             # 137 + the 31 NOAA outlook maps + the 10 winter maps
+        self.assertEqual(counts["winter"], 10)
         self.assertEqual(counts["rain-drought"], 46)
         self.assertEqual(counts["advisories"], 39)              # 8 advisory maps + 31 outlooks
         files = [m["file"] for g in catalog["groups"] for s in g["sections"] for m in s["maps"]]

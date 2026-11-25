@@ -441,6 +441,91 @@
       ]
     },
     {
+      "id": "winter",
+      "title": "Winter Weather",
+      "description": "National Weather Service snow and ice forecasts and the Winter Storm Severity Index (how disruptive a winter storm is likely to be).",
+      "sections": [
+        {
+          "id": "winter-forecast",
+          "title": "NWS Snow & Ice Forecast",
+          "maps": [
+            {
+              "key": "winter-snow-72hr",
+              "title": "NWS Snowfall Forecast (Next 72 Hours)",
+              "description": "Map of Missouri showing the total snowfall the National Weather Service forecasts over the next 72 hours.",
+              "file": "mo-winter-snow-72hr.png"
+            },
+            {
+              "key": "winter-ice-72hr",
+              "title": "NWS Ice Accumulation Forecast (Next 72 Hours)",
+              "description": "Map of Missouri showing the total ice accumulation the National Weather Service forecasts over the next 72 hours.",
+              "file": "mo-winter-ice-72hr.png"
+            }
+          ]
+        },
+        {
+          "id": "winter-wssi",
+          "title": "Winter Storm Severity Index",
+          "maps": [
+            {
+              "key": "winter-wssi-day1",
+              "title": "WSSI Day 1: Overall Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index overall impacts for Day 1.",
+              "file": "mo-winter-wssi-day1.png"
+            },
+            {
+              "key": "winter-wssi-day2",
+              "title": "WSSI Day 2: Overall Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index overall impacts for Day 2.",
+              "file": "mo-winter-wssi-day2.png"
+            },
+            {
+              "key": "winter-wssi-day3",
+              "title": "WSSI Day 3: Overall Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index overall impacts for Day 3.",
+              "file": "mo-winter-wssi-day3.png"
+            },
+            {
+              "key": "winter-wssi-days1-3",
+              "title": "WSSI Days 1-3: Overall Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index overall impacts for Days 1-3.",
+              "file": "mo-winter-wssi-days1-3.png"
+            }
+          ]
+        },
+        {
+          "id": "winter-wssi-components",
+          "title": "WSSI Impact Types (Days 1-3)",
+          "maps": [
+            {
+              "key": "winter-wssi-snow",
+              "title": "WSSI Snow Amount Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index snow amount impacts for Days 1-3.",
+              "file": "mo-winter-wssi-snow.png"
+            },
+            {
+              "key": "winter-wssi-snow-load",
+              "title": "WSSI Snow Load Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index snow load impacts for Days 1-3.",
+              "file": "mo-winter-wssi-snow-load.png"
+            },
+            {
+              "key": "winter-wssi-ice",
+              "title": "WSSI Ice Accumulation Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index ice accumulation impacts for Days 1-3.",
+              "file": "mo-winter-wssi-ice.png"
+            },
+            {
+              "key": "winter-wssi-blowing-snow",
+              "title": "WSSI Blowing Snow Impacts",
+              "description": "Map of Missouri showing the NOAA Weather Prediction Center Winter Storm Severity Index blowing snow impacts for Days 1-3.",
+              "file": "mo-winter-wssi-blowing-snow.png"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "radar-satellite",
       "title": "Radar & Satellite",
       "description": "Live radar, satellite imagery and station plots.",

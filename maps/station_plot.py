@@ -372,7 +372,10 @@ TITLE_LINE_HEIGHT = 26 * 1.2 / 72 * MAP_DPI / PIXEL_HEIGHT
 
 def wrap_title(title: str) -> tuple[str, float]:
     """(title wrapped to TITLE_WRAP_CHARS per line, how far to lower the lines below it)."""
-    lines = textwrap.wrap(title, TITLE_WRAP_CHARS) or [title]
+    if "\n" in title:      # the caller chose the breaks (at phrase boundaries); only wrap a line that is still too long
+        lines = [wrapped for line in title.split("\n") for wrapped in (textwrap.wrap(line, TITLE_WRAP_CHARS) or [line])]
+    else:
+        lines = textwrap.wrap(title, TITLE_WRAP_CHARS) or [title]
     return "\n".join(lines), (len(lines) - 1) * TITLE_LINE_HEIGHT
 
 
