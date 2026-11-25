@@ -1,7 +1,8 @@
 # ---------- Builder stage ----------
 # Installs build tooling + dev headers and builds the venv. Discarded after
 # build - none of this ships in the final image.
-FROM python:3.11-slim AS builder
+ARG PYTHON_IMAGE=python:3.11-slim@sha256:61e01f72680f86a5279ad510818ab7b2ee9f049822589d4e34e33e044360356c
+FROM ${PYTHON_IMAGE} AS builder
 
 # Install system dependencies for GIS and PostgreSQL
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,7 +34,7 @@ RUN python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
 # keeps downloaded/built wheels across builds, so even when this layer is
 # invalidated (lockfile change, builder cache GC) nothing is re-downloaded
 # or re-compiled from sdist unless it actually changed.
-COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.8@sha256:1d31be550ff927957472b2a491dc3de1ea9b5c2d319a9cea5b6a48021e2990a6 /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON=/opt/venv/bin/python
@@ -106,7 +107,7 @@ PY
 # manylinux wheels that vendor their own copies of GDAL/PROJ/GEOS/HDF5 - the
 # apt -dev packages in the builder stage are only needed to build the few
 # packages installed from sdist (psycopg2, Cartopy), not to run them.
-FROM python:3.11-slim
+FROM ${PYTHON_IMAGE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
@@ -120,6 +121,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gh \
     cron \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -201,13 +203,12 @@ RUN echo "TZ=UTC" > /etc/cron.d/maps \
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# App source last: it changes on every deploy, so everything above stays cached.
+COPY . .
 # The code a container runs is whatever was baked in at build time. The git checkout is not in the image (.dockerignore),
 # so the commit is recorded for the scheduler worker's heartbeat and the admin pages: `docker build --build-arg GIT_SHA=...`.
 ARG GIT_SHA=unknown
 ENV SMF_GIT_SHA=${GIT_SHA}
-LABEL smf.git_sha=${GIT_SHA}
-COPY . .
+LABEL smf.git_sha=${GIT_SHA} smf.long_job_lock=1
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 8000

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import wraps
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,23 @@ def groups_from_env(value: str | None = None) -> set[str]:
     return (groups & set(ALL_GROUPS)) or set(ALL_GROUPS)
 
 
+def guard_forecast_job(func, path):
+    """Hold a shared lock before a forecast job can claim work or write data."""
+    import fcntl
+
+    @wraps(func)
+    async def guarded(*args, **kwargs):
+        with open(path, "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                logger.info("Deferring %s while long workers are being deployed", func.__name__)
+                return None
+            return await func(*args, **kwargs)
+
+    return guarded
+
+
 class GroupFilteredScheduler:
     """Wraps a scheduler so `add_job` only registers jobs in the enabled groups, leaving every add_job call untouched."""
 
@@ -105,6 +123,9 @@ class GroupFilteredScheduler:
         if group not in self.groups:
             self.skipped.append(str(id))
             return None
+        lock_path = os.getenv("SMF_LONG_JOB_LOCK")
+        if group == FORECAST and lock_path:
+            func = guard_forecast_job(func, lock_path)
         self.registered.append(str(id))
         return self._scheduler.add_job(func, *args, id=id, **kwargs)
 

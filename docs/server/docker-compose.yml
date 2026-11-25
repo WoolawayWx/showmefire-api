@@ -121,6 +121,7 @@ services:
     stop_grace_period: 30m
     environment:
       - SMF_SCHEDULER_GROUPS=forecast
+      - SMF_LONG_JOB_LOCK=/app/.locks/long-deploy.lock
       - SMF_START_CRON=0
       - SMF_DOWNLOAD_MODOT_ROADS=0
       - SMF_METRICS_ENABLED=0
@@ -190,6 +191,7 @@ services:
     memswap_limit: 8g
     environment:
       - SMF_CRON_SET=long
+      - SMF_LONG_JOB_LOCK=/app/.locks/long-deploy.lock
       - SMF_GIS_PUBLISH_DIR=/app/gis
       - SMF_GIS_RESOLUTION_METERS=3000
       - SMF_GIS_RETENTION_DAYS=30

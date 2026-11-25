@@ -1,56 +1,88 @@
 #!/bin/bash
-# Deploy the latest showmefire-api code.
-#
-#   ./deploy.sh            pull, work out which containers need a restart, show the plan, ask, wait for a safe
-#                          moment (only for the containers being restarted), then restart just those
-#   ./deploy.sh --check    only report whether it is safe to restart everything right now
-#   ./deploy.sh --yes      don't ask (for scripts); still waits for a safe moment
-#   ./deploy.sh --api-only restart only the backend, no wait (the heavy jobs live in the scheduler container)
-#   ./deploy.sh --all      restart backend, worker and scheduler, with the full guard
-#   ./deploy.sh --force    skip the safety guard (emergencies only; kills running jobs)
-#   ./deploy.sh --long     only move the long-job containers (forecast, worker-long) to the newest code, if none is mid-run
-#
-# Which container needs what (the repo is bind-mounted at /app in all of them):
-#   backend    runs the web API and the quick scheduler jobs; Python code is read once at start, so any code change restarts it.
-#   scheduler  runs the heavy jobs (forecast-v1, hourly HRRR, archives...); restarted when code other than routers/, main.py,
-#              tests or docs changed, because it may import it. Restarting it kills a running forecast-v1 run.
-#   worker     runs cron; every cron job starts a fresh Python process, so it picks up new code by itself. Restarted only when
-#              its own entrypoint changes, or after a rebuild / compose / .env change. Restarting it kills running cron jobs.
-#   forecast, worker-long (optional; docs/long_jobs.md) run forecast-v1 and the long cron jobs from the pinned image
-#              `showmefire-api:long` with the code baked in. A deploy never restarts them: after the normal deploy this script
-#              builds the new image and moves them onto it only when none of their jobs is running (otherwise it records
-#              .long-pending and prints what is blocking; run `./deploy.sh --long` later). They can therefore lag the API by a
-#              few hours; never longer than the run in progress.
-# A Dockerfile/requirements change (rebuild) or a docker-compose.yml/.env change (recreate) affects every container.
-# Without a scheduler container (an unsplit deployment) the backend also runs the heavy jobs, so restarting it is guarded too.
-# Env: GUARD_WAIT_MIN (default 90) = how long to wait before giving up; GUARD_LEAD_MIN (default 10)
-# = how long before a daily job's start time we refuse to restart.
-set -e
+# Deploy the upstream revision on the ARM64 host. See docs/long_jobs.md.
+set -eo pipefail
+
 MODE=deploy
-FORCE_SCOPE=""      # "", api or all
+SCOPE=normal
 ASSUME_YES=false
+FORCE=false
 for arg in "$@"; do
     case "$arg" in
         --check) MODE=check ;;
         --long) MODE=long ;;
-        --force) MODE=force ;;
-        --api-only) FORCE_SCOPE=api ;;
-        --all) FORCE_SCOPE=all ;;
+        --force) FORCE=true ;;
+        --api-only) SCOPE=api ;;
+        --all) SCOPE=all ;;
         --yes|-y) ASSUME_YES=true ;;
-        *) echo "Unknown option: $arg (use --check, --long, --yes, --api-only, --all or --force)"; exit 2 ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
-ROOT=~/showmefire
+
+ROOT=${SMF_DEPLOY_ROOT:-"$HOME/showmefire"}
+ROOT=$(cd "$ROOT" && pwd -P)
 REPO=$ROOT/showmefire-api
-STATE_FILE=$ROOT/.deploy-config.sha256   # checksum of .env + docker-compose.yml after the last deploy
-PENDING_FILE=$ROOT/.deploy-pending       # set when code was pulled but containers were not restarted (line 1: action, line 2: services)
+STATE=$ROOT/.deploy-state
+STATE_FILE=$ROOT/.deploy-config.sha256
+PENDING_FILE=$ROOT/.deploy-pending
+LONG_PENDING_FILE=$ROOT/.long-pending
+LONG_LOCK_PATH=/app/.locks/long-deploy.lock
 GUARD_WAIT_MIN=${GUARD_WAIT_MIN:-90}
 GUARD_LEAD_MIN=${GUARD_LEAD_MIN:-10}
-LONG_PENDING_FILE=$ROOT/.long-pending    # set when the long containers are behind the newest code (line 1: the commit)
-# Are forecast-v1 and the long cron jobs in containers of their own? (compose services `forecast` and `worker-long`)
+DEPLOY_HEALTH_WAIT_SECONDS=${DEPLOY_HEALTH_WAIT_SECONDS:-120}
+
+cd "$ROOT"
+exec 9>"$ROOT/.deploy.lock"
+flock -n 9 || { echo "Another deployment is in progress." >&2; exit 1; }
+
+CONFIG=$(docker compose config --format json)
+HAS_SCHEDULER=false
 HAS_LONG=false
-if (cd "$ROOT" && docker compose config --services 2>/dev/null) | grep -qx forecast \
-   && (cd "$ROOT" && docker compose config --services 2>/dev/null) | grep -qx worker-long; then HAS_LONG=true; fi
+SPLIT=false
+if jq -e '.services.scheduler' >/dev/null <<< "$CONFIG"; then HAS_SCHEDULER=true; fi
+if jq -e '.services.forecast and .services["worker-long"]' >/dev/null <<< "$CONFIG"; then HAS_LONG=true; fi
+if jq -e '
+    .services.backend.environment.SMF_SCHEDULER_GROUPS == "api" and
+    .services.scheduler.command == ["python", "-m", "core.scheduler_worker", "--groups", "heavy"] and
+    .services.worker.environment.SMF_CRON_SET == "short" and
+    .services.forecast.command == ["python", "-m", "core.scheduler_worker", "--groups", "forecast"] and
+    .services["worker-long"].environment.SMF_CRON_SET == "long"
+' >/dev/null <<< "$CONFIG"; then SPLIT=true; fi
+
+container_name() {
+    case "$1" in
+        backend) echo show-me-fire-api ;;
+        *) echo "show-me-fire-$1" ;;
+    esac
+}
+
+inspect_container() {
+    docker inspect -f "$2" "$(container_name "$1")" 2>/dev/null
+}
+
+is_running() {
+    [ "$(inspect_container "$1" '{{.State.Running}}')" = true ]
+}
+
+uses_long_lock() {
+    [ "$(inspect_container "$1" '{{index .Config.Labels "smf.long_job_lock"}}')" = 1 ] &&
+        inspect_container "$1" '{{range .Config.Env}}{{println .}}{{end}}' |
+            grep -Fx "SMF_LONG_JOB_LOCK=$LONG_LOCK_PATH" >/dev/null
+}
+
+forecast_heartbeat() {
+    local revision=${1:-} host started written now
+    host=$(inspect_container forecast '{{.Config.Hostname}}') || return 1
+    started=$(inspect_container forecast '{{.State.StartedAt}}') || return 1
+    started=$(date -d "$started" +%s) || return 1
+    written=$(jq -er --arg revision "$revision" --arg host "$host" '
+        select(.host == $host and .groups == ["forecast"] and ($revision == "" or .git_sha == $revision))
+        | .written_at
+    ' "$LONG_STATE" 2>/dev/null) || return 1
+    written=$(date -d "$written" +%s) || return 1
+    now=$(date +%s)
+    [ "$written" -ge "$started" ] && [ "$written" -le "$now" ] && [ "$((now - written))" -lt 120 ]
+}
+
 # ---------------------------------------------------------------- guard
 # Frequent jobs that simply run again minutes later; everything else in the worker is a daily job
 # that would be lost for the day if killed.
@@ -65,7 +97,7 @@ SAFE_FORECAST_PHASES="queued preparing acquiring_sources"
 DAILY_UTC="04:30 06:40 12:05 13:00 15:00"
 # Daily jobs that run in the long containers (12z/09z forecasts, ensemble). When those are separate they no longer matter
 # for restarting the backend, scheduler or worker, only for moving the long containers (guard_collect_long).
-LONG_DAILY_UTC="12:05 13:00 15:00"
+LONG_DAILY_UTC="01:30 06:40 10:30 12:05 13:00 15:00 16:30 19:30 22:30"
 [ "$HAS_LONG" = true ] && DAILY_UTC="04:30 06:40"
 DAILY_CHICAGO="02:00"
 # What the guard looks at, set from the restart plan (all on for --check and for a rebuild/recreate):
@@ -86,7 +118,7 @@ guard_collect() {
         done < <(docker exec show-me-fire-worker sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null \
                  | awk '$1=="/bin/bash" && $2 ~ /run_job\.sh$/ {print $3}' | sort -u)
     fi
-    if [ "$GUARD_HEAVY" = true ] && [ "$HAS_LONG" = false ]; then
+    if [ "$GUARD_HEAVY" = true ] && { [ "$HAS_LONG" = false ] || ! is_running forecast; }; then
         # 2. forecast-v1 run (in the scheduler container once it exists, otherwise in the backend): the job file must say
         #    running/queued AND have been updated recently (a run killed by an earlier restart stops updating and is
         #    treated as stale). These are files on the host, so this works whichever container runs the job.
@@ -165,40 +197,40 @@ LONG_STATE=$REPO/data/current_conditions/status/scheduler_forecast.json
 LONG_REASONS=()
 guard_collect_long() {
     LONG_REASONS=()
-    local now_epoch id ignored skip job_file status updated age phase cutoff staging t day start delta lead
+    local now_epoch id job_file status updated age cutoff staging t day start delta lead processes
     now_epoch=$(date +%s)
     if docker inspect -f '{{.State.Running}}' show-me-fire-worker-long 2>/dev/null | grep -q true; then
-        while read -r id; do
-            [ -z "$id" ] && continue
-            skip=false
-            for ignored in $IGNORED_JOBS; do [ "$id" = "$ignored" ] && skip=true; done
-            $skip || LONG_REASONS+=("long cron job '$id' is running")
-        done < <(docker exec show-me-fire-worker-long sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null \
-                 | awk '$1=="/bin/bash" && $2 ~ /run_job\.sh$/ {print $3}' | sort -u)
+        if processes=$(docker top show-me-fire-worker-long -eo args); then
+            while read -r id; do
+                [ -n "$id" ] && LONG_REASONS+=("long cron job '$id' is running")
+            done < <(awk '$1 ~ /(^|\/)bash$/ && $2 ~ /run_job\.sh$/ {print $3}' <<< "$processes")
+        else
+            LONG_REASONS+=("could not inspect long cron jobs")
+        fi
     fi
     job_file=$REPO/data/forecast-v1/admin-job.json
     if [ -f "$job_file" ]; then
         status=$(jq -r '.status // "idle"' "$job_file" 2>/dev/null || echo idle)
         updated=$(jq -r '.updated_at // .started_at // empty' "$job_file" 2>/dev/null || true)
-        if [ "$status" = "running" ] || [ "$status" = "queued" ]; then
-            phase=$(jq -r '.phase // "?"' "$job_file" 2>/dev/null || echo "?")
-            case " $SAFE_FORECAST_PHASES " in
-                *" $phase "*) ;;
-                *)
-                    if [ -n "$updated" ] && age=$(( now_epoch - $(date -d "$updated" +%s 2>/dev/null || echo 0) )) && [ "$age" -lt 2700 ]; then
-                        LONG_REASONS+=("forecast-v1 run is $status (phase '$phase', updated $((age/60)) min ago)")
-                    fi
-                    ;;
-            esac
+        if [ "$status" = running ] && [ -n "$updated" ] \
+            && age=$(( now_epoch - $(date -d "$updated" +%s 2>/dev/null || echo 0) )) && [ "$age" -lt 2700 ]; then
+            LONG_REASONS+=("forecast-v1 admin run is active")
         fi
     fi
     cutoff=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
-    staging=$(sqlite3 -readonly "$REPO/data/showmefire.db" "SELECT count(*) FROM forecast_runs WHERE status='staging' AND created_at_utc > '$cutoff';" 2>/dev/null || echo 0)
-    [ "${staging:-0}" -gt 0 ] && LONG_REASONS+=("$staging forecast-v1 run(s) still staging in the database")
+    if [ -f "$REPO/data/showmefire.db" ]; then
+        if staging=$(sqlite3 -readonly "$REPO/data/showmefire.db" "SELECT count(*) FROM forecast_runs WHERE status='staging' AND created_at_utc > '$cutoff';"); then
+            [ "${staging:-0}" -gt 0 ] && LONG_REASONS+=("$staging forecast-v1 run(s) still staging in the database")
+        else
+            LONG_REASONS+=("could not check forecast staging")
+        fi
+    fi
+    if is_running forecast && ! uses_long_lock forecast && ! forecast_heartbeat; then
+        LONG_REASONS+=("legacy forecast worker has no fresh heartbeat")
+    fi
     if [ -f "$LONG_STATE" ] && [ $(( now_epoch - $(stat -c %Y "$LONG_STATE") )) -lt 300 ]; then
         while read -r id; do
             [ -z "$id" ] && continue
-            [ "$id" = forecast_v1_admin_requests ] && continue
             LONG_REASONS+=("forecast worker job '$id' is running")
         done < <(jq -r '(.running_jobs // [])[]' "$LONG_STATE" 2>/dev/null)
     fi
@@ -219,339 +251,398 @@ guard_collect_long() {
             fi
         done
     done
-}
-# Build the current code into the pinned `long` image and restart the two long containers on it. Returns 1 (and records
-# .long-pending) when something is running; the old containers keep running untouched.
-promote_long() {
-    [ "$HAS_LONG" = true ] || return 0
-    local sha running_sha
-    sha=$(git -C "$REPO" rev-parse --short HEAD)
-    running_sha=$(docker inspect -f '{{index .Config.Labels "smf.git_sha"}}' show-me-fire-forecast 2>/dev/null || true)
-    # A newer commit only matters to the long containers when it changed code they import (not routers/, main.py, docs, tests).
-    if [ -n "$running_sha" ] && [ "$running_sha" != "$sha" ] && [ ! -f "$LONG_PENDING_FILE" ]; then
-        local changed relevant
-        if changed=$(git -C "$REPO" diff --name-only "$running_sha" "$sha" 2>/dev/null); then
-            relevant=$(echo "$changed" | grep -vE '^(docs/|tests/|routers/|main\.py$|.*\.md$)' || true)
-        else
-            relevant=UNKNOWN      # the running commit is not in this checkout: assume it matters
-        fi
-        if [ -z "$relevant" ]; then
-            echo "Long containers: $running_sha -> $sha changed nothing they use; leaving them running."
-            return 0
-        fi
-    fi
-    if [ "$running_sha" = "$sha" ] && [ "$(docker inspect -f '{{.State.Running}}' show-me-fire-forecast 2>/dev/null)" = true ] \
-       && [ "$(docker inspect -f '{{.State.Running}}' show-me-fire-worker-long 2>/dev/null)" = true ]; then
-        echo "Long containers already run $sha."
-        rm -f "$LONG_PENDING_FILE"
-        return 0
-    fi
-    guard_collect_long
-    if [ ${#LONG_REASONS[@]} -gt 0 ]; then
-        echo "Long containers (forecast, worker-long) NOT moved to $sha: they are busy:"
-        for r in "${LONG_REASONS[@]}"; do echo "  - $r"; done
-        echo "$sha" > "$LONG_PENDING_FILE"
-        echo "They keep running their current code. Run ./deploy.sh --long when they are idle."
-        return 1
-    fi
-    echo "Building the long-job image for $sha..."
-    (cd "$ROOT" && GIT_SHA="$sha" docker compose build backend) || { echo "ERROR: image build failed; long containers left as they are."; return 1; }
-    # Keep the previous pinned image for a one-command rollback (docker tag showmefire-api:long-previous showmefire-api:long).
-    docker tag showmefire-api:long showmefire-api:long-previous 2>/dev/null || true
-    docker tag showmefire-api:latest showmefire-api:long
-    (cd "$ROOT" && docker compose up -d --no-deps forecast worker-long)
-    rm -f "$LONG_PENDING_FILE"
-    sleep 15
-    local c
-    for c in show-me-fire-forecast show-me-fire-worker-long; do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" != true ]; then
-            echo "ERROR: $c is not running after the move. Roll back: docker tag showmefire-api:long-previous showmefire-api:long && docker compose up -d --no-deps forecast worker-long"
-            docker logs --tail 30 "$c" 2>&1 || true
-            return 1
+    # The forecast scheduler runs its daily retention job in Central time.
+    for day in today tomorrow; do
+        start=$(TZ=America/Chicago date -d "$day 03:20" +%s)
+        delta=$(( start - now_epoch ))
+        if [ "$delta" -ge 0 ] && [ "$delta" -le "$lead" ]; then
+            LONG_REASONS+=("forecast retention due at 03:20 Central (in $((delta/60)) min)")
         fi
     done
-    echo "Long containers now run $sha."
 }
-if [ "$MODE" = long ]; then
-    if [ "$HAS_LONG" = false ]; then echo "No forecast/worker-long services in docker-compose.yml; nothing to do."; exit 0; fi
-    git -C "$REPO" fetch -q 2>/dev/null || true
-    promote_long
-    exit $?
-fi
-# ---------------------------------------------------------------- --check
 if [ "$MODE" = check ]; then
     guard_collect
     if [ "$HAS_LONG" = true ]; then
         guard_collect_long
-        if [ ${#LONG_REASONS[@]} -eq 0 ]; then echo "Long containers (forecast, worker-long): idle, could be moved now."
-        else echo "Long containers (forecast, worker-long) are busy (a deploy leaves them alone):"; for r in "${LONG_REASONS[@]}"; do echo "  - $r"; done; fi
+        GUARD_REASONS+=("${LONG_REASONS[@]}")
     fi
-    if [ ${#GUARD_REASONS[@]} -eq 0 ]; then
-        echo "SAFE: nothing is running that a restart would interrupt."
-        exit 0
+    if [ "${#GUARD_REASONS[@]}" -gt 0 ]; then
+        guard_print
+        exit 2
     fi
-    echo "NOT SAFE to restart containers right now:"
-    guard_print
-    exit 2
-fi
-# ---------------------------------------------------------------- pull
-cd "$REPO"
-BEFORE=$(git rev-parse HEAD)
-git pull
-AFTER=$(git rev-parse HEAD)
-cd "$ROOT"
-CHANGED_FILES=$(git -C "$REPO" diff --name-only "$BEFORE" "$AFTER")
-# Which containers exist / are up? (The scheduler is added to docker-compose.yml at cutover.)
-HAS_SCHEDULER=false
-if docker compose config --services 2>/dev/null | grep -qx scheduler; then HAS_SCHEDULER=true; fi
-SCHEDULER_UP=false
-if docker inspect -f '{{.State.Running}}' show-me-fire-scheduler 2>/dev/null | grep -q true; then SCHEDULER_UP=true; fi
-CONTAINERS="show-me-fire-api show-me-fire-worker"
-[ "$HAS_SCHEDULER" = true ] && CONTAINERS="$CONTAINERS show-me-fire-scheduler"
-# What does this deploy need?
-#   .env is gitignored and docker-compose.yml lives outside the repo, so git can't tell us when they
-#   change. Compare a checksum against the one saved after the last deploy. `docker compose restart`
-#   does not re-read either file; only `up -d` does.
-CONFIG_SUM=$(cat "$REPO/.env" "$ROOT/docker-compose.yml" | sha256sum | cut -d' ' -f1)
-CONFIG_CHANGED=false
-if [ ! -f "$STATE_FILE" ] || [ "$(cat "$STATE_FILE")" != "$CONFIG_SUM" ]; then
-    CONFIG_CHANGED=true
-fi
-ACTION=none
-if echo "$CHANGED_FILES" | grep -qE '^(requirements.*\.txt|Dockerfile)$'; then
-    ACTION=rebuild
-elif [ "$CONFIG_CHANGED" = true ]; then
-    ACTION=recreate
-elif [ "$BEFORE" != "$AFTER" ]; then
-    ACTION=restart
-fi
-# A previous run pulled code but was stopped by the guard: finish that job now, at the strongest level.
-PENDING_SERVICES=""
-if [ -f "$PENDING_FILE" ]; then
-    PENDING=$(sed -n 1p "$PENDING_FILE")
-    PENDING_SERVICES=$(sed -n 2p "$PENDING_FILE")
-    echo "Earlier deploy is still pending ($PENDING${PENDING_SERVICES:+: $PENDING_SERVICES})."
-    if [ "$PENDING" = rebuild ] || [ "$ACTION" = rebuild ]; then ACTION=rebuild
-    elif [ "$ACTION" = none ] || [ "$ACTION" = restart ]; then ACTION=$PENDING
-    fi
-fi
-if [ "$ACTION" = none ]; then
-    echo "No new commits pulled; nothing to deploy."
-    promote_long || true      # finishes a long-container move that an earlier deploy found busy
+    echo "Safe to restart."
     exit 0
 fi
-# ---------------------------------------------------------------- plan: which containers?
-RESTART_BACKEND=false
-RESTART_SCHEDULER=false
-RESTART_WORKER=false
-REASON_BACKEND="" REASON_SCHEDULER="" REASON_WORKER=""
-NOTE_SKIPPED=()
-plan_restart() {
-    if [ "$ACTION" = rebuild ] || [ "$ACTION" = recreate ]; then
-        RESTART_BACKEND=true; RESTART_WORKER=true
-        [ "$HAS_SCHEDULER" = true ] && RESTART_SCHEDULER=true
-        REASON_BACKEND="$ACTION"; REASON_WORKER="$ACTION"; REASON_SCHEDULER="$ACTION"
+
+if [ "$MODE" = long ] && [ "$HAS_LONG" = false ]; then
+    echo "No long worker services are configured."
+    exit 0
+fi
+
+BEFORE=$(git -C "$REPO" rev-parse HEAD)
+TARGET=$BEFORE
+if [ "$MODE" = deploy ]; then
+    git -C "$REPO" fetch --quiet
+    TARGET=$(git -C "$REPO" rev-parse '@{upstream}')
+    git -C "$REPO" merge-base --is-ancestor "$BEFORE" "$TARGET" ||
+        { echo "Cannot fast-forward the deployed checkout to $TARGET." >&2; exit 1; }
+    if ! git -C "$REPO" diff --quiet HEAD --; then
+        echo "The deployed checkout has tracked changes. Commit or move them before deploying." >&2
+        exit 1
+    fi
+fi
+
+CONFIG_SUM=$(cat "$REPO/.env" "$ROOT/docker-compose.yml" | sha256sum | cut -d' ' -f1)
+LEGACY_CONFIG=$(cat "$STATE_FILE" 2>/dev/null || true)
+LEGACY_ACTION=
+LEGACY_SERVICES=
+if [ -f "$PENDING_FILE" ]; then
+    LEGACY_ACTION=$(sed -n '1p' "$PENDING_FILE")
+    LEGACY_SERVICES=$(sed -n '2p' "$PENDING_FILE")
+fi
+
+MAIN_SERVICES=(backend)
+if jq -e '.services.worker' >/dev/null <<< "$CONFIG"; then MAIN_SERVICES+=(worker); fi
+if [ "$HAS_SCHEDULER" = true ]; then MAIN_SERVICES+=(scheduler); fi
+EXTRA_SERVICES=()
+while IFS= read -r service; do
+    EXTRA_SERVICES+=("$service")
+done < <(jq -r '.services | keys[] | select(. != "backend" and . != "worker" and . != "scheduler" and . != "forecast" and . != "worker-long")' <<< "$CONFIG")
+
+# Each service keeps a revision and config checksum even when another service
+# has already applied the same commit. The long workers advance as a pair.
+read_state() {
+    APPLIED=$BEFORE
+    APPLIED_CONFIG=$LEGACY_CONFIG
+    APPLIED_IMAGE=
+    if [ -f "$STATE/$1" ]; then
+        read -r APPLIED APPLIED_CONFIG APPLIED_IMAGE < "$STATE/$1"
+    elif [ "$1" = long ]; then
+        APPLIED=$(inspect_container forecast '{{index .Config.Labels "smf.git_sha"}}' || true)
+        APPLIED_IMAGE=$(inspect_container forecast '{{.Image}}' || true)
+        [ -n "$APPLIED" ] || APPLIED=unknown
+    fi
+    [ -n "$APPLIED_CONFIG" ] || APPLIED_CONFIG=unknown
+}
+
+write_state() {
+    local temp
+    temp=$(mktemp "$STATE/.state.XXXXXX") || return 1
+    printf '%s %s %s\n' "$2" "$3" "${4:-}" > "$temp" && mv -f "$temp" "$STATE/$1"
+}
+
+classify() {
+    local service=$1 changed path
+    ACTION=none
+    if ! changed=$(git -C "$REPO" diff --name-only --no-renames "$APPLIED" "$TARGET" -- 2>/dev/null); then
+        ACTION=rebuild
         return
     fi
-    local code heavy CODE_ONLY
-    # Anything that is not documentation, tests or a shell/cron script is code the backend has to reload.
-    code=$(echo "$CHANGED_FILES" | grep -vE '^(docs/|tests/|.*\.md$|scripts/.*\.sh$|scripts/localhost_forward\.py$)' || true)
-    # The scheduler may import anything except the web routers, main.py, tests and docs.
-    CODE_ONLY="$code"
-    heavy=$(echo "$CODE_ONLY" | grep -vE '^(routers/|main\.py$)' || true)
-    if [ -n "$code" ]; then
-        RESTART_BACKEND=true
-        REASON_BACKEND="code changed ($(echo "$code" | head -3 | tr '\n' ' ')...)"
-    else
-        NOTE_SKIPPED+=("backend: only docs, tests or cron scripts changed")
-    fi
-    if [ "$HAS_SCHEDULER" = true ]; then
-        if [ -n "$heavy" ]; then
-            RESTART_SCHEDULER=true
-            REASON_SCHEDULER="code it may import changed ($(echo "$heavy" | head -3 | tr '\n' ' ')...)"
-        elif [ -n "$code" ]; then
-            NOTE_SKIPPED+=("scheduler: only API code (routers/, main.py) changed")
-        fi
-    fi
-    # Cron scripts start a fresh Python process each run, so new code reaches them without a restart.
-    if echo "$CHANGED_FILES" | grep -qE '^scripts/(worker-entrypoint\.sh|localhost_forward\.py)$'; then
-        RESTART_WORKER=true
-        REASON_WORKER="worker entrypoint changed"
-    elif [ -n "$code" ]; then
-        NOTE_SKIPPED+=("worker: cron jobs pick up new code on their next run")
-    fi
-}
-plan_restart
-# Finish an earlier, guard-blocked deploy too.
-if [ -f "$PENDING_FILE" ] && [ -z "$PENDING_SERVICES" ] && [ "$ACTION" = restart ]; then
-    PENDING_SERVICES="backend scheduler worker"      # an older pending file did not record the plan: do everything
-fi
-for s in $PENDING_SERVICES; do
-    case "$s" in
-        backend) RESTART_BACKEND=true; REASON_BACKEND="${REASON_BACKEND:-pending from an earlier deploy}" ;;
-        scheduler) [ "$HAS_SCHEDULER" = true ] && RESTART_SCHEDULER=true && REASON_SCHEDULER="${REASON_SCHEDULER:-pending from an earlier deploy}" ;;
-        worker) RESTART_WORKER=true; REASON_WORKER="${REASON_WORKER:-pending from an earlier deploy}" ;;
-    esac
-done
-set_scope_api() { RESTART_BACKEND=true; RESTART_SCHEDULER=false; RESTART_WORKER=false; }
-set_scope_all() { RESTART_BACKEND=true; RESTART_WORKER=true; [ "$HAS_SCHEDULER" = true ] && RESTART_SCHEDULER=true; }
-[ "$FORCE_SCOPE" = api ] && [ "$ACTION" = restart ] && set_scope_api
-[ "$FORCE_SCOPE" = all ] && set_scope_all
-if [ "$ACTION" = restart ] && [ "$RESTART_BACKEND" = false ] && [ "$RESTART_SCHEDULER" = false ] && [ "$RESTART_WORKER" = false ]; then
-    echo "Pulled $(echo "$CHANGED_FILES" | wc -l) changed file(s); nothing needs a restart (${NOTE_SKIPPED[*]:-only docs, tests or cron scripts changed})."
-    echo "$CONFIG_SUM" > "$STATE_FILE"
-    rm -f "$PENDING_FILE"
-    exit 0
-fi
-save_pending() {
-    local list=""
-    [ "$RESTART_BACKEND" = true ] && list="$list backend"
-    [ "$RESTART_SCHEDULER" = true ] && list="$list scheduler"
-    [ "$RESTART_WORKER" = true ] && list="$list worker"
-    printf '%s\n%s\n' "$ACTION" "${list# }" > "$PENDING_FILE"
-}
-describe_plan() {
-    echo
-    echo "Deploy plan ($ACTION):"
-    if [ "$ACTION" = rebuild ] || [ "$ACTION" = recreate ]; then
-        echo "  recreate every container (the image or the compose/.env config changed)"
-    else
-        [ "$RESTART_BACKEND" = true ]   && echo "  restart backend   - ${REASON_BACKEND:-requested}"
-        [ "$RESTART_SCHEDULER" = true ] && echo "  restart scheduler - ${REASON_SCHEDULER:-requested}  (kills a running forecast-v1 run)"
-        [ "$RESTART_WORKER" = true ]    && echo "  restart worker    - ${REASON_WORKER:-requested}  (kills running cron jobs)"
-        local n
-        for n in "${NOTE_SKIPPED[@]}"; do echo "  leave alone       - $n"; done
-        if [ "$HAS_SCHEDULER" = true ] && [ "$RESTART_SCHEDULER" = false ] && [ "$SCHEDULER_UP" = false ]; then
-            echo "  note: the scheduler container is not running; the backend would run the heavy jobs itself."
-        fi
-    fi
-    echo
-}
-# Ask (only on a terminal, and not when a scope was forced or --yes was given).
-if [ "$MODE" != force ] && [ "$ASSUME_YES" = false ] && [ -z "$FORCE_SCOPE" ] && [ -t 0 ] && [ -t 1 ]; then
-    describe_plan
-    if [ "$ACTION" = restart ]; then
-        read -r -p "[Enter] go   [a] API only   [e] everything (full guard)   [q] quit > " CHOICE
-        case "$CHOICE" in
-            a|A) set_scope_api; echo "-> API only." ;;
-            e|E) set_scope_all; echo "-> everything." ;;
-            q|Q) save_pending; echo "Cancelled. The new code is pulled; run ./deploy.sh again to finish."; exit 0 ;;
-            *) ;;
-        esac
-    else
-        read -r -p "[Enter] go   [q] quit > " CHOICE
-        case "$CHOICE" in q|Q) save_pending; echo "Cancelled. Run ./deploy.sh again to finish."; exit 0 ;; esac
-    fi
-else
-    describe_plan
-fi
-# The guard only looks at what is about to be restarted.
-GUARD_CRON=false
-GUARD_HEAVY=false
-if [ "$ACTION" = rebuild ] || [ "$ACTION" = recreate ] || [ "$FORCE_SCOPE" = all ]; then
-    GUARD_CRON=true; GUARD_HEAVY=true
-else
-    [ "$RESTART_WORKER" = true ] && GUARD_CRON=true
-    [ "$RESTART_SCHEDULER" = true ] && GUARD_HEAVY=true
-    # Without a running scheduler container the backend runs the heavy jobs, so restarting it is guarded like the scheduler.
-    if [ "$RESTART_BACKEND" = true ] && [ "$SCHEDULER_UP" = false ]; then GUARD_HEAVY=true; fi
-fi
-# ---------------------------------------------------------------- guard
-if [ "$MODE" = force ]; then
-    echo "--force: skipping the safety guard."
-elif [ "$GUARD_CRON" = false ] && [ "$GUARD_HEAVY" = false ]; then
-    echo "Restarting only containers that run nothing a restart would lose; no wait needed."
-else
-    deadline=$(( $(date +%s) + GUARD_WAIT_MIN * 60 ))
-    while true; do
-        guard_collect
-        [ ${#GUARD_REASONS[@]} -eq 0 ] && break
-        echo "$(date +%H:%M:%S) Waiting for a safe moment to restart ($ACTION):"
-        guard_print
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-            save_pending
-            echo "Gave up after ${GUARD_WAIT_MIN} min. The new code is pulled but containers were NOT restarted."
-            echo "Run ./deploy.sh again later (it will finish this deploy), or ./deploy.sh --force to restart now."
-            exit 1
-        fi
-        sleep 30
-    done
-    echo "Safe to restart."
-fi
-# ---------------------------------------------------------------- apply
-# A normal deploy must never recreate the long containers (that would kill a run in progress): they are moved by promote_long.
-NON_LONG_SERVICES=""
-if [ "$HAS_LONG" = true ]; then
-    NON_LONG_SERVICES=$(cd "$ROOT" && docker compose config --services | grep -vxE 'forecast|worker-long' | tr '\n' ' ')
-fi
-export GIT_SHA=$(git -C "$REPO" rev-parse --short HEAD)
-case "$ACTION" in
-    rebuild)
-        echo "Dependency/Dockerfile changes -- full rebuild."
-        docker compose up -d --build $NON_LONG_SERVICES
-        # Drop build cache untouched for a week; recent layers stay so the next rebuild is still fast.
-        docker builder prune -f --filter until=168h || echo "Build cache prune failed (non-fatal)."
-        ;;
-    recreate)
-        echo ".env or docker-compose.yml changed -- recreating containers so the new config is applied."
-        docker compose up -d $NON_LONG_SERVICES
-        ;;
-    restart)
-        SERVICES=""
-        [ "$RESTART_BACKEND" = true ] && SERVICES="$SERVICES backend"
-        [ "$RESTART_SCHEDULER" = true ] && SERVICES="$SERVICES scheduler"
-        [ "$RESTART_WORKER" = true ] && SERVICES="$SERVICES worker"
-        echo "Restarting:$SERVICES"
-        docker compose restart $SERVICES
-        ;;
-esac
-echo "$CONFIG_SUM" > "$STATE_FILE"
-rm -f "$PENDING_FILE"
-# ---------------------------------------------------------------- health check
-# The containers must be running and not crash-looping.
-echo "Checking container health..."
-sleep 5
-FAILED=false
-for name in $CONTAINERS; do
-    for attempt in 1 2 3 4 5 6; do
-        STATUS=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)
-        [ "$STATUS" = "running" ] && break
-        sleep 5
-    done
-    if [ "$STATUS" != "running" ]; then
-        echo "ERROR: $name is $STATUS. Last log lines:"
-        docker logs --tail 30 "$name" 2>&1 || true
-        FAILED=true
-    else
-        sleep 5
-        if [ "$(docker inspect -f '{{.State.Status}}' "$name")" != "running" ]; then
-            echo "ERROR: $name stopped again after starting. Last log lines:"
-            docker logs --tail 30 "$name" 2>&1 || true
-            FAILED=true
-        else
-            echo "  $name: running"
-            # The API must also answer HTTP (a container can be "running" yet hung, issue #46). Compose maps it to :5001.
-            if [ "$name" = "show-me-fire-api" ]; then
-                API_OK=false
-                for attempt in 1 2 3 4 5 6 7 8; do
-                    if curl -fsS -m 5 "http://localhost:5001/health" >/dev/null 2>&1; then API_OK=true; break; fi
-                    sleep 5
-                done
-                if [ "$API_OK" = true ]; then
-                    echo "  $name: /health answers"
-                else
-                    echo "ERROR: $name is running but /health does not answer. Last log lines:"
-                    docker logs --tail 30 "$name" 2>&1 || true
-                    FAILED=true
+    while IFS= read -r path; do
+        case "$path" in
+            '') ;;
+            Dockerfile|.dockerignore|requirements*.txt|patches/rrfs.py)
+                ACTION=rebuild
+                return ;;
+            docs/*|tests/*|*.md) ;;
+            maps/advisory_category_maps.py)
+                # The API alert poll imports it, and the short map cron reads it on its next run.
+                if [ "$SPLIT" = true ]; then
+                    if [ "$service" = backend ]; then ACTION=restart; fi
+                    continue
                 fi
+                case "$service" in backend|scheduler|long) ACTION=restart ;; esac ;;
+            routers/*|main.py)
+                if [ "$service" = backend ]; then ACTION=restart; fi ;;
+            scripts/worker-entrypoint.sh|scripts/localhost_forward.py)
+                case "$service" in worker|long) ACTION=restart ;; esac ;;
+            scripts/*.sh)
+                if [ "$service" = long ]; then ACTION=restart; fi ;;
+            *)
+                case "$service" in backend|scheduler|long) ACTION=restart ;; esac ;;
+        esac
+    done <<< "$changed"
+}
+
+plan_service() {
+    local service=$1 pending ignored
+    read_state "$service"
+    classify "$service"
+    if [ ! -f "$STATE/$service" ] && [ "$service" != long ] &&
+        { [ -z "$LEGACY_SERVICES" ] || [[ " $LEGACY_SERVICES " == *" $service "* ]]; }; then
+        case "$LEGACY_ACTION" in
+            rebuild) ACTION=rebuild ;;
+            recreate) [ "$ACTION" = rebuild ] || ACTION=recreate ;;
+            restart) [ "$ACTION" != none ] || ACTION=restart ;;
+        esac
+    fi
+    if [ "$ACTION" != rebuild ] && [ "$APPLIED_CONFIG" != "$CONFIG_SUM" ]; then ACTION=recreate; fi
+    if [ -f "$STATE/pending-$service" ]; then
+        read -r pending ignored < "$STATE/pending-$service"
+        case "$pending" in
+            recreate) [ "$ACTION" = rebuild ] || ACTION=recreate ;;
+            restart) [ "$ACTION" != none ] || ACTION=restart ;;
+        esac
+    fi
+    if [ "$service" = long ]; then
+        if [ "$ACTION" = none ] &&
+            { [ -f "$LONG_PENDING_FILE" ] || ! is_running forecast || ! is_running worker-long ||
+              [ "$(inspect_container worker-long '{{.Image}}')" != "$APPLIED_IMAGE" ] ||
+              [ "$(inspect_container forecast '{{.Image}}')" != "$APPLIED_IMAGE" ]; }; then
+            ACTION=restart
+        fi
+    elif [ "$ACTION" = none ] && { [ "$SCOPE" = all ] || [ "$SCOPE" = api ]; }; then
+        ACTION=restart
+    fi
+}
+
+make_plan() {
+    local service
+    RESTART=()
+    RECREATE=()
+    BUILD_MAIN=false
+    BUILD_LONG=false
+    EXTRAS=false
+    NEED_IMAGE=false
+    echo "Deploy plan for ${TARGET:0:12}:"
+    if [ "$MODE" = deploy ]; then
+        for service in "${MAIN_SERVICES[@]}"; do
+            plan_service "$service"
+            if [ "$SCOPE" = api ] && [ "$service" != backend ]; then
+                if [ "$ACTION" != none ]; then echo "  $service: deferred (API only)"; fi
+                continue
             fi
+            if [ "$ACTION" = recreate ] && ! docker image inspect showmefire-api:latest >/dev/null 2>&1; then
+                ACTION=rebuild
+            fi
+            echo "  $service: $ACTION"
+            case "$ACTION" in
+                restart) RESTART+=("$service") ;;
+                recreate|rebuild)
+                    RECREATE+=("$service")
+                    if [ "$ACTION" = rebuild ]; then BUILD_MAIN=true; fi ;;
+            esac
+        done
+        read_state extras
+        if [ "$SCOPE" != api ] && [ "$APPLIED_CONFIG" != "$CONFIG_SUM" ]; then
+            EXTRAS=true
+            if [ "${#EXTRA_SERVICES[@]}" -gt 0 ]; then echo "  ${EXTRA_SERVICES[*]}: reconcile Compose config"; fi
         fi
     fi
-done
-if [ "$FAILED" = true ]; then
-    echo "Deployment FINISHED WITH ERRORS -- see above."
+    if [ "$HAS_LONG" = true ]; then
+        plan_service long
+        if [ "$ACTION" = none ]; then
+            echo "  forecast, worker-long: no change"
+        elif [ "$SCOPE" = api ]; then
+            echo "  forecast, worker-long: deferred (API only)"
+        else
+            BUILD_LONG=true
+            echo "  forecast, worker-long: apply when idle"
+        fi
+    fi
+    if $BUILD_MAIN || $BUILD_LONG; then
+        NEED_IMAGE=true
+        IMAGE="showmefire-api:$TARGET"
+        if image_matches_target; then
+            echo "  image: reuse $IMAGE"
+        else
+            echo "  image: build $IMAGE locally"
+        fi
+    else
+        echo "  image: no build"
+    fi
+}
+
+image_matches_target() {
+    [ "$(docker image inspect -f '{{index .Config.Labels "smf.git_sha"}}' "$IMAGE" 2>/dev/null)" = "$TARGET" ]
+}
+
+make_plan
+if [ "$MODE" = deploy ] && ! $FORCE && ! $ASSUME_YES && [ "$SCOPE" = normal ] && [ -t 0 ] && [ -t 1 ]; then
+    read -r -p "[Enter] go   [a] API only   [e] all standard services   [q] quit > " CHOICE
+    case "$CHOICE" in
+        a|A) SCOPE=api; make_plan ;;
+        e|E) SCOPE=all; make_plan ;;
+        '') ;;
+        *) echo "Cancelled. The live checkout is unchanged."; exit 0 ;;
+    esac
+fi
+
+if $BUILD_LONG && ! jq -e --arg lock "$LONG_LOCK_PATH" --arg source "$REPO/.locks" '
+    [.services.forecast, .services["worker-long"]]
+    | all(.environment.SMF_LONG_JOB_LOCK == $lock and
+          any(.volumes[]?; .type == "bind" and .source == $source and .target == "/app/.locks"))
+' >/dev/null <<< "$CONFIG"; then
+    echo "Long workers: failed preflight. Apply the shared job lock settings from docs/server/docker-compose.yml." >&2
     exit 1
 fi
-# The long containers are moved only if idle; a busy one is not a failed deploy.
-promote_long || true
-echo "Deployment complete!"
+
+mkdir -p "$STATE"
+# Record initial baselines before changing HEAD; a failed or partial deploy
+# retries from these revisions instead of treating the new checkout as applied.
+for service in "${MAIN_SERVICES[@]}" extras; do
+    [ -f "$STATE/$service" ] && continue
+    read_state "$service"
+    if [ "$service" != extras ] && [ -n "$LEGACY_ACTION" ] &&
+        { [ -z "$LEGACY_SERVICES" ] || [[ " $LEGACY_SERVICES " == *" $service "* ]]; }; then
+        # No trustworthy applied revision in the old pending format.
+        APPLIED=unknown
+    fi
+    write_state "$service" "$APPLIED" "$APPLIED_CONFIG"
+done
+if [ "$HAS_LONG" = true ] && [ ! -f "$STATE/long" ]; then
+    read_state long
+    write_state long "$APPLIED" "$APPLIED_CONFIG" "$APPLIED_IMAGE"
+fi
+
+prepare_image() (
+    local snapshot start
+    if image_matches_target; then
+        echo "Reusing image $IMAGE."
+        exit 0
+    fi
+    snapshot=$(mktemp -d) || exit 1
+    trap 'rm -rf "$snapshot"' EXIT
+    git -C "$REPO" archive "$TARGET" | tar -xf - -C "$snapshot" || exit 1
+    start=$SECONDS
+    docker build --progress=plain --build-arg "GIT_SHA=$TARGET" --tag "$IMAGE" "$snapshot" || exit 1
+    image_matches_target || exit 1
+    echo "Image built in $((SECONDS - start))s."
+)
+
+if $BUILD_MAIN && ! prepare_image; then
+    echo "Standard services: failed to prepare $IMAGE." >&2
+    exit 1
+fi
+
+if [ "$MODE" = deploy ]; then
+    GUARD_CRON=false
+    GUARD_HEAVY=false
+    for service in "${RESTART[@]}" "${RECREATE[@]}"; do
+        case "$service" in
+            worker) GUARD_CRON=true ;;
+            scheduler) GUARD_HEAVY=true ;;
+            backend) if ! is_running scheduler; then GUARD_HEAVY=true; fi ;;
+        esac
+    done
+    if ! $FORCE && { $GUARD_CRON || $GUARD_HEAVY; }; then
+        deadline=$((SECONDS + GUARD_WAIT_MIN * 60))
+        while true; do
+            guard_collect
+            [ "${#GUARD_REASONS[@]}" -eq 0 ] && break
+            echo "Waiting for a safe restart:"
+            guard_print
+            if [ "$SECONDS" -ge "$deadline" ]; then exit 1; fi
+            sleep 30
+        done
+    fi
+
+    for service in "${RESTART[@]}"; do write_state "pending-$service" restart "$TARGET"; done
+    for service in "${RECREATE[@]}"; do write_state "pending-$service" recreate "$TARGET"; done
+    git -C "$REPO" merge --ff-only --quiet "$TARGET"
+    if $BUILD_MAIN; then docker tag "$IMAGE" showmefire-api:latest; fi
+    if [ "${#RECREATE[@]}" -gt 0 ]; then
+        docker compose up -d --no-build --no-deps "${RECREATE[@]}"
+    fi
+    if [ "${#RESTART[@]}" -gt 0 ]; then docker compose restart --no-deps "${RESTART[@]}"; fi
+    if $EXTRAS && [ "${#EXTRA_SERVICES[@]}" -gt 0 ]; then
+        docker compose up -d --no-deps "${EXTRA_SERVICES[@]}"
+    fi
+
+    for service in "${RESTART[@]}" "${RECREATE[@]}"; do
+        deadline=$((SECONDS + DEPLOY_HEALTH_WAIT_SECONDS))
+        until is_running "$service" &&
+            { [ "$service" != backend ] || curl -fsS -m 5 http://localhost:5001/health >/dev/null; }; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "$service: failed verification." >&2
+                docker logs --tail 30 "$(container_name "$service")" >&2 || true
+                exit 1
+            fi
+            sleep 2
+        done
+        write_state "$service" "$TARGET" "$CONFIG_SUM"
+        rm -f "$STATE/pending-$service"
+        echo "$service: applied ${TARGET:0:12}"
+    done
+
+    if $EXTRAS; then
+        for service in "${EXTRA_SERVICES[@]}"; do
+            if [ -z "$(docker compose ps --status running --quiet "$service")" ]; then
+                echo "$service: failed verification." >&2
+                exit 1
+            fi
+        done
+    fi
+
+    for service in "${MAIN_SERVICES[@]}"; do
+        if [ "$SCOPE" = api ] && [ "$service" != backend ]; then continue; fi
+        read_state "$service"
+        if [ "$APPLIED" != "$TARGET" ] || [ "$APPLIED_CONFIG" != "$CONFIG_SUM" ]; then
+            write_state "$service" "$TARGET" "$CONFIG_SUM"
+        fi
+    done
+    if $EXTRAS; then write_state extras "$TARGET" "$CONFIG_SUM"; fi
+    if [ "$SCOPE" != api ]; then
+        if [ "$LEGACY_CONFIG" != "$CONFIG_SUM" ]; then printf '%s\n' "$CONFIG_SUM" > "$STATE_FILE"; fi
+        rm -f "$PENDING_FILE"
+    fi
+fi
+
+promote_long() (
+    local expected deadline reason
+    mkdir -p "$REPO/.locks" || return 1
+    exec 8>>"$REPO/.locks/long-deploy.lock"
+    if ! flock -n -x 8; then
+        echo "Long workers: deferred (a guarded job is active)."
+        return 2
+    fi
+    guard_collect_long
+    if [ "${#LONG_REASONS[@]}" -gt 0 ]; then
+        echo "Long workers: deferred."
+        for reason in "${LONG_REASONS[@]}"; do echo "  - $reason"; done
+        return 2
+    fi
+
+    read_state long
+    expected=$(docker image inspect -f '{{.Id}}' "$IMAGE") || return 1
+    if [ -n "$APPLIED_IMAGE" ] && [ "$APPLIED_IMAGE" != "$expected" ]; then
+        docker tag "$APPLIED_IMAGE" showmefire-api:long-previous || return 1
+    fi
+    docker tag "$IMAGE" showmefire-api:long || return 1
+    docker compose up -d --no-build --no-deps forecast worker-long || return 1
+
+    deadline=$((SECONDS + DEPLOY_HEALTH_WAIT_SECONDS))
+    until is_running forecast && is_running worker-long &&
+        [ "$(inspect_container forecast '{{.Image}}')" = "$expected" ] &&
+        [ "$(inspect_container worker-long '{{.Image}}')" = "$expected" ] &&
+        uses_long_lock forecast && uses_long_lock worker-long &&
+        [ "$(docker exec show-me-fire-worker-long cat /proc/1/comm 2>/dev/null)" = cron ] &&
+        forecast_heartbeat "$TARGET"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then return 1; fi
+        sleep 2
+    done
+    write_state long "$TARGET" "$CONFIG_SUM" "$expected" || return 1
+    rm -f "$LONG_PENDING_FILE" || return 1
+    echo "Long workers: applied ${TARGET:0:12}"
+)
+
+if $BUILD_LONG; then
+    printf '%s\n' "$TARGET" > "$LONG_PENDING_FILE"
+    if ! prepare_image; then
+        echo "Long workers: failed to prepare $IMAGE. Retry with ./deploy.sh --long." >&2
+        exit 1
+    fi
+    rollout_start=$SECONDS
+    code=0
+    promote_long || code=$?
+    case "$code" in
+        0) echo "Long rollout verified in $((SECONDS - rollout_start))s." ;;
+        2) echo "Retry the deferred rollout with ./deploy.sh --long."; exit 0 ;;
+        *)
+            echo "Long workers: failed verification or startup. Previous verified image is retained when available." >&2
+            docker logs --tail 30 show-me-fire-forecast >&2 || true
+            docker logs --tail 30 show-me-fire-worker-long >&2 || true
+            exit 1 ;;
+    esac
+fi
+echo "Deployment complete."

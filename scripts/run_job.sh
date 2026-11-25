@@ -33,6 +33,14 @@ if [ -f /etc/smf_container_env.sh ]; then
     . /etc/smf_container_env.sh
 fi
 
+if [ -n "${SMF_LONG_JOB_LOCK:-}" ]; then
+    exec 8>>"$SMF_LONG_JOB_LOCK" || exit 1
+    if ! flock -s -n 8; then
+        echo "[$JOB_ID] skipped while long workers are being deployed"
+        exit 0
+    fi
+fi
+
 JOB_SUMMARY_FILE="$(mktemp)"
 export JOB_SUMMARY_FILE
 trap 'rm -f "$JOB_SUMMARY_FILE"' EXIT
