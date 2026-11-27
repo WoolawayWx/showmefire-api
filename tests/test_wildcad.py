@@ -250,13 +250,14 @@ class HealthAndPushTests(WildcadBase):
         with patch.object(wildcad_health, "send") as send:
             self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=10)), [])            # fresh enough
             self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=25)), [])            # late, inside the grace window
-            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=45)), [])           # first strike
-            first = wildcad_health.run_health_check(NOW + timedelta(minutes=50))                         # second strike
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=65)), [])            # still inside it
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=75)), [])           # first strike
+            first = wildcad_health.run_health_check(NOW + timedelta(minutes=80))                         # second strike
             self.assertEqual(sorted(message for message, _ in first), ["WildCAD incidents is stale", "WildCAD resources is stale"])
-            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=55)), [])           # no repeat
+            self.assertEqual(wildcad_health.run_health_check(NOW + timedelta(minutes=85)), [])           # no repeat
             self.assertEqual(send.call_count, 2)
-            self._heartbeat("incidents", NOW + timedelta(minutes=56))
-            recovered = wildcad_health.run_health_check(NOW + timedelta(minutes=57))
+            self._heartbeat("incidents", NOW + timedelta(minutes=86))
+            recovered = wildcad_health.run_health_check(NOW + timedelta(minutes=87))
             self.assertEqual([message for message, _ in recovered], ["WildCAD incidents recovered"])
 
     def test_a_blip_that_recovers_inside_the_grace_window_sends_nothing(self):
