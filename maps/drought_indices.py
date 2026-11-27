@@ -14,6 +14,9 @@ Sources:
   ForDRI    NDMC weekly 0.045 deg GeoTIFF from fordri.unl.edu
 """
 import io
+import json
+import os
+import shutil
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -432,6 +435,112 @@ def _fordri() -> list:
     return [("ForDRI", build)]
 
 
+# --- data source issue banner -------------------------------------------------
+# When a source keeps failing (removed, blocked, down) the last map stays up, so
+# it is stamped "Data Source Issues" in the empty space of the right-hand panel.
+# The clean image is kept in STATUS_DIR so the stamp is lifted the moment the
+# source answers again (a fresh render simply replaces the stamped one).
+
+SOURCE_ISSUE_AFTER_MINUTES = 120
+
+
+def _product_images(name: str) -> list[tuple[str, str]]:
+    """(status product, PNG name) pairs drawn by the named check."""
+    if name == "EDDI":
+        return [(f"eddi_{slug}", f"mo-eddi-{slug}.png") for _scale, slug, _label, _period in EDDI_SCALES]
+    key = name.lower()
+    return [(key, f"mo-{key}.png")]
+
+
+def _failing_path(name: str) -> Path:
+    return spx.STATUS_DIR / f"drought_{name.lower()}.failing"
+
+
+def _clean_path(product: str) -> Path:
+    return spx.STATUS_DIR / f"{product}.clean.png"
+
+
+def _read_status(product: str) -> dict:
+    try:
+        return json.loads((spx.STATUS_DIR / f"{product}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _stamp_issue(png_path: Path, clean_path: Path, since: str) -> None:
+    from matplotlib import font_manager
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.open(clean_path).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    scale = image.width / 2048
+    bold = ImageFont.truetype(font_manager.findfont("DejaVu Sans:bold"), int(38 * scale))
+    body = ImageFont.truetype(font_manager.findfont("DejaVu Sans"), int(25 * scale))
+    lines = [("Data Source Issues", bold, "#ffffff"),
+             ("Source not updating since " + since, body, "#ffffff"),
+             ("Showing the last available data", body, "#ffffff")]
+    pad = int(18 * scale)
+    widths = [draw.textlength(text, font=font) for text, font, _c in lines]
+    heights = [int(font.size * 1.35) for _t, font, _c in lines]
+    right, top = image.width - int(21 * scale), int(225 * scale)
+    left = right - int(max(widths)) - 2 * pad
+    bottom = top + sum(heights) + 2 * pad
+    draw.rounded_rectangle((left, top, right, bottom), radius=int(14 * scale), fill="#c62828")
+    y = top + pad
+    for (text, font, color), width, height in zip(lines, widths, heights):
+        draw.text((right - pad - width, y), text, font=font, fill=color)
+        y += height
+    temporary = png_path.with_name(f".{png_path.name}.issue.tmp")
+    image.save(temporary, format="PNG")
+    os.chmod(temporary, 0o644)
+    os.replace(temporary, png_path)
+
+
+def _flag_source_issue(name: str, since: datetime, reason: str) -> None:
+    for product, png_name in _product_images(name):
+        png_path = spx.IMAGES_DIR / png_name
+        status = _read_status(product)
+        if status.get("source_issue") or not png_path.is_file():
+            continue
+        spx.STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        if not _clean_path(product).is_file():
+            shutil.copyfile(png_path, _clean_path(product))
+        _stamp_issue(png_path, _clean_path(product), f"{since:%b} {since.day}")
+        status["source_issue"] = {"since": since.isoformat(), "reason": reason[:200]}
+        sp._atomic_json_write(spx.STATUS_DIR / f"{product}.json", status)
+        print(f"{name}: stamped {png_name} with Data Source Issues ({reason}).")
+
+
+def _clear_source_issue(name: str) -> None:
+    for product, png_name in _product_images(name):
+        clean = _clean_path(product)
+        status = _read_status(product)
+        if status.get("source_issue") and clean.is_file():
+            shutil.copyfile(clean, spx.IMAGES_DIR / png_name)
+            status.pop("source_issue")
+            sp._atomic_json_write(spx.STATUS_DIR / f"{product}.json", status)
+            print(f"{name}: source is back; removed the Data Source Issues stamp from {png_name}.")
+        clean.unlink(missing_ok=True)
+    _failing_path(name).unlink(missing_ok=True)
+
+
+def _note_failure(name: str, reason: str) -> None:
+    """Remember when a source started failing; stamp its maps once it has failed long enough."""
+    path = _failing_path(name)
+    now = datetime.now().astimezone()
+    try:
+        since = datetime.fromisoformat(path.read_text().strip())
+    except (OSError, ValueError):
+        spx.STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        since = now
+        path.write_text(now.isoformat())
+    if (now - since).total_seconds() >= SOURCE_ISSUE_AFTER_MINUTES * 60:
+        try:
+            _flag_source_issue(name, since, reason)
+        except Exception as exc:  # noqa: BLE001 - the stamp is cosmetic; never break the other products
+            print(f"{name}: could not stamp Data Source Issues ({exc}).")
+
+
 # None of these sources publish more than once a day, so once a source has
 # been checked and found unchanged it is not asked again for this long.
 RECHECK_MINUTES = 60
@@ -466,12 +575,15 @@ def main() -> None:
         except requests.RequestException as exc:
             # The last map stays valid; just try again next cycle.
             print(f"{name}: source unreachable ({type(exc).__name__}); will retry next cycle.")
+            _note_failure(name, f"{type(exc).__name__}: {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 - reported via run_products below
+            _note_failure(name, f"{type(exc).__name__}: {exc}")
             def failed(exc=exc):
                 raise exc
             products.append((f"{name} check", failed))
             continue
+        _clear_source_issue(name)
         if found:
             products.extend(found)  # not marked: a failed render is retried next cycle
         else:
